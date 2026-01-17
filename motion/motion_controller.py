@@ -7,7 +7,7 @@ import threading
 import time
 import traceback
 
-from hardware import ServoRegistry
+from hardware.servo_registry import ServoRegistry
 from motion.action import Action
 from motion.keyframe import Keyframe
 from motion.logging import log_error, log_info, log_warning
@@ -335,7 +335,7 @@ class MotionController:
         return False
 
     def generate_base_keyframe(self, pan_degrees: int, tilt_degrees: int) -> Keyframe:
-        new_frame = Keyframe(target_time=self.transition_time, name="base")
+        new_frame = Keyframe(final_target_time=self.transition_time, name="base")
         new_frame.servo_destination["pan"] = pan_degrees
         new_frame.servo_destination["tilt"] = tilt_degrees
         return new_frame

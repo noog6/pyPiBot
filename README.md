@@ -13,13 +13,13 @@ control, and user-facing I/O in a clean, extensible Python codebase.
 
 ```
 pyPiBot/
-├── ai/            # AI provider integrations (planned)
+├── ai/            # AI provider integrations (realtime API + tools)
 ├── config/        # YAML configuration controller + defaults
 ├── core/          # Runtime orchestration and app lifecycle
 ├── hardware/      # GPIO, sensors, and actuator drivers
 ├── interaction/   # Audio input/output and user interaction helpers
 ├── motion/        # Motion controller and keyframe sequencing
-├── services/      # External services/integrations (planned)
+├── services/      # External services/integrations (placeholder)
 ├── storage/       # Persistent storage (SQLite) controller
 ├── systemd/       # systemd unit templates
 └── docs/          # Documentation (coding standards, requirements, setup)
@@ -30,7 +30,9 @@ pyPiBot/
 ### Prerequisites
 
 - Python 3.10+
-- (Optional) Audio dependencies for Raspberry Pi: `pyaudio`, `numpy`
+- Audio dependencies for Raspberry Pi: `pyaudio`, `numpy`
+- Realtime API dependencies: `websockets`
+- Camera/vision dependencies (Raspberry Pi): `picamera2`, `Pillow`
 
 ### Installation
 
@@ -47,6 +49,7 @@ The runtime will:
 - Load configuration from `config/default.yaml`.
 - Initialize the storage layer and log run metadata.
 - Attempt to start audio input/output (gracefully degrades if unavailable).
+- Start the motion controller and camera vision loop when hardware is present.
 
 ## Configuration
 
@@ -73,6 +76,6 @@ for Raspberry Pi deployment instructions.
 
 ## Next Steps
 
-- Add AI provider integration for OpenAI realtime models.
 - Expand hardware abstractions and mock drivers.
 - Build user interaction pipelines (speech/text -> intent -> action).
+- Add more external integrations in `services/`.
