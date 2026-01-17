@@ -30,7 +30,7 @@ def _require_camera_deps() -> tuple[Any, Any, Any]:
     picamera2 = importlib.import_module("picamera2")
     numpy = importlib.import_module("numpy")
     pil_image = importlib.import_module("PIL.Image")
-    return picamera2.Picamera2, numpy, pil_image.Image
+    return picamera2.Picamera2, numpy, pil_image
 
 
 def _safe_connection_closed_ok() -> type[BaseException] | None:
@@ -40,7 +40,10 @@ def _safe_connection_closed_ok() -> type[BaseException] | None:
     if importlib.util.find_spec("websockets") is None:
         return None
     websockets = importlib.import_module("websockets")
-    return websockets.exceptions.ConnectionClosedOK
+    exceptions_module = getattr(websockets, "exceptions", None)
+    if exceptions_module is not None:
+        return getattr(exceptions_module, "ConnectionClosedOK", None)
+    return getattr(websockets, "ConnectionClosedOK", None)
 
 
 class CameraController:
@@ -52,9 +55,9 @@ class CameraController:
         if CameraController._instance is not None:
             raise RuntimeError("You cannot create another CameraController class")
 
-        Picamera2, numpy, image_cls = _require_camera_deps()
+        Picamera2, numpy, pil_image = _require_camera_deps()
         self._np = numpy
-        self._Image = image_cls
+        self._pil_image = pil_image
 
         self.picam2 = Picamera2()
         self._main_size = (640, 480)
@@ -105,7 +108,7 @@ class CameraController:
     def take_image(self) -> Any:
         frame = self.picam2.capture_array("main")
         rotated_image = self._np.rot90(frame, k=3)
-        final_image = self._Image.fromarray(rotated_image)
+        final_image = self._pil_image.fromarray(rotated_image)
         return final_image
 
     def take_lores_luma(self) -> Any:
@@ -118,7 +121,7 @@ class CameraController:
         frame = self.picam2.capture_array("main")
         frame = frame[:, :, ::-1]
         rotated_image = self._np.rot90(frame, k=3)
-        return self._Image.fromarray(rotated_image, mode="RGB")
+        return self._pil_image.fromarray(rotated_image, mode="RGB")
 
     def _vision_loop(self) -> None:
         next_vision_loop_time = millis() + self.vision_loop_period_ms

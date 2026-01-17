@@ -43,6 +43,20 @@ def _require_websockets() -> Any:
     return websockets
 
 
+def _resolve_websocket_exceptions(websockets: Any) -> tuple[type[BaseException], type[BaseException]]:
+    connection_closed = getattr(websockets, "ConnectionClosed", None)
+    connection_closed_error = getattr(websockets, "ConnectionClosedError", None)
+    exceptions_module = getattr(websockets, "exceptions", None)
+    if exceptions_module is not None:
+        connection_closed = getattr(exceptions_module, "ConnectionClosed", connection_closed)
+        connection_closed_error = getattr(
+            exceptions_module, "ConnectionClosedError", connection_closed_error
+        )
+    if connection_closed is None or connection_closed_error is None:
+        raise RuntimeError("Unsupported websockets version: missing ConnectionClosed errors.")
+    return connection_closed, connection_closed_error
+
+
 def log_runtime(function_or_name: str, duration: float) -> None:
     jsonl_file = RUN_TIME_TABLE_LOG_JSON
     os.makedirs(os.path.dirname(jsonl_file), exist_ok=True)
@@ -104,7 +118,7 @@ class RealtimeAPI:
 
     async def run(self) -> None:
         websockets = _require_websockets()
-        ConnectionClosedError = websockets.exceptions.ConnectionClosedError
+        _, ConnectionClosedError = _resolve_websocket_exceptions(websockets)
 
         self.loop = asyncio.get_running_loop()
 
@@ -203,13 +217,14 @@ class RealtimeAPI:
 
     async def process_ws_messages(self, websocket: Any) -> None:
         websockets = _require_websockets()
+        ConnectionClosed, _ = _resolve_websocket_exceptions(websockets)
         while True:
             try:
                 message = await websocket.recv()
                 event = json.loads(message)
                 log_ws_event("Incoming", event)
                 await self.handle_event(event, websocket)
-            except websockets.ConnectionClosed:
+            except ConnectionClosed:
                 log_warning("⚠️ WebSocket connection lost.")
                 break
 
