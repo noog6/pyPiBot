@@ -8,7 +8,7 @@ import importlib.util
 
 CHANNELS = 1
 RATE = 24000
-CHUNK = 1024
+CHUNK = 2048
 
 
 def resolve_format() -> int:
