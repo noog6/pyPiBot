@@ -7,6 +7,7 @@ import logging
 from typing import Sequence
 
 from interaction import AsyncMicrophone, AudioPlayer
+from motion import MotionController
 from storage import StorageController
 
 
@@ -64,8 +65,18 @@ def run(config: AppConfig) -> int:
         LOGGER.warning("Audio playback unavailable: %s", exc)
         player = None
 
+    try:
+        LOGGER.info("Starting motion controller...")
+        motion_controller = MotionController.get_instance()
+        motion_controller.start_control_loop()
+    except Exception as exc:
+        LOGGER.warning("Motion controller unavailable: %s", exc)
+        motion_controller = None
+
     LOGGER.info("Runtime skeleton initialized")
 
+    if motion_controller:
+        motion_controller.stop_control_loop()
     if microphone:
         microphone.stop_recording()
         microphone.close()
