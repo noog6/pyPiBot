@@ -1,0 +1,13 @@
+# Default configuration for Theo
+
+# Application directories
+log_dir: "./log/"
+var_dir: "./var/"
+
+# Assistant settings
+assistant_name: "Theo"
+startup_prompts:
+  - "Say Hello World! or whatever fun salutation you prefer"
+
+# Logging settings
+logging_level: "INFO"
