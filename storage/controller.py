@@ -46,9 +46,7 @@ class StorageController:
         self.config_controller = ConfigController.get_instance()
         self.config = self.config_controller.get_config()
 
-        storage_config = self.config.get("storage", {})
-        var_dir = Path(storage_config["var_dir"]).expanduser()
-        log_dir = Path(storage_config["log_dir"]).expanduser()
+        var_dir, log_dir = self._resolve_storage_dirs()
 
         self.run_id_file = var_dir / "current_run"
         self.run_id = self.get_next_run_number(var_dir)
@@ -204,3 +202,12 @@ class StorageController:
             run_id_file=self.run_id_file,
             db_path=self.db_full_file_path,
         )
+
+    def _resolve_storage_dirs(self) -> tuple[Path, Path]:
+        """Resolve storage directories from configuration."""
+
+        storage_config = self.config.get("storage", {})
+        var_dir = storage_config.get("var_dir", self.config.get("var_dir", "./var/"))
+        log_dir = storage_config.get("log_dir", self.config.get("log_dir", "./log/"))
+
+        return Path(var_dir).expanduser(), Path(log_dir).expanduser()

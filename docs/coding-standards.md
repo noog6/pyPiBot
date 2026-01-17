@@ -80,3 +80,23 @@ This document defines the baseline standards for all Python code in this project
 - Validate external input.
 - Avoid executing shell commands with user input.
 - Treat hardware operations as potentially destructive—include safeguards.
+
+## Optional Dependencies
+
+- Optional dependencies (e.g., audio or hardware libraries) should be imported
+  lazily at runtime.
+- Missing optional dependencies must fail **gracefully** with a clear error
+  message and without crashing the entire runtime.
+
+## Configuration Conventions
+
+- Use intuitive, stable configuration keys.
+- If nested sections are used, group related settings under a shared prefix
+  (for example, `storage` for persistence settings).
+- Configuration updates should avoid breaking existing keys where possible.
+
+## Resource Lifecycle
+
+- Any resource that opens hardware, sockets, files, or databases must provide a
+  deterministic shutdown path (for example, a `close()` method).
+- Runtime code should explicitly clean up resources on shutdown.
