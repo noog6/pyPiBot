@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 import logging
 from typing import Sequence
 
+from storage import StorageController
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -36,6 +38,16 @@ def run(config: AppConfig) -> int:
         LOGGER.info("Startup prompts: %s", ", ".join(config.prompts))
     else:
         LOGGER.info("No startup prompts provided")
+
+    storage = StorageController.get_instance()
+    storage_info = storage.get_storage_info()
+    LOGGER.info(
+        "Storage ready (run_id=%s, run_id_file=%s, db_path=%s)",
+        storage_info.run_id,
+        storage_info.run_id_file,
+        storage_info.db_path,
+    )
+
     LOGGER.info("Runtime skeleton initialized")
     return 0
 

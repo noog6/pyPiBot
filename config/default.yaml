@@ -5,3 +5,6 @@ assistant:
     - "Say Hello World! or whatever fun salutation you prefer"
 logging:
   level: INFO
+storage:
+  var_dir: "var/"
+  log_dir: "log/"

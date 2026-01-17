@@ -54,7 +54,7 @@ class ConfigController:
             with self.paths.override_file.open("r", encoding="utf-8") as file:
                 override_config = yaml.safe_load(file) or {}
             if override_config:
-                config.update(override_config)
+                config = self._deep_merge(config, override_config)
 
         self.config = config
 
@@ -88,3 +88,18 @@ class ConfigController:
 
         filename = f"override_{index:04d}.yaml"
         return self.paths.config_dir / filename
+
+    def _deep_merge(self, base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+        """Deep merge dictionaries, overriding base values with override values."""
+
+        merged = dict(base)
+        for key, value in override.items():
+            if (
+                key in merged
+                and isinstance(merged[key], dict)
+                and isinstance(value, dict)
+            ):
+                merged[key] = self._deep_merge(merged[key], value)
+            else:
+                merged[key] = value
+        return merged
