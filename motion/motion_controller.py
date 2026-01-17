@@ -7,7 +7,7 @@ import threading
 import time
 import traceback
 
-from hardware import ServoRegistry
+from hardware.servo_registry import ServoRegistry
 from motion.action import Action
 from motion.keyframe import Keyframe
 from motion.logging import log_error, log_info, log_warning
