@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import logging
 from typing import Sequence
 
+from interaction import AsyncMicrophone, AudioPlayer
 from storage import StorageController
 
 
@@ -48,7 +49,29 @@ def run(config: AppConfig) -> int:
         storage_info.db_path,
     )
 
+    try:
+        microphone = AsyncMicrophone()
+        microphone.start_recording()
+        LOGGER.info("Microphone started")
+    except Exception as exc:
+        LOGGER.warning("Microphone unavailable: %s", exc)
+        microphone = None
+
+    try:
+        player = AudioPlayer()
+        LOGGER.info("Audio playback ready")
+    except Exception as exc:
+        LOGGER.warning("Audio playback unavailable: %s", exc)
+        player = None
+
     LOGGER.info("Runtime skeleton initialized")
+
+    if microphone:
+        microphone.stop_recording()
+        microphone.close()
+    if player:
+        player.close()
+
     return 0
 
 
