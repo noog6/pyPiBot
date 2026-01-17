@@ -11,3 +11,8 @@ startup_prompts:
 
 # Logging settings
 logging_level: "INFO"
+
+# Realtime audio detection
+prefix_padding_ms: 500
+silence_threshold: 0.2
+silence_duration_ms: 900

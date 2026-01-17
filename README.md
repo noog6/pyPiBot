@@ -16,8 +16,9 @@ pyPiBot/
 ├── ai/            # AI provider integrations (planned)
 ├── config/        # YAML configuration controller + defaults
 ├── core/          # Runtime orchestration and app lifecycle
-├── hardware/      # GPIO, sensors, and actuator drivers (planned)
+├── hardware/      # GPIO, sensors, and actuator drivers
 ├── interaction/   # Audio input/output and user interaction helpers
+├── motion/        # Motion controller and keyframe sequencing
 ├── services/      # External services/integrations (planned)
 ├── storage/       # Persistent storage (SQLite) controller
 ├── systemd/       # systemd unit templates
@@ -30,6 +31,11 @@ pyPiBot/
 
 - Python 3.10+
 - (Optional) Audio dependencies for Raspberry Pi: `pyaudio`, `numpy`
+
+### Installation
+
+See `docs/installation.md` for recommended `apt-get` packages and optional
+virtualenv setup.
 
 ### Run the Runtime
 
@@ -63,6 +69,7 @@ for Raspberry Pi deployment instructions.
 - `docs/coding-standards.md`
 - `docs/requirements.md`
 - `docs/systemd-setup.md`
+- `docs/installation.md`
 
 ## Next Steps
 

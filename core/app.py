@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import logging
 from typing import Sequence
 
+from hardware import ADS1015Sensor
 from interaction import AsyncMicrophone, AudioPlayer
 from motion import MotionController
 from storage import StorageController
@@ -49,6 +50,14 @@ def run(config: AppConfig) -> int:
         storage_info.run_id_file,
         storage_info.db_path,
     )
+
+    try:
+        sensor = ADS1015Sensor.get_instance()
+        battery_voltage = sensor.read_battery_voltage()
+        LOGGER.info("Battery voltage: %sV", battery_voltage)
+    except Exception as exc:
+        LOGGER.warning("ADS1015 sensor unavailable: %s", exc)
+        sensor = None
 
     try:
         microphone = AsyncMicrophone()
