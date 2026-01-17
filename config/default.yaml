@@ -1,0 +1,7 @@
+# Default configuration for Theo
+assistant:
+  name: Theo
+  startup_prompts:
+    - "Say Hello World! or whatever fun salutation you prefer"
+logging:
+  level: INFO
