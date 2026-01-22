@@ -13,6 +13,10 @@ from ai.diagnostics import probe as ai_probe
 from core.diagnostics import probe as core_probe
 from interaction.audio_hal import FakeAudioBackend
 from interaction.diagnostics import probe as audio_probe
+from interaction.microphone_hal import FakeInputBackend
+from interaction.microphone_diagnostics import probe as microphone_probe
+from hardware.diagnostics import HardwareProbeConfig, probe as hardware_probe
+from motion.diagnostics import MotionProbeConfig, probe as motion_probe
 from services.diagnostics import probe as services_probe
 from storage.diagnostics import probe as storage_probe
 
@@ -66,6 +70,21 @@ def main(argv: list[str] | None = None) -> int:
             def audio_probe_offline():
                 return audio_probe(backend=FakeAudioBackend())
 
+            def microphone_probe_offline():
+                return microphone_probe(backend=FakeInputBackend())
+
+            def hardware_probe_offline():
+                return hardware_probe(
+                    config=HardwareProbeConfig(require_all=False),
+                    available_modules={"smbus", "numpy", "PIL"},
+                )
+
+            def motion_probe_offline():
+                return motion_probe(
+                    servo_names=["pan", "tilt"],
+                    config=MotionProbeConfig(),
+                )
+
             def services_probe_offline():
                 return services_probe(base_dir=tmp_base)
 
@@ -78,6 +97,9 @@ def main(argv: list[str] | None = None) -> int:
                     ai_probe_offline,
                     core_probe_offline,
                     audio_probe_offline,
+                    microphone_probe_offline,
+                    hardware_probe_offline,
+                    motion_probe_offline,
                     services_probe_offline,
                     storage_probe_offline,
                 ]
@@ -95,6 +117,15 @@ def main(argv: list[str] | None = None) -> int:
         def audio_probe_live():
             return audio_probe()
 
+        def microphone_probe_live():
+            return microphone_probe()
+
+        def hardware_probe_live():
+            return hardware_probe(config=HardwareProbeConfig(require_all=False))
+
+        def motion_probe_live():
+            return motion_probe()
+
         def services_probe_with_base():
             return services_probe(base_dir=base_dir)
 
@@ -107,6 +138,9 @@ def main(argv: list[str] | None = None) -> int:
                 ai_probe_live,
                 core_probe_live,
                 audio_probe_live,
+                microphone_probe_live,
+                hardware_probe_live,
+                motion_probe_live,
                 services_probe_with_base,
                 storage_probe_with_base,
             ]

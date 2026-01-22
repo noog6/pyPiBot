@@ -66,11 +66,24 @@ def main(argv: list[str] | None = None) -> int:
         from diagnostics.models import DiagnosticStatus
         from diagnostics.runner import format_results, run_diagnostics
         from interaction.diagnostics import probe as audio_probe
+        from interaction.microphone_diagnostics import probe as microphone_probe
+        from hardware.diagnostics import probe as hardware_probe
+        from motion.diagnostics import probe as motion_probe
         from services.diagnostics import probe as services_probe
         from storage.diagnostics import probe as storage_probe
 
         results = run_diagnostics(
-            [config_probe, ai_probe, core_probe, audio_probe, services_probe, storage_probe]
+            [
+                config_probe,
+                ai_probe,
+                core_probe,
+                audio_probe,
+                microphone_probe,
+                hardware_probe,
+                motion_probe,
+                services_probe,
+                storage_probe,
+            ]
         )
         print(format_results(results))
         return 1 if any(result.status is DiagnosticStatus.FAIL for result in results) else 0
