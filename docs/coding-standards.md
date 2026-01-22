@@ -62,6 +62,18 @@ This document defines the baseline standards for all Python code in this project
 - Use **pytest**.
 - Tests should be deterministic and isolated.
 - Hardware interactions must be mockable.
+- Expose a lightweight `probe()` function in each subsystem to support
+  diagnostics and offline tests.
+- Keep probes side-effect safe by default (no destructive actions without an
+  explicit opt-in).
+
+## Diagnostics
+
+- Store high-level diagnostics orchestration in `diagnostics/`.
+- Probes should return a structured result (status + details) for consistent,
+  human-readable output.
+- Runtime diagnostics should be callable from the CLI without requiring the full
+  robot runtime to start.
 
 ## Project Structure
 

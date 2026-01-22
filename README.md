@@ -67,6 +67,26 @@ Default keys include:
 See `docs/systemd-setup.md` and the template unit in `systemd/pyPiBot.service`
 for Raspberry Pi deployment instructions.
 
+## Diagnostics & Tests
+
+Run the diagnostics suite (offline uses fake hardware backends where available):
+
+```bash
+python -m diagnostics.run --offline
+```
+
+To run diagnostics against live hardware and configured services:
+
+```bash
+python -m diagnostics.run
+```
+
+Unit tests are executed with pytest:
+
+```bash
+pytest -q
+```
+
 ## Documentation
 
 - `docs/coding-standards.md`

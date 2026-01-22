@@ -36,6 +36,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         description="Run the realtime API with optional prompts."
     )
     parser.add_argument("--prompts", type=str, help="Prompts separated by |")
+    parser.add_argument(
+        "--diagnostics",
+        action="store_true",
+        help="Run diagnostics probes and exit.",
+    )
     return parser.parse_args(argv)
 
 
@@ -54,6 +59,35 @@ def main(argv: list[str] | None = None) -> int:
 
     configure_logging()
     args = parse_args(argv)
+    if args.diagnostics:
+        from config.diagnostics import probe as config_probe
+        from ai.diagnostics import probe as ai_probe
+        from core.diagnostics import probe as core_probe
+        from diagnostics.models import DiagnosticStatus
+        from diagnostics.runner import format_results, run_diagnostics
+        from interaction.diagnostics import probe as audio_probe
+        from interaction.microphone_diagnostics import probe as microphone_probe
+        from hardware.diagnostics import probe as hardware_probe
+        from motion.diagnostics import probe as motion_probe
+        from services.diagnostics import probe as services_probe
+        from storage.diagnostics import probe as storage_probe
+
+        results = run_diagnostics(
+            [
+                config_probe,
+                ai_probe,
+                core_probe,
+                audio_probe,
+                microphone_probe,
+                hardware_probe,
+                motion_probe,
+                services_probe,
+                storage_probe,
+            ]
+        )
+        print(format_results(results))
+        return 1 if any(result.status is DiagnosticStatus.FAIL for result in results) else 0
+
     prompts = args.prompts.split("|") if args.prompts else None
 
     try:
