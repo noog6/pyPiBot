@@ -36,8 +36,9 @@ pyPiBot/
 
 ### Installation
 
-See `docs/installation.md` for recommended `apt-get` packages and optional
-virtualenv setup.
+See `docs/installation.md` for Raspberry Pi OS setup steps, git clone details,
+and the environment setup script. Hardware assembly notes live in
+`docs/hardware-setup.md`.
 
 ### Run the Runtime
 
@@ -93,6 +94,7 @@ pytest -q
 - `docs/requirements.md`
 - `docs/systemd-setup.md`
 - `docs/installation.md`
+- `docs/hardware-setup.md`
 
 ## Next Steps
 
