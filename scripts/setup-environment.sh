@@ -2,6 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+VENV_DIR="${PROJECT_ROOT}/.venv"
 
 sudo apt-get update
 sudo apt-get upgrade -y
@@ -28,8 +30,15 @@ sudo apt-get install -y \
 
 PYTHON_VERSION="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
 if python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 13) else 1)'; then
+  if [[ ! -d "${VENV_DIR}" ]]; then
+    echo "Creating virtual environment at ${VENV_DIR}."
+    python3 -m venv "${VENV_DIR}"
+  else
+    echo "Using existing virtual environment at ${VENV_DIR}."
+  fi
+  "${VENV_DIR}/bin/python" -m pip install --upgrade pip
   echo "Installing audioop-lts for Python ${PYTHON_VERSION}."
-  python3 -m pip install --upgrade audioop-lts
+  "${VENV_DIR}/bin/python" -m pip install --upgrade audioop-lts
 else
   echo "Python ${PYTHON_VERSION} includes audioop; skipping audioop-lts install."
 fi
