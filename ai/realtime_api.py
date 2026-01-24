@@ -21,7 +21,12 @@ from core.logging import (
     log_warning,
     log_ws_event,
 )
-from interaction import AsyncMicrophone, AudioPlayer
+from interaction import (
+    AsyncMicrophone,
+    AudioPlayer,
+    InteractionState,
+    InteractionStateManager,
+)
 from ai.tools import function_map, tools
 from ai.utils import (
     PREFIX_PADDING_MS,
@@ -101,6 +106,18 @@ class RealtimeAPI:
         self.response_start_time: float | None = None
         self.websocket = None
         self.profile_manager = ProfileManager.get_instance()
+        self.state_manager = InteractionStateManager()
+        self.state_manager.set_gesture_handler(self._handle_state_gesture)
+        self.state_manager.set_earcon_handler(self._handle_state_earcon)
+        self._speaking_started = False
+
+    def _handle_state_gesture(self, state: InteractionState) -> None:
+        """Hook for gesture cues on state transitions."""
+        logger.debug("Gesture cue for state: %s", state.value)
+
+    def _handle_state_earcon(self, state: InteractionState) -> None:
+        """Hook for earcon cues on state transitions."""
+        logger.debug("Earcon cue for state: %s", state.value)
 
     def _on_playback_complete(self) -> None:
         logger.info("Playback complete -> restarting mic")
@@ -240,6 +257,8 @@ class RealtimeAPI:
             self._audio_accum.clear()
             self.mic.start_receiving()
             self.response_in_progress = True
+            self._speaking_started = False
+            self.state_manager.update_state(InteractionState.THINKING, "response created")
         elif event_type == "response.output_item.added":
             await self.handle_output_item_added(event)
         elif event_type == "response.function_call_arguments.delta":
@@ -249,9 +268,14 @@ class RealtimeAPI:
         elif event_type == "response.text.delta":
             delta = event.get("delta", "")
             self.assistant_reply += delta
+            self.state_manager.update_state(InteractionState.SPEAKING, "text output")
         elif event_type == "response.output_audio.delta":
             audio_data = base64.b64decode(event["delta"])
             self._audio_accum.extend(audio_data)
+
+            if not self._speaking_started:
+                self._speaking_started = True
+                self.state_manager.update_state(InteractionState.SPEAKING, "audio output")
 
             if len(self._audio_accum) >= self._audio_accum_bytes_target:
                 if self.audio_player:
@@ -259,17 +283,24 @@ class RealtimeAPI:
                 self._audio_accum.clear()
         elif event_type == "response.output_audio.done":
             await self.handle_audio_response_done()
+            self.state_manager.update_state(InteractionState.IDLE, "audio output done")
         elif event_type == "response.output_audio_transcript.delta":
             delta = event.get("delta", "")
             self.assistant_reply += delta
         elif event_type == "response.output_audio_transcript.done":
             await self.handle_transcribe_response_done()
+            self.state_manager.update_state(
+                InteractionState.IDLE,
+                "audio transcript done",
+            )
         elif event_type == "error":
             await self.handle_error(event, websocket)
         elif event_type == "input_audio_buffer.speech_started":
             logger.info("Speech detected, listening...")
+            self.state_manager.update_state(InteractionState.LISTENING, "speech started")
         elif event_type == "input_audio_buffer.speech_stopped":
             await self.handle_speech_stopped(websocket)
+            self.state_manager.update_state(InteractionState.THINKING, "speech stopped")
         elif event_type == "rate_limits.updated":
             rl = {r["name"]: r for r in event.get("rate_limits", [])}
             self.rate_limits = rl
