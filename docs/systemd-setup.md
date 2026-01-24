@@ -7,6 +7,7 @@ This guide describes how to run the Theo runtime as a systemd service.
 - Repository checked out on the target Raspberry Pi.
 - Python virtual environment created under `.venv`.
 - Log directory created at `log/`.
+- `OPENAI_API_KEY` set in `/etc/environment` (or another file referenced by `EnvironmentFile` in the unit).
 
 ## Install the Service
 
@@ -50,3 +51,4 @@ Update the following fields in `systemd/pyPiBot.service` as needed:
 - `WorkingDirectory` path.
 - Log file paths in `StandardOutput` and `StandardError`.
 - `User` to the appropriate runtime user.
+- `EnvironmentFile` if you store `OPENAI_API_KEY` somewhere else.
