@@ -19,3 +19,15 @@ save_camera_images: false
 prefix_padding_ms: 500
 silence_threshold: 0.2
 silence_duration_ms: 900
+
+# Interaction state cues
+interaction_states:
+  cues_enabled: true
+  gesture_enabled: true
+  earcon_enabled: false
+  min_state_duration_ms: 150
+  cue_delays_ms:
+    idle: 0
+    listening: 0
+    thinking: 150
+    speaking: 0
