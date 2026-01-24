@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Awaitable, Callable
 
 from hardware import ADS1015Sensor
+from motion import MotionController, gesture_idle, gesture_nod
 
 
 ToolFn = Callable[..., Awaitable[Any]]
@@ -27,6 +28,27 @@ async def read_battery_voltage() -> dict[str, Any]:
     }
 
 
+def _enqueue_gesture(action: Any) -> None:
+    controller = MotionController.get_instance()
+    controller.add_action_to_queue(action)
+
+
+async def enqueue_idle_gesture(delay_ms: int = 0, intensity: float = 1.0) -> dict[str, Any]:
+    """Queue an idle gesture action on the motion controller."""
+
+    action = gesture_idle(delay_ms=delay_ms, intensity=float(intensity))
+    _enqueue_gesture(action)
+    return {"queued": True, "gesture": action.name, "delay_ms": delay_ms, "intensity": intensity}
+
+
+async def enqueue_nod_gesture(delay_ms: int = 0, intensity: float = 1.0) -> dict[str, Any]:
+    """Queue a nod gesture action on the motion controller."""
+
+    action = gesture_nod(delay_ms=delay_ms, intensity=float(intensity))
+    _enqueue_gesture(action)
+    return {"queued": True, "gesture": action.name, "delay_ms": delay_ms, "intensity": intensity}
+
+
 tools.append(
     {
         "type": "function",
@@ -45,3 +67,45 @@ tools.append(
 )
 
 function_map["read_battery_voltage"] = read_battery_voltage
+
+tools.append(
+    {
+        "type": "function",
+        "name": "gesture_idle",
+        "description": (
+            "Queue a gentle idle gesture on the pan/tilt rig. "
+            "Provide an optional delay in milliseconds and intensity (1.0 is normal)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "delay_ms": {"type": "integer", "minimum": 0, "default": 0},
+                "intensity": {"type": "number", "minimum": 0.1, "maximum": 2.0, "default": 1.0},
+            },
+            "required": [],
+        },
+    }
+)
+
+function_map["gesture_idle"] = enqueue_idle_gesture
+
+tools.append(
+    {
+        "type": "function",
+        "name": "gesture_nod",
+        "description": (
+            "Queue a nod gesture on the pan/tilt rig. "
+            "Provide an optional delay in milliseconds and intensity (1.0 is normal)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "delay_ms": {"type": "integer", "minimum": 0, "default": 0},
+                "intensity": {"type": "number", "minimum": 0.1, "maximum": 2.0, "default": 1.0},
+            },
+            "required": [],
+        },
+    }
+)
+
+function_map["gesture_nod"] = enqueue_nod_gesture
