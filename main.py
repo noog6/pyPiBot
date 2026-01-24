@@ -13,6 +13,7 @@ from core.logging import enable_file_logging, logger
 from hardware import CameraController
 from motion import MotionController
 from storage.controller import StorageController
+from services.profile_manager import ProfileManager
 
 
 def configure_logging(level_name: str) -> None:
@@ -45,6 +46,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Run diagnostics probes and exit.",
     )
+    parser.add_argument(
+        "--active-user-id",
+        type=str,
+        help="Override the active user profile id for this session.",
+    )
     return parser.parse_args(argv)
 
 
@@ -65,6 +71,8 @@ def main(argv: list[str] | None = None) -> int:
     config = config_controller.get_config()
     configure_logging(config.get("logging_level", "INFO"))
     args = parse_args(argv)
+    if args.active_user_id:
+        ProfileManager.get_instance().set_active_user_id(args.active_user_id)
     if args.diagnostics:
         from config.diagnostics import probe as config_probe
         from ai.diagnostics import probe as ai_probe

@@ -8,6 +8,7 @@ var_dir: "./var/"
 assistant_name: "Theo"
 startup_prompts:
   - "Say Hello World! or whatever fun salutation you prefer"
+active_user_id: "default"
 
 # Logging settings
 logging_level: "INFO"
