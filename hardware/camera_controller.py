@@ -8,9 +8,13 @@ import threading
 import time
 import traceback
 from typing import Any
+import concurrent.futures
+from datetime import datetime
 
+from config import ConfigController
 from core.logging import logger
 from motion.motion_controller import MotionController, millis
+from storage.controller import StorageController
 
 
 LOGGER = logging.getLogger(__name__)
@@ -81,6 +85,11 @@ class CameraController:
         self.last_image = None
         self.realtime_instance = None
         self.motion = MotionController.get_instance()
+        self._image_save_index = 0
+        self._image_save_executor: concurrent.futures.ThreadPoolExecutor | None = None
+        self._image_save_enabled = False
+        self._image_save_dir = None
+        self._configure_image_saving()
 
         CameraController._instance = self
 
@@ -104,6 +113,7 @@ class CameraController:
             self._vision_loop_thread = None
             logger.info("[CAMERA] Control loop stopped at index: %s", self.vision_loop_index)
             self.vision_loop_index = 0
+            self._shutdown_image_saver()
 
     def take_image(self) -> Any:
         frame = self.picam2.capture_array("main")
@@ -151,6 +161,7 @@ class CameraController:
                     if self.realtime_instance:
                         self._send_in_flight.set()
                         new_image = self.take_main_pil()
+                        self._save_image_async(new_image)
                         future = asyncio.run_coroutine_threadsafe(
                             self.realtime_instance.send_image_to_assistant(new_image),
                             self.realtime_instance.loop,
@@ -190,6 +201,42 @@ class CameraController:
                 logger.exception("[CAMERA] [WARN] Image send failed: %s", exc)
         finally:
             self._send_in_flight.clear()
+
+    def _configure_image_saving(self) -> None:
+        config = ConfigController.get_instance().get_config()
+        self._image_save_enabled = bool(config.get("save_camera_images", False))
+        if not self._image_save_enabled:
+            return
+        storage_controller = StorageController.get_instance()
+        self._image_save_dir = storage_controller.get_run_image_dir()
+        self._image_save_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="camera-image-save",
+        )
+
+    def _shutdown_image_saver(self) -> None:
+        if self._image_save_executor is not None:
+            self._image_save_executor.shutdown(wait=False)
+            self._image_save_executor = None
+
+    def _save_image_async(self, image: Any) -> None:
+        if not self._image_save_enabled or self._image_save_executor is None:
+            return
+        if self._image_save_dir is None:
+            return
+        self._image_save_index += 1
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        millis_part = int(time.time() * 1000) % 1000
+        filename = f"image_{timestamp}_{millis_part:03d}_{self._image_save_index:06d}.jpg"
+        path = self._image_save_dir / filename
+        image_copy = image.copy()
+        self._image_save_executor.submit(self._write_image, image_copy, path)
+
+    def _write_image(self, image: Any, path: Any) -> None:
+        try:
+            image.save(path, format="JPEG", quality=85)
+        except Exception as exc:
+            logger.exception("[CAMERA] Failed to save image to %s: %s", path, exc)
 
     def lores_changed(self, luma: Any, threshold: float = 7.0) -> tuple[bool, float]:
         if self._last_luma is None:

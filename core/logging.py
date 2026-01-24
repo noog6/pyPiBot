@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import atexit
 import hashlib
 import importlib
 import importlib.util
 import json
 import logging
+import logging.handlers
 import os
+from pathlib import Path
+import queue
 from typing import Any, Dict, Iterable, Optional
 
 
@@ -52,6 +56,74 @@ def setup_logging() -> logging.Logger:
 
 
 logger = setup_logging()
+
+_queue_listener: logging.handlers.QueueListener | None = None
+_queue_handlers: list[logging.Handler] = []
+_file_log_path: Path | None = None
+_atexit_registered = False
+
+
+def _shutdown_file_logging() -> None:
+    global _queue_listener
+
+    if _queue_listener is not None:
+        _queue_listener.stop()
+        _queue_listener = None
+
+
+def _remove_queue_handlers() -> None:
+    for handler in _queue_handlers:
+        for target_logger in (logging.getLogger(), logger):
+            if handler in target_logger.handlers:
+                target_logger.removeHandler(handler)
+    _queue_handlers.clear()
+
+
+def enable_file_logging(log_path: Path) -> None:
+    """Enable background file logging to the supplied log path."""
+
+    global _queue_listener, _file_log_path, _atexit_registered
+
+    log_path = log_path.expanduser()
+    if _file_log_path == log_path and _queue_listener is not None:
+        return
+
+    if _queue_listener is not None:
+        _queue_listener.stop()
+        _queue_listener = None
+
+    _remove_queue_handlers()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    file_handler.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    file_handler.setFormatter(formatter)
+
+    log_queue: queue.SimpleQueue[logging.LogRecord] = queue.SimpleQueue()
+    queue_handler = logging.handlers.QueueHandler(log_queue)
+    queue_handler.setLevel(logging.INFO)
+
+    root_logger = logging.getLogger()
+    root_logger.addHandler(queue_handler)
+    logger.addHandler(queue_handler)
+    _queue_handlers.append(queue_handler)
+
+    _queue_listener = logging.handlers.QueueListener(
+        log_queue,
+        file_handler,
+        respect_handler_level=True,
+    )
+    _queue_listener.start()
+
+    if getattr(_queue_listener, "_thread", None) is not None:
+        _queue_listener._thread.daemon = True
+
+    _file_log_path = log_path
+
+    if not _atexit_registered:
+        atexit.register(_shutdown_file_logging)
+        _atexit_registered = True
 
 
 def _format_text(message: str, style: str) -> Any:

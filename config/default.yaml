@@ -11,6 +11,8 @@ startup_prompts:
 
 # Logging settings
 logging_level: "INFO"
+file_logging_enabled: true
+save_camera_images: false
 
 # Realtime audio detection
 prefix_padding_ms: 500
