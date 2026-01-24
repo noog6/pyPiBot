@@ -116,9 +116,6 @@ def enable_file_logging(log_path: Path) -> None:
     )
     _queue_listener.start()
 
-    if getattr(_queue_listener, "_thread", None) is not None:
-        _queue_listener._thread.daemon = True
-
     _file_log_path = log_path
 
     if not _atexit_registered:
