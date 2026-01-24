@@ -23,6 +23,7 @@ sudo apt-get install -y \
   python3-pyaudio \
   python3-smbus \
   python3-venv \
+  python3-websockets \
   python3-yaml
 
 cp "${SCRIPT_DIR}/../config/asoundrc" "${HOME}/.asoundrc"
