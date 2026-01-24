@@ -39,6 +39,13 @@ if python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 13) els
   else
     echo "Using existing virtual environment at ${VENV_DIR}."
   fi
+  if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+    # shellcheck disable=SC1090
+    source "${VENV_DIR}/bin/activate"
+    echo "Activated virtual environment at ${VENV_DIR} for the current shell."
+  else
+    echo "To activate the virtual environment now, run: source ${VENV_DIR}/bin/activate"
+  fi
   "${VENV_DIR}/bin/python" -m pip install --upgrade pip
   echo "Installing audioop-lts for Python ${PYTHON_VERSION}."
   "${VENV_DIR}/bin/python" -m pip install --upgrade audioop-lts
