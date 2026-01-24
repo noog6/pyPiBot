@@ -32,7 +32,7 @@ PYTHON_VERSION="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.
 if python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 13) else 1)'; then
   if [[ ! -d "${VENV_DIR}" ]]; then
     echo "Creating virtual environment at ${VENV_DIR}."
-    python3 -m venv "${VENV_DIR}"
+    python3 -m venv --system-site-packages "${VENV_DIR}"
   else
     echo "Using existing virtual environment at ${VENV_DIR}."
   fi
