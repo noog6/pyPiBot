@@ -8,16 +8,20 @@ import logging
 import sys
 
 from ai import RealtimeAPI
-from core.logging import logger
+from config import ConfigController
+from core.logging import enable_file_logging, logger
 from hardware import CameraController
 from motion import MotionController
+from storage.controller import StorageController
 
 
-def configure_logging() -> None:
+def configure_logging(level_name: str) -> None:
     """Configure application logging."""
 
+    level = logging._nameToLevel.get(level_name.upper(), logging.INFO)
+
     logging.basicConfig(
-        level=logging.INFO,
+        level=level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
@@ -57,7 +61,9 @@ def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
 
-    configure_logging()
+    config_controller = ConfigController.get_instance()
+    config = config_controller.get_config()
+    configure_logging(config.get("logging_level", "INFO"))
     args = parse_args(argv)
     if args.diagnostics:
         from config.diagnostics import probe as config_probe
@@ -89,6 +95,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if any(result.status is DiagnosticStatus.FAIL for result in results) else 0
 
     prompts = args.prompts.split("|") if args.prompts else None
+    storage_controller = StorageController.get_instance()
+    if config.get("file_logging_enabled", True):
+        log_file_path = storage_controller.get_log_file_path()
+        enable_file_logging(log_file_path)
+        logger.info("Writing logs to %s", log_file_path)
 
     try:
         logger.info("Starting realtime API...")
