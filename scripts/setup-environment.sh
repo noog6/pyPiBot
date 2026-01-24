@@ -26,6 +26,14 @@ sudo apt-get install -y \
   python3-websockets \
   python3-yaml
 
+PYTHON_VERSION="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+if python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 13) else 1)'; then
+  echo "Installing audioop-lts for Python ${PYTHON_VERSION}."
+  python3 -m pip install --upgrade audioop-lts
+else
+  echo "Python ${PYTHON_VERSION} includes audioop; skipping audioop-lts install."
+fi
+
 cp "${SCRIPT_DIR}/../config/asoundrc" "${HOME}/.asoundrc"
 
 OPENAI_API_KEY="${OPENAI_API_KEY:-}"
@@ -50,3 +58,10 @@ if [[ -w "/etc/environment" ]]; then
 else
   echo "OPENAI_API_KEY=${OPENAI_API_KEY}" | sudo tee -a /etc/environment >/dev/null
 fi
+
+cat <<'EOF'
+
+Setup completed successfully!
+Example:
+  python main.py --prompts="Say Hello!"
+EOF
