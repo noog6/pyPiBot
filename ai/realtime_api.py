@@ -26,10 +26,11 @@ from ai.tools import function_map, tools
 from ai.utils import (
     PREFIX_PADDING_MS,
     RUN_TIME_TABLE_LOG_JSON,
-    SESSION_INSTRUCTIONS,
     SILENCE_DURATION_MS,
     SILENCE_THRESHOLD,
+    build_session_instructions,
 )
+from services.profile_manager import ProfileManager
 
 
 def _require_websockets() -> Any:
@@ -99,6 +100,7 @@ class RealtimeAPI:
         self.rate_limits: dict[str, Any] | None = None
         self.response_start_time: float | None = None
         self.websocket = None
+        self.profile_manager = ProfileManager.get_instance()
 
     def _on_playback_complete(self) -> None:
         logger.info("Playback complete -> restarting mic")
@@ -187,6 +189,8 @@ class RealtimeAPI:
                 self.websocket = None
 
     async def initialize_session(self, websocket: Any) -> None:
+        profile_context = self.profile_manager.get_profile_context()
+        instructions = build_session_instructions(profile_context.to_instruction_block())
         session_update = {
             "type": "session.update",
             "session": {
@@ -208,7 +212,7 @@ class RealtimeAPI:
                         "voice": "ballad",
                     },
                 },
-                "instructions": SESSION_INSTRUCTIONS,
+                "instructions": instructions,
                 "tools": tools,
             },
         }

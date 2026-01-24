@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, Awaitable, Callable
 
 from hardware import ADS1015Sensor
@@ -14,6 +15,7 @@ from motion import (
     gesture_no,
     gesture_nod,
 )
+from services.profile_manager import ProfileManager
 
 
 ToolFn = Callable[..., Awaitable[Any]]
@@ -93,6 +95,29 @@ async def enqueue_attention_snap_gesture(
     action = gesture_attention_snap(delay_ms=delay_ms, intensity=float(intensity))
     _enqueue_gesture(action)
     return {"queued": True, "gesture": action.name, "delay_ms": delay_ms, "intensity": intensity}
+
+
+async def update_user_profile(
+    name: str | None = None,
+    preferences: dict[str, Any] | None = None,
+    favorites: list[str] | None = None,
+) -> dict[str, Any]:
+    """Update the active user profile with provided fields."""
+
+    manager = ProfileManager.get_instance()
+    profile = manager.update_active_profile_fields(
+        name=name,
+        preferences=preferences,
+        favorites=favorites,
+        last_seen=int(time.time() * 1000),
+    )
+    return {
+        "user_id": profile.user_id,
+        "name": profile.name,
+        "preferences": profile.preferences,
+        "favorites": profile.favorites,
+        "last_seen": profile.last_seen,
+    }
 
 
 tools.append(
@@ -239,3 +264,25 @@ tools.append(
 )
 
 function_map["gesture_attention_snap"] = enqueue_attention_snap_gesture
+
+tools.append(
+    {
+        "type": "function",
+        "name": "update_user_profile",
+        "description": (
+            "Update the active user profile with personal details like name, "
+            "preferences, or favorites."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "preferences": {"type": "object"},
+                "favorites": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": [],
+        },
+    }
+)
+
+function_map["update_user_profile"] = update_user_profile
