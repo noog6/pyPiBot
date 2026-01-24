@@ -95,6 +95,11 @@ fi
 cat <<'EOF'
 
 Setup completed successfully!
-Example:
-  python main.py --prompts="Say Hello!"
+
+    sudo raspi-config
+
+        Select Interface Options -> I2C -> Enable
+
+    sudo reboot
+
 EOF
