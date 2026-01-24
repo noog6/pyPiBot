@@ -33,6 +33,9 @@ if python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 13) els
   if [[ ! -d "${VENV_DIR}" ]]; then
     echo "Creating virtual environment at ${VENV_DIR}."
     python3 -m venv --system-site-packages "${VENV_DIR}"
+    if [[ -f "${HOME}/.bashrc" ]] && ! grep -q "^source ${VENV_DIR}/bin/activate$" "${HOME}/.bashrc"; then
+      printf '\nsource %s/bin/activate\n' "${VENV_DIR}" >> "${HOME}/.bashrc"
+    fi
   else
     echo "Using existing virtual environment at ${VENV_DIR}."
   fi
