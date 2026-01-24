@@ -30,6 +30,10 @@ class StorageInfo:
 
     run_id: int
     run_id_file: Path
+    run_dir: Path
+    log_dir: Path
+    log_file: Path
+    image_dir: Path
     db_path: Path
 
 
@@ -47,6 +51,7 @@ class StorageController:
         self.config = self.config_controller.get_config()
 
         var_dir, log_dir = self._resolve_storage_dirs()
+        self.log_dir = log_dir
 
         self.run_id_file = var_dir / "current_run"
         self.run_id = self.get_next_run_number(var_dir)
@@ -140,6 +145,25 @@ class StorageController:
 
         return int(self.run_id)
 
+    def get_log_file_path(self) -> Path:
+        """Return the log file path for the current run."""
+
+        return self.log_dir / f"run_{self.run_id}.log"
+
+    def get_run_dir(self) -> Path:
+        """Return the artifact directory for the current run."""
+
+        run_dir = self.log_dir / f"run_{self.run_id}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        return run_dir
+
+    def get_run_image_dir(self) -> Path:
+        """Return the image artifact directory for the current run."""
+
+        image_dir = self.get_run_dir() / "images"
+        image_dir.mkdir(parents=True, exist_ok=True)
+        return image_dir
+
     def add_data(self, data_type: str, data: str) -> None:
         """Insert structured data into the database."""
 
@@ -200,6 +224,10 @@ class StorageController:
         return StorageInfo(
             run_id=self.run_id,
             run_id_file=self.run_id_file,
+            run_dir=self.get_run_dir(),
+            log_dir=self.log_dir,
+            log_file=self.get_log_file_path(),
+            image_dir=self.get_run_image_dir(),
             db_path=self.db_full_file_path,
         )
 
