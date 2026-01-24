@@ -8,6 +8,7 @@ from datetime import datetime
 from io import BytesIO
 import json
 import os
+import random
 import signal
 import time
 from typing import Any
@@ -34,6 +35,13 @@ from ai.utils import (
     SILENCE_DURATION_MS,
     SILENCE_THRESHOLD,
     build_session_instructions,
+)
+from motion import (
+    MotionController,
+    gesture_attention_snap,
+    gesture_curious_tilt,
+    gesture_idle,
+    gesture_nod,
 )
 from services.profile_manager import ProfileManager
 
@@ -110,10 +118,125 @@ class RealtimeAPI:
         self.state_manager.set_gesture_handler(self._handle_state_gesture)
         self.state_manager.set_earcon_handler(self._handle_state_earcon)
         self._speaking_started = False
+        self._gesture_last_fired: dict[str, float] = {}
+        self._last_gesture_time = 0.0
+        self._last_interaction_state = self.state_manager.state
+        self._gesture_global_cooldown_s = 10.0
+        self._gesture_cooldowns_s = {
+            "gesture_attention_snap": 10.0,
+            "gesture_curious_tilt": 6.0,
+            "gesture_nod": 8.0,
+            "gesture_idle": 8.0,
+        }
 
     def _handle_state_gesture(self, state: InteractionState) -> None:
         """Hook for gesture cues on state transitions."""
-        logger.debug("Gesture cue for state: %s", state.value)
+        previous_state = self._last_interaction_state
+        self._last_interaction_state = state
+
+        if state == InteractionState.SPEAKING:
+            logger.debug("Gesture cue skipped for state: %s", state.value)
+            return
+
+        gesture_name: str | None = None
+        delay_ms = 0
+        if state == InteractionState.LISTENING:
+            gesture_name = "gesture_attention_snap"
+        elif state == InteractionState.THINKING:
+            gesture_name = "gesture_curious_tilt"
+            delay_ms = random.randint(150, 300)
+        elif state == InteractionState.IDLE and previous_state == InteractionState.SPEAKING:
+            gesture_name = "gesture_nod"
+
+        if not gesture_name:
+            logger.debug("Gesture cue ignored for state: %s", state.value)
+            return
+
+        try:
+            controller = MotionController.get_instance()
+        except Exception as exc:
+            logger.warning("Gesture cue skipped: motion controller unavailable (%s).", exc)
+            return
+
+        if not controller.is_control_loop_alive():
+            logger.info(
+                "Gesture cue skipped: motion controller not running (state=%s).",
+                state.value,
+            )
+            return
+
+        try:
+            servos = controller.servo_registry.get_servos()
+        except Exception as exc:
+            logger.warning("Gesture cue skipped: servo registry unavailable (%s).", exc)
+            return
+
+        if not servos:
+            logger.warning("Gesture cue skipped: servo registry not ready.")
+            return
+
+        if controller.is_moving():
+            logger.debug("Gesture cue skipped: motion active for state %s.", state.value)
+            return
+
+        with controller._queue_lock:
+            queued_actions = list(controller.action_queue)
+
+        if queued_actions:
+            logger.debug(
+                "Gesture cue skipped: action queue not empty (%s items).",
+                len(queued_actions),
+            )
+            return
+
+        now = time.monotonic()
+        global_elapsed = now - self._last_gesture_time
+        if global_elapsed < self._gesture_global_cooldown_s:
+            logger.debug(
+                "Gesture cue skipped: global cooldown %.2fs remaining for %s.",
+                self._gesture_global_cooldown_s - global_elapsed,
+                state.value,
+            )
+            return
+
+        per_cooldown = self._gesture_cooldowns_s.get(gesture_name, 0.0)
+        last_fired = self._gesture_last_fired.get(gesture_name, 0.0)
+        per_elapsed = now - last_fired
+        if per_elapsed < per_cooldown:
+            logger.debug(
+                "Gesture cue skipped: %s cooldown %.2fs remaining for %s.",
+                gesture_name,
+                per_cooldown - per_elapsed,
+                state.value,
+            )
+            return
+
+        action = None
+        if gesture_name == "gesture_attention_snap":
+            action = gesture_attention_snap(delay_ms=delay_ms)
+        elif gesture_name == "gesture_curious_tilt":
+            action = gesture_curious_tilt(delay_ms=delay_ms)
+        elif gesture_name == "gesture_nod":
+            action = gesture_nod(delay_ms=delay_ms)
+        elif gesture_name == "gesture_idle":
+            action = gesture_idle(delay_ms=delay_ms)
+
+        if action is None:
+            logger.warning("Gesture cue skipped: no action built for %s.", gesture_name)
+            return
+
+        controller.add_action_to_queue(action)
+        self._gesture_last_fired[gesture_name] = now
+        self._last_gesture_time = now
+        logger.info(
+            "Gesture cue emitted: state=%s gesture=%s delay_ms=%s global_cd=%.2fs "
+            "gesture_cd=%.2fs",
+            state.value,
+            gesture_name,
+            delay_ms,
+            self._gesture_global_cooldown_s,
+            per_cooldown,
+        )
 
     def _handle_state_earcon(self, state: InteractionState) -> None:
         """Hook for earcon cues on state transitions."""
