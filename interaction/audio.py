@@ -31,9 +31,16 @@ class AudioPlayer:
             raise RuntimeError("PyAudio is required for AudioPlayer")
 
         pyaudio = importlib.import_module("pyaudio")
-        import audioop
+        audioop_module_name = None
+        if importlib.util.find_spec("audioop") is not None:
+            audioop_module_name = "audioop"
+        elif importlib.util.find_spec("audioop_lts") is not None:
+            audioop_module_name = "audioop_lts"
 
-        self._audioop = audioop
+        if audioop_module_name is None:
+            raise RuntimeError("audioop or audioop-lts is required for AudioPlayer")
+
+        self._audioop = importlib.import_module(audioop_module_name)
         self.on_playback_complete = on_playback_complete
         self.p = pyaudio.PyAudio()
         audio_format = resolve_format()
