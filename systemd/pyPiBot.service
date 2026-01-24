@@ -24,6 +24,7 @@ ExecStart=/home/pi/workarea/pyPiBot/.venv/bin/python /home/pi/workarea/pyPiBot/m
   --prompts "Say Hello World! or whatever fun salutation you prefer"
 ExecStop=/bin/kill -SIGTERM $MAINPID
 WorkingDirectory=/home/pi/workarea/pyPiBot/
+EnvironmentFile=-/etc/environment
 Environment="XDG_RUNTIME_DIR=/run/user/1000"
 StandardOutput=append:/home/pi/workarea/pyPiBot/log/pyPiBot.log
 StandardError=append:/home/pi/workarea/pyPiBot/log/pyPiBot-error.log
