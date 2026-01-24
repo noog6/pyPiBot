@@ -28,6 +28,20 @@ sudo apt-get install -y \
   python3-websockets \
   python3-yaml
 
+BOOT_CONFIG="/boot/firmware/config.txt"
+if [[ -f "${BOOT_CONFIG}" ]]; then
+  if grep -qE '^\s*dtparam=audio=on' "${BOOT_CONFIG}"; then
+    sudo sed -i 's/^\s*dtparam=audio=on\s*$/#dtparam=audio=on/' "${BOOT_CONFIG}"
+  fi
+
+  if ! grep -qE '^\s*dtoverlay=googlevoicehat-soundcard\s*$' "${BOOT_CONFIG}"; then
+    echo "Adding googlevoicehat-soundcard overlay to ${BOOT_CONFIG}."
+    echo "dtoverlay=googlevoicehat-soundcard" | sudo tee -a "${BOOT_CONFIG}" >/dev/null
+  fi
+else
+  echo "Warning: ${BOOT_CONFIG} not found; skipping audio board configuration."
+fi
+
 PYTHON_VERSION="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
 if python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 13) else 1)'; then
   if [[ ! -d "${VENV_DIR}" ]]; then
