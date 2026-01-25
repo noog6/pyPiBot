@@ -69,3 +69,8 @@ Configure the thresholds in `config/default.yaml`:
 
 - `injection_response_cooldown_s`: Minimum seconds between injected responses.
 - `max_injection_responses_per_minute`: Maximum injected responses per rolling minute.
+- `injection_response_triggers`: Per-trigger overrides for injected responses (keyed by trigger name).
+  - `cooldown_s`: Minimum seconds between injected responses for the trigger.
+  - `max_per_minute`: Maximum injected responses per rolling minute for the trigger.
+  - `priority`: Priority value; positive values bypass the global cooldown/rate limits while still
+    honoring the trigger-specific limits.
