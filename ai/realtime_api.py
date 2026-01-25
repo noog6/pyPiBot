@@ -591,7 +591,7 @@ class RealtimeAPI:
 
     async def send_text_message_to_conversation(self, text_message: str) -> None:
         text_event = {
-            "type": "conversation.item.added",
+            "type": "conversation.item.create",
             "item": {
                 "type": "message",
                 "role": "user",
