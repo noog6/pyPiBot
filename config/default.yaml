@@ -20,6 +20,10 @@ prefix_padding_ms: 500
 silence_threshold: 0.2
 silence_duration_ms: 900
 
+# Injected response throttling
+injection_response_cooldown_s: 2.0
+max_injection_responses_per_minute: 12
+
 # Interaction state cues
 interaction_states:
   cues_enabled: true

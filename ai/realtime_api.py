@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections import deque
 from datetime import datetime
 from io import BytesIO
 import json
@@ -13,6 +14,7 @@ import signal
 import time
 from typing import Any
 
+from config import ConfigController
 from core.logging import (
     logger,
     log_error,
@@ -122,6 +124,14 @@ class RealtimeAPI:
         self._last_gesture_time = 0.0
         self._last_interaction_state = self.state_manager.state
         self._gesture_global_cooldown_s = 10.0
+        config = ConfigController.get_instance().get_config()
+        self._injection_response_cooldown_s = float(
+            config.get("injection_response_cooldown_s", 0.0)
+        )
+        self._max_injection_responses_per_minute = int(
+            config.get("max_injection_responses_per_minute", 0)
+        )
+        self._injection_response_timestamps: deque[float] = deque()
         self._gesture_cooldowns_s = {
             "gesture_attention_snap": 10.0,
             "gesture_curious_tilt": 6.0,
@@ -518,6 +528,10 @@ class RealtimeAPI:
             }
             log_ws_event("Image", image_item)
             await self.websocket.send(json.dumps(image_item))
+            await self.maybe_request_response(
+                trigger="image_message",
+                metadata={"image_format": "jpeg"},
+            )
         else:
             log_warning("Unable to send image to assistant, websocket not available")
 
@@ -538,6 +552,7 @@ class RealtimeAPI:
             log_info(f"Assistant Response: {self.assistant_reply}", style="bold blue")
             self.assistant_reply = ""
 
+        self.response_in_progress = False
         logger.info("Finished handle_transcribe_response_done()")
 
     async def handle_audio_response_done(self) -> None:
@@ -548,6 +563,7 @@ class RealtimeAPI:
             self.response_start_time = None
 
         log_info("Assistant audio response complete.", style="bold blue")
+        self.response_in_progress = False
         if self._audio_accum:
             if self.audio_player:
                 self.audio_player.play_audio(bytes(self._audio_accum))
@@ -599,6 +615,77 @@ class RealtimeAPI:
             },
         }
         await self.websocket.send(json.dumps(text_event))
+        await self.maybe_request_response(
+            trigger="text_message",
+            metadata={"text_length": len(text_message)},
+        )
+
+    async def maybe_request_response(self, trigger: str, metadata: dict[str, Any]) -> None:
+        if not self.websocket:
+            log_warning("Skipping injected response (%s): websocket unavailable.", trigger)
+            return
+
+        if self.response_in_progress:
+            logger.info("Skipping injected response (%s): response already in progress.", trigger)
+            return
+
+        if self.state_manager.state not in (InteractionState.IDLE, InteractionState.LISTENING):
+            logger.info(
+                "Skipping injected response (%s): invalid state %s.",
+                trigger,
+                self.state_manager.state.value,
+            )
+            return
+
+        if self._injection_response_cooldown_s > 0.0:
+            now = time.monotonic()
+            last_ts = (
+                self._injection_response_timestamps[-1]
+                if self._injection_response_timestamps
+                else None
+            )
+            if last_ts is not None and now - last_ts < self._injection_response_cooldown_s:
+                logger.info(
+                    "Skipping injected response (%s): cooldown %.2fs remaining.",
+                    trigger,
+                    self._injection_response_cooldown_s - (now - last_ts),
+                )
+                return
+
+        if self._max_injection_responses_per_minute > 0:
+            now = time.monotonic()
+            while self._injection_response_timestamps and now - self._injection_response_timestamps[0] > 60:
+                self._injection_response_timestamps.popleft()
+            if len(self._injection_response_timestamps) >= self._max_injection_responses_per_minute:
+                logger.info(
+                    "Skipping injected response (%s): rate limit %s/minute reached.",
+                    trigger,
+                    self._max_injection_responses_per_minute,
+                )
+                return
+
+        if self.rate_limits:
+            for limit_name in ("requests", "responses"):
+                rate_limit = self.rate_limits.get(limit_name)
+                if not rate_limit:
+                    continue
+                remaining = rate_limit.get("remaining")
+                if remaining is not None and remaining <= 0:
+                    logger.info(
+                        "Skipping injected response (%s): %s rate limit exhausted.",
+                        trigger,
+                        limit_name,
+                    )
+                    return
+
+        log_ws_event(
+            "InjectedResponse",
+            {"trigger": trigger, "metadata": metadata},
+        )
+        response_create_event = {"type": "response.create"}
+        log_ws_event("Outgoing", response_create_event)
+        await self.websocket.send(json.dumps(response_create_event))
+        self._injection_response_timestamps.append(time.monotonic())
 
     async def send_audio_loop(self, websocket: Any) -> None:
         try:
