@@ -13,6 +13,12 @@ from collections import deque
 from datetime import datetime
 
 from config import ConfigController
+from hardware.camera_change_policy import (
+    CameraChangeConfig,
+    CameraChangePolicy,
+    CameraInterestState,
+)
+from interaction.state import InteractionState
 from core.logging import logger
 from motion.motion_controller import MotionController, millis
 from storage.controller import StorageController
@@ -99,6 +105,8 @@ class CameraController:
         self._warmup_frames_seen = 0
         self._warmup_done = True
         self._configure_warmup()
+        self._change_policy: CameraChangePolicy | None = None
+        self._configure_change_policy()
 
         CameraController._instance = self
 
@@ -165,12 +173,51 @@ class CameraController:
 
                 try:
                     luma = self.take_lores_luma()
-                    changed, score = self.lores_changed(luma, threshold=7.0)
-                    if not changed:
+                    ready, mad = self.lores_mad(luma)
+                    if not ready:
                         time.sleep(0.01)
                         continue
 
-                    logger.info("[CAMERA] change detected (mad=%.2f)", score)
+                    policy = self._change_policy
+                    if policy is None:
+                        time.sleep(0.01)
+                        continue
+                    result = policy.update(mad, time.time())
+                    logger.debug(
+                        "[CAMERA] MAD raw=%.2f ema=%.2f state=%s debounce=%s cooldown=%.2fs",
+                        result.mad,
+                        result.ema_mad,
+                        result.state.value,
+                        result.debounce_count,
+                        result.cooldown_remaining,
+                    )
+                    if result.state_changed:
+                        logger.info(
+                            "[CAMERA] state transition -> %s (ema=%.2f)",
+                            result.state.value,
+                            result.ema_mad,
+                        )
+                    if not result.promoted:
+                        if result.cooldown_remaining > 0:
+                            logger.info(
+                                "[CAMERA] promotion suppressed (cooldown %.2fs remaining)",
+                                result.cooldown_remaining,
+                            )
+                        time.sleep(0.01)
+                        continue
+                    if self._is_interaction_busy():
+                        logger.info(
+                            "[CAMERA] promotion suppressed (interaction busy: %s)",
+                            self._get_interaction_state_label(),
+                        )
+                        time.sleep(0.01)
+                        continue
+
+                    logger.info(
+                        "[CAMERA] change promoted (mad=%.2f ema=%.2f)",
+                        result.mad,
+                        result.ema_mad,
+                    )
 
                     new_image = self.take_main_pil()
                     self._save_image_async(new_image)
@@ -280,11 +327,25 @@ class CameraController:
         self._warmup_ms = max(int(config.get("camera_warmup_ms", 1000)), 0)
         self._reset_warmup()
 
+    def _configure_change_policy(self) -> None:
+        config = ConfigController.get_instance().get_config()
+        self._change_policy = CameraChangePolicy(
+            CameraChangeConfig(
+                trigger_threshold=float(config.get("camera_trigger_threshold", 25.0)),
+                clear_threshold=float(config.get("camera_clear_threshold", 15.0)),
+                debounce_frames=max(int(config.get("camera_debounce_frames", 3)), 1),
+                cooldown_seconds=max(float(config.get("camera_cooldown_seconds", 10.0)), 0.0),
+                ema_alpha=float(config.get("camera_ema_alpha", 0.3)),
+            )
+        )
+
     def _reset_warmup(self) -> None:
         self._warmup_start_ms = millis()
         self._warmup_frames_seen = 0
         self._warmup_done = self._warmup_frames == 0 and self._warmup_ms == 0
         self._last_luma = None
+        if self._change_policy is not None:
+            self._change_policy.reset()
 
     def _shutdown_image_saver(self) -> None:
         if self._image_save_executor is not None:
@@ -310,7 +371,7 @@ class CameraController:
         except Exception as exc:
             logger.exception("[CAMERA] Failed to save image to %s: %s", path, exc)
 
-    def lores_changed(self, luma: Any, threshold: float = 7.0) -> tuple[bool, float]:
+    def lores_mad(self, luma: Any) -> tuple[bool, float]:
         if not self._warmup_done:
             self._warmup_frames_seen += 1
             elapsed_ms = millis() - self._warmup_start_ms
@@ -328,4 +389,26 @@ class CameraController:
         d = luma.astype(self._np.int16) - self._last_luma.astype(self._np.int16)
         mad = float(self._np.abs(d).mean())
         self._last_luma = luma
-        return (mad >= threshold), mad
+        return True, mad
+
+    def _get_interaction_state_label(self) -> str:
+        if not self.realtime_instance:
+            return "unknown"
+        state_manager = getattr(self.realtime_instance, "state_manager", None)
+        state = getattr(state_manager, "state", None)
+        if isinstance(state, InteractionState):
+            return state.value
+        if isinstance(state, str):
+            return state
+        return "unknown"
+
+    def _is_interaction_busy(self) -> bool:
+        if not self.realtime_instance:
+            return False
+        state_manager = getattr(self.realtime_instance, "state_manager", None)
+        state = getattr(state_manager, "state", None)
+        if isinstance(state, InteractionState):
+            return state in (InteractionState.SPEAKING, InteractionState.LISTENING)
+        if isinstance(state, str):
+            return state in (InteractionState.SPEAKING.value, InteractionState.LISTENING.value)
+        return False
