@@ -9,6 +9,7 @@ import time
 import traceback
 from typing import Any
 import concurrent.futures
+from collections import deque
 from datetime import datetime
 
 from config import ConfigController
@@ -89,6 +90,8 @@ class CameraController:
         self._image_save_executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._image_save_enabled = False
         self._image_save_dir = None
+        self._pending_images: deque[Any] = deque(maxlen=3)
+        self._pending_lock = threading.Lock()
         self._configure_image_saving()
 
         CameraController._instance = self
@@ -144,6 +147,10 @@ class CameraController:
                     time.sleep(0.01)
                     continue
 
+                if self._drain_pending_images():
+                    time.sleep(0.01)
+                    continue
+
                 if self.motion and self.motion.is_moving():
                     logger.info("[CAMERA] skipped (motion active)")
                     time.sleep(0.01)
@@ -158,15 +165,14 @@ class CameraController:
 
                     logger.info("[CAMERA] change detected (mad=%.2f)", score)
 
-                    if self.realtime_instance:
+                    new_image = self.take_main_pil()
+                    self._save_image_async(new_image)
+                    if self._can_send_realtime():
                         self._send_in_flight.set()
-                        new_image = self.take_main_pil()
-                        self._save_image_async(new_image)
                         if not self._queue_image_send(new_image):
                             self._send_in_flight.clear()
                     else:
-                        self._send_in_flight.clear()
-                        logger.warning("[CAMERA] Unable to take image - realtime instance not available")
+                        self._queue_pending_image(new_image)
 
                 except Exception as exc:
                     self._send_in_flight.clear()
@@ -186,6 +192,37 @@ class CameraController:
 
     def set_realtime_instance(self, realtime_instance: Any) -> None:
         self.realtime_instance = realtime_instance
+
+    def _can_send_realtime(self) -> bool:
+        if not self.realtime_instance:
+            return False
+        is_ready = getattr(self.realtime_instance, "is_ready_for_injections", None)
+        if callable(is_ready):
+            return is_ready()
+        loop = getattr(self.realtime_instance, "loop", None)
+        return loop is not None and loop.is_running()
+
+    def _queue_pending_image(self, image: Any) -> None:
+        if not self.realtime_instance:
+            logger.warning("[CAMERA] Unable to take image - realtime instance not available")
+            return
+        with self._pending_lock:
+            if len(self._pending_images) == self._pending_images.maxlen:
+                self._pending_images.popleft()
+            self._pending_images.append(image)
+        logger.info("[CAMERA] Queued image until realtime loop is ready.")
+
+    def _drain_pending_images(self) -> bool:
+        if not self._can_send_realtime():
+            return False
+        with self._pending_lock:
+            if not self._pending_images:
+                return False
+            image = self._pending_images.popleft()
+        self._send_in_flight.set()
+        if not self._queue_image_send(image):
+            self._send_in_flight.clear()
+        return True
 
     def _queue_image_send(self, image: Any) -> bool:
         if not self.realtime_instance:

@@ -6,6 +6,8 @@ import argparse
 import asyncio
 import logging
 import sys
+import threading
+from collections import deque
 
 from ai import RealtimeAPI
 from config import ConfigController
@@ -130,6 +132,50 @@ def main(argv: list[str] | None = None) -> int:
         logger.exception("Realtime API startup failed: %s", exc)
         return 1
 
+    pending_imu_events: deque[ImuMotionEvent] = deque(maxlen=20)
+    pending_battery_events: deque[BatteryStatusEvent] = deque(maxlen=10)
+    pending_lock = threading.Lock()
+
+    def _send_text_message(message: str, request_response: bool = True) -> None:
+        future = asyncio.run_coroutine_threadsafe(
+            realtime_api_instance.send_text_message_to_conversation(
+                message,
+                request_response=request_response,
+            ),
+            realtime_api_instance.loop,
+        )
+
+        def _on_complete(task) -> None:
+            try:
+                task.result()
+            except Exception as exc:
+                logger.warning("Failed to send queued message: %s", exc)
+
+        future.add_done_callback(_on_complete)
+
+    def _drain_pending_events() -> None:
+        realtime_api_instance.ready_event.wait()
+        with pending_lock:
+            imu_events = list(pending_imu_events)
+            pending_imu_events.clear()
+            battery_events = list(pending_battery_events)
+            pending_battery_events.clear()
+        for event in imu_events:
+            _send_text_message(
+                "IMU event: "
+                f"{event.event_type} ({event.severity}) details={event.details}",
+                request_response=False,
+            )
+        for event in battery_events:
+            percent = event.percent_of_range * 100
+            _send_text_message(
+                "Battery voltage: "
+                f"{event.voltage:.2f}V ({percent:.1f}% of range) severity={event.severity}",
+                request_response=event.severity != "info",
+            )
+
+    threading.Thread(target=_drain_pending_events, daemon=True).start()
+
     motion_controller = None
     try:
         logger.info("Starting motion controller...")
@@ -156,23 +202,16 @@ def main(argv: list[str] | None = None) -> int:
         imu_monitor.start_loop()
 
         def _handle_imu_event(event: ImuMotionEvent) -> None:
-            if not realtime_api_instance.loop or not realtime_api_instance.websocket:
-                logger.debug("Skipping IMU event; realtime API not ready.")
+            if not realtime_api_instance.is_ready_for_injections():
+                with pending_lock:
+                    pending_imu_events.append(event)
+                logger.debug("Queueing IMU event; realtime API not ready.")
                 return
             message = (
                 "IMU event: "
                 f"{event.event_type} ({event.severity}) details={event.details}"
             )
-            future = asyncio.run_coroutine_threadsafe(
-                realtime_api_instance.send_text_message_to_conversation(message),
-                realtime_api_instance.loop,
-            )
-            def _on_complete(task) -> None:
-                try:
-                    task.result()
-                except Exception as exc:
-                    logger.warning("Failed to send IMU event message: %s", exc)
-            future.add_done_callback(_on_complete)
+            _send_text_message(message, request_response=False)
         imu_event_handler = _handle_imu_event
         imu_monitor.register_event_handler(_handle_imu_event)
     except Exception as exc:
@@ -186,29 +225,17 @@ def main(argv: list[str] | None = None) -> int:
         battery_monitor.start_loop()
 
         def _handle_battery_event(event: BatteryStatusEvent) -> None:
-            if not realtime_api_instance.loop or not realtime_api_instance.websocket:
-                logger.debug("Skipping battery event; realtime API not ready.")
-                return
             percent = event.percent_of_range * 100
             message = (
                 "Battery voltage: "
                 f"{event.voltage:.2f}V ({percent:.1f}% of range) severity={event.severity}"
             )
-            future = asyncio.run_coroutine_threadsafe(
-                realtime_api_instance.send_text_message_to_conversation(
-                    message,
-                    request_response=event.severity != "info",
-                ),
-                realtime_api_instance.loop,
-            )
-
-            def _on_complete(task) -> None:
-                try:
-                    task.result()
-                except Exception as exc:
-                    logger.warning("Failed to send battery event message: %s", exc)
-
-            future.add_done_callback(_on_complete)
+            if not realtime_api_instance.is_ready_for_injections():
+                with pending_lock:
+                    pending_battery_events.append(event)
+                logger.debug("Queueing battery event; realtime API not ready.")
+                return
+            _send_text_message(message, request_response=event.severity != "info")
 
         battery_event_handler = _handle_battery_event
         battery_monitor.register_event_handler(_handle_battery_event)

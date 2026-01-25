@@ -11,6 +11,7 @@ import json
 import os
 import random
 import signal
+import threading
 import time
 from typing import Any
 
@@ -105,6 +106,7 @@ class RealtimeAPI:
         self.mic = AsyncMicrophone(input_name_hint="default", debug_list_devices=False)
         self.audio_player: AudioPlayer | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
+        self.ready_event = threading.Event()
 
         self.assistant_reply = ""
         self._audio_accum = bytearray()
@@ -146,6 +148,14 @@ class RealtimeAPI:
             "gesture_nod": 8.0,
             "gesture_idle": 8.0,
         }
+
+    def is_ready_for_injections(self) -> bool:
+        return (
+            self.ready_event.is_set()
+            and self.websocket is not None
+            and self.loop is not None
+            and self.loop.is_running()
+        )
 
     def _handle_state_gesture(self, state: InteractionState) -> None:
         """Hook for gesture cues on state transitions."""
@@ -281,6 +291,7 @@ class RealtimeAPI:
         _, ConnectionClosedError = _resolve_websocket_exceptions(websockets)
 
         self.loop = asyncio.get_running_loop()
+        self.ready_event.clear()
 
         def _playback_complete_from_thread() -> None:
             if self.loop:
@@ -345,6 +356,7 @@ class RealtimeAPI:
                 self.mic.stop_recording()
                 self.mic.close()
                 self.websocket = None
+                self.ready_event.clear()
 
     async def initialize_session(self, websocket: Any) -> None:
         profile_context = self.profile_manager.get_profile_context()
@@ -461,6 +473,9 @@ class RealtimeAPI:
             )
         elif event_type == "session.updated":
             log_session_updated(event, full_payload=False)
+            if not self.ready_event.is_set():
+                logger.info("Realtime API ready to accept injections.")
+                self.ready_event.set()
 
     async def handle_output_item_added(self, event: dict[str, Any]) -> None:
         item = event.get("item", {})
