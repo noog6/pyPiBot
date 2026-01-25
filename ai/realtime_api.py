@@ -769,11 +769,14 @@ class RealtimeAPI:
                     )
                     return
 
-        log_ws_event(
-            "InjectedResponse",
-            {"trigger": trigger, "metadata": metadata, "priority": trigger_priority},
+        response_metadata = {"trigger": trigger, "priority": trigger_priority, "stimulus": metadata}
+        response_create_event = {
+            "type": "response.create",
+            "response": {"metadata": response_metadata},
+        }
+        log_info(
+            f"Requesting injected response for {trigger} with metadata {response_metadata}."
         )
-        response_create_event = {"type": "response.create"}
         log_ws_event("Outgoing", response_create_event)
         await self.websocket.send(json.dumps(response_create_event))
         now = time.monotonic()
