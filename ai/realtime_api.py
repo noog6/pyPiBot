@@ -772,7 +772,7 @@ class RealtimeAPI:
         response_metadata = {
             "trigger": trigger,
             "priority": str(trigger_priority),
-            "stimulus": metadata,
+            "stimulus": json.dumps(metadata, sort_keys=True),
         }
         response_create_event = {
             "type": "response.create",
