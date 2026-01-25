@@ -132,6 +132,8 @@ class RealtimeAPI:
             config.get("max_injection_responses_per_minute", 0)
         )
         self._injection_response_timestamps: deque[float] = deque()
+        self._injection_response_triggers = config.get("injection_response_triggers") or {}
+        self._injection_response_trigger_timestamps: dict[str, deque[float]] = {}
         self._gesture_cooldowns_s = {
             "gesture_attention_snap": 10.0,
             "gesture_curious_tilt": 6.0,
@@ -637,6 +639,18 @@ class RealtimeAPI:
             log_warning("Skipping injected response (%s): websocket unavailable.", trigger)
             return
 
+        trigger_config = self._injection_response_triggers.get(trigger, {})
+        trigger_cooldown_s = float(
+            trigger_config.get("cooldown_s", self._injection_response_cooldown_s)
+        )
+        trigger_max_per_minute = int(
+            trigger_config.get("max_per_minute", self._max_injection_responses_per_minute)
+        )
+        trigger_priority = int(trigger_config.get("priority", 0))
+        trigger_timestamps = self._injection_response_trigger_timestamps.setdefault(
+            trigger, deque()
+        )
+
         if self.response_in_progress:
             logger.info("Skipping injected response (%s): response already in progress.", trigger)
             return
@@ -649,7 +663,32 @@ class RealtimeAPI:
             )
             return
 
-        if self._injection_response_cooldown_s > 0.0:
+        if trigger_cooldown_s > 0.0:
+            now = time.monotonic()
+            last_ts = trigger_timestamps[-1] if trigger_timestamps else None
+            if last_ts is not None and now - last_ts < trigger_cooldown_s:
+                logger.info(
+                    "Skipping injected response (%s): trigger cooldown %.2fs remaining.",
+                    trigger,
+                    trigger_cooldown_s - (now - last_ts),
+                )
+                return
+
+        if trigger_max_per_minute > 0:
+            now = time.monotonic()
+            while trigger_timestamps and now - trigger_timestamps[0] > 60:
+                trigger_timestamps.popleft()
+            if len(trigger_timestamps) >= trigger_max_per_minute:
+                logger.info(
+                    "Skipping injected response (%s): trigger rate limit %s/minute reached.",
+                    trigger,
+                    trigger_max_per_minute,
+                )
+                return
+
+        bypass_global_limits = trigger_priority > 0
+
+        if self._injection_response_cooldown_s > 0.0 and not bypass_global_limits:
             now = time.monotonic()
             last_ts = (
                 self._injection_response_timestamps[-1]
@@ -664,7 +703,7 @@ class RealtimeAPI:
                 )
                 return
 
-        if self._max_injection_responses_per_minute > 0:
+        if self._max_injection_responses_per_minute > 0 and not bypass_global_limits:
             now = time.monotonic()
             while self._injection_response_timestamps and now - self._injection_response_timestamps[0] > 60:
                 self._injection_response_timestamps.popleft()
@@ -692,12 +731,14 @@ class RealtimeAPI:
 
         log_ws_event(
             "InjectedResponse",
-            {"trigger": trigger, "metadata": metadata},
+            {"trigger": trigger, "metadata": metadata, "priority": trigger_priority},
         )
         response_create_event = {"type": "response.create"}
         log_ws_event("Outgoing", response_create_event)
         await self.websocket.send(json.dumps(response_create_event))
-        self._injection_response_timestamps.append(time.monotonic())
+        now = time.monotonic()
+        self._injection_response_timestamps.append(now)
+        trigger_timestamps.append(now)
 
     async def send_audio_loop(self, websocket: Any) -> None:
         try:

@@ -23,6 +23,15 @@ silence_duration_ms: 900
 # Injected response throttling
 injection_response_cooldown_s: 2.0
 max_injection_responses_per_minute: 12
+injection_response_triggers:
+  image_message:
+    cooldown_s: 4.0
+    max_per_minute: 6
+    priority: 0
+  text_message:
+    cooldown_s: 2.0
+    max_per_minute: 12
+    priority: 0
 
 # Interaction state cues
 interaction_states:
