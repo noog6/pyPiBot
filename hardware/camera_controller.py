@@ -162,11 +162,8 @@ class CameraController:
                         self._send_in_flight.set()
                         new_image = self.take_main_pil()
                         self._save_image_async(new_image)
-                        future = asyncio.run_coroutine_threadsafe(
-                            self.realtime_instance.send_image_to_assistant(new_image),
-                            self.realtime_instance.loop,
-                        )
-                        future.add_done_callback(self._clear_send_flag)
+                        if not self._queue_image_send(new_image):
+                            self._send_in_flight.clear()
                     else:
                         self._send_in_flight.clear()
                         logger.warning("[CAMERA] Unable to take image - realtime instance not available")
@@ -189,6 +186,25 @@ class CameraController:
 
     def set_realtime_instance(self, realtime_instance: Any) -> None:
         self.realtime_instance = realtime_instance
+
+    def _queue_image_send(self, image: Any) -> bool:
+        if not self.realtime_instance:
+            logger.warning("[CAMERA] Unable to send image - realtime instance not available")
+            return False
+        loop = getattr(self.realtime_instance, "loop", None)
+        if loop is None or not loop.is_running():
+            logger.warning("[CAMERA] Unable to send image - realtime event loop not running")
+            return False
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                self.realtime_instance.send_image_to_assistant(image),
+                loop,
+            )
+        except Exception as exc:
+            logger.exception("[CAMERA] Failed to queue image send: %s", exc)
+            return False
+        future.add_done_callback(self._clear_send_flag)
+        return True
 
     def _clear_send_flag(self, fut: Any) -> None:
         ConnectionClosedOK = _safe_connection_closed_ok()
