@@ -13,7 +13,7 @@ from core.logging import enable_file_logging, logger
 from hardware import CameraController
 from motion import MotionController
 from storage.controller import StorageController
-from services.imu_monitor import ImuMonitor
+from services.imu_monitor import ImuMonitor, ImuMotionEvent
 from services.profile_manager import ProfileManager
 
 
@@ -148,10 +148,32 @@ def main(argv: list[str] | None = None) -> int:
         logger.warning("Camera controller unavailable: %s", exc)
 
     imu_monitor = None
+    imu_event_handler = None
     try:
         logger.info("Starting IMU monitor...")
         imu_monitor = ImuMonitor.get_instance()
         imu_monitor.start_loop()
+
+        def _handle_imu_event(event: ImuMotionEvent) -> None:
+            if not realtime_api_instance.loop or not realtime_api_instance.websocket:
+                logger.debug("Skipping IMU event; realtime API not ready.")
+                return
+            message = (
+                "IMU event: "
+                f"{event.event_type} ({event.severity}) details={event.details}"
+            )
+            future = asyncio.run_coroutine_threadsafe(
+                realtime_api_instance.send_text_message_to_conversation(message),
+                realtime_api_instance.loop,
+            )
+            def _on_complete(task) -> None:
+                try:
+                    task.result()
+                except Exception as exc:
+                    logger.warning("Failed to send IMU event message: %s", exc)
+            future.add_done_callback(_on_complete)
+        imu_event_handler = _handle_imu_event
+        imu_monitor.register_event_handler(_handle_imu_event)
     except Exception as exc:
         logger.warning("IMU monitor unavailable: %s", exc)
 
@@ -167,6 +189,8 @@ def main(argv: list[str] | None = None) -> int:
         if motion_controller:
             motion_controller.stop_control_loop()
         if imu_monitor:
+            if imu_event_handler:
+                imu_monitor.unregister_event_handler(imu_event_handler)
             imu_monitor.stop_loop()
 
     return 0
