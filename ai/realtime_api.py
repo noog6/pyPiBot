@@ -139,8 +139,14 @@ class RealtimeAPI:
         self._injection_response_timestamps: deque[float] = deque()
         self._injection_response_triggers = config.get("injection_response_triggers") or {}
         self._injection_response_trigger_timestamps: dict[str, deque[float]] = {}
-        self._image_response_mode = str(config.get("image_response_mode", "respond")).lower()
-        self._image_response_enabled = self._image_response_mode != "catalog_only"
+        self._image_response_mode = str(config.get("image_response_mode", "catalog_only")).lower()
+        if self._image_response_mode not in {"respond", "catalog_only"}:
+            logger.warning(
+                "Unknown image_response_mode=%s; defaulting to catalog_only.",
+                self._image_response_mode,
+            )
+            self._image_response_mode = "catalog_only"
+        self._image_response_enabled = self._image_response_mode == "respond"
         self._stimuli_coordinator = StimuliCoordinator(
             debounce_window_s=float(config.get("injection_debounce_window_s", 0.4)),
             cooldown_s=self._injection_response_cooldown_s,
