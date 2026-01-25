@@ -31,6 +31,7 @@ from interaction import (
     InteractionStateManager,
 )
 from ai.tools import function_map, tools
+from ai.stimuli_coordinator import StimuliCoordinator
 from ai.utils import (
     PREFIX_PADDING_MS,
     RUN_TIME_TABLE_LOG_JSON,
@@ -134,6 +135,11 @@ class RealtimeAPI:
         self._injection_response_timestamps: deque[float] = deque()
         self._injection_response_triggers = config.get("injection_response_triggers") or {}
         self._injection_response_trigger_timestamps: dict[str, deque[float]] = {}
+        self._stimuli_coordinator = StimuliCoordinator(
+            debounce_window_s=float(config.get("injection_debounce_window_s", 0.4)),
+            cooldown_s=self._injection_response_cooldown_s,
+            emit_callback=self.maybe_request_response,
+        )
         self._gesture_cooldowns_s = {
             "gesture_attention_snap": 10.0,
             "gesture_curious_tilt": 6.0,
@@ -532,9 +538,10 @@ class RealtimeAPI:
             }
             log_ws_event("Image", image_item)
             await self.websocket.send(json.dumps(image_item))
-            await self.maybe_request_response(
+            await self._stimuli_coordinator.enqueue(
                 trigger="image_message",
                 metadata={"image_format": "jpeg"},
+                priority=self._get_injection_priority("image_message"),
             )
         else:
             log_warning("Unable to send image to assistant, websocket not available")
@@ -629,9 +636,10 @@ class RealtimeAPI:
         }
         await self.websocket.send(json.dumps(text_event))
         if request_response:
-            await self.maybe_request_response(
+            await self._stimuli_coordinator.enqueue(
                 trigger="text_message",
                 metadata={"text_length": len(text_message)},
+                priority=self._get_injection_priority("text_message"),
             )
 
     async def maybe_request_response(self, trigger: str, metadata: dict[str, Any]) -> None:
@@ -739,6 +747,10 @@ class RealtimeAPI:
         now = time.monotonic()
         self._injection_response_timestamps.append(now)
         trigger_timestamps.append(now)
+
+    def _get_injection_priority(self, trigger: str) -> int:
+        trigger_config = self._injection_response_triggers.get(trigger, {})
+        return int(trigger_config.get("priority", 0))
 
     async def send_audio_loop(self, websocket: Any) -> None:
         try:
