@@ -127,6 +127,8 @@ class RealtimeAPI:
         self._last_gesture_time = 0.0
         self._last_interaction_state = self.state_manager.state
         self._gesture_global_cooldown_s = 10.0
+        self._pending_image_stimulus: dict[str, Any] | None = None
+        self._pending_image_flush_after_playback = False
         config = ConfigController.get_instance().get_config()
         self._injection_response_cooldown_s = float(
             config.get("injection_response_cooldown_s", 0.0)
@@ -285,6 +287,9 @@ class RealtimeAPI:
                 logger.exception("Failed to send input_audio_buffer.clear")
 
         self.mic.start_recording()
+        if self._pending_image_flush_after_playback and self._pending_image_stimulus:
+            self._pending_image_flush_after_playback = False
+            self._schedule_pending_image_flush("playback complete")
 
     async def run(self) -> None:
         websockets = _require_websockets()
@@ -579,6 +584,8 @@ class RealtimeAPI:
             self.assistant_reply = ""
 
         self.response_in_progress = False
+        if self._pending_image_stimulus and not self._pending_image_flush_after_playback:
+            await self._flush_pending_image_stimulus("response transcript done")
         logger.info("Finished handle_transcribe_response_done()")
 
     async def handle_audio_response_done(self) -> None:
@@ -596,11 +603,18 @@ class RealtimeAPI:
             self._audio_accum.clear()
         if self.audio_player:
             self.audio_player.close_response()
+        if self._pending_image_stimulus:
+            if self.audio_player:
+                self._pending_image_flush_after_playback = True
+            else:
+                await self._flush_pending_image_stimulus("audio response done")
 
     async def handle_response_completed(self) -> None:
         self.response_in_progress = False
         self.state_manager.update_state(InteractionState.IDLE, "response completed")
         logger.info("Received response.completed event.")
+        if self._pending_image_stimulus and not self._pending_image_flush_after_playback:
+            await self._flush_pending_image_stimulus("response completed")
 
     async def handle_error(self, event: dict[str, Any], websocket: Any) -> None:
         error_message = event.get("error", {}).get("message", "")
@@ -675,6 +689,9 @@ class RealtimeAPI:
         )
 
         if self.response_in_progress:
+            if trigger == "image_message":
+                self._queue_pending_image_stimulus(trigger, metadata)
+                return
             logger.info("Skipping injected response (%s): response already in progress.", trigger)
             return
 
@@ -766,6 +783,37 @@ class RealtimeAPI:
     def _get_injection_priority(self, trigger: str) -> int:
         trigger_config = self._injection_response_triggers.get(trigger, {})
         return int(trigger_config.get("priority", 0))
+
+    def _queue_pending_image_stimulus(self, trigger: str, metadata: dict[str, Any]) -> None:
+        self._pending_image_stimulus = {"trigger": trigger, "metadata": metadata}
+        self._pending_image_flush_after_playback = False
+        logger.info("Queued pending image stimulus while response is in progress.")
+
+    def _schedule_pending_image_flush(self, reason: str) -> None:
+        if not self._pending_image_stimulus:
+            return
+        if self.loop and self.loop.is_running():
+            self.loop.create_task(self._flush_pending_image_stimulus(reason))
+        else:
+            logger.warning(
+                "Unable to flush pending image stimulus after %s: event loop unavailable.",
+                reason,
+            )
+
+    async def _flush_pending_image_stimulus(self, reason: str) -> None:
+        if not self._pending_image_stimulus:
+            return
+        if self.response_in_progress:
+            logger.info(
+                "Deferring pending image stimulus flush after %s: response in progress.",
+                reason,
+            )
+            return
+        pending = self._pending_image_stimulus
+        self._pending_image_stimulus = None
+        self._pending_image_flush_after_playback = False
+        logger.info("Flushing pending image stimulus after %s.", reason)
+        await self.maybe_request_response(pending["trigger"], pending["metadata"])
 
     async def send_audio_loop(self, websocket: Any) -> None:
         try:
