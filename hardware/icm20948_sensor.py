@@ -460,7 +460,7 @@ class ICM20948Sensor:
         self.roll = (
             math.atan2(2 * self.q2 * self.q3 + 2 * self.q0 * self.q1, -2 * self.q1 * self.q1 - 2 * self.q2 * self.q2 + 1)
             * 57.3
-        )
+        ) + 90.0
         return self.roll
 
     def calc_yaw_degrees(self) -> float:
