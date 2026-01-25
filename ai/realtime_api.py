@@ -591,10 +591,11 @@ class RealtimeAPI:
 
     async def send_text_message_to_conversation(self, text_message: str) -> None:
         text_event = {
-            "type": "response.create",
-            "response": {
-                "metadata": {"topic": "sending data"},
-                "instructions": text_message,
+            "type": "conversation.item.added",
+            "item": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": text_message}],
             },
         }
         await self.websocket.send(json.dumps(text_event))
