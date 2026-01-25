@@ -193,38 +193,52 @@ class ImuMonitor:
         now = sample.timestamp
 
         if abs(sample.roll) > self._tilt_threshold_deg or abs(sample.pitch) > self._tilt_threshold_deg:
-            events.append(
-                ImuMotionEvent(
-                    timestamp=now,
-                    event_type="tilt",
-                    severity="warning",
-                    details={"roll": sample.roll, "pitch": sample.pitch},
-                )
+            event = ImuMotionEvent(
+                timestamp=now,
+                event_type="tilt",
+                severity="warning",
+                details={"roll": sample.roll, "pitch": sample.pitch},
             )
+            LOGGER.debug(
+                "[IMU] Tilt detected: roll=%.2f pitch=%.2f threshold=%.2f",
+                sample.roll,
+                sample.pitch,
+                self._tilt_threshold_deg,
+            )
+            events.append(event)
 
         gyro_mag = math.sqrt(sum(axis * axis for axis in sample.gyro))
         if gyro_mag > self._gyro_threshold_dps:
-            events.append(
-                ImuMotionEvent(
-                    timestamp=now,
-                    event_type="spin",
-                    severity="notice",
-                    details={"gyro_dps": gyro_mag},
-                )
+            event = ImuMotionEvent(
+                timestamp=now,
+                event_type="spin",
+                severity="notice",
+                details={"gyro_dps": gyro_mag},
             )
+            LOGGER.debug(
+                "[IMU] Spin detected: gyro_dps=%.2f threshold=%.2f",
+                gyro_mag,
+                self._gyro_threshold_dps,
+            )
+            events.append(event)
 
         if previous is not None:
             roll_rate = abs(sample.roll - previous.roll)
             pitch_rate = abs(sample.pitch - previous.pitch)
             if roll_rate > self._roll_rate_threshold or pitch_rate > self._roll_rate_threshold:
-                events.append(
-                    ImuMotionEvent(
-                        timestamp=now,
-                        event_type="shake",
-                        severity="notice",
-                        details={"roll_delta": roll_rate, "pitch_delta": pitch_rate},
-                    )
+                event = ImuMotionEvent(
+                    timestamp=now,
+                    event_type="shake",
+                    severity="notice",
+                    details={"roll_delta": roll_rate, "pitch_delta": pitch_rate},
                 )
+                LOGGER.debug(
+                    "[IMU] Shake detected: roll_delta=%.2f pitch_delta=%.2f threshold=%.2f",
+                    roll_rate,
+                    pitch_rate,
+                    self._roll_rate_threshold,
+                )
+                events.append(event)
 
         return self._rate_limit_events(events)
 
@@ -250,6 +264,12 @@ class ImuMonitor:
         if not handlers:
             return
         for event in events:
+            LOGGER.info(
+                "[IMU] Emitting event: type=%s severity=%s details=%s",
+                event.event_type,
+                event.severity,
+                event.details,
+            )
             for handler in handlers:
                 try:
                     handler(event)
