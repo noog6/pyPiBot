@@ -61,6 +61,7 @@ _queue_listener: logging.handlers.QueueListener | None = None
 _queue_handlers: list[logging.Handler] = []
 _file_log_path: Path | None = None
 _atexit_registered = False
+_unknown_event_log_path: Path | None = None
 
 
 def _shutdown_file_logging() -> None:
@@ -123,14 +124,50 @@ def enable_file_logging(log_path: Path) -> None:
         _atexit_registered = True
 
 
+def enable_unknown_event_logging(log_path: Path) -> None:
+    """Enable JSONL logging for unknown websocket events."""
+
+    global _unknown_event_log_path
+    _unknown_event_log_path = log_path.expanduser()
+    _unknown_event_log_path.parent.mkdir(parents=True, exist_ok=True)
+
+
+unknown_event_log_env = os.getenv("THEO_UNKNOWN_EVENT_LOG_PATH")
+if unknown_event_log_env:
+    enable_unknown_event_logging(Path(unknown_event_log_env))
+
+
 def _format_text(message: str, style: str) -> Any:
     if Text is None:
         return message
     return Text(message, style=style)
 
 
+def _stash_unknown_event(direction: str, event_type: str, event: dict[str, Any]) -> None:
+    if _unknown_event_log_path is None:
+        return
+    payload = {
+        "direction": direction,
+        "type": event_type,
+        "event": event,
+    }
+    try:
+        with _unknown_event_log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(_normalize_for_log(payload), ensure_ascii=False))
+            handle.write("\n")
+    except OSError as exc:
+        logger.debug("Failed to write unknown event log: %s", exc)
+
+
 def log_ws_event(direction: str, event: dict[str, Any]) -> None:
-    event_type = event.get("type", "Unknown")
+    raw_event_type = event.get("type")
+    event_type = (
+        raw_event_type
+        if isinstance(raw_event_type, str)
+        else str(raw_event_type)
+        if raw_event_type is not None
+        else "Unknown"
+    )
     spammy = {
         "response.output_audio.delta",
         "response.output_audio_transcript.delta",
@@ -172,10 +209,17 @@ def log_ws_event(direction: str, event: dict[str, Any]) -> None:
         "conversation.item.input_audio_transcription.completed": "📝",
         "conversation.item.input_audio_transcription.failed": "⚠️",
     }
+    is_unknown = event_type not in event_emojis
     emoji = event_emojis.get(event_type, "❓")
     icon = "⬆️ - Out" if direction == "Outgoing" else "⬇️ - In"
     style = "bold cyan" if direction == "Outgoing" else "bold green"
-    logger.info(_format_text(f"{emoji} {icon} {event_type}", style=style))
+    if is_unknown:
+        top_keys = sorted(event.keys(), key=str)
+        detail = f"{event_type} keys={top_keys}"
+        _stash_unknown_event(direction, event_type, event)
+    else:
+        detail = event_type
+    logger.info(_format_text(f"{emoji} {icon} {detail}", style=style))
 
 
 def log_tool_call(function_name: str, args: Any, result: Any) -> None:
