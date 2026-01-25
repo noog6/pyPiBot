@@ -49,3 +49,23 @@ State cues and timing thresholds are configured in `config/default.yaml` under
 - `cue_delays_ms`: Per-state delay before emitting cues (in milliseconds).
 
 Use `config/override.yaml` to customize these settings per deployment.
+
+## Injected Event Responses
+
+When the runtime injects events (for example, image or text messages pushed into the
+conversation outside of live audio), the realtime client can request a response by sending a
+`response.create` event. These injected responses are gated to avoid interrupting live
+interaction.
+
+The injected response request is skipped when any of the following are true:
+
+- The interaction state is not `IDLE` or `LISTENING`.
+- A response is already in progress.
+- A cooldown window has not elapsed since the last injected response.
+- The per-minute injected response limit is exhausted.
+- The session rate limits report zero remaining requests/responses.
+
+Configure the thresholds in `config/default.yaml`:
+
+- `injection_response_cooldown_s`: Minimum seconds between injected responses.
+- `max_injection_responses_per_minute`: Maximum injected responses per rolling minute.
