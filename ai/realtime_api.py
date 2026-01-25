@@ -426,6 +426,8 @@ class RealtimeAPI:
                 InteractionState.IDLE,
                 "audio transcript done",
             )
+        elif event_type == "response.completed":
+            await self.handle_response_completed()
         elif event_type == "error":
             await self.handle_error(event, websocket)
         elif event_type == "input_audio_buffer.speech_started":
@@ -570,6 +572,11 @@ class RealtimeAPI:
             self._audio_accum.clear()
         if self.audio_player:
             self.audio_player.close_response()
+
+    async def handle_response_completed(self) -> None:
+        self.response_in_progress = False
+        self.state_manager.update_state(InteractionState.IDLE, "response completed")
+        logger.info("Received response.completed event.")
 
     async def handle_error(self, event: dict[str, Any], websocket: Any) -> None:
         error_message = event.get("error", {}).get("message", "")
