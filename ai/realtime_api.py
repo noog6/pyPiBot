@@ -769,7 +769,11 @@ class RealtimeAPI:
                     )
                     return
 
-        response_metadata = {"trigger": trigger, "priority": trigger_priority, "stimulus": metadata}
+        response_metadata = {
+            "trigger": trigger,
+            "priority": str(trigger_priority),
+            "stimulus": metadata,
+        }
         response_create_event = {
             "type": "response.create",
             "response": {"metadata": response_metadata},
