@@ -57,7 +57,8 @@ class StorageController:
         self.run_id = self.get_next_run_number(var_dir)
 
         self.db_filename = f"app_data_{self.run_id}.db"
-        self.db_full_file_path = log_dir / self.db_filename
+        self.run_dir = log_dir / str(self.run_id)
+        self.db_full_file_path = self.run_dir / self.db_filename
 
         self.conn = self.connect(log_dir)
         self.initialize_db()
@@ -75,6 +76,7 @@ class StorageController:
         """Connect to the SQLite database for the current run."""
 
         log_dir.mkdir(parents=True, exist_ok=True)
+        self.run_dir.mkdir(parents=True, exist_ok=True)
         return sqlite3.connect(self.db_full_file_path, check_same_thread=False)
 
     def initialize_db(self) -> None:
@@ -148,14 +150,13 @@ class StorageController:
     def get_log_file_path(self) -> Path:
         """Return the log file path for the current run."""
 
-        return self.log_dir / f"run_{self.run_id}.log"
+        return self.get_run_dir() / f"run_{self.run_id}.log"
 
     def get_run_dir(self) -> Path:
         """Return the artifact directory for the current run."""
 
-        run_dir = self.log_dir / f"run_{self.run_id}"
-        run_dir.mkdir(parents=True, exist_ok=True)
-        return run_dir
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        return self.run_dir
 
     def get_run_image_dir(self) -> Path:
         """Return the image artifact directory for the current run."""
