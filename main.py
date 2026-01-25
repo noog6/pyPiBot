@@ -115,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
     logger.info( ":                                        :" )
     logger.info( ":                 ___  _ ___       __    :" )
     logger.info( ":      ___  __ __/ _ \\(_) _ )___  / /_   :" )
-    logger.info( ":     / _ \/ // / ___/ / _  / _ \/ __/   :" )
+    logger.info( ":     / _ \\/ // / ___/ / _  / _ \\/ __/   :" )
     logger.info( ":    / .__/\\_, /_/  /_/____/\\___/\\__/    :" )
     logger.info( ":   /_/   /___/                          :" )
     logger.info( ":                                        :" )
