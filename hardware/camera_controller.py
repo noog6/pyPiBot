@@ -104,8 +104,8 @@ class CameraController:
         self._warmup_start_ms = 0
         self._warmup_frames_seen = 0
         self._warmup_done = True
-        self._configure_warmup()
         self._change_policy: CameraChangePolicy | None = None
+        self._configure_warmup()
         self._configure_change_policy()
 
         CameraController._instance = self
