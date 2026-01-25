@@ -16,9 +16,9 @@ file_logging_enabled: true
 save_camera_images: false
 camera_warmup_frames: 5
 camera_warmup_ms: 1000
-camera_trigger_threshold: 25
-camera_clear_threshold: 15
-camera_debounce_frames: 3
+camera_trigger_threshold: 18
+camera_clear_threshold: 10
+camera_debounce_frames: 2
 camera_cooldown_seconds: 10
 camera_ema_alpha: 0.3
 
