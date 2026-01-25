@@ -612,7 +612,11 @@ class RealtimeAPI:
         log_ws_event("Outgoing", response_create_event)
         await websocket.send(json.dumps(response_create_event))
 
-    async def send_text_message_to_conversation(self, text_message: str) -> None:
+    async def send_text_message_to_conversation(
+        self,
+        text_message: str,
+        request_response: bool = True,
+    ) -> None:
         text_event = {
             "type": "conversation.item.create",
             "item": {
@@ -622,10 +626,11 @@ class RealtimeAPI:
             },
         }
         await self.websocket.send(json.dumps(text_event))
-        await self.maybe_request_response(
-            trigger="text_message",
-            metadata={"text_length": len(text_message)},
-        )
+        if request_response:
+            await self.maybe_request_response(
+                trigger="text_message",
+                metadata={"text_length": len(text_message)},
+            )
 
     async def maybe_request_response(self, trigger: str, metadata: dict[str, Any]) -> None:
         if not self.websocket:

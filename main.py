@@ -13,6 +13,7 @@ from core.logging import enable_file_logging, logger
 from hardware import CameraController
 from motion import MotionController
 from storage.controller import StorageController
+from services.battery_monitor import BatteryMonitor, BatteryStatusEvent
 from services.imu_monitor import ImuMonitor, ImuMotionEvent
 from services.profile_manager import ProfileManager
 
@@ -177,6 +178,43 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         logger.warning("IMU monitor unavailable: %s", exc)
 
+    battery_monitor = None
+    battery_event_handler = None
+    try:
+        logger.info("Starting battery monitor...")
+        battery_monitor = BatteryMonitor.get_instance()
+        battery_monitor.start_loop()
+
+        def _handle_battery_event(event: BatteryStatusEvent) -> None:
+            if not realtime_api_instance.loop or not realtime_api_instance.websocket:
+                logger.debug("Skipping battery event; realtime API not ready.")
+                return
+            percent = event.percent_of_range * 100
+            message = (
+                "Battery voltage: "
+                f"{event.voltage:.2f}V ({percent:.1f}% of range) severity={event.severity}"
+            )
+            future = asyncio.run_coroutine_threadsafe(
+                realtime_api_instance.send_text_message_to_conversation(
+                    message,
+                    request_response=event.severity != "info",
+                ),
+                realtime_api_instance.loop,
+            )
+
+            def _on_complete(task) -> None:
+                try:
+                    task.result()
+                except Exception as exc:
+                    logger.warning("Failed to send battery event message: %s", exc)
+
+            future.add_done_callback(_on_complete)
+
+        battery_event_handler = _handle_battery_event
+        battery_monitor.register_event_handler(_handle_battery_event)
+    except Exception as exc:
+        logger.warning("Battery monitor unavailable: %s", exc)
+
     try:
         asyncio.run(realtime_api_instance.run())
     except KeyboardInterrupt:
@@ -192,6 +230,10 @@ def main(argv: list[str] | None = None) -> int:
             if imu_event_handler:
                 imu_monitor.unregister_event_handler(imu_event_handler)
             imu_monitor.stop_loop()
+        if battery_monitor:
+            if battery_event_handler:
+                battery_monitor.unregister_event_handler(battery_event_handler)
+            battery_monitor.stop_loop()
 
     return 0
 
