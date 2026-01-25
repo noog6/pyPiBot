@@ -110,6 +110,18 @@ def main(argv: list[str] | None = None) -> int:
         enable_file_logging(log_file_path)
         logger.info("Writing logs to %s", log_file_path)
 
+    logger.info( "··········································" )
+    logger.info( ":                                        :" )
+    logger.info( ":                                        :" )
+    logger.info( ":                 ___  _ ___       __    :" )
+    logger.info( ":      ___  __ __/ _ \(_) _ )___  / /_   :" )
+    logger.info( ":     / _ \/ // / ___/ / _  / _ \/ __/   :" )
+    logger.info( ":    / .__/\_, /_/  /_/____/\___/\__/    :" )
+    logger.info( ":   /_/   /___/                          :" )
+    logger.info( ":                                        :" )
+    logger.info( ":                                        :" )
+    logger.info( "··········································" )
+    
     try:
         logger.info("Starting realtime API...")
         realtime_api_instance = RealtimeAPI(prompts)
