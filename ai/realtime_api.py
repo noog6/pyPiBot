@@ -139,6 +139,8 @@ class RealtimeAPI:
         self._injection_response_timestamps: deque[float] = deque()
         self._injection_response_triggers = config.get("injection_response_triggers") or {}
         self._injection_response_trigger_timestamps: dict[str, deque[float]] = {}
+        self._image_response_mode = str(config.get("image_response_mode", "respond")).lower()
+        self._image_response_enabled = self._image_response_mode != "catalog_only"
         self._stimuli_coordinator = StimuliCoordinator(
             debounce_window_s=float(config.get("injection_debounce_window_s", 0.4)),
             cooldown_s=self._injection_response_cooldown_s,
@@ -558,11 +560,14 @@ class RealtimeAPI:
             }
             log_ws_event("Image", image_item)
             await self.websocket.send(json.dumps(image_item))
-            await self._stimuli_coordinator.enqueue(
-                trigger="image_message",
-                metadata={"image_format": "jpeg"},
-                priority=self._get_injection_priority("image_message"),
-            )
+            if self._image_response_enabled:
+                await self._stimuli_coordinator.enqueue(
+                    trigger="image_message",
+                    metadata={"image_format": "jpeg"},
+                    priority=self._get_injection_priority("image_message"),
+                )
+            else:
+                logger.debug("Skipping image injection response (mode=%s).", self._image_response_mode)
         else:
             log_warning("Unable to send image to assistant, websocket not available")
 

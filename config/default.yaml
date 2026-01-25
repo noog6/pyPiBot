@@ -25,6 +25,8 @@ silence_duration_ms: 900
 # Injected response throttling
 injection_response_cooldown_s: 2.0
 max_injection_responses_per_minute: 12
+# Image response injection mode ("respond" or "catalog_only")
+image_response_mode: "respond"
 injection_response_triggers:
   image_message:
     cooldown_s: 4.0

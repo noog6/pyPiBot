@@ -69,6 +69,9 @@ Configure the thresholds in `config/default.yaml`:
 
 - `injection_response_cooldown_s`: Minimum seconds between injected responses.
 - `max_injection_responses_per_minute`: Maximum injected responses per rolling minute.
+- `image_response_mode`: Controls whether image injections can request responses.
+  - `respond`: Enqueue image messages as injected stimuli (default).
+  - `catalog_only`: Still send images to the model, but skip the injected response request.
 - `injection_response_triggers`: Per-trigger overrides for injected responses (keyed by trigger name).
   - `cooldown_s`: Minimum seconds between injected responses for the trigger.
   - `max_per_minute`: Maximum injected responses per rolling minute for the trigger.
