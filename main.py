@@ -13,6 +13,7 @@ from core.logging import enable_file_logging, logger
 from hardware import CameraController
 from motion import MotionController
 from storage.controller import StorageController
+from services.imu_monitor import ImuMonitor
 from services.profile_manager import ProfileManager
 
 
@@ -134,6 +135,14 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         logger.warning("Camera controller unavailable: %s", exc)
 
+    imu_monitor = None
+    try:
+        logger.info("Starting IMU monitor...")
+        imu_monitor = ImuMonitor.get_instance()
+        imu_monitor.start_loop()
+    except Exception as exc:
+        logger.warning("IMU monitor unavailable: %s", exc)
+
     try:
         asyncio.run(realtime_api_instance.run())
     except KeyboardInterrupt:
@@ -145,6 +154,8 @@ def main(argv: list[str] | None = None) -> int:
             camera_instance.stop_vision_loop()
         if motion_controller:
             motion_controller.stop_control_loop()
+        if imu_monitor:
+            imu_monitor.stop_loop()
 
     return 0
 
