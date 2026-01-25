@@ -93,6 +93,12 @@ class CameraController:
         self._pending_images: deque[Any] = deque(maxlen=3)
         self._pending_lock = threading.Lock()
         self._configure_image_saving()
+        self._warmup_frames = 0
+        self._warmup_ms = 0
+        self._warmup_start_ms = 0
+        self._warmup_frames_seen = 0
+        self._warmup_done = True
+        self._configure_warmup()
 
         CameraController._instance = self
 
@@ -106,6 +112,7 @@ class CameraController:
         if self._vision_loop_thread is None or not self._vision_loop_thread.is_alive():
             self._stop_event.clear()
             self.vision_loop_period_ms = vision_loop_period_ms
+            self._reset_warmup()
             self._vision_loop_thread = threading.Thread(target=self._vision_loop, daemon=True)
             self._vision_loop_thread.start()
 
@@ -267,6 +274,18 @@ class CameraController:
             thread_name_prefix="camera-image-save",
         )
 
+    def _configure_warmup(self) -> None:
+        config = ConfigController.get_instance().get_config()
+        self._warmup_frames = max(int(config.get("camera_warmup_frames", 5)), 0)
+        self._warmup_ms = max(int(config.get("camera_warmup_ms", 1000)), 0)
+        self._reset_warmup()
+
+    def _reset_warmup(self) -> None:
+        self._warmup_start_ms = millis()
+        self._warmup_frames_seen = 0
+        self._warmup_done = self._warmup_frames == 0 and self._warmup_ms == 0
+        self._last_luma = None
+
     def _shutdown_image_saver(self) -> None:
         if self._image_save_executor is not None:
             self._image_save_executor.shutdown(wait=False)
@@ -292,9 +311,19 @@ class CameraController:
             logger.exception("[CAMERA] Failed to save image to %s: %s", path, exc)
 
     def lores_changed(self, luma: Any, threshold: float = 7.0) -> tuple[bool, float]:
+        if not self._warmup_done:
+            self._warmup_frames_seen += 1
+            elapsed_ms = millis() - self._warmup_start_ms
+            if self._warmup_frames_seen < self._warmup_frames or elapsed_ms < self._warmup_ms:
+                self._last_luma = luma
+                return False, 0.0
+            self._warmup_done = True
+            self._last_luma = luma
+            return False, 0.0
+
         if self._last_luma is None:
             self._last_luma = luma
-            return True, 999.0
+            return False, 0.0
 
         d = luma.astype(self._np.int16) - self._last_luma.astype(self._np.int16)
         mad = float(self._np.abs(d).mean())
