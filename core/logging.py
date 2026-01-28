@@ -12,6 +12,7 @@ import logging.handlers
 import os
 from pathlib import Path
 import queue
+import time
 from typing import Any, Dict, Iterable, Optional
 
 
@@ -62,6 +63,82 @@ _queue_handlers: list[logging.Handler] = []
 _file_log_path: Path | None = None
 _atexit_registered = False
 _unknown_event_log_path: Path | None = None
+
+
+class _RealtimeEventStats:
+    def __init__(self) -> None:
+        self.response_in_progress = False
+        self.response_start_time: float | None = None
+        self.speech_start_time: float | None = None
+        self.last_utterance_duration: float | None = None
+        self.response_count = 0
+        self.utterance_count = 0
+        self.talk_over_incidents = 0
+        self.total_response_duration = 0.0
+        self.total_utterance_duration = 0.0
+
+    def note_event(self, event_type: str) -> None:
+        now = time.monotonic()
+        if event_type == "input_audio_buffer.speech_started":
+            if self.response_in_progress:
+                self.talk_over_incidents += 1
+                log_warning(
+                    "Talk-over detected: speech started while response active "
+                    f"(count={self.talk_over_incidents})."
+                )
+            self.speech_start_time = now
+            return
+
+        if event_type == "input_audio_buffer.speech_stopped":
+            if self.speech_start_time is not None:
+                duration = now - self.speech_start_time
+                self.last_utterance_duration = duration
+                self.total_utterance_duration += duration
+                self.utterance_count += 1
+            self.speech_start_time = None
+            return
+
+        if event_type == "response.created":
+            self.response_in_progress = True
+            self.response_start_time = now
+            return
+
+        if event_type in {
+            "response.completed",
+            "response.done",
+            "response.output_audio.done",
+            "response.output_audio_transcript.done",
+            "response.cancel",
+        }:
+            self._finish_response(now)
+
+    def _finish_response(self, now: float) -> None:
+        if self.response_start_time is None:
+            self.response_in_progress = False
+            return
+        duration = now - self.response_start_time
+        self.response_start_time = None
+        self.response_in_progress = False
+        self.response_count += 1
+        self.total_response_duration += duration
+        utterance = self.last_utterance_duration
+        ratio = duration / utterance if utterance else None
+        ratio_text = f"{ratio:.2f}x" if ratio is not None else "n/a"
+        log_info(
+            "Diagnostics: response_duration={:.2f}s | utterance_duration={} | "
+            "ratio={} | talk_over_incidents={} | responses={} | utterances={}".format(
+                duration,
+                f"{utterance:.2f}s" if utterance is not None else "n/a",
+                ratio_text,
+                self.talk_over_incidents,
+                self.response_count,
+                self.utterance_count,
+            ),
+            style="bold cyan",
+        )
+
+
+_realtime_event_stats = _RealtimeEventStats()
 
 
 def _shutdown_file_logging() -> None:
@@ -176,6 +253,9 @@ def log_ws_event(direction: str, event: dict[str, Any]) -> None:
 
     if event_type in spammy:
         return
+
+    if direction == "Incoming":
+        _realtime_event_stats.note_event(event_type)
 
     event_emojis = {
         "session.update": "🛠️",
