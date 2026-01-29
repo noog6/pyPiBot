@@ -314,7 +314,7 @@ tools.append(
     {
         "type": "function",
         "name": "get_output_volume",
-        "description": "Read the current output volume using ALSA.",
+        "description": "Read the current output audio volume.",
         "parameters": {
             "type": "object",
             "properties": {},
@@ -330,13 +330,13 @@ tools.append(
         "type": "function",
         "name": "set_output_volume",
         "description": (
-            "Set the output audio volume. Volume percent must be between 5 and 100. "
+            "Set the output audio volume. Volume percent must be between 1 and 100. "
             "Changes are rate-limited to once per second unless emergency is true."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "percent": {"type": "integer", "minimum": 5, "maximum": 100},
+                "percent": {"type": "integer", "minimum": 1, "maximum": 100},
                 "emergency": {"type": "boolean", "default": False},
             },
             "required": ["percent"],
