@@ -1,6 +1,6 @@
 # pyPiBot
 
-Theo is a Raspberry Pi robot assistant that combines AI interaction, hardware
+This is a Raspberry Pi robot assistant that combines AI interaction, hardware
 control, and user-facing I/O in a clean, extensible Python codebase.
 
 ## Current Focus
