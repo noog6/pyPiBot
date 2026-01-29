@@ -143,6 +143,58 @@ async def set_output_volume(percent: int, emergency: bool = False) -> dict[str, 
     }
 
 
+async def adjust_output_volume(
+    direction: str,
+    step: int = 5,
+    emergency: bool = False,
+) -> dict[str, Any]:
+    """Adjust the output volume up or down via ALSA within safe bounds."""
+
+    controller = OutputVolumeController.get_instance()
+    current = controller.get_volume()
+    normalized = direction.strip().lower()
+    if normalized in {"up", "increase", "louder", "raise", "turn_up", "turn-up"}:
+        delta = abs(int(step))
+    elif normalized in {"down", "decrease", "quieter", "lower", "turn_down", "turn-down"}:
+        delta = -abs(int(step))
+    else:
+        raise ValueError(f"Unknown volume direction '{direction}'. Use 'up' or 'down'.")
+    min_percent = 20
+    max_percent = 100
+    target = max(min_percent, min(max_percent, current.percent + delta))
+    if target == current.percent:
+        return {
+            "previous_percent": current.percent,
+            "percent": current.percent,
+            "muted": current.muted,
+            "unchanged": True,
+        }
+    status = controller.set_volume(
+        target,
+        emergency=bool(emergency),
+        min_percent=min_percent,
+        max_percent=max_percent,
+    )
+    return {
+        "previous_percent": current.percent,
+        "percent": status.percent,
+        "muted": status.muted,
+        "direction": normalized,
+        "step": int(step),
+    }
+
+
+async def read_output_volume() -> dict[str, Any]:
+    """Return the current output volume from ALSA."""
+
+    controller = OutputVolumeController.get_instance()
+    status = controller.get_volume()
+    return {
+        "percent": status.percent,
+        "muted": status.muted,
+    }
+
+
 tools.append(
     {
         "type": "function",
@@ -345,3 +397,44 @@ tools.append(
 )
 
 function_map["set_output_volume"] = set_output_volume
+
+tools.append(
+    {
+        "type": "function",
+        "name": "adjust_output_volume",
+        "description": (
+            "Adjust the output audio volume up or down via ALSA. "
+            "Use for direct volume requests like 'turn it up/down', "
+            "'I can’t hear you', or 'too loud'."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "direction": {
+                    "type": "string",
+                    "enum": ["up", "down"],
+                },
+                "step": {"type": "integer", "minimum": 1, "maximum": 50, "default": 5},
+                "emergency": {"type": "boolean", "default": False},
+            },
+            "required": ["direction"],
+        },
+    }
+)
+
+function_map["adjust_output_volume"] = adjust_output_volume
+
+tools.append(
+    {
+        "type": "function",
+        "name": "read_output_volume",
+        "description": "Read the current output audio volume using ALSA.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    }
+)
+
+function_map["read_output_volume"] = read_output_volume
