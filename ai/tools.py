@@ -15,6 +15,7 @@ from motion import (
     gesture_no,
     gesture_nod,
 )
+from services.output_volume import OutputVolumeController
 from services.profile_manager import ProfileManager
 
 
@@ -117,6 +118,28 @@ async def update_user_profile(
         "preferences": profile.preferences,
         "favorites": profile.favorites,
         "last_seen": profile.last_seen,
+    }
+
+
+async def get_output_volume() -> dict[str, Any]:
+    """Return the current output volume from ALSA."""
+
+    controller = OutputVolumeController.get_instance()
+    status = controller.get_volume()
+    return {
+        "percent": status.percent,
+        "muted": status.muted,
+    }
+
+
+async def set_output_volume(percent: int, emergency: bool = False) -> dict[str, Any]:
+    """Set the output volume via ALSA within safe bounds."""
+
+    controller = OutputVolumeController.get_instance()
+    status = controller.set_volume(percent=int(percent), emergency=bool(emergency))
+    return {
+        "percent": status.percent,
+        "muted": status.muted,
     }
 
 
@@ -286,3 +309,39 @@ tools.append(
 )
 
 function_map["update_user_profile"] = update_user_profile
+
+tools.append(
+    {
+        "type": "function",
+        "name": "get_output_volume",
+        "description": "Read the current output volume using ALSA.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    }
+)
+
+function_map["get_output_volume"] = get_output_volume
+
+tools.append(
+    {
+        "type": "function",
+        "name": "set_output_volume",
+        "description": (
+            "Set the output volume via ALSA. Volume percent must be between 20 and 100. "
+            "Changes are rate-limited to once per second unless emergency is true."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "percent": {"type": "integer", "minimum": 20, "maximum": 100},
+                "emergency": {"type": "boolean", "default": False},
+            },
+            "required": ["percent"],
+        },
+    }
+)
+
+function_map["set_output_volume"] = set_output_volume
