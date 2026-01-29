@@ -24,7 +24,7 @@ class OutputVolumeController:
 
     _instance: "OutputVolumeController | None" = None
 
-    def __init__(self, mixer: str = "Master", device: str = "default") -> None:
+    def __init__(self, mixer: str = "Master", device: str = "hw:0") -> None:
         self._mixer = mixer
         self._device = device
         self._last_set_time = 0.0
