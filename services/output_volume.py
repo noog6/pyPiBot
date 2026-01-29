@@ -46,7 +46,7 @@ class OutputVolumeController:
         percent: int,
         *,
         emergency: bool = False,
-        min_percent: int = 20,
+        min_percent: int = 1,
         max_percent: int = 100,
         rate_limit_s: float = 1.0,
     ) -> VolumeStatus:
