@@ -24,9 +24,9 @@ class OutputVolumeController:
 
     _instance: "OutputVolumeController | None" = None
 
-    def __init__(self, mixer: str = "Master", device: str = "hw:0") -> None:
+    def __init__(self, mixer: str = "Master", card: int = 0) -> None:
         self._mixer = mixer
-        self._device = device
+        self._card = card
         self._last_set_time = 0.0
 
     @classmethod
@@ -65,7 +65,7 @@ class OutputVolumeController:
         return self.get_volume()
 
     def _run_amixer(self, args: list[str]) -> str:
-        cmd = ["amixer", "-D", self._device]
+        cmd = ["amixer", "-c", self._card]
         cmd.extend(args)
         result = subprocess.run(
             cmd,
