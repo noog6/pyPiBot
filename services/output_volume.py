@@ -65,7 +65,7 @@ class OutputVolumeController:
         return self.get_volume()
 
     def _run_amixer(self, args: list[str]) -> str:
-        cmd = ["amixer", "-c", self._card]
+        cmd = ["amixer", "-c", str(self._card)]
         cmd.extend(args)
         result = subprocess.run(
             cmd,
