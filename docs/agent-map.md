@@ -40,12 +40,12 @@ flowchart LR
 
     subgraph Realtime["Realtime agent flow (async)"]
         WS["RealtimeAPI.run() websocket loop"]
-        MIC["AsyncMicrophone<br/>(PyAudio callback + queue)"]
-        PLAYER["AudioPlayer<br/>(playback thread)"]
-        TOOLS["Tool execution<br/>(function_map)"]
+        MIC["AsyncMicrophone<br/>PyAudio callback + queue"]
+        PLAYER["AudioPlayer<br/>playback thread"]
+        TOOLS["Tool execution<br/>function_map"]
         STATE[InteractionStateManager]
-        ORCH[OrchestrationState<br/>(sense/plan/act/reflect)]
-        REFLECTOR[ReflectionCoordinator<br/>(async task)]
+        ORCH["OrchestrationState<br/>sense/plan/act/reflect"]
+        REFLECTOR["ReflectionCoordinator<br/>async task"]
     end
 
     subgraph Sensors["Sensor/monitor threads"]
