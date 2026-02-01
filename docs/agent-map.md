@@ -12,7 +12,9 @@ The entrypoint in `main.py` builds and launches the following components:
 - **Realtime API agent (async loop)**: The primary agent thread that connects to
   OpenAI realtime, manages the websocket event loop, and coordinates tool
   execution, audio input, and audio output. It exposes `is_ready_for_injections`
-  for other threads to push events into the conversation context.【F:ai/realtime_api.py†L92-L207】
+  for other threads to push events into the conversation context. It also tracks
+  orchestration phases (sense/plan/act/reflect/idle) during the response
+  lifecycle and emits phase-transition logs for observability.【F:ai/realtime_api.py†L92-L208】【F:ai/orchestration.py†L1-L27】
 - **Motion control loop thread**: A background loop that drives the servo
   controller and executes queued gesture/motion actions.【F:motion/motion_controller.py†L90-L176】
 - **Vision loop thread**: The camera controller captures frames, detects scene
@@ -42,6 +44,8 @@ flowchart LR
         PLAYER["AudioPlayer<br/>(playback thread)"]
         TOOLS["Tool execution<br/>(function_map)"]
         STATE[InteractionStateManager]
+        ORCH[OrchestrationState<br/>(sense/plan/act/reflect)]
+        REFLECTOR[ReflectionCoordinator<br/>(async task)]
     end
 
     subgraph Sensors["Sensor/monitor threads"]
@@ -68,6 +72,8 @@ flowchart LR
     WS --> PLAYER
     WS --> TOOLS
     WS --> STATE
+    WS --> ORCH
+    ORCH --> REFLECTOR
 
     IMU --> DRAIN
     BAT --> DRAIN
@@ -118,6 +124,23 @@ Motion control is a continuous loop running in its own thread. The realtime
 agent uses an `InteractionStateManager` to interpret listening/speaking states
 and can emit gesture actions (e.g., nods) by pushing actions into the motion
 controller queue, assuming the control loop is running.【F:ai/realtime_api.py†L126-L208】【F:motion/motion_controller.py†L90-L272】
+
+### 5. Orchestration + Reflection Lifecycle
+
+The realtime loop now tracks orchestration phases with an `OrchestrationState`
+helper. Phases transition as the websocket events progress: speech start and
+injected text push the state into **sense**, `response.created` moves to
+**plan**, function calls enter **act**, and response completion marks
+**reflect** before returning to **idle**. Transitions are logged for runtime
+diagnostics.【F:ai/realtime_api.py†L493-L793】【F:ai/orchestration.py†L1-L27】
+
+Reflection generation is handled by `ReflectionCoordinator`, which is
+configured by `reflection_enabled` and `reflection_min_interval_s` and runs an
+async task so the main loop stays responsive. Each reflection captures the last
+user input, assistant reply, tool calls, and response metadata, then stores a
+JSON payload into `StorageController` (with min-interval and in-flight task
+guards). The latest lessons are also pulled from `ReflectionManager` during
+session initialization to seed instructions for the next turn.【F:ai/realtime_api.py†L155-L748】【F:ai/reflection.py†L1-L184】【F:services/reflection_manager.py†L1-L88】
 
 ## Quick Reference: Threads + Responsibilities
 
