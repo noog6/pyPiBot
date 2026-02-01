@@ -15,6 +15,7 @@ from motion import (
     gesture_no,
     gesture_nod,
 )
+from services.memory_manager import MemoryManager
 from services.output_volume import OutputVolumeController
 from services.profile_manager import ProfileManager
 
@@ -141,7 +142,40 @@ async def set_output_volume(percent: int, emergency: bool = False) -> dict[str, 
         "percent": status.percent,
         "muted": status.muted,
     }
-    
+
+
+async def remember_memory(
+    content: str,
+    tags: list[str] | None = None,
+    importance: int = 3,
+) -> dict[str, Any]:
+    """Store a memory entry for later recall."""
+
+    manager = MemoryManager.get_instance()
+    entry = manager.remember_memory(content=content, tags=tags, importance=importance)
+    return {
+        "memory_id": entry.memory_id,
+        "content": entry.content,
+        "tags": entry.tags,
+        "importance": entry.importance,
+    }
+
+
+async def recall_memories(query: str | None = None, limit: int = 5) -> dict[str, Any]:
+    """Recall stored memories based on a query."""
+
+    manager = MemoryManager.get_instance()
+    memories = manager.recall_memories(query=query, limit=limit)
+    return {"memories": [memory.__dict__ for memory in memories]}
+
+
+async def forget_memory(memory_id: int) -> dict[str, Any]:
+    """Delete a stored memory by id."""
+
+    manager = MemoryManager.get_instance()
+    removed = manager.forget_memory(memory_id=memory_id)
+    return {"removed": removed, "memory_id": memory_id}
+
 
 tools.append(
     {
@@ -345,3 +379,63 @@ tools.append(
 )
 
 function_map["set_output_volume"] = set_output_volume
+
+tools.append(
+    {
+        "type": "function",
+        "name": "remember_memory",
+        "description": (
+            "Store a durable memory about the user, preferences, or facts worth reusing. "
+            "Only store when the user provides stable, repeatable facts."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "importance": {"type": "integer", "minimum": 1, "maximum": 5, "default": 3},
+            },
+            "required": ["content"],
+        },
+    }
+)
+
+function_map["remember_memory"] = remember_memory
+
+tools.append(
+    {
+        "type": "function",
+        "name": "recall_memories",
+        "description": (
+            "Fetch relevant stored memories when the user asks about prior facts, "
+            "preferences, or context that might have been saved."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5},
+            },
+            "required": [],
+        },
+    }
+)
+
+function_map["recall_memories"] = recall_memories
+
+tools.append(
+    {
+        "type": "function",
+        "name": "forget_memory",
+        "description": "Remove a stored memory when the user asks to delete or forget it.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "memory_id": {"type": "integer", "minimum": 1},
+            },
+            "required": ["memory_id"],
+        },
+    }
+)
+
+function_map["forget_memory"] = forget_memory
