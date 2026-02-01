@@ -37,7 +37,7 @@ flowchart LR
     end
 
     subgraph Realtime["Realtime agent flow (async)"]
-        WS[RealtimeAPI.run() + websocket loop]
+        WS["RealtimeAPI.run() websocket loop"]
         MIC[AsyncMicrophone\n(PyAudio callback + queue)]
         PLAYER[AudioPlayer\n(playback thread)]
         TOOLS[Tool execution\n(function_map)]
