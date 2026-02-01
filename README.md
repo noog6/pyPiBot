@@ -36,9 +36,9 @@ pyPiBot/
 
 ### Installation
 
-See `docs/installation.md` for Raspberry Pi OS setup steps, git clone details,
-and the environment setup script. Hardware assembly notes live in
-`docs/hardware-setup.md`.
+See [docs/installation.md](docs/installation.md) for Raspberry Pi OS setup
+steps, git clone details, and the environment setup script. Hardware assembly
+notes live in [docs/hardware-setup.md](docs/hardware-setup.md).
 
 ### Run the Runtime
 
@@ -65,8 +65,9 @@ Default keys include:
 
 ## Systemd Deployment
 
-See `docs/systemd-setup.md` and the template unit in `systemd/pyPiBot.service`
-for Raspberry Pi deployment instructions.
+See [docs/systemd-setup.md](docs/systemd-setup.md) and the template unit in
+[systemd/pyPiBot.service](systemd/pyPiBot.service) for Raspberry Pi deployment
+instructions.
 
 ## Diagnostics & Tests
 
@@ -90,11 +91,15 @@ pytest -q
 
 ## Documentation
 
-- `docs/coding-standards.md`
-- `docs/requirements.md`
-- `docs/systemd-setup.md`
-- `docs/installation.md`
-- `docs/hardware-setup.md`
+- [docs/agent-map.md](docs/agent-map.md)
+- [docs/coding-standards.md](docs/coding-standards.md)
+- [docs/hardware-setup.md](docs/hardware-setup.md)
+- [docs/installation.md](docs/installation.md)
+- [docs/interaction-states.md](docs/interaction-states.md)
+- [docs/personalization.md](docs/personalization.md)
+- [docs/requirements.md](docs/requirements.md)
+- [docs/systemd-setup.md](docs/systemd-setup.md)
+- [docs/todo.md](docs/todo.md)
 
 ## Next Steps
 
