@@ -14,7 +14,13 @@ SILENCE_THRESHOLD = 0.2
 SILENCE_DURATION_MS = 900
 
 
-def build_session_instructions(profile_block: str | None = None) -> str:
+def build_session_instructions(
+    profile_block: str | None = None,
+    lessons_block: str | None = None,
+) -> str:
+    instruction_blocks = [BASE_SESSION_INSTRUCTIONS]
     if profile_block:
-        return f"{BASE_SESSION_INSTRUCTIONS}\n{profile_block}"
-    return BASE_SESSION_INSTRUCTIONS
+        instruction_blocks.append(profile_block)
+    if lessons_block:
+        instruction_blocks.append(lessons_block)
+    return "\n".join(instruction_blocks)
