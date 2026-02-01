@@ -34,6 +34,7 @@ from interaction import (
 from ai.tools import function_map, tools
 from ai.reflection import ReflectionCoordinator, ReflectionContext
 from ai.stimuli_coordinator import StimuliCoordinator
+from ai.orchestration import OrchestrationPhase, OrchestrationState
 from ai.utils import (
     PREFIX_PADDING_MS,
     RUN_TIME_TABLE_LOG_JSON,
@@ -172,6 +173,7 @@ class RealtimeAPI:
             "gesture_nod": 8.0,
             "gesture_idle": 8.0,
         }
+        self.orchestration_state = OrchestrationState()
 
     def is_ready_for_injections(self) -> bool:
         return (
@@ -488,6 +490,10 @@ class RealtimeAPI:
     async def handle_event(self, event: dict[str, Any], websocket: Any) -> None:
         event_type = event.get("type")
         if event_type == "response.created":
+            self.orchestration_state.transition(
+                OrchestrationPhase.PLAN,
+                reason="response created",
+            )
             if self.audio_player:
                 self.audio_player.start_response()
             self._audio_accum.clear()
@@ -546,6 +552,10 @@ class RealtimeAPI:
                 self._record_user_input(transcript, source="input_audio_transcription")
         elif event_type == "input_audio_buffer.speech_started":
             logger.info("Speech detected, listening...")
+            self.orchestration_state.transition(
+                OrchestrationPhase.SENSE,
+                reason="speech started",
+            )
             self.state_manager.update_state(InteractionState.LISTENING, "speech started")
         elif event_type == "input_audio_buffer.speech_stopped":
             await self.handle_speech_stopped(websocket)
@@ -585,6 +595,10 @@ class RealtimeAPI:
                 "Function call: %s with args: %s",
                 function_name,
                 self.function_call_args,
+            )
+            self.orchestration_state.transition(
+                OrchestrationPhase.ACT,
+                reason=f"function_call {function_name}",
             )
             try:
                 args = json.loads(self.function_call_args) if self.function_call_args else {}
@@ -723,7 +737,15 @@ class RealtimeAPI:
                 "response": event.get("response"),
                 "rate_limits": self.rate_limits,
             }
+        self.orchestration_state.transition(
+            OrchestrationPhase.REFLECT,
+            reason="response completed",
+        )
         self._maybe_enqueue_reflection("response completed")
+        self.orchestration_state.transition(
+            OrchestrationPhase.IDLE,
+            reason="reflection enqueued",
+        )
         if self._pending_image_stimulus and not self._pending_image_flush_after_playback:
             await self._flush_pending_image_stimulus("response completed")
 
@@ -768,6 +790,10 @@ class RealtimeAPI:
         text_message: str,
         request_response: bool = True,
     ) -> None:
+        self.orchestration_state.transition(
+            OrchestrationPhase.SENSE,
+            reason="text message",
+        )
         self._record_user_input(text_message, source="text_message")
         text_event = {
             "type": "conversation.item.create",

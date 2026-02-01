@@ -319,6 +319,21 @@ def log_warning(message: str) -> None:
     logger.warning(_format_text(message, style="bold yellow"))
 
 
+def log_phase_transition(
+    previous: Any,
+    current: Any,
+    *,
+    reason: str | None = None,
+) -> None:
+    reason_text = f" reason={reason}" if reason else ""
+    logger.info(
+        _format_text(
+            f"🧭 Phase transition: {previous} -> {current}.{reason_text}",
+            style="bold blue",
+        )
+    )
+
+
 MAX_STR = 38
 MAX_LIST = 60
 TOOL_NAME_CAP = 35
