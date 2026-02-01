@@ -371,7 +371,7 @@ class RealtimeAPI:
 
         self.audio_player = AudioPlayer(
             on_playback_complete=_playback_complete_from_thread,
-            output_name_hint="default",
+            output_name_hint="softvol",
         )
 
         while True:
