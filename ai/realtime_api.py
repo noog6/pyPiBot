@@ -32,6 +32,7 @@ from interaction import (
     InteractionStateManager,
 )
 from ai.tools import function_map, tools
+from ai.reflection import ReflectionCoordinator, ReflectionContext
 from ai.stimuli_coordinator import StimuliCoordinator
 from ai.utils import (
     PREFIX_PADDING_MS,
@@ -48,6 +49,7 @@ from motion import (
     gesture_nod,
 )
 from services.profile_manager import ProfileManager
+from storage import StorageController
 
 
 def _require_websockets() -> Any:
@@ -109,6 +111,7 @@ class RealtimeAPI:
         self.ready_event = threading.Event()
 
         self.assistant_reply = ""
+        self._assistant_reply_accum = ""
         self._audio_accum = bytearray()
         self._audio_accum_bytes_target = 9600
         self.response_in_progress = False
@@ -129,6 +132,12 @@ class RealtimeAPI:
         self._gesture_global_cooldown_s = 10.0
         self._pending_image_stimulus: dict[str, Any] | None = None
         self._pending_image_flush_after_playback = False
+        self._last_user_input_text: str | None = None
+        self._last_user_input_time: float | None = None
+        self._last_user_input_source: str | None = None
+        self._tool_call_records: list[dict[str, Any]] = []
+        self._last_tool_call_results: list[dict[str, Any]] = []
+        self._last_response_metadata: dict[str, Any] = {}
         config = ConfigController.get_instance().get_config()
         self._injection_response_cooldown_s = float(
             config.get("injection_response_cooldown_s", 0.0)
@@ -141,6 +150,16 @@ class RealtimeAPI:
         self._injection_response_trigger_timestamps: dict[str, deque[float]] = {}
         self._image_response_mode = str(config.get("image_response_mode", "respond")).lower()
         self._image_response_enabled = self._image_response_mode != "catalog_only"
+        self._reflection_enabled = bool(config.get("reflection_enabled", False))
+        self._reflection_min_interval_s = float(config.get("reflection_min_interval_s", 300.0))
+        self._storage = StorageController.get_instance()
+        self._reflection_coordinator = ReflectionCoordinator(
+            api_key=self.api_key,
+            enabled=self._reflection_enabled,
+            min_interval_s=self._reflection_min_interval_s,
+            storage=self._storage,
+        )
+        self._reflection_enqueued = False
         self._stimuli_coordinator = StimuliCoordinator(
             debounce_window_s=float(config.get("injection_debounce_window_s", 0.4)),
             cooldown_s=self._injection_response_cooldown_s,
@@ -273,6 +292,49 @@ class RealtimeAPI:
     def _handle_state_earcon(self, state: InteractionState) -> None:
         """Hook for earcon cues on state transitions."""
         logger.debug("Earcon cue for state: %s", state.value)
+
+    def _record_user_input(self, text: str, *, source: str) -> None:
+        clean_text = text.strip()
+        if not clean_text:
+            return
+        self._last_user_input_text = clean_text
+        self._last_user_input_time = time.monotonic()
+        self._last_user_input_source = source
+
+    def _extract_transcript(self, event: dict[str, Any]) -> str | None:
+        transcript = event.get("transcript")
+        if isinstance(transcript, str) and transcript.strip():
+            return transcript
+        item = event.get("item", {})
+        item_transcript = item.get("transcript")
+        if isinstance(item_transcript, str) and item_transcript.strip():
+            return item_transcript
+        for content in item.get("content", []) or []:
+            if isinstance(content, dict):
+                content_transcript = content.get("transcript")
+                if isinstance(content_transcript, str) and content_transcript.strip():
+                    return content_transcript
+                if content.get("type") == "input_text" and content.get("text"):
+                    return content["text"]
+        return None
+
+    def _maybe_enqueue_reflection(self, trigger: str) -> None:
+        if self._reflection_enqueued:
+            return
+        context = ReflectionContext(
+            last_user_input=self._last_user_input_text,
+            assistant_reply=self._assistant_reply_accum,
+            tool_calls=list(self._tool_call_records),
+            response_metadata={
+                **self._last_response_metadata,
+                "trigger": trigger,
+                "last_user_input_source": self._last_user_input_source,
+                "last_user_input_time": self._last_user_input_time,
+            },
+        )
+        self._last_tool_call_results = list(self._tool_call_records)
+        self._reflection_coordinator.enqueue_reflection(context)
+        self._reflection_enqueued = True
 
     def _on_playback_complete(self) -> None:
         logger.info("Playback complete -> restarting mic")
@@ -418,6 +480,11 @@ class RealtimeAPI:
             self.mic.start_receiving()
             self.response_in_progress = True
             self._speaking_started = False
+            self._assistant_reply_accum = ""
+            self._tool_call_records = []
+            self._last_tool_call_results = []
+            self._last_response_metadata = {}
+            self._reflection_enqueued = False
             self.state_manager.update_state(InteractionState.THINKING, "response created")
         elif event_type == "response.output_item.added":
             await self.handle_output_item_added(event)
@@ -428,6 +495,7 @@ class RealtimeAPI:
         elif event_type == "response.text.delta":
             delta = event.get("delta", "")
             self.assistant_reply += delta
+            self._assistant_reply_accum += delta
             self.state_manager.update_state(InteractionState.SPEAKING, "text output")
         elif event_type == "response.output_audio.delta":
             audio_data = base64.b64decode(event["delta"])
@@ -447,6 +515,7 @@ class RealtimeAPI:
         elif event_type == "response.output_audio_transcript.delta":
             delta = event.get("delta", "")
             self.assistant_reply += delta
+            self._assistant_reply_accum += delta
         elif event_type == "response.output_audio_transcript.done":
             await self.handle_transcribe_response_done()
             self.state_manager.update_state(
@@ -454,9 +523,13 @@ class RealtimeAPI:
                 "audio transcript done",
             )
         elif event_type == "response.completed":
-            await self.handle_response_completed()
+            await self.handle_response_completed(event)
         elif event_type == "error":
             await self.handle_error(event, websocket)
+        elif event_type == "conversation.item.input_audio_transcription.completed":
+            transcript = self._extract_transcript(event)
+            if transcript:
+                self._record_user_input(transcript, source="input_audio_transcription")
         elif event_type == "input_audio_buffer.speech_started":
             logger.info("Speech detected, listening...")
             self.state_manager.update_state(InteractionState.LISTENING, "speech started")
@@ -525,6 +598,17 @@ class RealtimeAPI:
             result = {"error": error_message}
             await self.send_error_message_to_assistant(error_message, websocket)
 
+        self._tool_call_records.append(
+            {
+                "name": function_name,
+                "call_id": call_id,
+                "args": args,
+                "result": result,
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+        )
+        self._last_tool_call_results = list(self._tool_call_records)
+
         function_call_output = {
             "type": "conversation.item.create",
             "item": {
@@ -589,6 +673,7 @@ class RealtimeAPI:
             self.assistant_reply = ""
 
         self.response_in_progress = False
+        self._maybe_enqueue_reflection("response transcript done")
         if self._pending_image_stimulus and not self._pending_image_flush_after_playback:
             await self._flush_pending_image_stimulus("response transcript done")
         logger.info("Finished handle_transcribe_response_done()")
@@ -614,10 +699,17 @@ class RealtimeAPI:
             else:
                 await self._flush_pending_image_stimulus("audio response done")
 
-    async def handle_response_completed(self) -> None:
+    async def handle_response_completed(self, event: dict[str, Any] | None = None) -> None:
         self.response_in_progress = False
         self.state_manager.update_state(InteractionState.IDLE, "response completed")
         logger.info("Received response.completed event.")
+        if event:
+            self._last_response_metadata = {
+                "event_type": event.get("type"),
+                "response": event.get("response"),
+                "rate_limits": self.rate_limits,
+            }
+        self._maybe_enqueue_reflection("response completed")
         if self._pending_image_stimulus and not self._pending_image_flush_after_playback:
             await self._flush_pending_image_stimulus("response completed")
 
@@ -640,6 +732,8 @@ class RealtimeAPI:
     async def send_initial_prompts(self, websocket: Any) -> None:
         logger.info("Sending %s prompts: %s", len(self.prompts), self.prompts)
         content = [{"type": "input_text", "text": prompt} for prompt in self.prompts]
+        if self.prompts:
+            self._record_user_input(self.prompts[-1], source="startup_prompt")
         event = {
             "type": "conversation.item.create",
             "item": {
@@ -660,6 +754,7 @@ class RealtimeAPI:
         text_message: str,
         request_response: bool = True,
     ) -> None:
+        self._record_user_input(text_message, source="text_message")
         text_event = {
             "type": "conversation.item.create",
             "item": {
