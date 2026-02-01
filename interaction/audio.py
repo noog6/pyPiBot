@@ -14,7 +14,7 @@ from interaction.utils import CHANNELS, resolve_format
 
 
 INPUT_RATE = 24000
-OUTPUT_RATE = 44100
+OUTPUT_RATE = 48000
 FRAMES_PER_BUFFER = 16384
 
 
