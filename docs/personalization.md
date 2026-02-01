@@ -49,3 +49,37 @@ Some fields are updated automatically as the assistant is used:
 
 Over time, this enables more natural continuity because the assistant can keep track of
 recent activity and use stored preferences or favorites when responding.
+
+## How memories work
+
+Theo has a separate, durable memory system that stores long-lived facts independently
+from the profile fields above. Memories are only added or queried when Theo calls the
+memory tools (there is no automatic background capture), and the base session
+instructions explicitly guide Theo to use them only for stable, reusable facts the
+user confirms.
+
+### Capturing memories
+
+Theo captures memories through the `remember_memory` tool. Each memory stores:
+
+- **Content**: A short normalized text snippet. Content is trimmed and capped at
+  400 characters to keep prompts concise.
+- **Tags**: Optional, normalized tags (lowercased, deduped, max 6 tags, 24 characters
+  each).
+- **Importance**: A 1–5 score that gets clamped to safe bounds.
+- **Scope**: The active `user_id` and `session_id` are stored with each entry so that
+  recall can filter to the current user/session when needed.
+
+Memories are persisted to SQLite in `var/memories.db` using the memory store.
+
+### Recalling memories
+
+Theo recalls memories via the `recall_memories` tool. The query is a lightweight
+SQL `LIKE` match over content and tags, and results are filtered by the active
+`user_id`/`session_id`. Results are ordered by **importance** (descending) and then
+by **recency**, and the recall limit is capped at 10.
+
+### Forgetting memories
+
+When a user asks Theo to delete a memory, the `forget_memory` tool removes the row by
+its `memory_id`.
