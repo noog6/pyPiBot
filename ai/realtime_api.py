@@ -49,6 +49,7 @@ from motion import (
     gesture_nod,
 )
 from services.profile_manager import ProfileManager
+from services.reflection_manager import ReflectionManager
 from storage import StorageController
 
 
@@ -429,7 +430,20 @@ class RealtimeAPI:
 
     async def initialize_session(self, websocket: Any) -> None:
         profile_context = self.profile_manager.get_profile_context()
-        instructions = build_session_instructions(profile_context.to_instruction_block())
+        reflection_manager = ReflectionManager.get_instance()
+        recent_lessons = reflection_manager.get_recent_lessons()
+        lessons_block = None
+        if recent_lessons:
+            lesson_lines = "\n".join(f"- {lesson}" for lesson in recent_lessons)
+            lessons_block = (
+                "Lessons learned:\n"
+                f"{lesson_lines}\n"
+                "Use these lessons when planning next actions."
+            )
+        instructions = build_session_instructions(
+            profile_context.to_instruction_block(),
+            lessons_block,
+        )
         session_update = {
             "type": "session.update",
             "session": {
