@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from typing import Any, Awaitable, Callable
 
-from hardware import ADS1015Sensor
+from hardware import ADS1015Sensor, LPS22HBSensor
 from motion import (
     MotionController,
     gesture_attention_snap,
@@ -37,6 +37,19 @@ async def read_battery_voltage() -> dict[str, Any]:
         "unit": "V",
         "min_voltage": 7.0,
         "max_voltage": 8.4,
+    }
+
+
+async def read_environment() -> dict[str, Any]:
+    """Return the current air pressure and temperature."""
+
+    sensor = LPS22HBSensor.get_instance()
+    air_pressure, air_temperature = sensor.read_value()
+    return {
+        "air_pressure": air_pressure,
+        "air_temperature": air_temperature,
+        "pressure_unit": "hPa",
+        "temperature_unit": "C",
     }
 
 
@@ -195,6 +208,24 @@ tools.append(
 )
 
 function_map["read_battery_voltage"] = read_battery_voltage
+
+tools.append(
+    {
+        "type": "function",
+        "name": "read_environment",
+        "description": (
+            "Fetch the current air pressure and temperature from the LPS22HB sensor. "
+            "Return values in hPa and Celsius."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    }
+)
+
+function_map["read_environment"] = read_environment
 
 tools.append(
     {
