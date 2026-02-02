@@ -586,7 +586,7 @@ class RealtimeAPI:
                 tok.get("reset_seconds"),
             )
         elif event_type == "session.updated":
-            log_session_updated(event, full_payload=False)
+            log_session_updated(event, full_payload=True)
             if not self.ready_event.is_set():
                 logger.info("Realtime API ready to accept injections.")
                 self.ready_event.set()
