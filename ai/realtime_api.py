@@ -178,6 +178,7 @@ class RealtimeAPI:
             storage=self._storage,
         )
         self._reflection_enqueued = False
+        self._response_done_reflection_task: asyncio.Task | None = None
         self._stimuli_coordinator = StimuliCoordinator(
             debounce_window_s=float(config.get("injection_debounce_window_s", 0.4)),
             cooldown_s=self._injection_response_cooldown_s,
@@ -466,6 +467,19 @@ class RealtimeAPI:
             importance=importance,
         )
         logger.info("response.done remember_memory stored: %s", result.get("memory_id"))
+
+    def _enqueue_response_done_reflection(self, trigger: str) -> None:
+        if self._response_done_reflection_task and not self._response_done_reflection_task.done():
+            logger.debug("response.done reflection skipped: task already running.")
+            return
+
+        async def _runner() -> None:
+            try:
+                await self._run_response_done_reflection(trigger)
+            except Exception as exc:  # noqa: BLE001 - safety for background task
+                logger.warning("response.done reflection task failed: %s", exc)
+
+        self._response_done_reflection_task = asyncio.create_task(_runner())
 
     def _on_playback_complete(self) -> None:
         logger.info("Playback complete -> restarting mic")
@@ -871,7 +885,7 @@ class RealtimeAPI:
             OrchestrationPhase.REFLECT,
             reason="response done",
         )
-        await self._run_response_done_reflection("response done")
+        self._enqueue_response_done_reflection("response done")
         self.orchestration_state.transition(
             OrchestrationPhase.IDLE,
             reason="response done reflection",
