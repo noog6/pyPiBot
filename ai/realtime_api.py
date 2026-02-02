@@ -58,7 +58,7 @@ RESPONSE_DONE_REFLECTION_PROMPT = """Summarize what changed. Any anomalies? Shou
 Return ONLY valid JSON with keys: summary, remember_memory.
 Rules:
 - summary: one-line run summary.
-- remember_memory: null OR an object with keys {content, tags, importance}.
+- remember_memory: null OR an object with keys {{content, tags, importance}}.
 - tags: optional list of short strings.
 - importance: integer 1-5.
 
