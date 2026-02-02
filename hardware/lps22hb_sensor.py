@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import time
 
 LPS22HB_I2C_ADDRESS = 0x5C
 
@@ -77,9 +78,18 @@ class LPS22HBSensor:
 
     def read_value(self) -> tuple[float, float]:
         self.start_oneshot()
+        self._wait_for_data_ready(timeout_s=0.1)
         air_pressure = self.get_pressure()
         air_temperature = self.get_temperature()
         return air_pressure, air_temperature
+
+    def _wait_for_data_ready(self, timeout_s: float = 0.1) -> None:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            status = self._read_byte(LPS_STATUS)
+            if (status & 0x03) == 0x03:
+                return
+            time.sleep(0.005)
 
     def start_oneshot(self) -> None:
         buf = self._read_u16(LPS_CTRL_REG2)
