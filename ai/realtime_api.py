@@ -323,6 +323,10 @@ class RealtimeAPI:
 
     def _maybe_enqueue_reflection(self, trigger: str) -> None:
         if self._reflection_enqueued:
+            logger.debug(
+                "Reflection enqueue skipped: already enqueued (trigger=%s).",
+                trigger,
+            )
             return
         context = ReflectionContext(
             last_user_input=self._last_user_input_text,
@@ -334,6 +338,12 @@ class RealtimeAPI:
                 "last_user_input_source": self._last_user_input_source,
                 "last_user_input_time": self._last_user_input_time,
             },
+        )
+        logger.debug(
+            "Reflection enqueue requested (trigger=%s, tool_calls=%d, reply_len=%d).",
+            trigger,
+            len(self._tool_call_records),
+            len(self._assistant_reply_accum),
         )
         self._last_tool_call_results = list(self._tool_call_records)
         self._reflection_coordinator.enqueue_reflection(context)
