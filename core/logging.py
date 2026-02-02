@@ -12,6 +12,7 @@ import logging.handlers
 import os
 from pathlib import Path
 import queue
+import re
 import time
 from typing import Any, Dict, Iterable, Optional
 
@@ -214,7 +215,18 @@ if unknown_event_log_env:
     enable_unknown_event_logging(Path(unknown_event_log_env))
 
 
+_BEARER_TOKEN_RE = re.compile(r"(Bearer\s+)(sk-[A-Za-z0-9-_]+)")
+_API_KEY_RE = re.compile(r"sk-[A-Za-z0-9-_]{10,}")
+
+
+def _redact_text(message: str) -> str:
+    redacted = _BEARER_TOKEN_RE.sub(r"\1<redacted>", message)
+    return _API_KEY_RE.sub("<redacted>", redacted)
+
+
 def _format_text(message: str, style: str) -> Any:
+    if isinstance(message, str):
+        message = _redact_text(message)
     if Text is None:
         return message
     return Text(message, style=style)
@@ -339,6 +351,15 @@ MAX_LIST = 60
 TOOL_NAME_CAP = 35
 REDACT = True
 REDACT_KEYS = {"event_id", "id", "session_id"}
+SENSITIVE_KEYS = {
+    "authorization",
+    "Authorization",
+    "api_key",
+    "apikey",
+    "api-key",
+    "apiKey",
+    "openai_api_key",
+}
 NO_TRUNCATE_KEYS = {"instructions"}
 
 DROP_SESSION_KEYS = (
@@ -393,9 +414,10 @@ def _shorten_list(lst: list[Any], max_items: int = MAX_LIST) -> list[Any]:
 
 def _normalize_for_log(obj: Any, *, _key: Optional[str] = None) -> Any:
     if isinstance(obj, str):
+        redacted = _redact_text(obj)
         if _key in NO_TRUNCATE_KEYS:
-            return obj
-        return _truncate_str(obj)
+            return redacted
+        return _truncate_str(redacted)
 
     if isinstance(obj, list):
         return [_normalize_for_log(x) for x in _shorten_list(obj)]
@@ -406,6 +428,8 @@ def _normalize_for_log(obj: Any, *, _key: Optional[str] = None) -> Any:
             v = obj[k]
             if REDACT and k in REDACT_KEYS and isinstance(v, str):
                 out[k] = "<redacted>"
+            elif REDACT and k in SENSITIVE_KEYS and isinstance(v, str):
+                out[k] = _redact_text(v)
             else:
                 out[k] = _normalize_for_log(v, _key=k)
         return out
