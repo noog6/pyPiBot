@@ -14,6 +14,7 @@ import signal
 import threading
 import time
 from typing import Any
+from urllib import request
 
 from config import ConfigController
 from core.logging import (
@@ -52,6 +53,21 @@ from motion import (
 from services.profile_manager import ProfileManager
 from services.reflection_manager import ReflectionManager
 from storage import StorageController
+
+RESPONSE_DONE_REFLECTION_PROMPT = """Summarize what changed. Any anomalies? Should anything be remembered?
+Return ONLY valid JSON with keys: summary, remember_memory.
+Rules:
+- summary: one-line run summary.
+- remember_memory: null OR an object with keys {content, tags, importance}.
+- tags: optional list of short strings.
+- importance: integer 1-5.
+
+Context:
+User input: {user_input}
+Assistant reply: {assistant_reply}
+Tool calls: {tool_calls}
+Response metadata: {response_metadata}
+"""
 
 
 def _require_websockets() -> Any:
@@ -349,6 +365,108 @@ class RealtimeAPI:
         self._reflection_coordinator.enqueue_reflection(context)
         self._reflection_enqueued = True
 
+    def _clip_text(self, text: str | None, limit: int = 1200) -> str:
+        if not text:
+            return "(none)"
+        return text if len(text) <= limit else f"{text[:limit]}…"
+
+    def _build_response_done_prompt(self, trigger: str) -> str:
+        tool_calls = self._clip_text(
+            json.dumps(self._tool_call_records, ensure_ascii=False)
+        )
+        response_metadata = self._clip_text(
+            json.dumps(
+                {
+                    **self._last_response_metadata,
+                    "trigger": trigger,
+                    "last_user_input_source": self._last_user_input_source,
+                    "last_user_input_time": self._last_user_input_time,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return RESPONSE_DONE_REFLECTION_PROMPT.format(
+            user_input=self._clip_text(self._last_user_input_text),
+            assistant_reply=self._clip_text(self._assistant_reply_accum),
+            tool_calls=tool_calls,
+            response_metadata=response_metadata,
+        )
+
+    def _call_openai_prompt(self, prompt: str) -> str:
+        payload = {
+            "model": "gpt-4o-mini",
+            "messages": [
+                {"role": "system", "content": "You are a concise internal auditor."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.2,
+            "max_tokens": 220,
+        }
+        data = json.dumps(payload).encode("utf-8")
+        req = request.Request(
+            "https://api.openai.com/v1/chat/completions",
+            data=data,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with request.urlopen(req, timeout=30) as response:
+            body = response.read().decode("utf-8")
+        response_payload = json.loads(body)
+        return response_payload["choices"][0]["message"]["content"].strip()
+
+    def _parse_response_done_payload(self, raw_response: str) -> dict[str, Any] | None:
+        try:
+            payload = json.loads(raw_response)
+        except json.JSONDecodeError:
+            logger.debug("response.done reflection returned non-JSON payload.")
+            return None
+        if not isinstance(payload, dict):
+            logger.debug("response.done reflection payload is not an object.")
+            return None
+        return payload
+
+    async def _run_response_done_reflection(self, trigger: str) -> None:
+        if not self.api_key:
+            logger.debug("Skipping response.done reflection: missing API key.")
+            return
+        prompt = self._build_response_done_prompt(trigger)
+        try:
+            raw_response = await asyncio.to_thread(self._call_openai_prompt, prompt)
+        except Exception as exc:  # noqa: BLE001 - guard background call
+            logger.warning("response.done reflection failed: %s", exc)
+            return
+        payload = self._parse_response_done_payload(raw_response)
+        if not payload:
+            return
+        summary = payload.get("summary")
+        if isinstance(summary, str) and summary.strip():
+            logger.info("response.done summary: %s", summary.strip())
+        remember_payload = payload.get("remember_memory")
+        if not isinstance(remember_payload, dict):
+            return
+        content = remember_payload.get("content")
+        if not isinstance(content, str) or not content.strip():
+            return
+        tags = remember_payload.get("tags")
+        if not isinstance(tags, list):
+            tags = None
+        importance = remember_payload.get("importance", 3)
+        if not isinstance(importance, int):
+            importance = 3
+        remember_func = function_map.get("remember_memory")
+        if remember_func is None:
+            logger.warning("response.done reflection skipped: remember_memory unavailable.")
+            return
+        result = await remember_func(
+            content=content.strip(),
+            tags=tags,
+            importance=importance,
+        )
+        logger.info("response.done remember_memory stored: %s", result.get("memory_id"))
+
     def _on_playback_complete(self) -> None:
         logger.info("Playback complete -> restarting mic")
 
@@ -552,6 +670,8 @@ class RealtimeAPI:
                 InteractionState.IDLE,
                 "audio transcript done",
             )
+        elif event_type == "response.done":
+            await self.handle_response_done(event)
         elif event_type == "response.completed":
             await self.handle_response_completed(event)
         elif event_type == "error":
@@ -736,6 +856,28 @@ class RealtimeAPI:
                 self._pending_image_flush_after_playback = True
             else:
                 await self._flush_pending_image_stimulus("audio response done")
+
+    async def handle_response_done(self, event: dict[str, Any] | None = None) -> None:
+        self.response_in_progress = False
+        self.state_manager.update_state(InteractionState.IDLE, "response done")
+        logger.info("Received response.done event.")
+        if event:
+            self._last_response_metadata = {
+                "event_type": event.get("type"),
+                "response": event.get("response"),
+                "rate_limits": self.rate_limits,
+            }
+        self.orchestration_state.transition(
+            OrchestrationPhase.REFLECT,
+            reason="response done",
+        )
+        await self._run_response_done_reflection("response done")
+        self.orchestration_state.transition(
+            OrchestrationPhase.IDLE,
+            reason="response done reflection",
+        )
+        if self._pending_image_stimulus and not self._pending_image_flush_after_playback:
+            await self._flush_pending_image_stimulus("response done")
 
     async def handle_response_completed(self, event: dict[str, Any] | None = None) -> None:
         self.response_in_progress = False
