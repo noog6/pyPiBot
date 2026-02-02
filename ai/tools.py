@@ -42,7 +42,7 @@ async def read_battery_voltage() -> dict[str, Any]:
 
 
 async def read_environment() -> dict[str, Any]:
-    """Return the current air pressure and temperature."""
+    """Return the current onboard air pressure and temperature."""
 
     sensor = LPS22HBSensor.get_instance()
     air_pressure, air_temperature = sensor.read_value()
@@ -266,7 +266,8 @@ tools.append(
         "type": "function",
         "name": "read_environment",
         "description": (
-            "Fetch the current air pressure and temperature from the LPS22HB sensor. "
+            "Fetch Theo's internal air pressure and temperature from the LPS22HB sensor. "
+            "This is Theo's onboard reading, not external weather data. "
             "Return values in hPa and Celsius."
         ),
         "parameters": {
