@@ -15,6 +15,7 @@ from motion import (
     gesture_no,
     gesture_nod,
 )
+from services.imu_monitor import ImuMonitor
 from services.memory_manager import MemoryManager
 from services.output_volume import OutputVolumeController
 from services.profile_manager import ProfileManager
@@ -50,6 +51,57 @@ async def read_environment() -> dict[str, Any]:
         "air_temperature": air_temperature,
         "pressure_unit": "hPa",
         "temperature_unit": "C",
+    }
+
+
+async def read_imu_data() -> dict[str, Any]:
+    """Return the latest IMU orientation and sensor readings."""
+
+    monitor = ImuMonitor.get_instance()
+    sample = monitor.get_latest_sample()
+    if sample is None:
+        return {
+            "status": "no_data",
+            "message": "IMU has not produced a sample yet.",
+        }
+
+    events = monitor.get_recent_events(limit=5)
+    event_items = [
+        {
+            "timestamp": event.timestamp,
+            "event_type": event.event_type,
+            "severity": event.severity,
+            "details": event.details,
+        }
+        for event in events
+    ]
+    orientation = {
+        "roll_deg": sample.roll,
+        "pitch_deg": sample.pitch,
+        "yaw_deg": sample.yaw,
+    }
+    summary = (
+        "IMU readings: "
+        f"roll {sample.roll:.2f}°, pitch {sample.pitch:.2f}°, yaw {sample.yaw:.2f}°. "
+        f"Accel {tuple(round(val, 3) for val in sample.accel)}. "
+        f"Gyro {tuple(round(val, 3) for val in sample.gyro)}. "
+        f"Mag {tuple(round(val, 3) for val in sample.mag)}."
+    )
+    return {
+        "status": "ok",
+        "summary": summary,
+        "timestamp": sample.timestamp,
+        "orientation": orientation,
+        "accel": sample.accel,
+        "gyro": sample.gyro,
+        "mag": sample.mag,
+        "recent_events": event_items,
+        "units": {
+            "orientation": "degrees",
+            "accel": "raw",
+            "gyro": "raw",
+            "mag": "raw",
+        },
     }
 
 
@@ -226,6 +278,24 @@ tools.append(
 )
 
 function_map["read_environment"] = read_environment
+
+tools.append(
+    {
+        "type": "function",
+        "name": "read_imu_data",
+        "description": (
+            "Fetch the latest IMU orientation (roll/pitch/yaw) and raw accel/gyro/mag readings. "
+            "Return a human-readable summary string plus structured values."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    }
+)
+
+function_map["read_imu_data"] = read_imu_data
 
 tools.append(
     {
