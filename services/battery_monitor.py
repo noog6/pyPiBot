@@ -22,6 +22,7 @@ class BatteryStatusEvent:
     voltage: float
     percent_of_range: float
     severity: str
+    event_type: str = "status"
 
 
 class BatteryMonitor:
@@ -107,12 +108,27 @@ class BatteryMonitor:
             voltage=voltage,
             percent_of_range=percent,
             severity=severity,
+            event_type="status",
         )
 
     def _store_event(self, event: BatteryStatusEvent) -> None:
+        clear_event = None
         with self._lock:
+            previous_event = self._latest_event
             self._latest_event = event
-        self._emit_events([event])
+        if (
+            previous_event
+            and previous_event.severity in {"warning", "critical"}
+            and event.severity == "info"
+        ):
+            clear_event = BatteryStatusEvent(
+                timestamp=event.timestamp,
+                voltage=event.voltage,
+                percent_of_range=event.percent_of_range,
+                severity="info",
+                event_type="clear",
+            )
+        self._emit_events([clear_event, event] if clear_event else [event])
 
     def _emit_events(self, events: Iterable[BatteryStatusEvent]) -> None:
         handlers = list(self._event_handlers)

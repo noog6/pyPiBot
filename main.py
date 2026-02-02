@@ -153,6 +153,20 @@ def main(argv: list[str] | None = None) -> int:
 
         future.add_done_callback(_on_complete)
 
+    def _format_battery_message(event: BatteryStatusEvent) -> tuple[str, bool]:
+        percent = event.percent_of_range * 100
+        if event.event_type == "clear":
+            return (
+                "Battery warning cleared: "
+                f"{event.voltage:.2f}V ({percent:.1f}% of range)",
+                False,
+            )
+        return (
+            "Battery voltage: "
+            f"{event.voltage:.2f}V ({percent:.1f}% of range) severity={event.severity}",
+            event.severity != "info",
+        )
+
     def _drain_pending_events() -> None:
         realtime_api_instance.ready_event.wait()
         with pending_lock:
@@ -167,12 +181,8 @@ def main(argv: list[str] | None = None) -> int:
                 request_response=False,
             )
         for event in battery_events:
-            percent = event.percent_of_range * 100
-            _send_text_message(
-                "Battery voltage: "
-                f"{event.voltage:.2f}V ({percent:.1f}% of range) severity={event.severity}",
-                request_response=event.severity != "info",
-            )
+            message, request_response = _format_battery_message(event)
+            _send_text_message(message, request_response=request_response)
 
     threading.Thread(target=_drain_pending_events, daemon=True).start()
 
@@ -225,17 +235,13 @@ def main(argv: list[str] | None = None) -> int:
         battery_monitor.start_loop()
 
         def _handle_battery_event(event: BatteryStatusEvent) -> None:
-            percent = event.percent_of_range * 100
-            message = (
-                "Battery voltage: "
-                f"{event.voltage:.2f}V ({percent:.1f}% of range) severity={event.severity}"
-            )
+            message, request_response = _format_battery_message(event)
             if not realtime_api_instance.is_ready_for_injections():
                 with pending_lock:
                     pending_battery_events.append(event)
                 logger.debug("Queueing battery event; realtime API not ready.")
                 return
-            _send_text_message(message, request_response=event.severity != "info")
+            _send_text_message(message, request_response=request_response)
 
         battery_event_handler = _handle_battery_event
         battery_monitor.register_event_handler(_handle_battery_event)

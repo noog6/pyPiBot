@@ -56,6 +56,7 @@ class ImuMonitor:
         self._event_history: Deque[ImuMotionEvent] = deque(maxlen=50)
         self._event_handlers: set[Callable[[ImuMotionEvent], None]] = set()
         self._last_event_times: dict[str, float] = {}
+        self._active_warning_events: set[str] = set()
         self._loop_period_s = 0.05
         self._mag_period_s = 0.2
         self._tilt_threshold_deg = 45.0
@@ -192,7 +193,10 @@ class ImuMonitor:
         events: list[ImuMotionEvent] = []
         now = sample.timestamp
 
-        if abs(sample.roll) > self._tilt_threshold_deg or abs(sample.pitch) > self._tilt_threshold_deg:
+        tilt_exceeded = (
+            abs(sample.roll) > self._tilt_threshold_deg or abs(sample.pitch) > self._tilt_threshold_deg
+        )
+        if tilt_exceeded:
             event = ImuMotionEvent(
                 timestamp=now,
                 event_type="tilt",
@@ -206,6 +210,16 @@ class ImuMonitor:
                 self._tilt_threshold_deg,
             )
             events.append(event)
+            self._active_warning_events.add("tilt")
+        elif "tilt" in self._active_warning_events:
+            clear_event = ImuMotionEvent(
+                timestamp=now,
+                event_type="tilt_clear",
+                severity="info",
+                details={"roll": sample.roll, "pitch": sample.pitch},
+            )
+            events.append(clear_event)
+            self._active_warning_events.discard("tilt")
 
         gyro_mag = math.sqrt(sum(axis * axis for axis in sample.gyro))
         if gyro_mag > self._gyro_threshold_dps:
