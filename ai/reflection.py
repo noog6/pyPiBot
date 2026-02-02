@@ -64,23 +64,34 @@ class ReflectionCoordinator:
         """Enqueue a reflection generation task if allowed."""
 
         if not self._enabled:
+            logger.debug("Reflection enqueue skipped: disabled.")
             return
 
         now = time.monotonic()
         if self._min_interval_s > 0.0 and (now - self._last_reflection_ts) < self._min_interval_s:
-            logger.debug("Skipping reflection: min interval not elapsed.")
+            remaining = self._min_interval_s - (now - self._last_reflection_ts)
+            logger.debug(
+                "Reflection enqueue skipped: min interval not elapsed (%.2fs remaining).",
+                remaining,
+            )
             return
 
         if self._pending_task is not None and not self._pending_task.done():
-            logger.debug("Skipping reflection: previous task still running.")
+            logger.debug("Reflection enqueue skipped: previous task still running.")
             return
 
+        trigger = context.response_metadata.get("trigger", "unknown")
+        logger.debug("Reflection task enqueued (trigger=%s).", trigger)
         self._pending_task = asyncio.create_task(self._run_reflection(context))
 
     async def _run_reflection(self, context: ReflectionContext) -> None:
+        start_time = time.monotonic()
         try:
+            trigger = context.response_metadata.get("trigger", "unknown")
+            logger.debug("Reflection task started (trigger=%s).", trigger)
             reflection = await self.generate_reflection(context)
             if reflection is None:
+                logger.debug("Reflection task ended with no payload.")
                 return
             payload = {
                 "timestamp": datetime.utcnow().isoformat(),
@@ -94,10 +105,13 @@ class ReflectionCoordinator:
             }
             if self._storage is not None:
                 self._storage.add_data("reflection", json.dumps(payload))
+                logger.debug("Reflection payload stored.")
         except Exception as exc:  # noqa: BLE001 - guard background task
             logger.warning("Reflection task failed: %s", exc)
         finally:
+            duration = time.monotonic() - start_time
             self._last_reflection_ts = time.monotonic()
+            logger.debug("Reflection task finished in %.2fs.", duration)
 
     async def generate_reflection(
         self, context: ReflectionContext
@@ -110,6 +124,7 @@ class ReflectionCoordinator:
 
         prompt = self._build_prompt(context)
         try:
+            logger.debug("Requesting reflection from model=%s.", self._model)
             raw_response = await asyncio.to_thread(self._call_openai, prompt)
         except Exception as exc:  # noqa: BLE001 - surface errors in response payload
             logger.warning("Reflection request failed: %s", exc)
@@ -123,6 +138,7 @@ class ReflectionCoordinator:
         try:
             reflection = json.loads(raw_response)
             if isinstance(reflection, dict):
+                logger.debug("Reflection JSON parsed successfully.")
                 return reflection
         except json.JSONDecodeError:
             logger.debug("Reflection response was not valid JSON.")
