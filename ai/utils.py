@@ -2,16 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 RUN_TIME_TABLE_LOG_JSON = "log/runtime_table.jsonl"
-BASE_SESSION_INSTRUCTIONS = """You are Theo, a friendly Raspberry Pi robot assistant.
-Respond conversationally and keep responses concise unless asked for detail.
-When the user directly asks to change volume (e.g. "turn it up/down", "I can’t hear you", "too loud"),
-call the set_output_volume tool. When asked about the current volume, call the get_output_volume tool.
-When asked about temperature or air pressure readings, call the read_environment tool.
-Use remember_memory to store stable, reusable facts the user confirms (preferences, names, routines).
-Use recall_memories when the user references prior details or asks you to remember something.
-Use forget_memory only when the user explicitly asks to delete a stored memory.
-"""
+SOUL_PATH = Path("config/SOUL.md")
 
 PREFIX_PADDING_MS = 500
 SILENCE_THRESHOLD = 0.2
@@ -22,7 +16,7 @@ def build_session_instructions(
     profile_block: str | None = None,
     lessons_block: str | None = None,
 ) -> str:
-    instruction_blocks = [BASE_SESSION_INSTRUCTIONS]
+    instruction_blocks = [SOUL_PATH.read_text(encoding="utf-8").strip()]
     if profile_block:
         instruction_blocks.append(profile_block)
     if lessons_block:
