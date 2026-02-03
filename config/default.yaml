@@ -35,6 +35,89 @@ max_injection_responses_per_minute: 12
 # Reflection settings
 reflection_enabled: false
 reflection_min_interval_s: 300
+# Governance settings
+governance:
+  autonomy_level: "act-with-bounds"
+  risk_threshold: 0.6
+  budgets:
+    tool_calls_per_minute: 30
+    expensive_calls_per_day: 20
+  tool_specs:
+    read_battery_voltage:
+      tier: 0
+      reversible: true
+      cost_hint: "cheap"
+      safety_tags: ["battery", "sensor"]
+    read_environment:
+      tier: 0
+      reversible: true
+      cost_hint: "cheap"
+      safety_tags: ["sensor"]
+    read_imu_data:
+      tier: 0
+      reversible: true
+      cost_hint: "cheap"
+      safety_tags: ["sensor", "motion"]
+    gesture_idle:
+      tier: 1
+      reversible: true
+      cost_hint: "cheap"
+      safety_tags: ["motion"]
+    gesture_nod:
+      tier: 1
+      reversible: true
+      cost_hint: "cheap"
+      safety_tags: ["motion"]
+    gesture_no:
+      tier: 1
+      reversible: true
+      cost_hint: "cheap"
+      safety_tags: ["motion"]
+    gesture_look_around:
+      tier: 1
+      reversible: true
+      cost_hint: "cheap"
+      safety_tags: ["motion"]
+    gesture_curious_tilt:
+      tier: 1
+      reversible: true
+      cost_hint: "cheap"
+      safety_tags: ["motion"]
+    gesture_attention_snap:
+      tier: 1
+      reversible: true
+      cost_hint: "cheap"
+      safety_tags: ["motion"]
+    update_user_profile:
+      tier: 2
+      reversible: false
+      cost_hint: "med"
+      safety_tags: ["storage"]
+    get_output_volume:
+      tier: 0
+      reversible: true
+      cost_hint: "cheap"
+      safety_tags: ["audio"]
+    set_output_volume:
+      tier: 1
+      reversible: true
+      cost_hint: "cheap"
+      safety_tags: ["audio"]
+    remember_memory:
+      tier: 2
+      reversible: false
+      cost_hint: "med"
+      safety_tags: ["storage"]
+    recall_memories:
+      tier: 1
+      reversible: true
+      cost_hint: "cheap"
+      safety_tags: ["storage"]
+    forget_memory:
+      tier: 2
+      reversible: false
+      cost_hint: "med"
+      safety_tags: ["storage"]
 # Image response injection mode ("respond" or "catalog_only")
 image_response_mode: "catalog_only"
 injection_response_triggers:
