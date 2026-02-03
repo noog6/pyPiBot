@@ -11,6 +11,7 @@ from ai import RealtimeAPI
 from config import ConfigController
 from core.logging import enable_file_logging, logger
 from hardware import CameraController
+from interaction.stderr_suppression import suppress_noisy_stderr
 from motion import MotionController
 from storage.controller import StorageController
 from services.battery_monitor import BatteryMonitor
@@ -143,7 +144,12 @@ def main(argv: list[str] | None = None) -> int:
     camera_instance = None
     try:
         logger.info("Starting camera controller...")
-        camera_instance = CameraController.get_instance()
+        with suppress_noisy_stderr(
+            "camera startup",
+            env_var="THEO_CAMERA_DEBUG",
+            logger=logger,
+        ):
+            camera_instance = CameraController.get_instance()
         logger.info("Starting vision thread...")
         camera_instance.set_realtime_instance(realtime_api_instance)
         camera_instance.start_vision_loop(vision_loop_period_ms=1000)
@@ -180,7 +186,12 @@ def main(argv: list[str] | None = None) -> int:
         logger.exception("An unexpected error occurred: %s", exc)
     finally:
         if camera_instance:
-            camera_instance.stop_vision_loop()
+            with suppress_noisy_stderr(
+                "camera shutdown",
+                env_var="THEO_CAMERA_DEBUG",
+                logger=logger,
+            ):
+                camera_instance.stop_vision_loop()
         if motion_controller:
             motion_controller.stop_control_loop()
         if imu_monitor:
