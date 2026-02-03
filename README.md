@@ -62,6 +62,8 @@ Default keys include:
 - `log_dir` and `var_dir` for storage
 - `assistant_name` and `startup_prompts`
 - `logging_level`
+- `stop_words` and `stop_word_cooldown_s` to pause tool execution on emergency phrases
+- `governance` settings (autonomy level, autonomy windows, budgets, and tool tier specs)
 
 ## Systemd Deployment
 
