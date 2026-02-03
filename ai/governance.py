@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from collections import deque
+from datetime import datetime, timedelta
 import time
 from typing import Any, Iterable
+
+from core.logging import log_info
 
 
 @dataclass(frozen=True)
@@ -76,6 +79,32 @@ class GovernanceDecision:
         return self.status == "denied"
 
 
+@dataclass(frozen=True)
+class AutonomyWindowSpec:
+    name: str
+    start_minutes: int
+    duration_s: float
+    allowed_tiers: tuple[int, ...]
+    enabled: bool = True
+
+
+@dataclass
+class AutonomyWindowState:
+    name: str
+    opened_at: float
+    expires_at: float
+    allowed_tiers: tuple[int, ...]
+    source: str
+
+    def summary(self) -> str:
+        opened = datetime.fromtimestamp(self.opened_at).isoformat(timespec="seconds")
+        expires = datetime.fromtimestamp(self.expires_at).isoformat(timespec="seconds")
+        return (
+            f"name={self.name} source={self.source} opened_at={opened} "
+            f"expires_at={expires} allowed_tiers={list(self.allowed_tiers)}"
+        )
+
+
 class BudgetTracker:
     def __init__(self, limit: int, window_s: float) -> None:
         self.limit = limit
@@ -113,6 +142,11 @@ class GovernanceLayer:
             60.0 * 60.0 * 24.0,
         )
         self._risk_threshold = float(governance_cfg.get("risk_threshold", 0.6))
+        self._scheduled_windows = self._load_autonomy_windows(
+            governance_cfg.get("autonomy_windows") or []
+        )
+        self._active_window: AutonomyWindowState | None = None
+        self._last_window_name: str | None = None
 
     def _default_spec(self) -> ToolSpec:
         return ToolSpec(
@@ -167,8 +201,52 @@ class GovernanceLayer:
             requires_confirmation=requires_confirmation,
         )
 
+    def open_autonomy_window(
+        self,
+        name: str,
+        *,
+        duration_s: float | None = None,
+        allowed_tiers: Iterable[int] | None = None,
+        source: str = "manual",
+    ) -> None:
+        now = time.time()
+        spec = next((window for window in self._scheduled_windows if window.name == name), None)
+        resolved_duration = duration_s or (spec.duration_s if spec else None)
+        if resolved_duration is None:
+            raise ValueError("duration_s must be provided when opening an ad-hoc window")
+        resolved_tiers = (
+            tuple(allowed_tiers)
+            if allowed_tiers is not None
+            else (spec.allowed_tiers if spec else ())
+        )
+        if not resolved_tiers:
+            raise ValueError("allowed_tiers must be provided when opening an ad-hoc window")
+        state = AutonomyWindowState(
+            name=name,
+            opened_at=now,
+            expires_at=now + float(resolved_duration),
+            allowed_tiers=tuple(int(tier) for tier in resolved_tiers),
+            source=source,
+        )
+        self._active_window = state
+        self._log_window_transition(previous=self._last_window_name, current=state)
+
+    def close_autonomy_window(self, *, name: str | None = None, reason: str = "manual") -> None:
+        if self._active_window is None:
+            return
+        if name is not None and self._active_window.name != name:
+            return
+        previous = self._active_window
+        self._active_window = None
+        log_info(
+            f"🪟 Autonomy window closed ({reason}): {previous.summary()}",
+            style="bold blue",
+        )
+        self._log_window_transition(previous=previous.name, current=None)
+
     def review(self, action: ActionPacket) -> GovernanceDecision:
         now = time.monotonic()
+        now_wall = time.time()
         if self._autonomy_level in {"observe-only", "observe"}:
             return GovernanceDecision(
                 status="denied",
@@ -189,11 +267,19 @@ class GovernanceLayer:
                 reason="expensive-call budget exhausted",
             )
 
-        if action.tier > 1 or risk_score >= self._risk_threshold:
+        if risk_score >= self._risk_threshold:
             return GovernanceDecision(
                 status="needs_confirmation",
-                reason="tool tier requires confirmation",
+                reason="risk threshold exceeded",
             )
+
+        if action.tier > 1:
+            window_state = self._resolve_autonomy_window(now_wall)
+            if window_state is None or action.tier not in window_state.allowed_tiers:
+                return GovernanceDecision(
+                    status="needs_confirmation",
+                    reason="autonomy window closed for tiered action",
+                )
 
         if self._autonomy_level in {"assist", "act-with-confirm"}:
             if action.tier > 0:
@@ -218,6 +304,115 @@ class GovernanceLayer:
             "cost_hint": spec.cost_hint,
             "safety_tags": list(spec.safety_tags),
         }
+
+    def _load_autonomy_windows(self, raw_windows: Iterable[dict[str, Any]]) -> list[AutonomyWindowSpec]:
+        windows: list[AutonomyWindowSpec] = []
+        for raw in raw_windows:
+            if not isinstance(raw, dict):
+                continue
+            name = str(raw.get("name") or "window")
+            start_time = str(raw.get("start_time") or "00:00")
+            duration_minutes = float(raw.get("duration_minutes") or 0.0)
+            allowed_tiers = tuple(int(tier) for tier in (raw.get("allowed_tiers") or []))
+            enabled = bool(raw.get("enabled", True))
+            start_minutes = self._parse_start_minutes(start_time)
+            window = AutonomyWindowSpec(
+                name=name,
+                start_minutes=start_minutes,
+                duration_s=max(0.0, duration_minutes * 60.0),
+                allowed_tiers=allowed_tiers,
+                enabled=enabled,
+            )
+            windows.append(window)
+        return windows
+
+    def _parse_start_minutes(self, start_time: str) -> int:
+        try:
+            parts = start_time.strip().split(":")
+            hours = int(parts[0])
+            minutes = int(parts[1]) if len(parts) > 1 else 0
+            return max(0, min(23, hours)) * 60 + max(0, min(59, minutes))
+        except (ValueError, IndexError):
+            return 0
+
+    def _resolve_autonomy_window(self, now_wall: float) -> AutonomyWindowState | None:
+        if self._active_window is not None:
+            if now_wall >= self._active_window.expires_at:
+                expired = self._active_window
+                self._active_window = None
+                log_info(
+                    f"🪟 Autonomy window expired: {expired.summary()}",
+                    style="bold blue",
+                )
+                self._log_window_transition(previous=expired.name, current=None)
+            else:
+                self._log_window_transition(previous=self._last_window_name, current=self._active_window)
+                return self._active_window
+
+        scheduled = self._resolve_scheduled_window(now_wall)
+        self._log_window_transition(previous=self._last_window_name, current=scheduled)
+        return scheduled
+
+    def _resolve_scheduled_window(self, now_wall: float) -> AutonomyWindowState | None:
+        if not self._scheduled_windows:
+            return None
+        now = datetime.fromtimestamp(now_wall)
+        minutes_now = now.hour * 60 + now.minute
+        for window in self._scheduled_windows:
+            if not window.enabled or window.duration_s <= 0 or not window.allowed_tiers:
+                continue
+            duration_minutes = int(window.duration_s // 60)
+            if duration_minutes >= 24 * 60:
+                start_dt = datetime.combine(now.date(), datetime.min.time())
+                return AutonomyWindowState(
+                    name=window.name,
+                    opened_at=start_dt.timestamp(),
+                    expires_at=start_dt.timestamp() + window.duration_s,
+                    allowed_tiers=window.allowed_tiers,
+                    source="scheduled",
+                )
+            end_minutes = (window.start_minutes + duration_minutes) % (24 * 60)
+            crosses_midnight = window.start_minutes + duration_minutes >= 24 * 60
+            in_window = (
+                window.start_minutes <= minutes_now < end_minutes
+                if not crosses_midnight
+                else minutes_now >= window.start_minutes or minutes_now < end_minutes
+            )
+            if not in_window:
+                continue
+            start_date = now.date()
+            if crosses_midnight and minutes_now < end_minutes:
+                start_date = (now - timedelta(days=1)).date()
+            start_dt = datetime.combine(
+                start_date,
+                datetime.min.time(),
+            ) + timedelta(minutes=window.start_minutes)
+            return AutonomyWindowState(
+                name=window.name,
+                opened_at=start_dt.timestamp(),
+                expires_at=start_dt.timestamp() + window.duration_s,
+                allowed_tiers=window.allowed_tiers,
+                source="scheduled",
+            )
+        return None
+
+    def _log_window_transition(
+        self,
+        *,
+        previous: str | None,
+        current: AutonomyWindowState | None,
+    ) -> None:
+        current_name = current.name if current else None
+        if previous == current_name:
+            return
+        prev_label = previous or "none"
+        current_label = current_name or "none"
+        detail = f"current={current.summary()}" if current else "current=none"
+        log_info(
+            f"🪟 Autonomy window transition: {prev_label} -> {current_label} ({detail})",
+            style="bold blue",
+        )
+        self._last_window_name = current_name
 
     def _estimate_risk(self, spec: ToolSpec) -> float:
         base = 0.2
