@@ -50,6 +50,16 @@ State cues and timing thresholds are configured in `config/default.yaml` under
 
 Use `config/override.yaml` to customize these settings per deployment.
 
+## Approval Prompts & Stop Words
+
+When a tool call requires confirmation, the realtime agent presents a structured
+action packet (what/why/impact/rollback/cost/confidence/alternatives) and waits
+for an explicit approval response before executing the action.【F:ai/realtime_api.py†L720-L840】
+
+Stop words (configured in `config/default.yaml`) immediately cancel pending
+actions and place tool execution into a cooldown period so users can safely
+interrupt automated actions.【F:ai/realtime_api.py†L231-L540】【F:config/default.yaml†L12-L16】
+
 ## Injected Event Responses
 
 When the runtime injects events (for example, image or text messages pushed into the

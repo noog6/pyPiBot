@@ -11,10 +11,16 @@ The entrypoint in `main.py` builds and launches the following components:
 
 - **Realtime API agent (async loop)**: The primary agent thread that connects to
   OpenAI realtime, manages the websocket event loop, and coordinates tool
-  execution, audio input, audio output, and event injection. It exposes
+  execution, audio input, audio output, and event injection. Tool calls are
+  routed through the governance layer, which builds structured action packets,
+  enforces tiered approvals/autonomy windows, and blocks tool use on stop-word
+  emergency phrases. It exposes
   `is_ready_for_injections` for other threads to gate event delivery. It also
   tracks orchestration phases (sense/plan/act/reflect/idle) during the response
   lifecycle and emits phase-transition logs for observability.【F:ai/realtime_api.py†L92-L208】【F:ai/orchestration.py†L1-L27】
+- **Governance layer**: Builds action packets for tool calls, applies tool tier
+  policy (read-only vs. reversible vs. stateful/credentialed), enforces autonomy
+  windows, and decides whether approval is required before execution.【F:ai/governance.py†L13-L320】
 - **Event bus (shared queue)**: Thread-safe queue that collects sensor events
   and orders them by priority for injection into the realtime session.【F:ai/event_bus.py†L1-L94】
 - **Motion control loop thread**: A background loop that drives the servo
@@ -44,6 +50,7 @@ flowchart LR
         WS["RealtimeAPI.run() websocket loop"]
         MIC["AsyncMicrophone<br/>PyAudio callback + queue"]
         PLAYER["AudioPlayer<br/>playback thread"]
+        GOV["GovernanceLayer<br/>action packets + approvals"]
         TOOLS["Tool execution<br/>function_map"]
         BUS["EventBus"]
         INJECT["EventInjector thread"]
@@ -73,7 +80,8 @@ flowchart LR
 
     MIC --> WS
     WS --> PLAYER
-    WS --> TOOLS
+    WS --> GOV
+    GOV --> TOOLS
     WS --> BUS
     BUS --> INJECT
     INJECT --> WS
@@ -103,8 +111,12 @@ are accumulated and streamed to `AudioPlayer` for playback. When playback
 finishes, the microphone is resumed and the agent can accept new audio input.【F:ai/realtime_api.py†L352-L445】
 
 **Tool execution** is driven by realtime function call events
-(`response.function_call_arguments.done`), mapped through `function_map`, and
-results are returned to the conversation as `function_call_output` items.【F:ai/realtime_api.py†L383-L459】【F:ai/tools.py†L1-L72】
+(`response.function_call_arguments.done`). The realtime agent builds a structured
+action packet (what/why/impact/rollback/cost/confidence/alternatives), asks for
+approval when required, and enforces autonomy windows before mapping the call
+through `function_map` and returning results as `function_call_output` items.
+Stop words immediately cancel pending actions and pause tool execution for a
+cooldown interval.【F:ai/realtime_api.py†L680-L840】【F:ai/governance.py†L38-L320】【F:ai/tools.py†L1-L72】
 
 ### 2. Vision Thread → Realtime Agent
 
