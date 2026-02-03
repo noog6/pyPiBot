@@ -10,6 +10,7 @@ import threading
 import time
 from typing import Callable, Deque, Iterable
 
+from ai.event_bus import Event, EventBus
 from hardware.icm20948_sensor import ICM20948Sensor
 
 
@@ -123,6 +124,32 @@ class ImuMonitor:
             "- recent_events:\n"
             f"{event_lines}"
         )
+
+    def create_event_bus_handler(self, event_bus: EventBus) -> Callable[[ImuMotionEvent], None]:
+        def _handle_imu_event(event: ImuMotionEvent) -> None:
+            if event.severity == "warning":
+                priority = "high"
+            elif event.severity == "notice":
+                priority = "normal"
+            else:
+                priority = "low"
+            event_bus.publish(
+                Event(
+                    source="imu",
+                    kind="observation",
+                    priority=priority,
+                    dedupe_key="imu_motion",
+                    cooldown_s=1.0,
+                    metadata={
+                        "event_type": event.event_type,
+                        "severity": event.severity,
+                        "details": event.details,
+                    },
+                ),
+                coalesce=True,
+            )
+
+        return _handle_imu_event
 
     def _loop(self) -> None:
         next_sample_time = time.monotonic()

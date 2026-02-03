@@ -7,14 +7,13 @@ import logging
 import sys
 
 from ai import RealtimeAPI
-from ai.event_bus import Event
 from config import ConfigController
 from core.logging import enable_file_logging, logger
 from hardware import CameraController
 from motion import MotionController
 from storage.controller import StorageController
-from services.battery_monitor import BatteryMonitor, BatteryStatusEvent
-from services.imu_monitor import ImuMonitor, ImuMotionEvent
+from services.battery_monitor import BatteryMonitor
+from services.imu_monitor import ImuMonitor
 from services.profile_manager import ProfileManager
 
 
@@ -156,31 +155,8 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("Starting IMU monitor...")
         imu_monitor = ImuMonitor.get_instance()
         imu_monitor.start_loop()
-
-        def _handle_imu_event(event: ImuMotionEvent) -> None:
-            if event.severity == "warning":
-                priority = "high"
-            elif event.severity == "notice":
-                priority = "normal"
-            else:
-                priority = "low"
-            event_bus.publish(
-                Event(
-                    source="imu",
-                    kind="observation",
-                    priority=priority,
-                    dedupe_key="imu_motion",
-                    cooldown_s=1.0,
-                    metadata={
-                        "event_type": event.event_type,
-                        "severity": event.severity,
-                        "details": event.details,
-                    },
-                ),
-                coalesce=True,
-            )
-        imu_event_handler = _handle_imu_event
-        imu_monitor.register_event_handler(_handle_imu_event)
+        imu_event_handler = imu_monitor.create_event_bus_handler(event_bus)
+        imu_monitor.register_event_handler(imu_event_handler)
     except Exception as exc:
         logger.warning("IMU monitor unavailable: %s", exc)
 
@@ -190,33 +166,8 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("Starting battery monitor...")
         battery_monitor = BatteryMonitor.get_instance()
         battery_monitor.start_loop()
-
-        def _handle_battery_event(event: BatteryStatusEvent) -> None:
-            if event.severity == "critical":
-                priority = "critical"
-            elif event.severity == "warning":
-                priority = "high"
-            else:
-                priority = "low"
-            event_bus.publish(
-                Event(
-                    source="battery",
-                    kind="status",
-                    priority=priority,
-                    dedupe_key="battery_status",
-                    cooldown_s=60.0,
-                    metadata={
-                        "voltage": event.voltage,
-                        "percent_of_range": event.percent_of_range,
-                        "severity": event.severity,
-                        "event_type": event.event_type,
-                    },
-                ),
-                coalesce=True,
-            )
-
-        battery_event_handler = _handle_battery_event
-        battery_monitor.register_event_handler(_handle_battery_event)
+        battery_event_handler = battery_monitor.create_event_bus_handler(event_bus)
+        battery_monitor.register_event_handler(battery_event_handler)
     except Exception as exc:
         logger.warning("Battery monitor unavailable: %s", exc)
 

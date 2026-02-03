@@ -8,6 +8,7 @@ import threading
 import time
 from typing import Callable, Iterable
 
+from ai.event_bus import Event, EventBus
 from hardware import ADS1015Sensor
 
 
@@ -78,6 +79,33 @@ class BatteryMonitor:
 
     def unregister_event_handler(self, handler: Callable[[BatteryStatusEvent], None]) -> None:
         self._event_handlers.discard(handler)
+
+    def create_event_bus_handler(self, event_bus: EventBus) -> Callable[[BatteryStatusEvent], None]:
+        def _handle_battery_event(event: BatteryStatusEvent) -> None:
+            if event.severity == "critical":
+                priority = "critical"
+            elif event.severity == "warning":
+                priority = "high"
+            else:
+                priority = "low"
+            event_bus.publish(
+                Event(
+                    source="battery",
+                    kind="status",
+                    priority=priority,
+                    dedupe_key="battery_status",
+                    cooldown_s=60.0,
+                    metadata={
+                        "voltage": event.voltage,
+                        "percent_of_range": event.percent_of_range,
+                        "severity": event.severity,
+                        "event_type": event.event_type,
+                    },
+                ),
+                coalesce=True,
+            )
+
+        return _handle_battery_event
 
     def _loop(self) -> None:
         while not self._stop_event.is_set():
