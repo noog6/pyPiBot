@@ -231,7 +231,25 @@ class RealtimeAPI:
         message, request_response = self._format_event_for_injection(event)
         if event.request_response is not None:
             request_response = event.request_response
+        self._log_injection_event(event, request_response)
         self._send_text_message(message, request_response=request_response)
+
+    def _log_injection_event(self, event: Event, request_response: bool) -> None:
+        metadata = event.metadata or {}
+        parts = [
+            "injection:",
+            f"source={event.source}",
+        ]
+        if event.kind:
+            parts.append(f"kind={event.kind}")
+        severity = metadata.get("severity")
+        if severity:
+            parts.append(f"severity={severity}")
+        reason = metadata.get("reason") or metadata.get("event_type")
+        if reason:
+            parts.append(f"reason={reason}")
+        parts.append(f"create_response={'true' if request_response else 'false'}")
+        log_info(" ".join(parts))
 
     def _send_text_message(self, message: str, request_response: bool = True) -> None:
         if not self.loop:

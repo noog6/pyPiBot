@@ -136,7 +136,7 @@ class ImuMonitor:
             event_bus.publish(
                 Event(
                     source="imu",
-                    kind="observation",
+                    kind=event.severity,
                     priority=priority,
                     dedupe_key="imu_motion",
                     cooldown_s=1.0,
