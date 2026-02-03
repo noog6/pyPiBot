@@ -4,17 +4,14 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-import logging
 import math
 import threading
 import time
 from typing import Callable, Deque, Iterable
 
 from ai.event_bus import Event, EventBus
+from core.logging import logger as LOGGER
 from hardware.icm20948_sensor import ICM20948Sensor
-
-
-LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)

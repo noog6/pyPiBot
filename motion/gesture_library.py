@@ -4,17 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
-import logging
 from pathlib import Path
 import threading
 
+from core.logging import logger as LOGGER
 from motion.action import Action
 from motion.keyframe import Keyframe
 from motion.motion_controller import MotionController, millis
 from storage.controller import StorageController
-
-
-LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)

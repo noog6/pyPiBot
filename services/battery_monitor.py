@@ -3,16 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import logging
 import threading
 import time
 from typing import Callable, Iterable
 
 from ai.event_bus import Event, EventBus
+from core.logging import logger as LOGGER
 from hardware import ADS1015Sensor
-
-
-LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)

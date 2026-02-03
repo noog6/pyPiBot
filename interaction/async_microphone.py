@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
-import logging
 import queue
 from typing import Any
 
+from core.logging import logger
 from interaction.utils import CHANNELS, CHUNK, RATE, resolve_format
 
 
@@ -43,14 +43,14 @@ class AsyncMicrophone:
 
         try:
             info = self.p.get_device_info_by_index(input_device_index)
-            logging.info(
+            logger.info(
                 "[ASYNC MIC] Input device (selected): %s idx=%s defaultRate=%s",
                 info.get("name"),
                 info.get("index"),
                 info.get("defaultSampleRate"),
             )
         except Exception:
-            logging.info(
+            logger.info(
                 "[ASYNC MIC] Input device index selected: %s (hint=%s)",
                 input_device_index,
                 input_name_hint,
@@ -75,7 +75,7 @@ class AsyncMicrophone:
         self.queue: queue.Queue[bytes] = queue.Queue(maxsize=50)
         self.is_recording = False
         self.is_receiving = False
-        logging.info("AsyncMicrophone initialized")
+        logger.info("AsyncMicrophone initialized")
 
     def callback(
         self,
@@ -99,7 +99,7 @@ class AsyncMicrophone:
         require_input: bool = False,
         require_output: bool = False,
     ) -> None:
-        logging.info(
+        logger.info(
             "[ASYNC MIC] Listing audio devices (input=%s output=%s)",
             require_input,
             require_output,
@@ -110,7 +110,7 @@ class AsyncMicrophone:
                 continue
             if require_output and info.get("maxOutputChannels", 0) <= 0:
                 continue
-            logging.info(
+            logger.info(
                 "[ASYNC MIC] Device %s: %s | Input Channels: %s | Output Channels: %s",
                 i,
                 info.get("name"),
@@ -133,26 +133,26 @@ class AsyncMicrophone:
         """Enable recording."""
 
         self.is_recording = True
-        logging.info("Started recording")
+        logger.info("Started recording")
 
     def stop_recording(self) -> None:
         """Disable recording."""
 
         self.is_recording = False
-        logging.info("Stopped recording")
+        logger.info("Stopped recording")
 
     def start_receiving(self) -> None:
         """Mark assistant response playback in progress."""
 
         self.is_receiving = True
         self.is_recording = False
-        logging.info("Started receiving assistant response")
+        logger.info("Started receiving assistant response")
 
     def stop_receiving(self) -> None:
         """Mark assistant response playback complete."""
 
         self.is_receiving = False
-        logging.info("Stopped receiving assistant response")
+        logger.info("Stopped receiving assistant response")
 
     def get_audio_data(self) -> bytes | None:
         """Drain queued audio and return concatenated bytes."""
@@ -183,4 +183,4 @@ class AsyncMicrophone:
         self.stream.stop_stream()
         self.stream.close()
         self.p.terminate()
-        logging.info("AsyncMicrophone closed")
+        logger.info("AsyncMicrophone closed")

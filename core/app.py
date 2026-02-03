@@ -3,17 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import logging
 from typing import Sequence
 
 from config import ConfigController
+from core.logging import logger as LOGGER
 from hardware import ADS1015Sensor
 from interaction import AsyncMicrophone, AudioPlayer
 from motion import MotionController
 from storage import StorageController
-
-
-LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
