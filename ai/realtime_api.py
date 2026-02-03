@@ -118,6 +118,43 @@ def base64_encode_audio(audio_bytes: bytes) -> str:
     return base64.b64encode(audio_bytes).decode("utf-8")
 
 
+def _validate_tool_specs(tool_specs: dict[str, Any], tool_defs: list[dict[str, Any]]) -> None:
+    required_fields = ("tier", "reversible", "cost_hint", "safety_tags")
+    tool_names = {tool.get("name") for tool in tool_defs}
+    missing_specs = sorted(tool_names - set(tool_specs.keys()))
+    if missing_specs:
+        log_warning(
+            "Governance tool_specs missing entries for: %s",
+            ", ".join(missing_specs),
+        )
+    unknown_specs = sorted(set(tool_specs.keys()) - tool_names)
+    if unknown_specs:
+        log_warning(
+            "Governance tool_specs include unknown tools: %s",
+            ", ".join(unknown_specs),
+        )
+    for tool_name, spec in tool_specs.items():
+        if not isinstance(spec, dict):
+            log_warning("Governance tool_specs for %s should be a mapping.", tool_name)
+            continue
+        missing_fields = [field for field in required_fields if field not in spec]
+        if missing_fields:
+            log_warning(
+                "Governance tool_specs for %s missing fields: %s",
+                tool_name,
+                ", ".join(missing_fields),
+            )
+        tier = spec.get("tier")
+        if tier is None:
+            log_warning("Governance tool_specs for %s missing tier value.", tool_name)
+        elif int(tier) not in (0, 1, 2, 3):
+            log_warning(
+                "Governance tool_specs for %s has unexpected tier %s.",
+                tool_name,
+                tier,
+            )
+
+
 class RealtimeAPI:
     """Realtime OpenAI API client."""
 
@@ -185,6 +222,7 @@ class RealtimeAPI:
         self._reflection_enabled = bool(config.get("reflection_enabled", False))
         self._reflection_min_interval_s = float(config.get("reflection_min_interval_s", 300.0))
         governance_cfg = config.get("governance") or {}
+        _validate_tool_specs(governance_cfg.get("tool_specs") or {}, tools)
         tool_specs = build_tool_specs(governance_cfg.get("tool_specs") or {})
         self._governance = GovernanceLayer(tool_specs, config)
         self._pending_action: ActionPacket | None = None
