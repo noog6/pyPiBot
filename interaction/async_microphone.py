@@ -8,6 +8,7 @@ import queue
 from typing import Any
 
 from core.logging import logger
+from interaction.stderr_suppression import suppress_noisy_stderr
 from interaction.utils import CHANNELS, CHUNK, RATE, resolve_device_index, resolve_format
 
 
@@ -30,52 +31,53 @@ class AsyncMicrophone:
         self._pa_continue = pyaudio.paContinue
         audio_format = resolve_format()
 
-        self.p = pyaudio.PyAudio()
+        with suppress_noisy_stderr("audio input initialization", logger=logger):
+            self.p = pyaudio.PyAudio()
 
-        if debug_list_devices:
-            self._log_devices(require_input=True)
+            if debug_list_devices:
+                self._log_devices(require_input=True)
 
-        if not input_device_name:
-            raise RuntimeError(
-                "Audio input device name is required. Set audio.input.device_name"
-            )
+            if not input_device_name:
+                raise RuntimeError(
+                    "Audio input device name is required. Set audio.input.device_name"
+                )
 
-        input_device_index = resolve_device_index(
-            self.p,
-            input_device_name,
-            require_input=True,
-        )
-        try:
-            info = self.p.get_device_info_by_index(input_device_index)
-            logger.info(
-                "[ASYNC MIC] Input device (selected): %s idx=%s defaultRate=%s",
-                info.get("name"),
-                info.get("index"),
-                info.get("defaultSampleRate"),
-            )
-        except Exception:
-            logger.info(
-                "[ASYNC MIC] Input device selected: %s (idx=%s)",
+            input_device_index = resolve_device_index(
+                self.p,
                 input_device_name,
-                input_device_index,
+                require_input=True,
             )
+            try:
+                info = self.p.get_device_info_by_index(input_device_index)
+                logger.info(
+                    "[ASYNC MIC] Input device (selected): %s idx=%s defaultRate=%s",
+                    info.get("name"),
+                    info.get("index"),
+                    info.get("defaultSampleRate"),
+                )
+            except Exception:
+                logger.info(
+                    "[ASYNC MIC] Input device selected: %s (idx=%s)",
+                    input_device_name,
+                    input_device_index,
+                )
 
-        try:
-            self.stream = self.p.open(
-                format=audio_format,
-                channels=CHANNELS,
-                rate=RATE,
-                input=True,
-                input_device_index=input_device_index,
-                frames_per_buffer=CHUNK,
-                stream_callback=self.callback,
-            )
-        except Exception as exc:
-            self._log_devices(require_input=True)
-            raise RuntimeError(
-                "Failed to open input audio device "
-                f"'{input_device_name}' (idx={input_device_index})"
-            ) from exc
+            try:
+                self.stream = self.p.open(
+                    format=audio_format,
+                    channels=CHANNELS,
+                    rate=RATE,
+                    input=True,
+                    input_device_index=input_device_index,
+                    frames_per_buffer=CHUNK,
+                    stream_callback=self.callback,
+                )
+            except Exception as exc:
+                self._log_devices(require_input=True)
+                raise RuntimeError(
+                    "Failed to open input audio device "
+                    f"'{input_device_name}' (idx={input_device_index})"
+                ) from exc
         self.queue: queue.Queue[bytes] = queue.Queue(maxsize=50)
         self.is_recording = False
         self.is_receiving = False

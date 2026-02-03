@@ -10,6 +10,7 @@ import time
 from typing import Any
 
 from core.logging import logger
+from interaction.stderr_suppression import suppress_noisy_stderr
 from interaction.utils import CHANNELS, resolve_device_index, resolve_format
 
 
@@ -41,50 +42,52 @@ class AudioPlayer:
 
         self._audioop = importlib.import_module(audioop_module_name)
         self.on_playback_complete = on_playback_complete
-        self.p = pyaudio.PyAudio()
-        audio_format = resolve_format()
 
-        if not output_device_name:
-            raise RuntimeError(
-                "Audio output device name is required. Set audio.output.device_name"
-            )
+        with suppress_noisy_stderr("audio output initialization", logger=logger):
+            self.p = pyaudio.PyAudio()
+            audio_format = resolve_format()
 
-        output_device_index = resolve_device_index(
-            self.p,
-            output_device_name,
-            require_output=True,
-        )
-        try:
-            info = self.p.get_device_info_by_index(output_device_index)
-            logger.info(
-                "[AUDIO] Output device (selected): %s idx=%s defaultRate=%s",
-                info.get("name"),
-                info.get("index"),
-                info.get("defaultSampleRate"),
-            )
-        except Exception:
-            logger.info(
-                "[AUDIO] Output device selected: %s (idx=%s)",
+            if not output_device_name:
+                raise RuntimeError(
+                    "Audio output device name is required. Set audio.output.device_name"
+                )
+
+            output_device_index = resolve_device_index(
+                self.p,
                 output_device_name,
-                output_device_index,
+                require_output=True,
             )
+            try:
+                info = self.p.get_device_info_by_index(output_device_index)
+                logger.info(
+                    "[AUDIO] Output device (selected): %s idx=%s defaultRate=%s",
+                    info.get("name"),
+                    info.get("index"),
+                    info.get("defaultSampleRate"),
+                )
+            except Exception:
+                logger.info(
+                    "[AUDIO] Output device selected: %s (idx=%s)",
+                    output_device_name,
+                    output_device_index,
+                )
 
-        try:
-            self.stream = self.p.open(
-                format=audio_format,
-                channels=CHANNELS,
-                rate=OUTPUT_RATE,
-                output=True,
-                output_device_index=output_device_index,
-                frames_per_buffer=FRAMES_PER_BUFFER,
-                start=True,
-            )
-        except Exception as exc:
-            self._log_devices(require_output=True)
-            raise RuntimeError(
-                "Failed to open output audio device "
-                f"'{output_device_name}' (idx={output_device_index})"
-            ) from exc
+            try:
+                self.stream = self.p.open(
+                    format=audio_format,
+                    channels=CHANNELS,
+                    rate=OUTPUT_RATE,
+                    output=True,
+                    output_device_index=output_device_index,
+                    frames_per_buffer=FRAMES_PER_BUFFER,
+                    start=True,
+                )
+            except Exception as exc:
+                self._log_devices(require_output=True)
+                raise RuntimeError(
+                    "Failed to open output audio device "
+                    f"'{output_device_name}' (idx={output_device_index})"
+                ) from exc
 
         self._q: queue.Queue[bytes | None] = queue.Queue()
         self._stop = threading.Event()
