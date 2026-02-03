@@ -102,9 +102,3 @@ pytest -q
 - [docs/requirements.md](docs/requirements.md)
 - [docs/systemd-setup.md](docs/systemd-setup.md)
 - [docs/todo.md](docs/todo.md)
-
-## Next Steps
-
-- Expand hardware abstractions and mock drivers.
-- Build user interaction pipelines (speech/text -> intent -> action).
-- Add more external integrations in `services/`.
