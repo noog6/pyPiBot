@@ -22,6 +22,15 @@ prefix_padding_ms: 500
 silence_threshold: 0.2
 silence_duration_ms: 900
 
+# Audio devices
+audio:
+  input:
+    device_index: 0
+    device_name: "default"
+  output:
+    device_index: 0
+    device_name: "softvol"
+
 # Injected response throttling
 injection_response_cooldown_s: 2.0
 max_injection_responses_per_minute: 12

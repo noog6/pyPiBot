@@ -34,32 +34,44 @@ class AsyncMicrophone:
         self.p = pyaudio.PyAudio()
 
         if debug_list_devices:
-            logging.info("[ASYNC MIC] Listing input devices:")
-            for i in range(self.p.get_device_count()):
-                info = self.p.get_device_info_by_index(i)
-                logging.info(
-                    "[ASYNC MIC] Device %s: %s | Input Channels: %s",
-                    i,
-                    info.get("name"),
-                    info.get("maxInputChannels"),
-                )
-            logging.info("[ASYNC MIC] Completed device list")
+            self._log_devices(require_input=True)
 
-        if input_device_index is None and input_name_hint:
-            input_device_index = self._find_device_index(
-                name_hint=input_name_hint,
-                require_input=True,
+        if input_device_index is None:
+            raise RuntimeError(
+                "Audio input device index is required. Set audio.input.device_index"
             )
 
-        self.stream = self.p.open(
-            format=audio_format,
-            channels=CHANNELS,
-            rate=RATE,
-            input=True,
-            input_device_index=input_device_index,
-            frames_per_buffer=CHUNK,
-            stream_callback=self.callback,
-        )
+        try:
+            info = self.p.get_device_info_by_index(input_device_index)
+            logging.info(
+                "[ASYNC MIC] Input device (selected): %s idx=%s defaultRate=%s",
+                info.get("name"),
+                info.get("index"),
+                info.get("defaultSampleRate"),
+            )
+        except Exception:
+            logging.info(
+                "[ASYNC MIC] Input device index selected: %s (hint=%s)",
+                input_device_index,
+                input_name_hint,
+            )
+
+        try:
+            self.stream = self.p.open(
+                format=audio_format,
+                channels=CHANNELS,
+                rate=RATE,
+                input=True,
+                input_device_index=input_device_index,
+                frames_per_buffer=CHUNK,
+                stream_callback=self.callback,
+            )
+        except Exception as exc:
+            self._log_devices(require_input=True)
+            raise RuntimeError(
+                "Failed to open input audio device index "
+                f"{input_device_index} (hint={input_name_hint})"
+            ) from exc
         self.queue: queue.Queue[bytes] = queue.Queue(maxsize=50)
         self.is_recording = False
         self.is_receiving = False
@@ -81,23 +93,30 @@ class AsyncMicrophone:
                 pass
         return (None, self._pa_continue)
 
-    def _find_device_index(
+    def _log_devices(
         self,
-        name_hint: str,
+        *,
         require_input: bool = False,
         require_output: bool = False,
-    ) -> int:
-        name_hint = name_hint.lower()
+    ) -> None:
+        logging.info(
+            "[ASYNC MIC] Listing audio devices (input=%s output=%s)",
+            require_input,
+            require_output,
+        )
         for i in range(self.p.get_device_count()):
             info = self.p.get_device_info_by_index(i)
-            name = info.get("name", "").lower()
-            if name_hint in name:
-                if require_input and info.get("maxInputChannels", 0) <= 0:
-                    continue
-                if require_output and info.get("maxOutputChannels", 0) <= 0:
-                    continue
-                return i
-        raise RuntimeError(f"No device matching '{name_hint}' found")
+            if require_input and info.get("maxInputChannels", 0) <= 0:
+                continue
+            if require_output and info.get("maxOutputChannels", 0) <= 0:
+                continue
+            logging.info(
+                "[ASYNC MIC] Device %s: %s | Input Channels: %s | Output Channels: %s",
+                i,
+                info.get("name"),
+                info.get("maxInputChannels"),
+                info.get("maxOutputChannels"),
+            )
 
     def rms_numpy(self, audio_bytes: bytes, sample_width: int = 2) -> float:
         """Compute RMS (Root Mean Square) volume level with NumPy."""

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import logging
 from typing import Sequence
 
+from config import ConfigController
 from hardware import ADS1015Sensor
 from interaction import AsyncMicrophone, AudioPlayer
 from motion import MotionController
@@ -59,8 +60,19 @@ def run(config: AppConfig) -> int:
         LOGGER.warning("ADS1015 sensor unavailable: %s", exc)
         sensor = None
 
+    config = ConfigController.get_instance().get_config()
+    audio_cfg = config.get("audio") or {}
+    input_cfg = audio_cfg.get("input") or {}
+    output_cfg = audio_cfg.get("output") or {}
+
     try:
-        microphone = AsyncMicrophone()
+        input_device_index = input_cfg.get("device_index")
+        microphone = AsyncMicrophone(
+            input_device_index=(
+                int(input_device_index) if input_device_index is not None else None
+            ),
+            input_name_hint=input_cfg.get("device_name"),
+        )
         microphone.start_recording()
         LOGGER.info("Microphone started")
     except Exception as exc:
@@ -68,7 +80,13 @@ def run(config: AppConfig) -> int:
         microphone = None
 
     try:
-        player = AudioPlayer()
+        output_device_index = output_cfg.get("device_index")
+        player = AudioPlayer(
+            output_device_index=(
+                int(output_device_index) if output_device_index is not None else None
+            ),
+            output_name_hint=output_cfg.get("device_name"),
+        )
         LOGGER.info("Audio playback ready")
     except Exception as exc:
         LOGGER.warning("Audio playback unavailable: %s", exc)

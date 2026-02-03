@@ -45,22 +45,12 @@ class AudioPlayer:
         self.p = pyaudio.PyAudio()
         audio_format = resolve_format()
 
-        if output_device_index is None and output_name_hint:
-            output_device_index = self._find_device_index(
-                name_hint=output_name_hint,
-                require_output=True,
+        if output_device_index is None:
+            raise RuntimeError(
+                "Audio output device index is required. Set audio.output.device_index"
             )
 
-        if output_device_index is None:
-            out = self.p.get_default_output_device_info()
-            output_device_index = out["index"]
-            logging.info(
-                "[AUDIO] Output device (default): %s idx=%s defaultRate=%s",
-                out.get("name"),
-                out.get("index"),
-                out.get("defaultSampleRate"),
-            )
-        else:
+        try:
             info = self.p.get_device_info_by_index(output_device_index)
             logging.info(
                 "[AUDIO] Output device (selected): %s idx=%s defaultRate=%s",
@@ -68,16 +58,29 @@ class AudioPlayer:
                 info.get("index"),
                 info.get("defaultSampleRate"),
             )
+        except Exception:
+            logging.info(
+                "[AUDIO] Output device index selected: %s (hint=%s)",
+                output_device_index,
+                output_name_hint,
+            )
 
-        self.stream = self.p.open(
-            format=audio_format,
-            channels=CHANNELS,
-            rate=OUTPUT_RATE,
-            output=True,
-            output_device_index=output_device_index,
-            frames_per_buffer=FRAMES_PER_BUFFER,
-            start=True,
-        )
+        try:
+            self.stream = self.p.open(
+                format=audio_format,
+                channels=CHANNELS,
+                rate=OUTPUT_RATE,
+                output=True,
+                output_device_index=output_device_index,
+                frames_per_buffer=FRAMES_PER_BUFFER,
+                start=True,
+            )
+        except Exception as exc:
+            self._log_devices(require_output=True)
+            raise RuntimeError(
+                "Failed to open output audio device index "
+                f"{output_device_index} (hint={output_name_hint})"
+            ) from exc
 
         self._q: queue.Queue[bytes | None] = queue.Queue()
         self._stop = threading.Event()
@@ -89,23 +92,30 @@ class AudioPlayer:
         self._t = threading.Thread(target=self._worker, daemon=True)
         self._t.start()
 
-    def _find_device_index(
+    def _log_devices(
         self,
-        name_hint: str,
+        *,
         require_input: bool = False,
         require_output: bool = False,
-    ) -> int:
-        name_hint = name_hint.lower()
+    ) -> None:
+        logging.info(
+            "[AUDIO] Listing audio devices (input=%s output=%s)",
+            require_input,
+            require_output,
+        )
         for i in range(self.p.get_device_count()):
             info = self.p.get_device_info_by_index(i)
-            name = info.get("name", "").lower()
-            if name_hint in name:
-                if require_input and info.get("maxInputChannels", 0) <= 0:
-                    continue
-                if require_output and info.get("maxOutputChannels", 0) <= 0:
-                    continue
-                return i
-        raise RuntimeError(f"No device matching '{name_hint}' found")
+            if require_input and info.get("maxInputChannels", 0) <= 0:
+                continue
+            if require_output and info.get("maxOutputChannels", 0) <= 0:
+                continue
+            logging.info(
+                "[AUDIO] Device %s: %s | Input Channels: %s | Output Channels: %s",
+                i,
+                info.get("name"),
+                info.get("maxInputChannels"),
+                info.get("maxOutputChannels"),
+            )
 
     def start_response(self) -> None:
         """Call at response.created (or when you begin accepting audio)."""
