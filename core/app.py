@@ -63,12 +63,8 @@ def run(config: AppConfig) -> int:
     output_cfg = audio_cfg.get("output") or {}
 
     try:
-        input_device_index = input_cfg.get("device_index")
         microphone = AsyncMicrophone(
-            input_device_index=(
-                int(input_device_index) if input_device_index is not None else None
-            ),
-            input_name_hint=input_cfg.get("device_name"),
+            input_device_name=input_cfg.get("device_name"),
         )
         microphone.start_recording()
         LOGGER.info("Microphone started")
@@ -77,12 +73,8 @@ def run(config: AppConfig) -> int:
         microphone = None
 
     try:
-        output_device_index = output_cfg.get("device_index")
         player = AudioPlayer(
-            output_device_index=(
-                int(output_device_index) if output_device_index is not None else None
-            ),
-            output_name_hint=output_cfg.get("device_name"),
+            output_device_name=output_cfg.get("device_name"),
         )
         LOGGER.info("Audio playback ready")
     except Exception as exc:
