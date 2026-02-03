@@ -36,6 +36,8 @@ from ai.tools import function_map, tools
 from ai.reflection import ReflectionCoordinator, ReflectionContext
 from ai.stimuli_coordinator import StimuliCoordinator
 from ai.orchestration import OrchestrationPhase, OrchestrationState
+from ai.event_bus import Event, EventBus
+from ai.event_injector import EventInjector
 from ai.utils import (
     PREFIX_PADDING_MS,
     RUN_TIME_TABLE_LOG_JSON,
@@ -191,6 +193,16 @@ class RealtimeAPI:
             "gesture_idle": 8.0,
         }
         self.orchestration_state = OrchestrationState()
+        self.event_bus = EventBus()
+        self._event_injector = EventInjector(
+            self.event_bus,
+            ready_event=self.ready_event,
+            is_ready=self.is_ready_for_injections,
+            inject_callback=self.inject_event,
+        )
+
+    def get_event_bus(self) -> EventBus:
+        return self.event_bus
 
     def is_ready_for_injections(self) -> bool:
         return (
@@ -199,6 +211,63 @@ class RealtimeAPI:
             and self.loop is not None
             and self.loop.is_running()
         )
+
+    def inject_event(self, event: Event) -> None:
+        message, request_response = self._format_event_for_injection(event)
+        if event.request_response is not None:
+            request_response = event.request_response
+        self._send_text_message(message, request_response=request_response)
+
+    def _send_text_message(self, message: str, request_response: bool = True) -> None:
+        if not self.loop:
+            logger.debug("Unable to send message; event loop unavailable.")
+            return
+        future = asyncio.run_coroutine_threadsafe(
+            self.send_text_message_to_conversation(
+                message,
+                request_response=request_response,
+            ),
+            self.loop,
+        )
+
+        def _on_complete(task) -> None:
+            try:
+                task.result()
+            except Exception as exc:
+                logger.warning("Failed to send queued message: %s", exc)
+
+        future.add_done_callback(_on_complete)
+
+    def _format_event_for_injection(self, event: Event) -> tuple[str, bool]:
+        if event.content:
+            return event.content, True
+        if event.source == "imu":
+            metadata = event.metadata
+            return (
+                "IMU event: "
+                f"{metadata.get('event_type')} ({metadata.get('severity')}) "
+                f"details={metadata.get('details')}",
+                False,
+            )
+        if event.source == "battery":
+            metadata = event.metadata
+            percent = float(metadata.get("percent_of_range", 0.0)) * 100
+            voltage = float(metadata.get("voltage", 0.0))
+            event_type = metadata.get("event_type")
+            if event_type == "clear":
+                return (
+                    "Battery warning cleared: "
+                    f"{voltage:.2f}V ({percent:.1f}% of range)",
+                    False,
+                )
+            severity = metadata.get("severity", "info")
+            return (
+                "Battery voltage: "
+                f"{voltage:.2f}V ({percent:.1f}% of range) "
+                f"severity={severity}",
+                severity != "info",
+            )
+        return f"{event.source} event: {event.metadata}", True
 
     def _handle_state_gesture(self, state: InteractionState) -> None:
         """Hook for gesture cues on state transitions."""
@@ -506,6 +575,7 @@ class RealtimeAPI:
 
         self.loop = asyncio.get_running_loop()
         self.ready_event.clear()
+        self._event_injector.start()
 
         def _playback_complete_from_thread() -> None:
             if self.loop:
@@ -516,61 +586,64 @@ class RealtimeAPI:
             output_name_hint="softvol",
         )
 
-        while True:
-            try:
-                url = "wss://api.openai.com/v1/realtime?model=gpt-realtime"
-                headers = {"Authorization": f"Bearer {self.api_key}"}
+        try:
+            while True:
+                try:
+                    url = "wss://api.openai.com/v1/realtime?model=gpt-realtime"
+                    headers = {"Authorization": f"Bearer {self.api_key}"}
 
-                async with websockets.connect(
-                    url,
-                    additional_headers=headers,
-                    close_timeout=120,
-                    ping_interval=30,
-                    ping_timeout=10,
-                ) as websocket:
-                    log_info("✅ Connected to the server.", style="bold green")
+                    async with websockets.connect(
+                        url,
+                        additional_headers=headers,
+                        close_timeout=120,
+                        ping_interval=30,
+                        ping_timeout=10,
+                    ) as websocket:
+                        log_info("✅ Connected to the server.", style="bold green")
 
-                    await self.initialize_session(websocket)
-                    ws_task = asyncio.create_task(self.process_ws_messages(websocket))
+                        await self.initialize_session(websocket)
+                        ws_task = asyncio.create_task(self.process_ws_messages(websocket))
 
-                    logger.info(
-                        "Conversation started. Speak freely, and the assistant will respond."
-                    )
+                        logger.info(
+                            "Conversation started. Speak freely, and the assistant will respond."
+                        )
 
-                    self.websocket = websocket
+                        self.websocket = websocket
 
-                    self.loop.add_signal_handler(signal.SIGTERM, self.shutdown_handler)
+                        self.loop.add_signal_handler(signal.SIGTERM, self.shutdown_handler)
 
-                    if self.prompts:
-                        await self.send_initial_prompts(websocket)
-                    else:
-                        self.mic.start_recording()
-                        logger.info("Recording started. Listening for speech...")
+                        if self.prompts:
+                            await self.send_initial_prompts(websocket)
+                        else:
+                            self.mic.start_recording()
+                            logger.info("Recording started. Listening for speech...")
 
-                    await self.send_audio_loop(websocket)
+                        await self.send_audio_loop(websocket)
 
-                    await ws_task
+                        await ws_task
 
-                break
-            except ConnectionClosedError as exc:
-                if "keepalive ping timeout" in str(exc):
-                    logger.warning(
-                        "WebSocket connection lost due to keepalive ping timeout. Reconnecting..."
-                    )
-                    await asyncio.sleep(1)
-                    continue
-                logger.exception("WebSocket connection closed unexpectedly.")
-                break
-            except Exception as exc:
-                logger.exception("An unexpected error occurred: %s", exc)
-                break
-            finally:
-                if self.audio_player:
-                    self.audio_player.close()
-                self.mic.stop_recording()
-                self.mic.close()
-                self.websocket = None
-                self.ready_event.clear()
+                    break
+                except ConnectionClosedError as exc:
+                    if "keepalive ping timeout" in str(exc):
+                        logger.warning(
+                            "WebSocket connection lost due to keepalive ping timeout. Reconnecting..."
+                        )
+                        await asyncio.sleep(1)
+                        continue
+                    logger.exception("WebSocket connection closed unexpectedly.")
+                    break
+                except Exception as exc:
+                    logger.exception("An unexpected error occurred: %s", exc)
+                    break
+                finally:
+                    if self.audio_player:
+                        self.audio_player.close()
+                    self.mic.stop_recording()
+                    self.mic.close()
+                    self.websocket = None
+                    self.ready_event.clear()
+        finally:
+            self._event_injector.stop()
 
     async def initialize_session(self, websocket: Any) -> None:
         profile_context = self.profile_manager.get_profile_context()

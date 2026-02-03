@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import logging
 import sys
-import threading
-from collections import deque
 
 from ai import RealtimeAPI
+from ai.event_bus import Event
 from config import ConfigController
 from core.logging import enable_file_logging, logger
 from hardware import CameraController
@@ -132,59 +130,7 @@ def main(argv: list[str] | None = None) -> int:
         logger.exception("Realtime API startup failed: %s", exc)
         return 1
 
-    pending_imu_events: deque[ImuMotionEvent] = deque(maxlen=20)
-    pending_battery_events: deque[BatteryStatusEvent] = deque(maxlen=10)
-    pending_lock = threading.Lock()
-
-    def _send_text_message(message: str, request_response: bool = True) -> None:
-        future = asyncio.run_coroutine_threadsafe(
-            realtime_api_instance.send_text_message_to_conversation(
-                message,
-                request_response=request_response,
-            ),
-            realtime_api_instance.loop,
-        )
-
-        def _on_complete(task) -> None:
-            try:
-                task.result()
-            except Exception as exc:
-                logger.warning("Failed to send queued message: %s", exc)
-
-        future.add_done_callback(_on_complete)
-
-    def _format_battery_message(event: BatteryStatusEvent) -> tuple[str, bool]:
-        percent = event.percent_of_range * 100
-        if event.event_type == "clear":
-            return (
-                "Battery warning cleared: "
-                f"{event.voltage:.2f}V ({percent:.1f}% of range)",
-                False,
-            )
-        return (
-            "Battery voltage: "
-            f"{event.voltage:.2f}V ({percent:.1f}% of range) severity={event.severity}",
-            event.severity != "info",
-        )
-
-    def _drain_pending_events() -> None:
-        realtime_api_instance.ready_event.wait()
-        with pending_lock:
-            imu_events = list(pending_imu_events)
-            pending_imu_events.clear()
-            battery_events = list(pending_battery_events)
-            pending_battery_events.clear()
-        for event in imu_events:
-            _send_text_message(
-                "IMU event: "
-                f"{event.event_type} ({event.severity}) details={event.details}",
-                request_response=False,
-            )
-        for event in battery_events:
-            message, request_response = _format_battery_message(event)
-            _send_text_message(message, request_response=request_response)
-
-    threading.Thread(target=_drain_pending_events, daemon=True).start()
+    event_bus = realtime_api_instance.get_event_bus()
 
     motion_controller = None
     try:
@@ -212,16 +158,27 @@ def main(argv: list[str] | None = None) -> int:
         imu_monitor.start_loop()
 
         def _handle_imu_event(event: ImuMotionEvent) -> None:
-            if not realtime_api_instance.is_ready_for_injections():
-                with pending_lock:
-                    pending_imu_events.append(event)
-                logger.debug("Queueing IMU event; realtime API not ready.")
-                return
-            message = (
-                "IMU event: "
-                f"{event.event_type} ({event.severity}) details={event.details}"
+            if event.severity == "warning":
+                priority = "high"
+            elif event.severity == "notice":
+                priority = "normal"
+            else:
+                priority = "low"
+            event_bus.publish(
+                Event(
+                    source="imu",
+                    kind="observation",
+                    priority=priority,
+                    dedupe_key="imu_motion",
+                    cooldown_s=1.0,
+                    metadata={
+                        "event_type": event.event_type,
+                        "severity": event.severity,
+                        "details": event.details,
+                    },
+                ),
+                coalesce=True,
             )
-            _send_text_message(message, request_response=False)
         imu_event_handler = _handle_imu_event
         imu_monitor.register_event_handler(_handle_imu_event)
     except Exception as exc:
@@ -235,13 +192,28 @@ def main(argv: list[str] | None = None) -> int:
         battery_monitor.start_loop()
 
         def _handle_battery_event(event: BatteryStatusEvent) -> None:
-            message, request_response = _format_battery_message(event)
-            if not realtime_api_instance.is_ready_for_injections():
-                with pending_lock:
-                    pending_battery_events.append(event)
-                logger.debug("Queueing battery event; realtime API not ready.")
-                return
-            _send_text_message(message, request_response=request_response)
+            if event.severity == "critical":
+                priority = "critical"
+            elif event.severity == "warning":
+                priority = "high"
+            else:
+                priority = "low"
+            event_bus.publish(
+                Event(
+                    source="battery",
+                    kind="status",
+                    priority=priority,
+                    dedupe_key="battery_status",
+                    cooldown_s=60.0,
+                    metadata={
+                        "voltage": event.voltage,
+                        "percent_of_range": event.percent_of_range,
+                        "severity": event.severity,
+                        "event_type": event.event_type,
+                    },
+                ),
+                coalesce=True,
+            )
 
         battery_event_handler = _handle_battery_event
         battery_monitor.register_event_handler(_handle_battery_event)
