@@ -42,6 +42,11 @@ governance:
   budgets:
     tool_calls_per_minute: 30
     expensive_calls_per_day: 20
+  # tool_specs entries must define:
+  #   tier: 0 (read-only), 1 (low-risk reversible), 2 (stateful/irreversible), 3 (credentialed/irreversible)
+  #   reversible: true/false
+  #   cost_hint: cheap | med | expensive
+  #   safety_tags: list of risk tags
   tool_specs:
     read_battery_voltage:
       tier: 0
