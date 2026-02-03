@@ -10,7 +10,7 @@ from core.logging import logger
 from diagnostics.models import DiagnosticResult, DiagnosticStatus
 from interaction.audio import FRAMES_PER_BUFFER, OUTPUT_RATE
 from interaction.audio_hal import AudioOutputBackend
-from interaction.utils import CHANNELS, resolve_format
+from interaction.utils import CHANNELS, resolve_device_index, resolve_format
 
 
 def probe(backend: AudioOutputBackend | None = None) -> DiagnosticResult:
@@ -59,23 +59,28 @@ def probe(backend: AudioOutputBackend | None = None) -> DiagnosticResult:
         config = ConfigController.get_instance().get_config()
         audio_cfg = config.get("audio") or {}
         output_cfg = audio_cfg.get("output") or {}
-        output_device_index = output_cfg.get("device_index")
-        if output_device_index is None:
+        output_device_name = output_cfg.get("device_name")
+        if not output_device_name:
             return DiagnosticResult(
                 name=name,
                 status=DiagnosticStatus.FAIL,
-                details="Audio output device index not configured",
+                details="Audio output device name not configured",
             )
         pyaudio = importlib.import_module("pyaudio")
         audio = pyaudio.PyAudio()
         try:
-            device_info = audio.get_device_info_by_index(int(output_device_index))
+            output_device_index = resolve_device_index(
+                audio,
+                output_device_name,
+                require_output=True,
+            )
+            device_info = audio.get_device_info_by_index(output_device_index)
             stream = audio.open(
                 format=resolve_format(),
                 channels=CHANNELS,
                 rate=OUTPUT_RATE,
                 output=True,
-                output_device_index=int(output_device_index),
+                output_device_index=output_device_index,
                 frames_per_buffer=FRAMES_PER_BUFFER,
                 start=False,
             )

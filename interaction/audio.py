@@ -10,7 +10,7 @@ import time
 from typing import Any
 
 from core.logging import logger
-from interaction.utils import CHANNELS, resolve_format
+from interaction.utils import CHANNELS, resolve_device_index, resolve_format
 
 
 INPUT_RATE = 24000
@@ -24,8 +24,7 @@ class AudioPlayer:
     def __init__(
         self,
         on_playback_complete: Any | None = None,
-        output_device_index: int | None = None,
-        output_name_hint: str | None = None,
+        output_device_name: str | None = None,
     ) -> None:
         if importlib.util.find_spec("pyaudio") is None:
             raise RuntimeError("PyAudio is required for AudioPlayer")
@@ -45,11 +44,16 @@ class AudioPlayer:
         self.p = pyaudio.PyAudio()
         audio_format = resolve_format()
 
-        if output_device_index is None:
+        if not output_device_name:
             raise RuntimeError(
-                "Audio output device index is required. Set audio.output.device_index"
+                "Audio output device name is required. Set audio.output.device_name"
             )
 
+        output_device_index = resolve_device_index(
+            self.p,
+            output_device_name,
+            require_output=True,
+        )
         try:
             info = self.p.get_device_info_by_index(output_device_index)
             logger.info(
@@ -60,9 +64,9 @@ class AudioPlayer:
             )
         except Exception:
             logger.info(
-                "[AUDIO] Output device index selected: %s (hint=%s)",
+                "[AUDIO] Output device selected: %s (idx=%s)",
+                output_device_name,
                 output_device_index,
-                output_name_hint,
             )
 
         try:
@@ -78,8 +82,8 @@ class AudioPlayer:
         except Exception as exc:
             self._log_devices(require_output=True)
             raise RuntimeError(
-                "Failed to open output audio device index "
-                f"{output_device_index} (hint={output_name_hint})"
+                "Failed to open output audio device "
+                f"'{output_device_name}' (idx={output_device_index})"
             ) from exc
 
         self._q: queue.Queue[bytes | None] = queue.Queue()

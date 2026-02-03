@@ -8,7 +8,7 @@ import queue
 from typing import Any
 
 from core.logging import logger
-from interaction.utils import CHANNELS, CHUNK, RATE, resolve_format
+from interaction.utils import CHANNELS, CHUNK, RATE, resolve_device_index, resolve_format
 
 
 class AsyncMicrophone:
@@ -16,8 +16,7 @@ class AsyncMicrophone:
 
     def __init__(
         self,
-        input_device_index: int | None = None,
-        input_name_hint: str | None = None,
+        input_device_name: str | None = None,
         debug_list_devices: bool = False,
     ) -> None:
         if importlib.util.find_spec("pyaudio") is None:
@@ -36,11 +35,16 @@ class AsyncMicrophone:
         if debug_list_devices:
             self._log_devices(require_input=True)
 
-        if input_device_index is None:
+        if not input_device_name:
             raise RuntimeError(
-                "Audio input device index is required. Set audio.input.device_index"
+                "Audio input device name is required. Set audio.input.device_name"
             )
 
+        input_device_index = resolve_device_index(
+            self.p,
+            input_device_name,
+            require_input=True,
+        )
         try:
             info = self.p.get_device_info_by_index(input_device_index)
             logger.info(
@@ -51,9 +55,9 @@ class AsyncMicrophone:
             )
         except Exception:
             logger.info(
-                "[ASYNC MIC] Input device index selected: %s (hint=%s)",
+                "[ASYNC MIC] Input device selected: %s (idx=%s)",
+                input_device_name,
                 input_device_index,
-                input_name_hint,
             )
 
         try:
@@ -69,8 +73,8 @@ class AsyncMicrophone:
         except Exception as exc:
             self._log_devices(require_input=True)
             raise RuntimeError(
-                "Failed to open input audio device index "
-                f"{input_device_index} (hint={input_name_hint})"
+                "Failed to open input audio device "
+                f"'{input_device_name}' (idx={input_device_index})"
             ) from exc
         self.queue: queue.Queue[bytes] = queue.Queue(maxsize=50)
         self.is_recording = False

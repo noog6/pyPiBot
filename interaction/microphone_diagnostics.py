@@ -9,7 +9,7 @@ from config import ConfigController
 from core.logging import logger
 from diagnostics.models import DiagnosticResult, DiagnosticStatus
 from interaction.microphone_hal import AudioInputBackend
-from interaction.utils import CHANNELS, CHUNK, RATE, resolve_format
+from interaction.utils import CHANNELS, CHUNK, RATE, resolve_device_index, resolve_format
 
 
 def probe(backend: AudioInputBackend | None = None) -> DiagnosticResult:
@@ -65,23 +65,28 @@ def probe(backend: AudioInputBackend | None = None) -> DiagnosticResult:
         config = ConfigController.get_instance().get_config()
         audio_cfg = config.get("audio") or {}
         input_cfg = audio_cfg.get("input") or {}
-        input_device_index = input_cfg.get("device_index")
-        if input_device_index is None:
+        input_device_name = input_cfg.get("device_name")
+        if not input_device_name:
             return DiagnosticResult(
                 name=name,
                 status=DiagnosticStatus.FAIL,
-                details="Audio input device index not configured",
+                details="Audio input device name not configured",
             )
         pyaudio = importlib.import_module("pyaudio")
         audio = pyaudio.PyAudio()
         try:
-            device_info = audio.get_device_info_by_index(int(input_device_index))
+            input_device_index = resolve_device_index(
+                audio,
+                input_device_name,
+                require_input=True,
+            )
+            device_info = audio.get_device_info_by_index(input_device_index)
             stream = audio.open(
                 format=resolve_format(),
                 channels=CHANNELS,
                 rate=RATE,
                 input=True,
-                input_device_index=int(input_device_index),
+                input_device_index=input_device_index,
                 frames_per_buffer=CHUNK,
                 start=False,
             )
