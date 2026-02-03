@@ -53,6 +53,7 @@ from motion import (
     gesture_idle,
     gesture_nod,
 )
+from motion.gesture_library import DEFAULT_GESTURES
 from services.profile_manager import ProfileManager
 from services.reflection_manager import ReflectionManager
 from storage import StorageController
@@ -187,6 +188,9 @@ class RealtimeAPI:
         tool_specs = build_tool_specs(governance_cfg.get("tool_specs") or {})
         self._governance = GovernanceLayer(tool_specs, config)
         self._pending_action: ActionPacket | None = None
+        self._pending_action_staging: dict[str, Any] | None = None
+        self._approval_timeout_s = float(config.get("approval_timeout_s", 90.0))
+        self._tool_definitions = {tool["name"]: tool for tool in tools}
         self._storage = StorageController.get_instance()
         self._reflection_coordinator = ReflectionCoordinator(
             api_key=self.api_key,
@@ -485,6 +489,191 @@ class RealtimeAPI:
         if not text:
             return "(none)"
         return text if len(text) <= limit else f"{text[:limit]}…"
+
+    def _find_gesture_definition(self, gesture_name: str) -> dict[str, Any] | None:
+        for definition in DEFAULT_GESTURES:
+            if definition.name == gesture_name:
+                total_duration = sum(frame.duration_ms for frame in definition.frames)
+                return {
+                    "name": definition.name,
+                    "total_duration_ms": total_duration,
+                    "frame_count": len(definition.frames),
+                }
+        return None
+
+    def _stage_action(self, action: ActionPacket) -> dict[str, Any]:
+        tool_def = self._tool_definitions.get(action.tool_name)
+        errors: list[str] = []
+        warnings: list[str] = []
+        bounds_checks: list[dict[str, Any]] = []
+
+        if tool_def is None:
+            warnings.append("Tool definition not found; skipped schema validation.")
+        else:
+            schema = tool_def.get("parameters") or {}
+            properties = schema.get("properties") or {}
+            required = set(schema.get("required") or [])
+            provided = set(action.tool_args.keys())
+
+            missing = sorted(required - provided)
+            if missing:
+                errors.append(f"Missing required args: {', '.join(missing)}.")
+
+            extra = sorted(provided - set(properties.keys()))
+            if extra:
+                warnings.append(f"Unknown args will be ignored: {', '.join(extra)}.")
+
+            for key, spec in properties.items():
+                if key not in action.tool_args:
+                    continue
+                value = action.tool_args[key]
+                expected = spec.get("type")
+                if expected and not self._validate_arg_type(expected, value):
+                    errors.append(f"Arg '{key}' expected type {expected}.")
+                minimum = spec.get("minimum")
+                maximum = spec.get("maximum")
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    if minimum is not None or maximum is not None:
+                        within = True
+                        if minimum is not None and value < minimum:
+                            within = False
+                        if maximum is not None and value > maximum:
+                            within = False
+                        bounds_checks.append(
+                            {
+                                "field": key,
+                                "value": value,
+                                "min": minimum,
+                                "max": maximum,
+                                "within": within,
+                            }
+                        )
+                        if not within:
+                            errors.append(
+                                f"Arg '{key}' out of bounds ({minimum}..{maximum})."
+                            )
+
+        motion_info = None
+        if action.tool_name.startswith("gesture_"):
+            gesture = self._find_gesture_definition(action.tool_name)
+            motion_info = {
+                "gesture": action.tool_name,
+                "duration_ms": gesture["total_duration_ms"] if gesture else None,
+                "frame_count": gesture["frame_count"] if gesture else None,
+                "delay_ms": action.tool_args.get("delay_ms", 0),
+                "intensity": action.tool_args.get("intensity", 1.0),
+                "safe_servo_bounds": {"pan": [-90.0, 90.0], "tilt": [-45.0, 45.0]},
+            }
+
+        explanation = self._describe_staged_action(action, motion_info)
+
+        return {
+            "valid": not errors,
+            "errors": errors,
+            "warnings": warnings,
+            "bounds_checks": bounds_checks,
+            "explanation": explanation,
+            "motion": motion_info,
+        }
+
+    def _validate_arg_type(self, expected: str, value: Any) -> bool:
+        if expected == "string":
+            return isinstance(value, str)
+        if expected == "integer":
+            return isinstance(value, int) and not isinstance(value, bool)
+        if expected == "number":
+            return isinstance(value, (int, float)) and not isinstance(value, bool)
+        if expected == "boolean":
+            return isinstance(value, bool)
+        if expected == "array":
+            return isinstance(value, list)
+        if expected == "object":
+            return isinstance(value, dict)
+        return True
+
+    def _describe_staged_action(
+        self, action: ActionPacket, motion_info: dict[str, Any] | None
+    ) -> str:
+        if action.tool_name.startswith("read_") or action.tool_name.startswith("get_"):
+            return f"Would read data via {action.tool_name}."
+        if action.tool_name.startswith("recall_"):
+            return f"Would fetch stored memories via {action.tool_name}."
+        if action.tool_name.startswith("gesture_") and motion_info:
+            duration = motion_info.get("duration_ms")
+            return (
+                f"Would queue gesture '{motion_info['gesture']}' "
+                f"for ~{duration}ms within safe servo bounds."
+            )
+        return f"Would call {action.tool_name} with the proposed arguments."
+
+    def _build_approval_prompt(self, action: ActionPacket) -> str:
+        base = f"I can do this now: {action.intent_summary}"
+        if action.tier >= 3:
+            return (
+                f"{base}. This will: {action.expected_effect} "
+                f"Approve? Reply exactly: 'Yes, do it now' / no / modify."
+            )
+        return f"{base}. Approve? (yes / no / modify)"
+
+    def _clear_pending_action(self) -> None:
+        self._pending_action = None
+        self._pending_action_staging = None
+
+    async def _maybe_handle_approval_response(
+        self, text: str, websocket: Any
+    ) -> bool:
+        if not self._pending_action:
+            return False
+        now = time.monotonic()
+        action = self._pending_action
+        if action.expiry_ts is not None and now > action.expiry_ts:
+            await self.send_assistant_message(
+                "Approval window expired. Please ask again if you still want this.",
+                websocket,
+            )
+            self._clear_pending_action()
+            return True
+
+        normalized = text.strip().lower()
+        if not normalized:
+            return False
+
+        requires_phrase = action.tier >= 3
+        approved = False
+        if requires_phrase:
+            approved = normalized in {"yes, do it now", "yes do it now"}
+        else:
+            approved = normalized in {"yes", "y", "approve", "ok", "okay"}
+
+        if approved:
+            staging = self._pending_action_staging or self._stage_action(action)
+            await self._execute_action(action, staging, websocket)
+            self._clear_pending_action()
+            return True
+
+        if normalized in {"no", "n", "deny", "cancel"}:
+            await self._reject_tool_call(
+                action,
+                "User declined approval.",
+                websocket,
+                status="cancelled",
+            )
+            self._clear_pending_action()
+            return True
+
+        if normalized in {"modify", "change"}:
+            await self.send_assistant_message(
+                "Okay. Tell me what to change and I will restage the action.",
+                websocket,
+            )
+            self._clear_pending_action()
+            return True
+
+        await self.send_assistant_message(
+            "Please reply with: yes / no / modify.",
+            websocket,
+        )
+        return True
 
     def _build_response_done_prompt(self, trigger: str) -> str:
         tool_calls = self._clip_text(
@@ -817,6 +1006,8 @@ class RealtimeAPI:
             transcript = self._extract_transcript(event)
             if transcript:
                 self._record_user_input(transcript, source="input_audio_transcription")
+                if await self._maybe_handle_approval_response(transcript, websocket):
+                    return
         elif event_type == "input_audio_buffer.speech_started":
             logger.info("Speech detected, listening...")
             self.orchestration_state.transition(
@@ -871,20 +1062,50 @@ class RealtimeAPI:
                 args = json.loads(self.function_call_args) if self.function_call_args else {}
             except json.JSONDecodeError:
                 args = {}
-            action = self._governance.build_action_packet(function_name, call_id, args)
+            action = self._governance.build_action_packet(
+                function_name,
+                call_id,
+                args,
+                reason=f"function_call {function_name}",
+            )
+            staging = self._stage_action(action)
+            if not staging["valid"]:
+                await self._reject_tool_call(
+                    action,
+                    "Argument validation failed.",
+                    websocket,
+                    staging=staging,
+                    status="invalid_arguments",
+                )
+                return
             decision = self._governance.review(action)
             log_info(f"🛡️ Governance decision: {decision.status} ({decision.reason}) {action.summary()}")
             if decision.approved:
-                await self.execute_function_call(function_name, call_id, args, websocket)
-                self._governance.record_execution(action)
+                await self._execute_action(action, staging, websocket)
             elif decision.needs_confirmation:
+                action.requires_confirmation = True
                 self._pending_action = action
-                await self._request_tool_confirmation(action, decision.reason, websocket)
+                self._pending_action_staging = staging
+                action.expiry_ts = time.monotonic() + self._approval_timeout_s
+                await self._request_tool_confirmation(action, decision.reason, websocket, staging)
             else:
-                await self._deny_tool_call(action, decision.reason, websocket)
+                await self._reject_tool_call(
+                    action,
+                    decision.reason,
+                    websocket,
+                    staging=staging,
+                    status="denied",
+                )
 
     async def execute_function_call(
-        self, function_name: str, call_id: str, args: dict[str, Any], websocket: Any
+        self,
+        function_name: str,
+        call_id: str,
+        args: dict[str, Any],
+        websocket: Any,
+        *,
+        action: ActionPacket | None = None,
+        staging: dict[str, Any] | None = None,
     ) -> None:
         if function_name in function_map:
             try:
@@ -909,6 +1130,8 @@ class RealtimeAPI:
                 "call_id": call_id,
                 "args": args,
                 "result": result,
+                "action_packet": action.to_payload() if action else None,
+                "staging": staging,
                 "timestamp": datetime.utcnow().isoformat(),
             }
         )
@@ -933,30 +1156,57 @@ class RealtimeAPI:
         self.function_call = None
         self.function_call_args = ""
 
+    async def _execute_action(
+        self,
+        action: ActionPacket,
+        staging: dict[str, Any],
+        websocket: Any,
+    ) -> None:
+        if not staging.get("valid", True):
+            await self._reject_tool_call(
+                action,
+                "Argument validation failed.",
+                websocket,
+                staging=staging,
+                status="invalid_arguments",
+            )
+            return
+        await self.execute_function_call(
+            action.tool_name,
+            action.id,
+            action.tool_args,
+            websocket,
+            action=action,
+            staging=staging,
+        )
+        self._governance.record_execution(action)
+
     async def _request_tool_confirmation(
         self,
         action: ActionPacket,
         reason: str,
         websocket: Any,
+        staging: dict[str, Any],
     ) -> None:
         summary = action.summary()
-        tool_metadata = self._governance.describe_tool(action.name)
-        message = (
-            "I need confirmation before running this action. "
-            f"{summary}. Reason: {reason}."
-        )
+        tool_metadata = self._governance.describe_tool(action.tool_name)
+        message = self._build_approval_prompt(action)
         await self.send_assistant_message(message, websocket)
         function_call_output = {
             "type": "conversation.item.create",
             "item": {
                 "type": "function_call_output",
-                "call_id": action.call_id,
+                "call_id": action.id,
                 "output": json.dumps(
                     {
                         "status": "awaiting_confirmation",
                         "message": message,
-                        "tool": action.name,
+                        "tool": action.tool_name,
                         "tool_metadata": tool_metadata,
+                        "action_packet": action.to_payload(),
+                        "staging": staging,
+                        "summary": summary,
+                        "reason": reason,
                     }
                 ),
             },
@@ -971,28 +1221,30 @@ class RealtimeAPI:
         self.function_call = None
         self.function_call_args = ""
 
-    async def _deny_tool_call(
+    async def _reject_tool_call(
         self,
         action: ActionPacket,
         reason: str,
         websocket: Any,
+        *,
+        staging: dict[str, Any] | None = None,
+        status: str = "denied",
     ) -> None:
-        message = (
-            "Tool execution denied by governance policy. "
-            f"{action.summary()}. Reason: {reason}."
-        )
+        message = f"Tool execution not run. {action.summary()}. Reason: {reason}."
         await self.send_assistant_message(message, websocket)
         function_call_output = {
             "type": "conversation.item.create",
             "item": {
                 "type": "function_call_output",
-                "call_id": action.call_id,
+                "call_id": action.id,
                 "output": json.dumps(
                     {
-                        "status": "denied",
+                        "status": status,
                         "message": message,
-                        "tool": action.name,
-                        "tool_metadata": self._governance.describe_tool(action.name),
+                        "tool": action.tool_name,
+                        "tool_metadata": self._governance.describe_tool(action.tool_name),
+                        "action_packet": action.to_payload(),
+                        "staging": staging,
                     }
                 ),
             },
@@ -1181,6 +1433,8 @@ class RealtimeAPI:
         text_message: str,
         request_response: bool = True,
     ) -> None:
+        if await self._maybe_handle_approval_response(text_message, self.websocket):
+            return
         self.orchestration_state.transition(
             OrchestrationPhase.SENSE,
             reason="text message",
