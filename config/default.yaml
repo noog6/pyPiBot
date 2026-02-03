@@ -25,10 +25,8 @@ silence_duration_ms: 900
 # Audio devices
 audio:
   input:
-    device_index: 0
     device_name: "default"
   output:
-    device_index: 0
     device_name: "softvol"
 
 # Injected response throttling
