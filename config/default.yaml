@@ -42,6 +42,15 @@ governance:
   budgets:
     tool_calls_per_minute: 30
     expensive_calls_per_day: 20
+  autonomy_windows:
+    - name: "daytime-elevated"
+      start_time: "09:00"
+      duration_minutes: 120
+      allowed_tiers: [2]
+    - name: "nightly-maintenance"
+      start_time: "23:00"
+      duration_minutes: 60
+      allowed_tiers: [2, 3]
   # tool_specs entries must define:
   #   tier: 0 (read-only), 1 (low-risk reversible), 2 (stateful/irreversible), 3 (credentialed/irreversible)
   #   reversible: true/false
