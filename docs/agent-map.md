@@ -3,7 +3,7 @@
 This document maps the active agents/threads in the current runtime and the data
 flows between them. It mirrors the wiring in `main.py` and the thread loops in
 the controllers/monitors. The realtime agent thread is the primary agentic
-flow, coordinating audio in/out and tool execution.
+flow, coordinating audio in/out, tool execution, and event injections.
 
 ## Top-Level Runtime Orchestration
 
@@ -11,10 +11,12 @@ The entrypoint in `main.py` builds and launches the following components:
 
 - **Realtime API agent (async loop)**: The primary agent thread that connects to
   OpenAI realtime, manages the websocket event loop, and coordinates tool
-  execution, audio input, and audio output. It exposes `is_ready_for_injections`
-  for other threads to push events into the conversation context. It also tracks
-  orchestration phases (sense/plan/act/reflect/idle) during the response
+  execution, audio input, audio output, and event injection. It exposes
+  `is_ready_for_injections` for other threads to gate event delivery. It also
+  tracks orchestration phases (sense/plan/act/reflect/idle) during the response
   lifecycle and emits phase-transition logs for observability.【F:ai/realtime_api.py†L92-L208】【F:ai/orchestration.py†L1-L27】
+- **Event bus (shared queue)**: Thread-safe queue that collects sensor events
+  and orders them by priority for injection into the realtime session.【F:ai/event_bus.py†L1-L94】
 - **Motion control loop thread**: A background loop that drives the servo
   controller and executes queued gesture/motion actions.【F:motion/motion_controller.py†L90-L176】
 - **Vision loop thread**: The camera controller captures frames, detects scene
@@ -23,8 +25,9 @@ The entrypoint in `main.py` builds and launches the following components:
   event callbacks into the main runtime.【F:services/imu_monitor.py†L40-L210】
 - **Battery monitor thread**: Samples the ADS1015 voltage, derives battery
   events, and emits callbacks to the runtime.【F:services/battery_monitor.py†L31-L140】
-- **Pending event drain thread**: Buffers IMU/battery events until the realtime
-  agent is ready, then injects them into the conversation.【F:main.py†L132-L178】
+- **Event injector thread**: Drains the shared event bus, applies cooldown/TTL
+  checks, and injects events into the realtime session when the websocket is
+  ready.【F:ai/event_injector.py†L1-L79】【F:ai/realtime_api.py†L193-L646】
 
 These are all started in `main.py` after the realtime API is initialized and
 before the async realtime loop runs.【F:main.py†L110-L246】
@@ -35,7 +38,6 @@ before the async realtime loop runs.【F:main.py†L110-L246】
 flowchart LR
     subgraph Runtime["main.py runtime"]
         MAIN[main.py orchestration]
-        DRAIN[Pending event drain thread]
     end
 
     subgraph Realtime["Realtime agent flow (async)"]
@@ -43,6 +45,8 @@ flowchart LR
         MIC["AsyncMicrophone<br/>PyAudio callback + queue"]
         PLAYER["AudioPlayer<br/>playback thread"]
         TOOLS["Tool execution<br/>function_map"]
+        BUS["EventBus"]
+        INJECT["EventInjector thread"]
         STATE[InteractionStateManager]
         ORCH["OrchestrationState<br/>sense/plan/act/reflect"]
         REFLECTOR["ReflectionCoordinator<br/>async task"]
@@ -62,7 +66,6 @@ flowchart LR
     end
 
     MAIN --> WS
-    MAIN --> DRAIN
     MAIN --> CAM
     MAIN --> MOTION
     MAIN --> IMU
@@ -71,13 +74,15 @@ flowchart LR
     MIC --> WS
     WS --> PLAYER
     WS --> TOOLS
+    WS --> BUS
+    BUS --> INJECT
+    INJECT --> WS
     WS --> STATE
     WS --> ORCH
     ORCH --> REFLECTOR
 
-    IMU --> DRAIN
-    BAT --> DRAIN
-    DRAIN --> WS
+    IMU --> BUS
+    BAT --> BUS
 
     CAM --> WS
     WS --> CAM
@@ -111,12 +116,11 @@ buffers images until the agent is ready.【F:hardware/camera_controller.py†L14
 
 ### 3. IMU + Battery Monitor Threads → Realtime Agent
 
-The IMU and battery monitors run independent loops and emit events via
-callbacks. `main.py` registers handlers that:
-
-1. **Queue events** until the realtime agent declares readiness.
-2. **Inject events** as text messages once the websocket is ready, avoiding
-   response creation for non-critical events where possible.【F:main.py†L118-L236】
+The IMU and battery monitors run independent loops and publish structured
+events to the shared `EventBus`. `main.py` registers handlers that convert
+sensor events into bus payloads, and the realtime agent’s `EventInjector`
+thread drains the bus when ready, applying cooldown/TTL logic before injecting
+messages into the websocket session.【F:services/imu_monitor.py†L109-L153】【F:services/battery_monitor.py†L76-L118】【F:ai/event_injector.py†L1-L79】【F:main.py†L110-L207】
 
 ### 4. Motion Loop and Realtime State Hooks
 
@@ -153,4 +157,5 @@ session initialization to seed instructions for the next turn.【F:ai/realtime_a
 | Motion control loop | `MotionController` | Servo motion execution | Gesture/action queue | Servo position updates |
 | IMU monitor | `ImuMonitor` | Sample IMU data, emit events | IMU sensor | Motion events to main/realtime |
 | Battery monitor | `BatteryMonitor` | Sample voltage, emit events | ADS1015 sensor | Battery events to main/realtime |
-| Pending event drain | `main.py` | Flush queued events when realtime ready | Buffered IMU/battery events | Messages to realtime |
+| Event bus | `ai/EventBus` | Thread-safe queue of pending realtime events | Sensor handler events | Prioritized events for injection |
+| Event injector thread | `ai/EventInjector` | Flush queued bus events when realtime ready | EventBus entries | Messages to realtime |
