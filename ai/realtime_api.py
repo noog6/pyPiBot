@@ -155,6 +155,8 @@ class RealtimeAPI:
         self._last_user_input_text: str | None = None
         self._last_user_input_time: float | None = None
         self._last_user_input_source: str | None = None
+        self._last_outgoing_event_type: str | None = None
+        self._last_outgoing_response_origin: str | None = None
         self._tool_call_records: list[dict[str, Any]] = []
         self._last_tool_call_results: list[dict[str, Any]] = []
         self._last_response_metadata: dict[str, Any] = {}
@@ -211,6 +213,19 @@ class RealtimeAPI:
             and self.loop is not None
             and self.loop.is_running()
         )
+
+    def _track_outgoing_event(
+        self,
+        event: dict[str, Any],
+        *,
+        origin: str | None = None,
+    ) -> None:
+        event_type = event.get("type")
+        if not event_type:
+            return
+        self._last_outgoing_event_type = str(event_type)
+        if event_type == "response.create":
+            self._last_outgoing_response_origin = origin
 
     def inject_event(self, event: Event) -> None:
         message, request_response = self._format_event_for_injection(event)
@@ -705,6 +720,10 @@ class RealtimeAPI:
     async def handle_event(self, event: dict[str, Any], websocket: Any) -> None:
         event_type = event.get("type")
         if event_type == "response.created":
+            origin = "unknown"
+            if self._last_outgoing_event_type == "response.create":
+                origin = self._last_outgoing_response_origin or "unknown"
+            log_info(f"response.created: origin={origin}")
             self.orchestration_state.transition(
                 OrchestrationPhase.PLAN,
                 reason="response created",
@@ -863,8 +882,12 @@ class RealtimeAPI:
             },
         }
         log_ws_event("Outgoing", function_call_output)
+        self._track_outgoing_event(function_call_output)
         await websocket.send(json.dumps(function_call_output))
-        await websocket.send(json.dumps({"type": "response.create"}))
+        response_create_event = {"type": "response.create"}
+        log_ws_event("Outgoing", response_create_event)
+        self._track_outgoing_event(response_create_event, origin="tool_output")
+        await websocket.send(json.dumps(response_create_event))
 
         self.function_call = None
         self.function_call_args = ""
@@ -1018,10 +1041,12 @@ class RealtimeAPI:
             },
         }
         log_ws_event("Outgoing", event)
+        self._track_outgoing_event(event)
         await websocket.send(json.dumps(event))
 
         response_create_event = {"type": "response.create"}
         log_ws_event("Outgoing", response_create_event)
+        self._track_outgoing_event(response_create_event, origin="prompt")
         await websocket.send(json.dumps(response_create_event))
 
     async def send_text_message_to_conversation(
@@ -1042,6 +1067,8 @@ class RealtimeAPI:
                 "content": [{"type": "input_text", "text": text_message}],
             },
         }
+        log_ws_event("Outgoing", text_event)
+        self._track_outgoing_event(text_event)
         await self.websocket.send(json.dumps(text_event))
         if request_response:
             await self._stimuli_coordinator.enqueue(
@@ -1161,6 +1188,7 @@ class RealtimeAPI:
             f"Requesting injected response for {trigger} with metadata {response_metadata}."
         )
         log_ws_event("Outgoing", response_create_event)
+        self._track_outgoing_event(response_create_event, origin="injection")
         await self.websocket.send(json.dumps(response_create_event))
         now = time.monotonic()
         self._injection_response_timestamps.append(now)
