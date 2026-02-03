@@ -35,6 +35,7 @@ from interaction import (
 from ai.tools import function_map, tools
 from ai.reflection import ReflectionCoordinator, ReflectionContext
 from ai.stimuli_coordinator import StimuliCoordinator
+from ai.governance import ActionPacket, GovernanceLayer, build_tool_specs
 from ai.orchestration import OrchestrationPhase, OrchestrationState
 from ai.event_bus import Event, EventBus
 from ai.event_injector import EventInjector
@@ -182,6 +183,10 @@ class RealtimeAPI:
         self._image_response_enabled = self._image_response_mode != "catalog_only"
         self._reflection_enabled = bool(config.get("reflection_enabled", False))
         self._reflection_min_interval_s = float(config.get("reflection_min_interval_s", 300.0))
+        governance_cfg = config.get("governance") or {}
+        tool_specs = build_tool_specs(governance_cfg.get("tool_specs") or {})
+        self._governance = GovernanceLayer(tool_specs, config)
+        self._pending_action: ActionPacket | None = None
         self._storage = StorageController.get_instance()
         self._reflection_coordinator = ReflectionCoordinator(
             api_key=self.api_key,
@@ -866,7 +871,17 @@ class RealtimeAPI:
                 args = json.loads(self.function_call_args) if self.function_call_args else {}
             except json.JSONDecodeError:
                 args = {}
-            await self.execute_function_call(function_name, call_id, args, websocket)
+            action = self._governance.build_action_packet(function_name, call_id, args)
+            decision = self._governance.review(action)
+            log_info(f"🛡️ Governance decision: {decision.status} ({decision.reason}) {action.summary()}")
+            if decision.approved:
+                await self.execute_function_call(function_name, call_id, args, websocket)
+                self._governance.record_execution(action)
+            elif decision.needs_confirmation:
+                self._pending_action = action
+                await self._request_tool_confirmation(action, decision.reason, websocket)
+            else:
+                await self._deny_tool_call(action, decision.reason, websocket)
 
     async def execute_function_call(
         self, function_name: str, call_id: str, args: dict[str, Any], websocket: Any
@@ -918,6 +933,80 @@ class RealtimeAPI:
         self.function_call = None
         self.function_call_args = ""
 
+    async def _request_tool_confirmation(
+        self,
+        action: ActionPacket,
+        reason: str,
+        websocket: Any,
+    ) -> None:
+        summary = action.summary()
+        tool_metadata = self._governance.describe_tool(action.name)
+        message = (
+            "I need confirmation before running this action. "
+            f"{summary}. Reason: {reason}."
+        )
+        await self.send_assistant_message(message, websocket)
+        function_call_output = {
+            "type": "conversation.item.create",
+            "item": {
+                "type": "function_call_output",
+                "call_id": action.call_id,
+                "output": json.dumps(
+                    {
+                        "status": "awaiting_confirmation",
+                        "message": message,
+                        "tool": action.name,
+                        "tool_metadata": tool_metadata,
+                    }
+                ),
+            },
+        }
+        log_ws_event("Outgoing", function_call_output)
+        self._track_outgoing_event(function_call_output)
+        await websocket.send(json.dumps(function_call_output))
+        response_create_event = {"type": "response.create"}
+        log_ws_event("Outgoing", response_create_event)
+        self._track_outgoing_event(response_create_event, origin="tool_output")
+        await websocket.send(json.dumps(response_create_event))
+        self.function_call = None
+        self.function_call_args = ""
+
+    async def _deny_tool_call(
+        self,
+        action: ActionPacket,
+        reason: str,
+        websocket: Any,
+    ) -> None:
+        message = (
+            "Tool execution denied by governance policy. "
+            f"{action.summary()}. Reason: {reason}."
+        )
+        await self.send_assistant_message(message, websocket)
+        function_call_output = {
+            "type": "conversation.item.create",
+            "item": {
+                "type": "function_call_output",
+                "call_id": action.call_id,
+                "output": json.dumps(
+                    {
+                        "status": "denied",
+                        "message": message,
+                        "tool": action.name,
+                        "tool_metadata": self._governance.describe_tool(action.name),
+                    }
+                ),
+            },
+        }
+        log_ws_event("Outgoing", function_call_output)
+        self._track_outgoing_event(function_call_output)
+        await websocket.send(json.dumps(function_call_output))
+        response_create_event = {"type": "response.create"}
+        log_ws_event("Outgoing", response_create_event)
+        self._track_outgoing_event(response_create_event, origin="tool_output")
+        await websocket.send(json.dumps(response_create_event))
+        self.function_call = None
+        self.function_call_args = ""
+
     async def send_image_to_assistant(self, new_image: Any) -> None:
         if self.websocket:
             bytes_buffer = BytesIO()
@@ -948,6 +1037,18 @@ class RealtimeAPI:
                 logger.debug("Skipping image injection response (mode=%s).", self._image_response_mode)
         else:
             log_warning("Unable to send image to assistant, websocket not available")
+
+    async def send_assistant_message(self, message: str, websocket: Any) -> None:
+        assistant_item = {
+            "type": "conversation.item.create",
+            "item": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": message}],
+            },
+        }
+        log_ws_event("Outgoing", assistant_item)
+        await websocket.send(json.dumps(assistant_item))
 
     async def send_error_message_to_assistant(self, error_message: str, websocket: Any) -> None:
         error_item = {
