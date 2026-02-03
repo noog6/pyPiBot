@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
-import logging
 from pathlib import Path
 import sqlite3
 import threading
@@ -13,9 +12,7 @@ import traceback
 from typing import Any
 
 from config import ConfigController
-
-
-LOGGER = logging.getLogger(__name__)
+from core.logging import logger as LOGGER
 
 
 def millis() -> int:

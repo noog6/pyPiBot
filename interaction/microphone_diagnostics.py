@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
-import logging
 
 from config import ConfigController
+from core.logging import logger
 from diagnostics.models import DiagnosticResult, DiagnosticStatus
 from interaction.microphone_hal import AudioInputBackend
 from interaction.utils import CHANNELS, CHUNK, RATE, resolve_format
@@ -98,7 +98,7 @@ def probe(backend: AudioInputBackend | None = None) -> DiagnosticResult:
         try:
             _log_devices(require_input=True)
         except Exception:
-            logging.exception("Failed to list input devices after audio probe error")
+            logger.exception("Failed to list input devices after audio probe error")
         return DiagnosticResult(
             name=name,
             status=DiagnosticStatus.FAIL,
@@ -112,7 +112,7 @@ def _log_devices(*, require_input: bool = False) -> None:
     pyaudio = importlib.import_module("pyaudio")
     audio = pyaudio.PyAudio()
     try:
-        logging.info(
+        logger.info(
             "[MIC DIAG] Listing devices (input=%s)",
             require_input,
         )
@@ -120,7 +120,7 @@ def _log_devices(*, require_input: bool = False) -> None:
             info = audio.get_device_info_by_index(i)
             if require_input and info.get("maxInputChannels", 0) <= 0:
                 continue
-            logging.info(
+            logger.info(
                 "[MIC DIAG] Device %s: %s | Input Channels: %s",
                 i,
                 info.get("name"),

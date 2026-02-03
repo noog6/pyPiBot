@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import logging
 import threading
 import time
 from typing import Callable
 
 from ai.event_bus import Event, EventBus
-
-
-LOGGER = logging.getLogger(__name__)
+from core.logging import logger as LOGGER
 
 
 class EventInjector:

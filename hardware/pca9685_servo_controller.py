@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
-import logging
 import math
 import time
 from typing import Any
 
-
-LOGGER = logging.getLogger(__name__)
+from core.logging import logger as LOGGER
 
 
 class PCA9685Actuator:

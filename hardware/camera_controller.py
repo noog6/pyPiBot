@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import threading
 import time
 import traceback
@@ -16,9 +15,6 @@ from config import ConfigController
 from core.logging import logger
 from motion.motion_controller import MotionController, millis
 from storage.controller import StorageController
-
-
-LOGGER = logging.getLogger(__name__)
 
 
 def _require_camera_deps() -> tuple[Any, Any, Any]:

@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import logging
-
-
-LOGGER = logging.getLogger("motion")
+from core.logging import logger as LOGGER
 
 
 def log_info(message: str, *args: object) -> None:

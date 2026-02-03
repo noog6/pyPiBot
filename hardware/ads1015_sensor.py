@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
-import logging
 import time
 
-
-LOGGER = logging.getLogger(__name__)
+from core.logging import logger as LOGGER
 
 ADS_I2C_ADDRESS = 0x48
 

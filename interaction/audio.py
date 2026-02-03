@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
-import logging
 import queue
 import threading
 import time
 from typing import Any
 
+from core.logging import logger
 from interaction.utils import CHANNELS, resolve_format
 
 
@@ -52,14 +52,14 @@ class AudioPlayer:
 
         try:
             info = self.p.get_device_info_by_index(output_device_index)
-            logging.info(
+            logger.info(
                 "[AUDIO] Output device (selected): %s idx=%s defaultRate=%s",
                 info.get("name"),
                 info.get("index"),
                 info.get("defaultSampleRate"),
             )
         except Exception:
-            logging.info(
+            logger.info(
                 "[AUDIO] Output device index selected: %s (hint=%s)",
                 output_device_index,
                 output_name_hint,
@@ -98,7 +98,7 @@ class AudioPlayer:
         require_input: bool = False,
         require_output: bool = False,
     ) -> None:
-        logging.info(
+        logger.info(
             "[AUDIO] Listing audio devices (input=%s output=%s)",
             require_input,
             require_output,
@@ -109,7 +109,7 @@ class AudioPlayer:
                 continue
             if require_output and info.get("maxOutputChannels", 0) <= 0:
                 continue
-            logging.info(
+            logger.info(
                 "[AUDIO] Device %s: %s | Input Channels: %s | Output Channels: %s",
                 i,
                 info.get("name"),
@@ -163,7 +163,7 @@ class AudioPlayer:
                 self._maybe_fire_complete()
 
         except Exception:
-            logging.exception("Audio output worker crashed")
+            logger.exception("Audio output worker crashed")
 
     def _maybe_fire_complete(self) -> None:
         cb = None
@@ -184,7 +184,7 @@ class AudioPlayer:
 
                 cb()
             except Exception:
-                logging.exception("on_playback_complete callback failed")
+                logger.exception("on_playback_complete callback failed")
 
     def play_audio(self, audio_data: bytes) -> None:
         """Enqueue audio data for playback."""
@@ -197,7 +197,7 @@ class AudioPlayer:
         except queue.Full:
             with self._lock:
                 self._pending -= 1
-            logging.warning("Audio queue full; dropping audio")
+            logger.warning("Audio queue full; dropping audio")
             self._maybe_fire_complete()
 
     def flush(self) -> None:

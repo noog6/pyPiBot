@@ -4,13 +4,11 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
-import logging
 import threading
 import time
 from typing import Deque, Iterable
 
-
-LOGGER = logging.getLogger(__name__)
+from core.logging import logger as LOGGER
 
 
 @dataclass(frozen=True)

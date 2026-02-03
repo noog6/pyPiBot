@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-import logging
 
+from core.logging import logger as LOGGER
 from diagnostics.models import DiagnosticResult, DiagnosticStatus
-
-
-LOGGER = logging.getLogger(__name__)
 
 
 def format_results(results: Iterable[DiagnosticResult]) -> str:
