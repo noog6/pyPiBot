@@ -10,6 +10,7 @@ from io import BytesIO
 import json
 import os
 import random
+import re
 import signal
 import threading
 import time
@@ -231,6 +232,13 @@ class RealtimeAPI:
         self._tool_definitions = {tool["name"]: tool for tool in tools}
         self._storage = StorageController.get_instance()
         self._presented_actions: set[str] = set()
+        self._stop_words = [
+            word.strip().lower()
+            for word in (config.get("stop_words") or [])
+            if isinstance(word, str) and word.strip()
+        ]
+        self._stop_word_cooldown_s = float(config.get("stop_word_cooldown_s", 0.0))
+        self._tool_execution_disabled_until = 0.0
         self._reflection_coordinator = ReflectionCoordinator(
             api_key=self.api_key,
             enabled=self._reflection_enabled,
@@ -479,6 +487,60 @@ class RealtimeAPI:
         self._last_user_input_time = time.monotonic()
         self._last_user_input_source = source
 
+    def _find_stop_word(self, text: str) -> str | None:
+        if not text or not self._stop_words:
+            return None
+        lowered = text.lower()
+        for word in self._stop_words:
+            if " " in word:
+                if word in lowered:
+                    return word
+                continue
+            if re.search(rf"\\b{re.escape(word)}\\b", lowered):
+                return word
+        return None
+
+    def _tool_execution_cooldown_remaining(self) -> float:
+        remaining = self._tool_execution_disabled_until - time.monotonic()
+        return remaining if remaining > 0 else 0.0
+
+    async def _handle_stop_word(
+        self,
+        text: str,
+        websocket: Any,
+        *,
+        source: str,
+    ) -> bool:
+        stop_word = self._find_stop_word(text)
+        if not stop_word:
+            return False
+        now = time.monotonic()
+        if self._stop_word_cooldown_s > 0:
+            self._tool_execution_disabled_until = max(
+                self._tool_execution_disabled_until,
+                now + self._stop_word_cooldown_s,
+            )
+        else:
+            self._tool_execution_disabled_until = max(self._tool_execution_disabled_until, now)
+        if self._pending_action:
+            await self._reject_tool_call(
+                self._pending_action,
+                f"Stop word '{stop_word}' detected; tool execution paused.",
+                websocket,
+                staging=self._pending_action_staging,
+                status="cancelled",
+            )
+            self._clear_pending_action()
+        else:
+            cooldown_msg = ""
+            if self._stop_word_cooldown_s > 0:
+                cooldown_msg = f" for {int(self._stop_word_cooldown_s)}s"
+            await self.send_assistant_message(
+                f"Stop word '{stop_word}' detected. Pending actions cancelled and tool use paused{cooldown_msg}.",
+                websocket,
+            )
+        return True
+
     def _extract_transcript(self, event: dict[str, Any]) -> str | None:
         transcript = event.get("transcript")
         if isinstance(transcript, str) and transcript.strip():
@@ -689,6 +751,19 @@ class RealtimeAPI:
     ) -> bool:
         if not self._pending_action:
             return False
+        if await self._handle_stop_word(text, websocket, source="approval_response"):
+            return True
+        cooldown_remaining = self._tool_execution_cooldown_remaining()
+        if cooldown_remaining > 0:
+            await self._reject_tool_call(
+                self._pending_action,
+                f"Tool execution paused for {cooldown_remaining:.0f}s due to stop word.",
+                websocket,
+                staging=self._pending_action_staging,
+                status="cancelled",
+            )
+            self._clear_pending_action()
+            return True
         now = time.monotonic()
         action = self._pending_action
         if action.expiry_ts is not None and now > action.expiry_ts:
@@ -1071,6 +1146,12 @@ class RealtimeAPI:
             transcript = self._extract_transcript(event)
             if transcript:
                 self._record_user_input(transcript, source="input_audio_transcription")
+                if await self._handle_stop_word(
+                    transcript,
+                    websocket,
+                    source="input_audio_transcription",
+                ):
+                    return
                 if await self._maybe_handle_approval_response(transcript, websocket):
                     return
         elif event_type == "input_audio_buffer.speech_started":
@@ -1134,6 +1215,15 @@ class RealtimeAPI:
                 args,
                 reason=f"function_call {function_name}",
             )
+            cooldown_remaining = self._tool_execution_cooldown_remaining()
+            if cooldown_remaining > 0:
+                await self._reject_tool_call(
+                    action,
+                    f"Tool execution paused for {cooldown_remaining:.0f}s due to stop word.",
+                    websocket,
+                    status="cancelled",
+                )
+                return
             staging = self._stage_action(action)
             if dry_run_requested:
                 await self._send_dry_run_output(action, staging, websocket)
@@ -1597,13 +1687,15 @@ class RealtimeAPI:
         text_message: str,
         request_response: bool = True,
     ) -> None:
+        self._record_user_input(text_message, source="text_message")
+        if await self._handle_stop_word(text_message, self.websocket, source="text_message"):
+            return
         if await self._maybe_handle_approval_response(text_message, self.websocket):
             return
         self.orchestration_state.transition(
             OrchestrationPhase.SENSE,
             reason="text message",
         )
-        self._record_user_input(text_message, source="text_message")
         text_event = {
             "type": "conversation.item.create",
             "item": {
