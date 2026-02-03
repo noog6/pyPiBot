@@ -645,13 +645,27 @@ class RealtimeAPI:
         return f"Would call {action.tool_name} with the proposed arguments."
 
     def _build_approval_prompt(self, action: ActionPacket) -> str:
-        base = f"I can do this now: {action.intent_summary}"
+        packet = self._format_action_packet(action)
         if action.tier >= 3:
             return (
-                f"{base}. This will: {action.expected_effect} "
-                f"Approve? Reply exactly: 'Yes, do it now' / no / modify."
+                "Approval required for this action.\n"
+                f"{packet}\n"
+                "Approve? Reply exactly: 'Yes, do it now' / no / modify."
             )
-        return f"{base}. Approve? (yes / no / modify)"
+        return f"Approval required for this action.\n{packet}\nApprove? (yes / no / modify)"
+
+    def _format_action_packet(self, action: ActionPacket) -> str:
+        alternatives = ", ".join(action.alternatives) if action.alternatives else "(none)"
+        return (
+            "Action packet:\n"
+            f"- what: {action.what}\n"
+            f"- why: {action.why}\n"
+            f"- impact: {action.impact}\n"
+            f"- rollback: {action.rollback}\n"
+            f"- cost: {action.cost}\n"
+            f"- confidence: {action.confidence:.2f}\n"
+            f"- alternatives: {alternatives}"
+        )
 
     def _clear_pending_action(self) -> None:
         self._pending_action = None
@@ -1175,12 +1189,18 @@ class RealtimeAPI:
         )
         self._last_tool_call_results = list(self._tool_call_records)
 
+        output_payload: dict[str, Any] = {"result": result}
+        if action:
+            output_payload["action_packet"] = action.to_payload()
+        if staging is not None:
+            output_payload["staging"] = staging
+
         function_call_output = {
             "type": "conversation.item.create",
             "item": {
                 "type": "function_call_output",
                 "call_id": call_id,
-                "output": json.dumps(result),
+                "output": json.dumps(output_payload),
             },
         }
         log_ws_event("Outgoing", function_call_output)
@@ -1268,7 +1288,8 @@ class RealtimeAPI:
         staging: dict[str, Any] | None = None,
         status: str = "denied",
     ) -> None:
-        message = f"Tool execution not run. {action.summary()}. Reason: {reason}."
+        packet = self._format_action_packet(action)
+        message = f"Tool execution not run.\n{packet}\nReason: {reason}."
         await self.send_assistant_message(message, websocket)
         function_call_output = {
             "type": "conversation.item.create",

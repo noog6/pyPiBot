@@ -19,39 +19,39 @@ class ToolSpec:
 @dataclass
 class ActionPacket:
     id: str
-    intent_summary: str
     tool_name: str
     tool_args: dict[str, Any]
     tier: int
-    why_now: str
-    expected_effect: str
-    rollback_plan: str
-    verification_plan: str
+    what: str
+    why: str
+    impact: str
+    rollback: str
+    alternatives: list[str]
     confidence: float
-    cost_estimate: str
+    cost: str
     risk_flags: list[str]
     requires_confirmation: bool
     expiry_ts: float | None = None
 
     def summary(self) -> str:
         return (
-            f"tool={self.tool_name} tier={self.tier} cost={self.cost_estimate} "
+            f"tool={self.tool_name} tier={self.tier} cost={self.cost} "
             f"confidence={self.confidence:.2f} requires_confirmation={self.requires_confirmation}"
         )
 
     def to_payload(self) -> dict[str, Any]:
         return {
             "id": self.id,
-            "intent_summary": self.intent_summary,
             "tool_name": self.tool_name,
             "tool_args": self.tool_args,
             "tier": self.tier,
-            "why_now": self.why_now,
-            "expected_effect": self.expected_effect,
-            "rollback_plan": self.rollback_plan,
-            "verification_plan": self.verification_plan,
+            "what": self.what,
+            "why": self.why,
+            "impact": self.impact,
+            "rollback": self.rollback,
+            "alternatives": list(self.alternatives),
             "confidence": self.confidence,
-            "cost_estimate": self.cost_estimate,
+            "cost": self.cost,
             "risk_flags": list(self.risk_flags),
             "requires_confirmation": self.requires_confirmation,
             "expiry_ts": self.expiry_ts,
@@ -141,29 +141,28 @@ class GovernanceLayer:
         if risk_score >= self._risk_threshold:
             risk_flags.append("risk_threshold_exceeded")
         requires_confirmation = spec.tier >= 2
-        expected_effect = f"Invoke {name} with proposed arguments and return its result."
-        rollback_plan = (
+        impact = f"Invoke {name} with proposed arguments and return its result."
+        rollback = (
             "No rollback needed (read-only)."
             if spec.reversible
             else "Manual rollback required; no automatic undo available."
         )
-        verification_plan = (
-            "Verify tool output matches expected schema and values."
-            if spec.tier <= 1
-            else "Review tool output and confirm expected state changes."
-        )
+        alternatives = [
+            "Do nothing and leave the current state unchanged.",
+            "Ask for revised arguments or a different approach.",
+        ]
         return ActionPacket(
             id=call_id,
-            intent_summary=f"Run {name} with proposed arguments.",
             tool_name=name,
             tool_args=args,
             tier=spec.tier,
-            why_now=reason or "Model requested tool call.",
-            expected_effect=expected_effect,
-            rollback_plan=rollback_plan,
-            verification_plan=verification_plan,
+            what=f"Run {name} with proposed arguments.",
+            why=reason or "Model requested tool call.",
+            impact=impact,
+            rollback=rollback,
+            alternatives=alternatives,
             confidence=max(0.05, min(0.98, 1.0 - risk_score)),
-            cost_estimate=estimated_cost,
+            cost=estimated_cost,
             risk_flags=risk_flags,
             requires_confirmation=requires_confirmation,
         )
@@ -184,7 +183,7 @@ class GovernanceLayer:
 
         spec = self._tool_specs.get(action.tool_name, self._default_spec())
         risk_score = self._estimate_risk(spec)
-        if action.cost_estimate == "expensive" and not self._expensive_budget.allow(now):
+        if action.cost == "expensive" and not self._expensive_budget.allow(now):
             return GovernanceDecision(
                 status="denied",
                 reason="expensive-call budget exhausted",
@@ -208,7 +207,7 @@ class GovernanceLayer:
     def record_execution(self, action: ActionPacket) -> None:
         now = time.monotonic()
         self._tool_calls_budget.record(now)
-        if action.cost_estimate == "expensive":
+        if action.cost == "expensive":
             self._expensive_budget.record(now)
 
     def describe_tool(self, name: str) -> dict[str, Any]:
