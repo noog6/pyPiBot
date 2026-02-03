@@ -230,6 +230,7 @@ class RealtimeAPI:
         self._approval_timeout_s = float(config.get("approval_timeout_s", 90.0))
         self._tool_definitions = {tool["name"]: tool for tool in tools}
         self._storage = StorageController.get_instance()
+        self._presented_actions: set[str] = set()
         self._reflection_coordinator = ReflectionCoordinator(
             api_key=self.api_key,
             enabled=self._reflection_enabled,
@@ -629,6 +630,16 @@ class RealtimeAPI:
             return isinstance(value, dict)
         return True
 
+    def _normalize_dry_run_flag(self, value: Any) -> bool:
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "y"}
+        return bool(value)
+
+    def _extract_dry_run_flag(self, args: dict[str, Any]) -> bool:
+        if "dry_run" not in args:
+            return False
+        return self._normalize_dry_run_flag(args.pop("dry_run"))
+
     def _describe_staged_action(
         self, action: ActionPacket, motion_info: dict[str, Any] | None
     ) -> str:
@@ -668,6 +679,8 @@ class RealtimeAPI:
         )
 
     def _clear_pending_action(self) -> None:
+        if self._pending_action:
+            self._presented_actions.discard(self._pending_action.id)
         self._pending_action = None
         self._pending_action_staging = None
 
@@ -1114,6 +1127,7 @@ class RealtimeAPI:
                 args = json.loads(self.function_call_args) if self.function_call_args else {}
             except json.JSONDecodeError:
                 args = {}
+            dry_run_requested = self._extract_dry_run_flag(args)
             action = self._governance.build_action_packet(
                 function_name,
                 call_id,
@@ -1121,6 +1135,9 @@ class RealtimeAPI:
                 reason=f"function_call {function_name}",
             )
             staging = self._stage_action(action)
+            if dry_run_requested:
+                await self._send_dry_run_output(action, staging, websocket)
+                return
             if not staging["valid"]:
                 await self._reject_tool_call(
                     action,
@@ -1229,6 +1246,13 @@ class RealtimeAPI:
                 status="invalid_arguments",
             )
             return
+        if action.tier > 1 and action.id not in self._presented_actions:
+            await self._present_action(
+                action,
+                staging,
+                websocket,
+                reason="pre-execution presentation",
+            )
         await self.execute_function_call(
             action.tool_name,
             action.id,
@@ -1238,6 +1262,7 @@ class RealtimeAPI:
             staging=staging,
         )
         self._governance.record_execution(action)
+        self._presented_actions.discard(action.id)
 
     async def _request_tool_confirmation(
         self,
@@ -1265,6 +1290,85 @@ class RealtimeAPI:
                         "staging": staging,
                         "summary": summary,
                         "reason": reason,
+                    }
+                ),
+            },
+        }
+        log_ws_event("Outgoing", function_call_output)
+        self._track_outgoing_event(function_call_output)
+        await websocket.send(json.dumps(function_call_output))
+        response_create_event = {"type": "response.create"}
+        log_ws_event("Outgoing", response_create_event)
+        self._track_outgoing_event(response_create_event, origin="tool_output")
+        await websocket.send(json.dumps(response_create_event))
+        self._presented_actions.add(action.id)
+        self.function_call = None
+        self.function_call_args = ""
+
+    async def _present_action(
+        self,
+        action: ActionPacket,
+        staging: dict[str, Any],
+        websocket: Any,
+        *,
+        reason: str | None = None,
+    ) -> None:
+        summary = action.summary()
+        function_call_output = {
+            "type": "conversation.item.create",
+            "item": {
+                "type": "function_call_output",
+                "call_id": action.id,
+                "output": json.dumps(
+                    {
+                        "status": "presented",
+                        "tool": action.tool_name,
+                        "tool_metadata": self._governance.describe_tool(action.tool_name),
+                        "action_packet": action.to_payload(),
+                        "staging": staging,
+                        "summary": summary,
+                        "reason": reason,
+                    }
+                ),
+            },
+        }
+        log_ws_event("Outgoing", function_call_output)
+        self._track_outgoing_event(function_call_output)
+        await websocket.send(json.dumps(function_call_output))
+        response_create_event = {"type": "response.create"}
+        log_ws_event("Outgoing", response_create_event)
+        self._track_outgoing_event(response_create_event, origin="tool_output")
+        await websocket.send(json.dumps(response_create_event))
+        self._presented_actions.add(action.id)
+
+    async def _send_dry_run_output(
+        self,
+        action: ActionPacket,
+        staging: dict[str, Any],
+        websocket: Any,
+    ) -> None:
+        summary = action.summary()
+        dry_run_payload = {
+            "requested": True,
+            "summary": summary,
+            "valid": staging.get("valid", True),
+            "staging": staging,
+        }
+        function_call_output = {
+            "type": "conversation.item.create",
+            "item": {
+                "type": "function_call_output",
+                "call_id": action.id,
+                "output": json.dumps(
+                    {
+                        "status": "dry_run",
+                        "message": "Dry-run requested; no execution performed.",
+                        "tool": action.tool_name,
+                        "tool_metadata": self._governance.describe_tool(action.tool_name),
+                        "action_packet": action.to_payload(),
+                        "staging": staging,
+                        "summary": summary,
+                        "dry_run": dry_run_payload,
                     }
                 ),
             },
@@ -1315,6 +1419,7 @@ class RealtimeAPI:
         log_ws_event("Outgoing", response_create_event)
         self._track_outgoing_event(response_create_event, origin="tool_output")
         await websocket.send(json.dumps(response_create_event))
+        self._presented_actions.discard(action.id)
         self.function_call = None
         self.function_call_args = ""
 
