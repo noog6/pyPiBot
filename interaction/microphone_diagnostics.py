@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import logging
 
+from config import ConfigController
 from diagnostics.models import DiagnosticResult, DiagnosticStatus
 from interaction.microphone_hal import AudioInputBackend
 from interaction.utils import CHANNELS, CHUNK, RATE, resolve_format
@@ -60,16 +62,26 @@ def probe(backend: AudioInputBackend | None = None) -> DiagnosticResult:
         )
 
     try:
+        config = ConfigController.get_instance().get_config()
+        audio_cfg = config.get("audio") or {}
+        input_cfg = audio_cfg.get("input") or {}
+        input_device_index = input_cfg.get("device_index")
+        if input_device_index is None:
+            return DiagnosticResult(
+                name=name,
+                status=DiagnosticStatus.FAIL,
+                details="Audio input device index not configured",
+            )
         pyaudio = importlib.import_module("pyaudio")
         audio = pyaudio.PyAudio()
         try:
-            device_info = audio.get_default_input_device_info()
+            device_info = audio.get_device_info_by_index(int(input_device_index))
             stream = audio.open(
                 format=resolve_format(),
                 channels=CHANNELS,
                 rate=RATE,
                 input=True,
-                input_device_index=device_info["index"],
+                input_device_index=int(input_device_index),
                 frames_per_buffer=CHUNK,
                 start=False,
             )
@@ -80,11 +92,39 @@ def probe(backend: AudioInputBackend | None = None) -> DiagnosticResult:
         return DiagnosticResult(
             name=name,
             status=DiagnosticStatus.PASS,
-            details=f"Default input device: {device_info.get('name')}",
+            details=f"Input device: {device_info.get('name')}",
         )
     except Exception as exc:  # noqa: BLE001 - probe should not raise
+        try:
+            _log_devices(require_input=True)
+        except Exception:
+            logging.exception("Failed to list input devices after audio probe error")
         return DiagnosticResult(
             name=name,
             status=DiagnosticStatus.FAIL,
             details=f"Audio input probe failed: {exc}",
         )
+
+
+def _log_devices(*, require_input: bool = False) -> None:
+    if importlib.util.find_spec("pyaudio") is None:
+        return
+    pyaudio = importlib.import_module("pyaudio")
+    audio = pyaudio.PyAudio()
+    try:
+        logging.info(
+            "[MIC DIAG] Listing devices (input=%s)",
+            require_input,
+        )
+        for i in range(audio.get_device_count()):
+            info = audio.get_device_info_by_index(i)
+            if require_input and info.get("maxInputChannels", 0) <= 0:
+                continue
+            logging.info(
+                "[MIC DIAG] Device %s: %s | Input Channels: %s",
+                i,
+                info.get("name"),
+                info.get("maxInputChannels"),
+            )
+    finally:
+        audio.terminate()

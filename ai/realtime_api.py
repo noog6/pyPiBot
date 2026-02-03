@@ -124,8 +124,24 @@ class RealtimeAPI:
         self.api_key = os.getenv("OPENAI_API_KEY")
         if not self.api_key:
             raise RuntimeError("Please set the OPENAI_API_KEY environment variable.")
+        config = ConfigController.get_instance().get_config()
+        audio_cfg = config.get("audio") or {}
+        input_cfg = audio_cfg.get("input") or {}
+        output_cfg = audio_cfg.get("output") or {}
+        self._audio_input_device_index = input_cfg.get("device_index")
+        self._audio_input_device_name = input_cfg.get("device_name")
+        self._audio_output_device_index = output_cfg.get("device_index")
+        self._audio_output_device_name = output_cfg.get("device_name")
         self.exit_event = asyncio.Event()
-        self.mic = AsyncMicrophone(input_name_hint="default", debug_list_devices=False)
+        self.mic = AsyncMicrophone(
+            input_device_index=(
+                int(self._audio_input_device_index)
+                if self._audio_input_device_index is not None
+                else None
+            ),
+            input_name_hint=self._audio_input_device_name,
+            debug_list_devices=False,
+        )
         self.audio_player: AudioPlayer | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
         self.ready_event = threading.Event()
@@ -160,7 +176,6 @@ class RealtimeAPI:
         self._tool_call_records: list[dict[str, Any]] = []
         self._last_tool_call_results: list[dict[str, Any]] = []
         self._last_response_metadata: dict[str, Any] = {}
-        config = ConfigController.get_instance().get_config()
         self._injection_response_cooldown_s = float(
             config.get("injection_response_cooldown_s", 0.0)
         )
@@ -616,7 +631,12 @@ class RealtimeAPI:
 
         self.audio_player = AudioPlayer(
             on_playback_complete=_playback_complete_from_thread,
-            output_name_hint="softvol",
+            output_device_index=(
+                int(self._audio_output_device_index)
+                if self._audio_output_device_index is not None
+                else None
+            ),
+            output_name_hint=self._audio_output_device_name,
         )
 
         try:
