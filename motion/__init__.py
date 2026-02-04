@@ -8,6 +8,11 @@ from motion.gestures import (
     gesture_curious_tilt,
     gesture_idle,
     gesture_look_around,
+    gesture_look_center,
+    gesture_look_down,
+    gesture_look_left,
+    gesture_look_right,
+    gesture_look_up,
     gesture_no,
     gesture_nod,
 )
@@ -22,6 +27,11 @@ __all__ = [
     "gesture_curious_tilt",
     "gesture_idle",
     "gesture_look_around",
+    "gesture_look_center",
+    "gesture_look_down",
+    "gesture_look_left",
+    "gesture_look_right",
+    "gesture_look_up",
     "gesture_no",
     "gesture_nod",
 ]

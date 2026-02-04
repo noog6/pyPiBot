@@ -178,6 +178,54 @@ DEFAULT_GESTURES = (
         ),
     ),
     GestureDefinition(
+        name="gesture_look_up",
+        priority=2,
+        frames=(
+            GestureFrameSpec(
+                name="look-up",
+                pan_offset=0.0,
+                tilt_offset=999.0,
+                duration_ms=600,
+            ),
+        ),
+    ),
+    GestureDefinition(
+        name="gesture_look_left",
+        priority=2,
+        frames=(
+            GestureFrameSpec(
+                name="look-left",
+                pan_offset=-999.0,
+                tilt_offset=0.0,
+                duration_ms=600,
+            ),
+        ),
+    ),
+    GestureDefinition(
+        name="gesture_look_right",
+        priority=2,
+        frames=(
+            GestureFrameSpec(
+                name="look-right",
+                pan_offset=999.0,
+                tilt_offset=0.0,
+                duration_ms=600,
+            ),
+        ),
+    ),
+    GestureDefinition(
+        name="gesture_look_down",
+        priority=2,
+        frames=(
+            GestureFrameSpec(
+                name="look-down",
+                pan_offset=0.0,
+                tilt_offset=-999.0,
+                duration_ms=600,
+            ),
+        ),
+    ),
+    GestureDefinition(
         name="gesture_curious_tilt",
         priority=1,
         frames=(
