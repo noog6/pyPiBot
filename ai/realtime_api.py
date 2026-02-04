@@ -16,6 +16,7 @@ import threading
 import time
 from typing import Any
 from urllib import request
+from urllib.parse import urlparse
 
 from config import ConfigController
 from core.logging import (
@@ -73,6 +74,23 @@ Assistant reply: {assistant_reply}
 Tool calls: {tool_calls}
 Response metadata: {response_metadata}
 """
+
+ALLOWED_OUTBOUND_HOSTS = {"api.openai.com"}
+ALLOWED_OUTBOUND_SCHEMES = {"https", "wss"}
+
+
+def _validate_outbound_endpoint(url: str) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme not in ALLOWED_OUTBOUND_SCHEMES:
+        raise RuntimeError(
+            f"Blocked outbound endpoint with non-TLS scheme: {parsed.scheme or 'missing'}"
+        )
+    if not parsed.hostname:
+        raise RuntimeError("Blocked outbound endpoint with missing hostname.")
+    if parsed.hostname not in ALLOWED_OUTBOUND_HOSTS:
+        raise RuntimeError(f"Blocked outbound endpoint to untrusted host: {parsed.hostname}")
+    if parsed.username or parsed.password:
+        raise RuntimeError("Blocked outbound endpoint with embedded credentials.")
 
 
 def _require_websockets() -> Any:
@@ -838,6 +856,8 @@ class RealtimeAPI:
         )
 
     def _call_openai_prompt(self, prompt: str) -> str:
+        endpoint = "https://api.openai.com/v1/chat/completions"
+        _validate_outbound_endpoint(endpoint)
         payload = {
             "model": "gpt-4o-mini",
             "messages": [
@@ -849,7 +869,7 @@ class RealtimeAPI:
         }
         data = json.dumps(payload).encode("utf-8")
         req = request.Request(
-            "https://api.openai.com/v1/chat/completions",
+            endpoint,
             data=data,
             headers={
                 "Authorization": f"Bearer {self.api_key}",
@@ -965,6 +985,7 @@ class RealtimeAPI:
             while True:
                 try:
                     url = "wss://api.openai.com/v1/realtime?model=gpt-realtime"
+                    _validate_outbound_endpoint(url)
                     headers = {"Authorization": f"Bearer {self.api_key}"}
 
                     async with websockets.connect(
