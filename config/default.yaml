@@ -107,6 +107,21 @@ governance:
       reversible: true
       cost_hint: "cheap"
       safety_tags: ["motion"]
+    set_pan:
+      tier: 1
+      reversible: true
+      cost_hint: "cheap"
+      safety_tags: ["motion"]
+    set_tilt:
+      tier: 1
+      reversible: true
+      cost_hint: "cheap"
+      safety_tags: ["motion"]
+    get_servo_position:
+      tier: 0
+      reversible: true
+      cost_hint: "cheap"
+      safety_tags: ["motion", "sensor"]
     update_user_profile:
       tier: 2
       reversible: false

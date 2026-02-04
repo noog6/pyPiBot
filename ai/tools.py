@@ -15,6 +15,8 @@ from motion import (
     gesture_no,
     gesture_nod,
 )
+from motion.action import Action
+from motion.motion_controller import millis
 from services.imu_monitor import ImuMonitor
 from services.memory_manager import MemoryManager
 from services.output_volume import OutputVolumeController
@@ -110,6 +112,31 @@ def _enqueue_gesture(action: Any) -> None:
     controller.add_action_to_queue(action)
 
 
+def _enqueue_servo_move(
+    name: str, pan_degrees: float | None = None, tilt_degrees: float | None = None
+) -> dict[str, Any]:
+    controller = MotionController.get_instance()
+    pan_servo = controller.servo_registry.servos["pan"]
+    tilt_servo = controller.servo_registry.servos["tilt"]
+    current_pan = float(pan_servo.read_value())
+    current_tilt = float(tilt_servo.read_value())
+    target_pan = current_pan if pan_degrees is None else float(pan_degrees)
+    target_tilt = current_tilt if tilt_degrees is None else float(tilt_degrees)
+
+    frame = controller.generate_base_keyframe(
+        pan_degrees=int(target_pan), tilt_degrees=int(target_tilt)
+    )
+    frame.name = name
+    action = Action(priority=2, timestamp=millis(), name=name, frames=frame)
+    _enqueue_gesture(action)
+    return {
+        "queued": True,
+        "action": name,
+        "target": {"pan": target_pan, "tilt": target_tilt},
+        "current": {"pan": current_pan, "tilt": current_tilt},
+    }
+
+
 async def enqueue_idle_gesture(delay_ms: int = 0, intensity: float = 1.0) -> dict[str, Any]:
     """Queue an idle gesture action on the motion controller."""
 
@@ -162,6 +189,31 @@ async def enqueue_attention_snap_gesture(
     action = gesture_attention_snap(delay_ms=delay_ms, intensity=float(intensity))
     _enqueue_gesture(action)
     return {"queued": True, "gesture": action.name, "delay_ms": delay_ms, "intensity": intensity}
+
+
+async def set_pan(degrees: int) -> dict[str, Any]:
+    """Set the pan servo to an absolute position."""
+
+    return _enqueue_servo_move("set_pan", pan_degrees=degrees)
+
+
+async def set_tilt(degrees: int) -> dict[str, Any]:
+    """Set the tilt servo to an absolute position."""
+
+    return _enqueue_servo_move("set_tilt", tilt_degrees=degrees)
+
+
+async def get_servo_position(servo_name: str) -> dict[str, Any]:
+    """Return the current position of the requested servo."""
+
+    controller = MotionController.get_instance()
+    servo = controller.servo_registry.servos[servo_name]
+    return {
+        "servo": servo_name,
+        "degrees": float(servo.read_value()),
+        "min_degrees": float(servo.min_angle),
+        "max_degrees": float(servo.max_angle),
+    }
 
 
 async def update_user_profile(
@@ -423,6 +475,83 @@ tools.append(
 )
 
 function_map["gesture_attention_snap"] = enqueue_attention_snap_gesture
+
+tools.append(
+    {
+        "type": "function",
+        "name": "set_pan",
+        "description": (
+            "Set Theo's head pan servo to an absolute position between -90 and +90 degrees. "
+            "Use this to look left/right."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "degrees": {
+                    "type": "integer",
+                    "minimum": -90,
+                    "maximum": 90,
+                    "description": (
+                        "Target pan position where 0 is neutral, -90 is full left, "
+                        "and +90 is full right."
+                    ),
+                },
+            },
+            "required": ["degrees"],
+        },
+    }
+)
+
+function_map["set_pan"] = set_pan
+
+tools.append(
+    {
+        "type": "function",
+        "name": "set_tilt",
+        "description": (
+            "Set Theo's head tilt servo to an absolute position between -45 and +45 degrees. "
+            "Use this to look up/down."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "degrees": {
+                    "type": "integer",
+                    "minimum": -45,
+                    "maximum": 45,
+                    "description": (
+                        "Target tilt position where 0 is neutral, -45 is full down, "
+                        "and +45 is full up."
+                    ),
+                },
+            },
+            "required": ["degrees"],
+        },
+    }
+)
+
+function_map["set_tilt"] = set_tilt
+
+tools.append(
+    {
+        "type": "function",
+        "name": "get_servo_position",
+        "description": "Read the current position of the requested servo.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "servo_name": {
+                    "type": "string",
+                    "enum": ["pan", "tilt"],
+                    "description": "The name of the servo to read.",
+                },
+            },
+            "required": ["servo_name"],
+        },
+    }
+)
+
+function_map["get_servo_position"] = get_servo_position
 
 tools.append(
     {
