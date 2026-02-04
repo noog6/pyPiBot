@@ -215,7 +215,7 @@ if unknown_event_log_env:
     enable_unknown_event_logging(Path(unknown_event_log_env))
 
 
-_BEARER_TOKEN_RE = re.compile(r"(Bearer\s+)(sk-[A-Za-z0-9-_]+)")
+_BEARER_TOKEN_RE = re.compile(r"(Bearer\s+)([^\s]+)")
 _API_KEY_RE = re.compile(r"sk-[A-Za-z0-9-_]{10,}")
 
 
@@ -359,6 +359,14 @@ SENSITIVE_KEYS = {
     "api-key",
     "apiKey",
     "openai_api_key",
+    "openai-api-key",
+    "x-api-key",
+    "x-openai-api-key",
+    "token",
+    "access_token",
+    "refresh_token",
+    "secret",
+    "password",
 }
 NO_TRUNCATE_KEYS = {"instructions"}
 
