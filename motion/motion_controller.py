@@ -231,15 +231,18 @@ class MotionController:
         )
 
         if abs(limited_pan - self.current_servo_position["pan"]) > 1.0:
-            log_info(
-                "[MOTION] [%s] 'pan' servo to (%.2f) (wanted: %.2f) "
-                "(PAN_V_MAX:%.3f) (Elapsed ms:%s)",
-                new_frame.name,
-                limited_pan,
-                desired_pan,
-                pan_v_max,
-                now_ms - new_frame.start_time_ms,
-            )
+            last_pan_log_ms = new_frame.last_pan_log_ms
+            if last_pan_log_ms is None or now_ms - last_pan_log_ms >= 200:
+                log_info(
+                    "[MOTION] [%s] 'pan' servo to (%.2f) (wanted: %.2f) "
+                    "(PAN_V_MAX:%.3f) (Elapsed ms:%s)",
+                    new_frame.name,
+                    limited_pan,
+                    desired_pan,
+                    pan_v_max,
+                    now_ms - new_frame.start_time_ms,
+                )
+                new_frame.last_pan_log_ms = now_ms
 
         self.current_servo_position["pan"] = limited_pan
         self.current_servo_position["tilt"] = limited_tilt
@@ -260,19 +263,20 @@ class MotionController:
             self.servo_registry.servos["pan"].write_value(desired_pan)
             self.servo_registry.servos["tilt"].write_value(desired_tilt)
 
+            elapsed_ms = now_ms - new_frame.start_time_ms
             log_info(
                 "[MOTION] 'pan' servo move completed (Cmd: %.3f) "
-                "(Position: %s) (Elapsed ms: %s)",
+                "(Position: %.2f) (Elapsed ms: %s)",
                 desired_pan,
                 desired_pan,
-                now_ms - new_frame.start_time_ms,
+                elapsed_ms,
             )
             log_info(
                 "[MOTION] 'tilt' servo move completed (Cmd: %.3f) "
-                "(Position: %s) (Duration ms: %s)",
+                "(Position: %.2f) (Elapsed ms: %s)",
                 desired_tilt,
                 desired_tilt,
-                new_frame.final_target_time,
+                elapsed_ms,
             )
             self._moving_event.clear()
             return True
@@ -296,22 +300,16 @@ class MotionController:
         }
 
         log_info(
-            "[MOTION] New motion frame started (Name:%s) (Duration:%s) (deadline_ms:%s)",
+            "[MOTION] New motion frame started (Name:%s) (Duration:%sms) "
+            "pan %.2f->%.2f tilt %.2f->%.2f (deadline_ms:%s)",
             frame.name,
             frame.duration_ms,
-            frame.deadline_ms,
-        )
-        log_info(
-            "[MOTION] Moving 'pan' servo from (%.2f) to (%.2f)",
             self.current_servo_position["pan"],
             frame.servo_destination["pan"],
-        )
-        log_info(
-            "[MOTION] Moving 'tilt' servo from (%.2f) to (%.2f)",
             self.current_servo_position["tilt"],
             frame.servo_destination["tilt"],
+            frame.deadline_ms,
         )
-
         frame.is_initialized = True
 
     def _frame_done(self, frame: Keyframe, at_dest: bool, now_ms: int) -> bool:

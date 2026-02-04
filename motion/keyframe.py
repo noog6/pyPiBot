@@ -17,6 +17,7 @@ class Keyframe:
     is_initialized: bool = False
     start_time_ms: int | None = None
     duration_ms: int | None = None
+    last_pan_log_ms: int | None = None
     start_pos: dict[str, float] = field(default_factory=lambda: {"pan": 0.0, "tilt": 0.0})
     delta_pos: dict[str, float] = field(default_factory=lambda: {"pan": 0.0, "tilt": 0.0})
     servo_destination: dict[str, float] = field(
