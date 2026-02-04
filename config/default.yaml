@@ -97,6 +97,31 @@ governance:
       reversible: true
       cost_hint: "cheap"
       safety_tags: ["motion"]
+    gesture_look_up:
+      tier: 1
+      reversible: true
+      cost_hint: "cheap"
+      safety_tags: ["motion"]
+    gesture_look_left:
+      tier: 1
+      reversible: true
+      cost_hint: "cheap"
+      safety_tags: ["motion"]
+    gesture_look_right:
+      tier: 1
+      reversible: true
+      cost_hint: "cheap"
+      safety_tags: ["motion"]
+    gesture_look_down:
+      tier: 1
+      reversible: true
+      cost_hint: "cheap"
+      safety_tags: ["motion"]
+    gesture_look_center:
+      tier: 1
+      reversible: true
+      cost_hint: "cheap"
+      safety_tags: ["motion"]
     gesture_curious_tilt:
       tier: 1
       reversible: true

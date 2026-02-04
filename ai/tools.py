@@ -12,6 +12,11 @@ from motion import (
     gesture_curious_tilt,
     gesture_idle,
     gesture_look_around,
+    gesture_look_center,
+    gesture_look_down,
+    gesture_look_left,
+    gesture_look_right,
+    gesture_look_up,
     gesture_no,
     gesture_nod,
 )
@@ -142,6 +147,52 @@ async def enqueue_look_around_gesture(
     action = gesture_look_around(delay_ms=delay_ms, intensity=float(intensity))
     _enqueue_gesture(action)
     return {"queued": True, "gesture": action.name, "delay_ms": delay_ms, "intensity": intensity}
+
+
+async def enqueue_look_up_gesture(delay_ms: int = 0, intensity: float = 1.0) -> dict[str, Any]:
+    """Queue a look up gesture action on the motion controller."""
+
+    action = gesture_look_up(delay_ms=delay_ms, intensity=float(intensity))
+    _enqueue_gesture(action)
+    return {"queued": True, "gesture": action.name, "delay_ms": delay_ms, "intensity": intensity}
+
+
+async def enqueue_look_left_gesture(
+    delay_ms: int = 0, intensity: float = 1.0
+) -> dict[str, Any]:
+    """Queue a look left gesture action on the motion controller."""
+
+    action = gesture_look_left(delay_ms=delay_ms, intensity=float(intensity))
+    _enqueue_gesture(action)
+    return {"queued": True, "gesture": action.name, "delay_ms": delay_ms, "intensity": intensity}
+
+
+async def enqueue_look_right_gesture(
+    delay_ms: int = 0, intensity: float = 1.0
+) -> dict[str, Any]:
+    """Queue a look right gesture action on the motion controller."""
+
+    action = gesture_look_right(delay_ms=delay_ms, intensity=float(intensity))
+    _enqueue_gesture(action)
+    return {"queued": True, "gesture": action.name, "delay_ms": delay_ms, "intensity": intensity}
+
+
+async def enqueue_look_down_gesture(
+    delay_ms: int = 0, intensity: float = 1.0
+) -> dict[str, Any]:
+    """Queue a look down gesture action on the motion controller."""
+
+    action = gesture_look_down(delay_ms=delay_ms, intensity=float(intensity))
+    _enqueue_gesture(action)
+    return {"queued": True, "gesture": action.name, "delay_ms": delay_ms, "intensity": intensity}
+
+
+async def enqueue_look_center_gesture(delay_ms: int = 0) -> dict[str, Any]:
+    """Queue a look center gesture action on the motion controller."""
+
+    action = gesture_look_center(delay_ms=delay_ms)
+    _enqueue_gesture(action)
+    return {"queued": True, "gesture": action.name, "delay_ms": delay_ms}
 
 
 async def enqueue_curious_tilt_gesture(
@@ -381,6 +432,115 @@ tools.append(
 )
 
 function_map["gesture_look_around"] = enqueue_look_around_gesture
+
+tools.append(
+    {
+        "type": "function",
+        "name": "gesture_look_up",
+        "description": (
+            "Tilt the camera all the way up while keeping the current pan. "
+            "Use for requests like 'look up' or 'look all the way up'. "
+            "Provide an optional delay in milliseconds and intensity (1.0 is normal)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "delay_ms": {"type": "integer", "minimum": 0, "default": 0},
+                "intensity": {"type": "number", "minimum": 0.1, "maximum": 2.0, "default": 1.0},
+            },
+            "required": [],
+        },
+    }
+)
+
+function_map["gesture_look_up"] = enqueue_look_up_gesture
+
+tools.append(
+    {
+        "type": "function",
+        "name": "gesture_look_left",
+        "description": (
+            "Pan the camera all the way left while keeping the current tilt. "
+            "Use for requests like 'look left' or 'look all the way left'. "
+            "Provide an optional delay in milliseconds and intensity (1.0 is normal)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "delay_ms": {"type": "integer", "minimum": 0, "default": 0},
+                "intensity": {"type": "number", "minimum": 0.1, "maximum": 2.0, "default": 1.0},
+            },
+            "required": [],
+        },
+    }
+)
+
+function_map["gesture_look_left"] = enqueue_look_left_gesture
+
+tools.append(
+    {
+        "type": "function",
+        "name": "gesture_look_right",
+        "description": (
+            "Pan the camera all the way right while keeping the current tilt. "
+            "Use for requests like 'look right' or 'look all the way right'. "
+            "Provide an optional delay in milliseconds and intensity (1.0 is normal)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "delay_ms": {"type": "integer", "minimum": 0, "default": 0},
+                "intensity": {"type": "number", "minimum": 0.1, "maximum": 2.0, "default": 1.0},
+            },
+            "required": [],
+        },
+    }
+)
+
+function_map["gesture_look_right"] = enqueue_look_right_gesture
+
+tools.append(
+    {
+        "type": "function",
+        "name": "gesture_look_down",
+        "description": (
+            "Tilt the camera all the way down while keeping the current pan. "
+            "Use for requests like 'look down' or 'look all the way down'. "
+            "Provide an optional delay in milliseconds and intensity (1.0 is normal)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "delay_ms": {"type": "integer", "minimum": 0, "default": 0},
+                "intensity": {"type": "number", "minimum": 0.1, "maximum": 2.0, "default": 1.0},
+            },
+            "required": [],
+        },
+    }
+)
+
+function_map["gesture_look_down"] = enqueue_look_down_gesture
+
+tools.append(
+    {
+        "type": "function",
+        "name": "gesture_look_center",
+        "description": (
+            "Return the camera to a neutral, centered pan/tilt position. "
+            "Use for requests like 'look back to center' or 'return to neutral'. "
+            "Provide an optional delay in milliseconds."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "delay_ms": {"type": "integer", "minimum": 0, "default": 0},
+            },
+            "required": [],
+        },
+    }
+)
+
+function_map["gesture_look_center"] = enqueue_look_center_gesture
 
 tools.append(
     {
