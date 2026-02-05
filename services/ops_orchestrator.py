@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import random
 import threading
 import time
 
 from config import ConfigController
 from core.logging import logger as LOGGER
+from core.alert_policy import Alert, AlertPolicy
+from core.budgeting import RollingWindowBudget
 from core.ops_models import (
     BudgetCounters,
     DebouncedState,
@@ -24,6 +27,8 @@ from services.health_probes import (
     probe_network,
     probe_realtime_session,
 )
+from motion.gestures import gesture_idle
+from motion.motion_controller import MotionController
 
 
 class OpsOrchestrator:
@@ -52,6 +57,18 @@ class OpsOrchestrator:
         self._network_probe_host = "api.openai.com"
         self._network_probe_timeout_s = 2.0
         self._realtime_api: object | None = None
+        self._event_bus = None
+        self._alert_policy = AlertPolicy()
+        self._sensor_budget = RollingWindowBudget(0, 60.0, name="sensor_reads")
+        self._micro_presence_budget = RollingWindowBudget(0, 3600.0, name="micro_presence")
+        self._log_budget = RollingWindowBudget(0, 60.0, name="logs")
+        self._last_probe_results: list[HealthProbeResult] = []
+        self._micro_presence_enabled = False
+        self._micro_presence_min_s = 60.0
+        self._micro_presence_max_s = 180.0
+        self._micro_presence_battery_min = 0.2
+        self._micro_presence_health_allowed = {HealthStatus.OK, HealthStatus.DEGRADED}
+        self._micro_presence_next_ts = time.monotonic()
         OpsOrchestrator._instance = self
 
     @classmethod
@@ -91,6 +108,10 @@ class OpsOrchestrator:
         with self._lock:
             self._realtime_api = realtime_api
 
+    def set_event_bus(self, event_bus) -> None:
+        with self._lock:
+            self._event_bus = event_bus
+
     def enable_network_probe(self, enabled: bool) -> None:
         with self._lock:
             self._network_probe_enabled = enabled
@@ -127,6 +148,8 @@ class OpsOrchestrator:
                 self._emit_health_snapshot(self._latest_health)
             self._mode = ModeState.ACTIVE
 
+        self._maybe_run_micro_presence(now)
+
         if now >= self._next_heartbeat:
             self._next_heartbeat = now + self._heartbeat_period_s
             self._emit_heartbeat(timestamp)
@@ -147,13 +170,13 @@ class OpsOrchestrator:
                 },
             )
             self._recent_events = (self._recent_events + [event])[-20:]
-
-        LOGGER.info(
-            "[Ops] Heartbeat: mode=%s ticks=%s heartbeats=%s",
-            event.metadata["mode"],
-            event.metadata["ticks"],
-            event.metadata["heartbeats"],
-        )
+        if self._should_log_event("heartbeat"):
+            LOGGER.info(
+                "[Ops] Heartbeat: mode=%s ticks=%s heartbeats=%s",
+                event.metadata["mode"],
+                event.metadata["ticks"],
+                event.metadata["heartbeats"],
+            )
 
     def _load_probe_config(self) -> None:
         config = ConfigController.get_instance().get_config()
@@ -165,8 +188,58 @@ class OpsOrchestrator:
         self._network_probe_timeout_s = float(
             network_cfg.get("timeout_s", self._network_probe_timeout_s)
         )
+        ops_cfg = config.get("ops") or {}
+        budgets_cfg = ops_cfg.get("budgets") or {}
+        self._sensor_budget = RollingWindowBudget(
+            int(budgets_cfg.get("sensor_reads_per_minute", 0)),
+            60.0,
+            name="sensor_reads",
+        )
+        self._micro_presence_budget = RollingWindowBudget(
+            int(budgets_cfg.get("micro_presence_per_hour", 0)),
+            3600.0,
+            name="micro_presence",
+        )
+        self._log_budget = RollingWindowBudget(
+            int(budgets_cfg.get("logs_per_minute", 0)),
+            60.0,
+            name="logs",
+        )
+        self._alert_policy = AlertPolicy.from_config(config)
+        micro_cfg = ops_cfg.get("micro_presence") or {}
+        self._micro_presence_enabled = bool(micro_cfg.get("enabled", self._micro_presence_enabled))
+        self._micro_presence_min_s = float(
+            micro_cfg.get("min_interval_s", self._micro_presence_min_s)
+        )
+        self._micro_presence_max_s = float(
+            micro_cfg.get("max_interval_s", self._micro_presence_max_s)
+        )
+        self._micro_presence_battery_min = float(
+            micro_cfg.get("battery_min_percent", self._micro_presence_battery_min)
+        )
+        allowed = micro_cfg.get("health_allowed") or [
+            HealthStatus.OK.value,
+            HealthStatus.DEGRADED.value,
+        ]
+        resolved: set[HealthStatus] = set()
+        for status in allowed:
+            if not isinstance(status, str):
+                continue
+            try:
+                resolved.add(HealthStatus(status))
+            except ValueError:
+                continue
+        if resolved:
+            self._micro_presence_health_allowed = resolved
+        self._schedule_next_micro_presence(time.monotonic())
 
     def _run_health_probes(self) -> list[HealthProbeResult]:
+        now = time.monotonic()
+        if not self._sensor_budget.allow(now):
+            self._emit_budget_alert("sensor_reads", "Sensor read budget exhausted.")
+            return list(self._last_probe_results)
+
+        self._sensor_budget.record(now)
         with self._lock:
             realtime_api = self._realtime_api
             network_enabled = self._network_probe_enabled
@@ -181,6 +254,7 @@ class OpsOrchestrator:
         ]
         if network_enabled:
             results.append(probe_network(network_host, network_timeout))
+        self._last_probe_results = list(results)
         return results
 
     def _apply_health_results(
@@ -269,8 +343,103 @@ class OpsOrchestrator:
             },
         )
         self._recent_events = (self._recent_events + [event])[-20:]
-        LOGGER.info(
-            "[Ops] Health snapshot: status=%s summary=%s",
-            snapshot.status.value,
-            snapshot.summary,
+        if self._should_log_event("health_snapshot"):
+            LOGGER.info(
+                "[Ops] Health snapshot: status=%s summary=%s",
+                snapshot.status.value,
+                snapshot.summary,
+            )
+        self._emit_health_alert(snapshot)
+
+    def _emit_health_alert(self, snapshot: HealthSnapshot) -> None:
+        if snapshot.status == HealthStatus.OK:
+            return
+        severity = "critical" if snapshot.status == HealthStatus.FAILING else "warning"
+        self._emit_alert(
+            Alert(
+                key=f"health_{snapshot.status.value}",
+                message=f"Health status {snapshot.status.value}: {snapshot.summary}",
+                severity=severity,
+                metadata={"summary": snapshot.summary},
+                cooldown_s=120.0,
+            )
         )
+
+    def _emit_budget_alert(self, key: str, message: str) -> None:
+        self._emit_alert(Alert(key=f"budget_{key}", message=message, severity="warning"))
+
+    def _emit_alert(self, alert: Alert) -> None:
+        event_bus = None
+        with self._lock:
+            event_bus = self._event_bus
+        if event_bus is None:
+            return
+        self._alert_policy.emit(event_bus, alert)
+
+    def _should_log_event(self, event_type: str) -> bool:
+        now = time.monotonic()
+        if self._log_budget.allow(now):
+            self._log_budget.record(now)
+            return True
+        self._emit_budget_alert("logs", f"Log budget exhausted (event={event_type}).")
+        return False
+
+    def _schedule_next_micro_presence(self, now: float) -> None:
+        min_s = max(0.1, self._micro_presence_min_s)
+        max_s = max(min_s, self._micro_presence_max_s)
+        self._micro_presence_next_ts = now + random.uniform(min_s, max_s)
+
+    def _maybe_run_micro_presence(self, now: float) -> None:
+        if not self._micro_presence_enabled:
+            return
+        if now < self._micro_presence_next_ts:
+            return
+        self._schedule_next_micro_presence(now)
+        if not self._micro_presence_budget.allow(now):
+            self._emit_budget_alert("micro_presence", "Micro-presence budget exhausted.")
+            return
+
+        with self._lock:
+            snapshot = self._latest_health
+
+        if snapshot and snapshot.status not in self._micro_presence_health_allowed:
+            return
+
+        battery_percent = None
+        if snapshot:
+            battery_value = snapshot.details.get("battery_percent")
+            if isinstance(battery_value, (int, float)):
+                battery_percent = float(battery_value)
+        if battery_percent is not None and battery_percent < self._micro_presence_battery_min:
+            return
+
+        try:
+            controller = MotionController.get_instance()
+        except Exception as exc:
+            LOGGER.debug("[Ops] Micro-presence skipped: motion controller unavailable (%s).", exc)
+            return
+
+        if not controller.is_control_loop_alive():
+            LOGGER.debug("[Ops] Micro-presence skipped: motion loop inactive.")
+            return
+
+        if controller.is_moving():
+            LOGGER.debug("[Ops] Micro-presence skipped: motion busy.")
+            return
+
+        with controller._queue_lock:
+            if controller.action_queue:
+                LOGGER.debug("[Ops] Micro-presence skipped: action queue not empty.")
+                return
+
+        delay_ms = random.randint(100, 350)
+        intensity = random.uniform(0.6, 1.0)
+        action = gesture_idle(delay_ms=delay_ms, intensity=intensity)
+        controller.add_action_to_queue(action)
+        self._micro_presence_budget.record(now)
+        if self._should_log_event("micro_presence"):
+            LOGGER.info(
+                "[Ops] Micro-presence gesture queued: delay_ms=%s intensity=%.2f",
+                delay_ms,
+                intensity,
+            )
