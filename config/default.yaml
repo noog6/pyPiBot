@@ -37,6 +37,23 @@ audio:
 # Injected response throttling
 injection_response_cooldown_s: 2.0
 max_injection_responses_per_minute: 12
+# Operational budgets and micro-presence
+ops:
+  budgets:
+    ai_calls_per_minute: 60
+    micro_presence_per_hour: 12
+    sensor_reads_per_minute: 60
+    logs_per_minute: 240
+  micro_presence:
+    enabled: true
+    min_interval_s: 45
+    max_interval_s: 120
+    battery_min_percent: 0.25
+    health_allowed: ["ok", "degraded"]
+# Alert policy
+alerts:
+  cooldown_s: 60
+  ttl_s: 120
 # Reflection settings
 reflection_enabled: false
 reflection_min_interval_s: 300

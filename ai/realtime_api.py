@@ -19,6 +19,8 @@ from urllib import request
 from urllib.parse import urlparse
 
 from config import ConfigController
+from core.alert_policy import Alert, AlertPolicy
+from core.budgeting import RollingWindowBudget
 from core.logging import (
     logger,
     log_error,
@@ -240,6 +242,14 @@ class RealtimeAPI:
         self._image_response_enabled = self._image_response_mode != "catalog_only"
         self._reflection_enabled = bool(config.get("reflection_enabled", False))
         self._reflection_min_interval_s = float(config.get("reflection_min_interval_s", 300.0))
+        ops_cfg = config.get("ops") or {}
+        budgets_cfg = ops_cfg.get("budgets") or {}
+        self._ai_call_budget = RollingWindowBudget(
+            int(budgets_cfg.get("ai_calls_per_minute", 0)),
+            60.0,
+            name="ai_calls",
+        )
+        self._alert_policy = AlertPolicy.from_config(config)
         governance_cfg = config.get("governance") or {}
         _validate_tool_specs(governance_cfg.get("tool_specs") or {}, tools)
         tool_specs = build_tool_specs(governance_cfg.get("tool_specs") or {})
@@ -262,6 +272,7 @@ class RealtimeAPI:
             enabled=self._reflection_enabled,
             min_interval_s=self._reflection_min_interval_s,
             storage=self._storage,
+            budget=self._ai_call_budget,
         )
         self._reflection_enqueued = False
         self._response_done_reflection_task: asyncio.Task | None = None
@@ -295,6 +306,27 @@ class RealtimeAPI:
 
     def get_event_bus(self) -> EventBus:
         return self.event_bus
+
+    def _allow_ai_call(self, reason: str, *, bypass: bool = False) -> bool:
+        if bypass:
+            return True
+        if self._ai_call_budget.allow():
+            return True
+        self._emit_alert(
+            Alert(
+                key="budget_ai_calls",
+                message=f"AI call budget exhausted ({reason}).",
+                severity="warning",
+                metadata={"reason": reason},
+            )
+        )
+        return False
+
+    def _record_ai_call(self) -> None:
+        self._ai_call_budget.record()
+
+    def _emit_alert(self, alert: Alert) -> None:
+        self._alert_policy.emit(self.event_bus, alert)
 
     def is_ready_for_injections(self) -> bool:
         return (
@@ -938,12 +970,16 @@ class RealtimeAPI:
         if not self.api_key:
             logger.debug("Skipping response.done reflection: missing API key.")
             return
+        if not self._allow_ai_call("response_done_reflection"):
+            logger.info("Skipping response.done reflection: AI call budget exhausted.")
+            return
         prompt = self._build_response_done_prompt(trigger)
         try:
             raw_response = await asyncio.to_thread(self._call_openai_prompt, prompt)
         except Exception as exc:  # noqa: BLE001 - guard background call
             logger.warning("response.done reflection failed: %s", exc)
             return
+        self._record_ai_call()
         payload = self._parse_response_done_payload(raw_response)
         if not payload:
             return
@@ -1752,10 +1788,14 @@ class RealtimeAPI:
         self._track_outgoing_event(event)
         await websocket.send(json.dumps(event))
 
+        if not self._allow_ai_call("startup_prompt"):
+            logger.info("Skipping startup response: AI call budget exhausted.")
+            return
         response_create_event = {"type": "response.create"}
         log_ws_event("Outgoing", response_create_event)
         self._track_outgoing_event(response_create_event, origin="prompt")
         await websocket.send(json.dumps(response_create_event))
+        self._record_ai_call()
 
     async def send_text_message_to_conversation(
         self,
@@ -1887,6 +1927,10 @@ class RealtimeAPI:
                     )
                     return
 
+        bypass_budget = trigger == "text_message"
+        if not self._allow_ai_call(f"injection:{trigger}", bypass=bypass_budget):
+            logger.info("Skipping injected response (%s): AI call budget exhausted.", trigger)
+            return
         response_metadata = {
             "trigger": trigger,
             "priority": str(trigger_priority),
@@ -1905,6 +1949,7 @@ class RealtimeAPI:
         now = time.monotonic()
         self._injection_response_timestamps.append(now)
         trigger_timestamps.append(now)
+        self._record_ai_call()
 
     def _get_injection_priority(self, trigger: str) -> int:
         trigger_config = self._injection_response_triggers.get(trigger, {})

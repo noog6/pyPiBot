@@ -10,6 +10,7 @@ import time
 from typing import Any
 from urllib import request
 
+from core.budgeting import RollingWindowBudget
 from core.logging import logger
 from storage import StorageController
 
@@ -51,12 +52,14 @@ class ReflectionCoordinator:
         min_interval_s: float,
         storage: StorageController | None = None,
         model: str = "gpt-4o-mini",
+        budget: RollingWindowBudget | None = None,
     ) -> None:
         self._api_key = api_key
         self._enabled = enabled
         self._min_interval_s = max(0.0, min_interval_s)
         self._storage = storage
         self._model = model
+        self._budget = budget
         self._last_reflection_ts = 0.0
         self._pending_task: asyncio.Task[None] | None = None
 
@@ -121,6 +124,9 @@ class ReflectionCoordinator:
         if not self._api_key:
             logger.debug("Skipping reflection: missing API key.")
             return None
+        if self._budget and not self._budget.allow():
+            logger.debug("Skipping reflection: AI call budget exhausted.")
+            return None
 
         prompt = self._build_prompt(context)
         try:
@@ -134,6 +140,9 @@ class ReflectionCoordinator:
                 "improvements": [],
                 "follow_up": "Retry reflection when connectivity is restored.",
             }
+
+        if self._budget:
+            self._budget.record()
 
         try:
             reflection = json.loads(raw_response)
