@@ -185,3 +185,11 @@ interaction_states:
     listening: 0
     thinking: 150
     speaking: 0
+
+# Health monitoring
+health:
+  debounce_s: 2.0
+  network:
+    enabled: false
+    host: "api.openai.com"
+    timeout_s: 2.0

@@ -284,6 +284,14 @@ class RealtimeAPI:
             is_ready=self.is_ready_for_injections,
             inject_callback=self.inject_event,
         )
+        self._session_connection_attempts = 0
+        self._session_connections = 0
+        self._session_reconnects = 0
+        self._session_failures = 0
+        self._session_connected = False
+        self._last_connect_time: float | None = None
+        self._last_disconnect_reason: str | None = None
+        self._last_failure_reason: str | None = None
 
     def get_event_bus(self) -> EventBus:
         return self.event_bus
@@ -295,6 +303,39 @@ class RealtimeAPI:
             and self.loop is not None
             and self.loop.is_running()
         )
+
+    def get_session_health(self) -> dict[str, Any]:
+        return {
+            "connected": self._session_connected,
+            "ready": self.ready_event.is_set(),
+            "connection_attempts": self._session_connection_attempts,
+            "connections": self._session_connections,
+            "reconnects": self._session_reconnects,
+            "failures": self._session_failures,
+            "last_connect_time": self._last_connect_time or 0.0,
+            "last_disconnect_reason": self._last_disconnect_reason or "",
+            "last_failure_reason": self._last_failure_reason or "",
+        }
+
+    def _note_connection_attempt(self) -> None:
+        self._session_connection_attempts += 1
+
+    def _note_connected(self) -> None:
+        self._session_connections += 1
+        self._session_connected = True
+        self._last_connect_time = time.time()
+        self._last_disconnect_reason = None
+
+    def _note_disconnect(self, reason: str) -> None:
+        self._session_connected = False
+        self._last_disconnect_reason = reason
+
+    def _note_failure(self, reason: str) -> None:
+        self._session_failures += 1
+        self._last_failure_reason = reason
+
+    def _note_reconnect(self) -> None:
+        self._session_reconnects += 1
 
     def _track_outgoing_event(
         self,
@@ -971,6 +1012,7 @@ class RealtimeAPI:
         self.loop = asyncio.get_running_loop()
         self.ready_event.clear()
         self._event_injector.start()
+        pending_disconnect_reason: str | None = None
 
         def _playback_complete_from_thread() -> None:
             if self.loop:
@@ -984,6 +1026,7 @@ class RealtimeAPI:
         try:
             while True:
                 try:
+                    self._note_connection_attempt()
                     url = "wss://api.openai.com/v1/realtime?model=gpt-realtime"
                     _validate_outbound_endpoint(url)
                     headers = {"Authorization": f"Bearer {self.api_key}"}
@@ -996,6 +1039,8 @@ class RealtimeAPI:
                         ping_timeout=10,
                     ) as websocket:
                         log_info("✅ Connected to the server.", style="bold green")
+                        self._note_connected()
+                        pending_disconnect_reason = None
 
                         await self.initialize_session(websocket)
                         ws_task = asyncio.create_task(self.process_ws_messages(websocket))
@@ -1020,16 +1065,22 @@ class RealtimeAPI:
 
                     break
                 except ConnectionClosedError as exc:
+                    pending_disconnect_reason = str(exc)
+                    self._note_disconnect(pending_disconnect_reason)
                     if "keepalive ping timeout" in str(exc):
                         logger.warning(
                             "WebSocket connection lost due to keepalive ping timeout. Reconnecting..."
                         )
+                        self._note_reconnect()
                         await asyncio.sleep(1)
                         continue
                     logger.exception("WebSocket connection closed unexpectedly.")
+                    self._note_failure(str(exc))
                     break
                 except Exception as exc:
                     logger.exception("An unexpected error occurred: %s", exc)
+                    pending_disconnect_reason = str(exc)
+                    self._note_failure(str(exc))
                     break
                 finally:
                     if self.audio_player:
@@ -1038,6 +1089,8 @@ class RealtimeAPI:
                     self.mic.close()
                     self.websocket = None
                     self.ready_event.clear()
+                    if pending_disconnect_reason:
+                        self._note_disconnect(pending_disconnect_reason)
         finally:
             self._event_injector.stop()
 
@@ -1096,6 +1149,7 @@ class RealtimeAPI:
                 await self.handle_event(event, websocket)
             except ConnectionClosed:
                 log_warning("⚠️ WebSocket connection lost.")
+                self._note_disconnect("websocket connection closed")
                 break
 
     async def handle_event(self, event: dict[str, Any], websocket: Any) -> None:
