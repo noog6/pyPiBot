@@ -77,10 +77,16 @@ class ImuMonitor:
             self._loop_thread = threading.Thread(target=self._loop, daemon=True)
             self._loop_thread.start()
 
-    def stop_loop(self) -> None:
+    def stop_loop(self, timeout_s: float = 2.0) -> None:
         if self._loop_thread is not None:
             self._stop_event.set()
-            self._loop_thread.join()
+            self._loop_thread.join(timeout=timeout_s)
+            if self._loop_thread.is_alive():
+                LOGGER.warning(
+                    "[IMU] Loop thread did not exit within %.2fs; continuing shutdown.",
+                    timeout_s,
+                )
+                return
             self._loop_thread = None
 
     def is_loop_alive(self) -> bool:
