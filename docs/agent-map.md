@@ -31,6 +31,9 @@ The entrypoint in `main.py` builds and launches the following components:
   event callbacks into the main runtime.【F:services/imu_monitor.py†L40-L210】
 - **Battery monitor thread**: Samples the ADS1015 voltage, derives battery
   events, and emits callbacks to the runtime.【F:services/battery_monitor.py†L31-L140】
+- **Ops orchestrator thread**: Runs a heartbeat loop that executes health
+  probes, debounces health states, enforces rolling budgets, and emits health
+  snapshots/alerts onto the event bus.【F:services/ops_orchestrator.py†L1-L431】【F:services/health_probes.py†L1-L199】
 - **Event injector thread**: Drains the shared event bus, applies cooldown/TTL
   checks, and injects events into the realtime session when the websocket is
   ready.【F:ai/event_injector.py†L1-L79】【F:ai/realtime_api.py†L193-L646】
@@ -62,6 +65,7 @@ flowchart LR
     subgraph Sensors["Sensor/monitor threads"]
         IMU[IMU monitor thread]
         BAT[Battery monitor thread]
+        OPS[Ops orchestrator thread]
     end
 
     subgraph Vision["Vision thread"]
@@ -77,6 +81,7 @@ flowchart LR
     MAIN --> MOTION
     MAIN --> IMU
     MAIN --> BAT
+    MAIN --> OPS
 
     MIC --> WS
     WS --> PLAYER
@@ -91,6 +96,7 @@ flowchart LR
 
     IMU --> BUS
     BAT --> BUS
+    OPS --> BUS
 
     CAM --> WS
     WS --> CAM
@@ -134,14 +140,22 @@ sensor events into bus payloads, and the realtime agent’s `EventInjector`
 thread drains the bus when ready, applying cooldown/TTL logic before injecting
 messages into the websocket session.【F:services/imu_monitor.py†L109-L153】【F:services/battery_monitor.py†L76-L118】【F:ai/event_injector.py†L1-L79】【F:main.py†L110-L207】
 
-### 4. Motion Loop and Realtime State Hooks
+### 4. Ops Orchestrator → Event Bus
+
+The ops orchestrator runs a periodic tick loop to execute health probes,
+calculate debounced health status, emit health snapshots, and publish alerts or
+budget warnings to the shared event bus. This provides a low-frequency
+operations heartbeat alongside the sensor loops and is started/stopped by
+`main.py` just like the other background services.【F:services/ops_orchestrator.py†L34-L431】【F:main.py†L174-L233】
+
+### 5. Motion Loop and Realtime State Hooks
 
 Motion control is a continuous loop running in its own thread. The realtime
 agent uses an `InteractionStateManager` to interpret listening/speaking states
 and can emit gesture actions (e.g., nods) by pushing actions into the motion
 controller queue, assuming the control loop is running.【F:ai/realtime_api.py†L126-L208】【F:motion/motion_controller.py†L90-L272】
 
-### 5. Orchestration + Reflection Lifecycle
+### 6. Orchestration + Reflection Lifecycle
 
 The realtime loop now tracks orchestration phases with an `OrchestrationState`
 helper. Phases transition as the websocket events progress: speech start and
@@ -169,5 +183,6 @@ session initialization to seed instructions for the next turn.【F:ai/realtime_a
 | Motion control loop | `MotionController` | Servo motion execution | Gesture/action queue | Servo position updates |
 | IMU monitor | `ImuMonitor` | Sample IMU data, emit events | IMU sensor | Motion events to main/realtime |
 | Battery monitor | `BatteryMonitor` | Sample voltage, emit events | ADS1015 sensor | Battery events to main/realtime |
+| Ops orchestrator | `OpsOrchestrator` | Health probes, heartbeats, alerts, budgets | Realtime API + system probes | Health snapshots + alert events |
 | Event bus | `ai/EventBus` | Thread-safe queue of pending realtime events | Sensor handler events | Prioritized events for injection |
 | Event injector thread | `ai/EventInjector` | Flush queued bus events when realtime ready | EventBus entries | Messages to realtime |
