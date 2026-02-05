@@ -1127,6 +1127,8 @@ class RealtimeAPI:
                     self.ready_event.clear()
                     if pending_disconnect_reason:
                         self._note_disconnect(pending_disconnect_reason)
+                    elif self._session_connected:
+                        self._note_disconnect("clean shutdown")
         finally:
             self._event_injector.stop()
 
