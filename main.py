@@ -16,6 +16,7 @@ from motion import MotionController
 from storage.controller import StorageController
 from services.battery_monitor import BatteryMonitor
 from services.imu_monitor import ImuMonitor
+from services.ops_orchestrator import OpsOrchestrator
 from services.profile_manager import ProfileManager
 
 
@@ -178,6 +179,14 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         logger.warning("Battery monitor unavailable: %s", exc)
 
+    ops_orchestrator = None
+    try:
+        logger.info("Starting ops orchestrator...")
+        ops_orchestrator = OpsOrchestrator.get_instance()
+        ops_orchestrator.start_loop()
+    except Exception as exc:
+        logger.warning("Ops orchestrator unavailable: %s", exc)
+
     try:
         asyncio.run(realtime_api_instance.run())
     except KeyboardInterrupt:
@@ -202,6 +211,8 @@ def main(argv: list[str] | None = None) -> int:
             if battery_event_handler:
                 battery_monitor.unregister_event_handler(battery_event_handler)
             battery_monitor.stop_loop()
+        if ops_orchestrator:
+            ops_orchestrator.stop_loop()
 
     return 0
 
