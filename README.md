@@ -63,6 +63,7 @@ Default keys include:
 - `assistant_name` and `startup_prompts`
 - `logging_level`
 - `stop_words` and `stop_word_cooldown_s` to pause tool execution on emergency phrases
+- `health`, `ops`, and `alerts` for operational health probes, budgets, and alert policy
 - `governance` settings (autonomy level, autonomy windows, budgets, and tool tier specs)
 
 ## Systemd Deployment
@@ -98,6 +99,7 @@ pytest -q
 - [docs/hardware-setup.md](docs/hardware-setup.md)
 - [docs/installation.md](docs/installation.md)
 - [docs/interaction-states.md](docs/interaction-states.md)
+- [docs/operations.md](docs/operations.md)
 - [docs/personalization.md](docs/personalization.md)
 - [docs/requirements.md](docs/requirements.md)
 - [docs/systemd-setup.md](docs/systemd-setup.md)
