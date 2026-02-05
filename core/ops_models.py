@@ -51,3 +51,12 @@ class OpsEvent:
     event_type: str
     message: str
     metadata: Mapping[str, str | float | int] = field(default_factory=dict)
+
+
+@dataclass
+class DebouncedState:
+    """Hold a debounced state for health probes."""
+
+    status: HealthStatus
+    since: float
+    last_update: float

@@ -183,6 +183,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         logger.info("Starting ops orchestrator...")
         ops_orchestrator = OpsOrchestrator.get_instance()
+        ops_orchestrator.set_realtime_api(realtime_api_instance)
         ops_orchestrator.start_loop()
     except Exception as exc:
         logger.warning("Ops orchestrator unavailable: %s", exc)
