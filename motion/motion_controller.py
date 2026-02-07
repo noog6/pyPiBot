@@ -6,6 +6,7 @@ import heapq
 import threading
 import time
 import traceback
+from dataclasses import dataclass
 
 from hardware.servo_registry import ServoRegistry
 from motion.action import Action
@@ -25,8 +26,23 @@ def smoothstep(t: float) -> float:
     return t * t * (3.0 - 2.0 * t)
 
 
-MAX_PAN_DEG_PER_TICK = 2.5
-MAX_TILT_DEG_PER_TICK = 1.5
+@dataclass(frozen=True)
+class MotionTuning:
+    dt_min_s: float = 0.005
+    dt_max_s: float = 0.05
+    pan_step_min_deg: float = 0.2
+    pan_step_max_deg: float = 1.6
+    pan_step_scale_deg: float = 90.0
+    tilt_step_max_deg: float = 1.5
+    pan_a_max: float = 600.0
+    tilt_a_max: float = 400.0
+    v_max_smoothing_tau_s: float = 0.04
+    position_eps_deg: float = 0.05
+    at_dest_eps_deg: float = 0.5
+    debug_motion: bool = False
+
+
+TUNING = MotionTuning()
 
 
 def limit_step(
@@ -77,11 +93,10 @@ def limit_step(
     return nxt
 
 
-def scaled_pan_step(dist_deg: float) -> float:
-    pan_step_min = 0.2
-    pan_step_max = 1.6
-    ratio = clamp01(abs(dist_deg) / 90.0)
-    return pan_step_min + (pan_step_max - pan_step_min) * ratio
+def scaled_step(dist_deg: float, step_min: float, step_max: float, scale_deg: float) -> float:
+    ratio = clamp01(abs(dist_deg) / max(scale_deg, 1e-6))
+    ratio = smoothstep(ratio)
+    return step_min + (step_max - step_min) * ratio
 
 
 class MotionController:
@@ -105,8 +120,10 @@ class MotionController:
         self.servo_registry = ServoRegistry.get_instance()
         self.current_servo_position = {"pan": 0.0, "tilt": 0.0}
         self.axis_v = {"pan": 0.0, "tilt": 0.0}
+        self.axis_v_max = {"pan": 0.0, "tilt": 0.0}
         self.action_queue: list[Action] = []
         self.current_action: Action | None = None
+        self._last_update_ms: int | None = None
         MotionController._instance = self
 
     @classmethod
@@ -199,14 +216,24 @@ class MotionController:
         if not new_frame.is_initialized:
             self._init_frame(new_frame, now_ms)
 
-        dt_s = max(self.control_loop_period_ms, 1) / 1000.0
+        dt_s = self._compute_dt_s(now_ms)
         desired_pan = new_frame.servo_destination["pan"]
         desired_tilt = new_frame.servo_destination["tilt"]
         pan_remaining = desired_pan - self.current_servo_position["pan"]
-        pan_v_max = scaled_pan_step(pan_remaining) / dt_s
-        tilt_v_max = MAX_TILT_DEG_PER_TICK / dt_s
-        pan_a_max = 600.0
-        tilt_a_max = 400.0
+        pan_v_max_raw = (
+            scaled_step(
+                pan_remaining,
+                TUNING.pan_step_min_deg,
+                TUNING.pan_step_max_deg,
+                TUNING.pan_step_scale_deg,
+            )
+            / dt_s
+        )
+        tilt_v_max_raw = TUNING.tilt_step_max_deg / dt_s
+        pan_v_max = self._smooth_v_max("pan", pan_v_max_raw, dt_s)
+        tilt_v_max = self._smooth_v_max("tilt", tilt_v_max_raw, dt_s)
+        pan_a_max = TUNING.pan_a_max
+        tilt_a_max = TUNING.tilt_a_max
 
         limited_pan = limit_step(
             self.current_servo_position["pan"],
@@ -216,7 +243,7 @@ class MotionController:
             dt_s,
             pan_v_max,
             pan_a_max,
-            eps=0.05,
+            eps=TUNING.position_eps_deg,
         )
 
         limited_tilt = limit_step(
@@ -227,7 +254,7 @@ class MotionController:
             dt_s,
             tilt_v_max,
             tilt_a_max,
-            eps=0.05,
+            eps=TUNING.position_eps_deg,
         )
 
         if abs(limited_pan - self.current_servo_position["pan"]) > 1.0:
@@ -249,11 +276,24 @@ class MotionController:
         self.servo_registry.servos["pan"].write_value(limited_pan)
         self.servo_registry.servos["tilt"].write_value(limited_tilt)
 
-        eps = 0.5
+        eps = TUNING.at_dest_eps_deg
         at_dest = (
             abs(self.current_servo_position["pan"] - desired_pan) <= eps
             and abs(self.current_servo_position["tilt"] - desired_tilt) <= eps
         )
+
+        if TUNING.debug_motion:
+            log_info(
+                "[MOTION][debug] dt=%.4f pan_v=%.2f pan_vmax=%.2f tilt_v=%.2f tilt_vmax=%.2f "
+                "pan_err=%.2f tilt_err=%.2f",
+                dt_s,
+                self.axis_v["pan"],
+                pan_v_max,
+                self.axis_v["tilt"],
+                tilt_v_max,
+                desired_pan - self.current_servo_position["pan"],
+                desired_tilt - self.current_servo_position["tilt"],
+            )
 
         done = self._frame_done(new_frame, at_dest, now_ms)
 
@@ -282,6 +322,31 @@ class MotionController:
             return True
 
         return False
+
+    def _compute_dt_s(self, now_ms: int) -> float:
+        if self._last_update_ms is None:
+            dt_ms = max(self.control_loop_period_ms, 1)
+        else:
+            dt_ms = max(now_ms - self._last_update_ms, 1)
+        self._last_update_ms = now_ms
+        dt_s = dt_ms / 1000.0
+        if dt_s < TUNING.dt_min_s:
+            return TUNING.dt_min_s
+        if dt_s > TUNING.dt_max_s:
+            return TUNING.dt_max_s
+        return dt_s
+
+    def _smooth_v_max(self, axis: str, v_max: float, dt_s: float) -> float:
+        tau_s = TUNING.v_max_smoothing_tau_s
+        if tau_s <= 0.0:
+            self.axis_v_max[axis] = max(v_max, 0.0)
+            return v_max
+        prev = self.axis_v_max.get(axis, 0.0)
+        alpha = dt_s / (tau_s + dt_s)
+        smoothed = prev + alpha * (v_max - prev)
+        smoothed = max(smoothed, 0.0)
+        self.axis_v_max[axis] = smoothed
+        return smoothed
 
     def _init_frame(self, frame: Keyframe, now_ms: int) -> None:
         frame.start_time_ms = now_ms
