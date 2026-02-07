@@ -10,6 +10,7 @@ from typing import Any
 import concurrent.futures
 from collections import deque
 from datetime import datetime
+from pathlib import Path
 
 from config import ConfigController
 from core.logging import logger
@@ -95,6 +96,9 @@ class CameraController:
         self._warmup_frames_seen = 0
         self._warmup_done = True
         self._configure_warmup()
+        self.imx500 = None
+        self.imx500_device_id = None
+        self._configure_imx500()
 
         CameraController._instance = self
 
@@ -276,6 +280,41 @@ class CameraController:
         self._warmup_frames = max(int(config.get("camera_warmup_frames", 5)), 0)
         self._warmup_ms = max(int(config.get("camera_warmup_ms", 1000)), 0)
         self._reset_warmup()
+
+    def _configure_imx500(self) -> None:
+        config = ConfigController.get_instance().get_config()
+        imx500_enabled = bool(config.get("imx500_enabled", True))
+        if not imx500_enabled:
+            return
+        import importlib
+        import importlib.util
+
+        if importlib.util.find_spec("picamera2.devices.imx500") is None:
+            logger.info("[CAMERA] IMX500 support not installed; skipping setup.")
+            return
+
+        model_path = config.get(
+            "imx500_model_path",
+            "/usr/share/imx500-models/imx500_network_mobilenet_v2.rpk",
+        )
+        if not model_path:
+            logger.warning("[CAMERA] IMX500 model path not configured; skipping setup.")
+            return
+        model_file = Path(str(model_path))
+        if not model_file.exists():
+            logger.warning("[CAMERA] IMX500 model not found at %s; skipping setup.", model_file)
+            return
+
+        imx500_module = importlib.import_module("picamera2.devices.imx500")
+        IMX500 = getattr(imx500_module, "IMX500", None)
+        if IMX500 is None:
+            logger.warning("[CAMERA] IMX500 class not available; skipping setup.")
+            return
+
+        self.imx500 = IMX500(str(model_file))
+        self.picam2.capture_metadata()
+        self.imx500_device_id = self.imx500.get_device_id()
+        logger.info("[CAMERA] IMX500 device detected: %s", self.imx500_device_id)
 
     def _reset_warmup(self) -> None:
         self._warmup_start_ms = millis()
