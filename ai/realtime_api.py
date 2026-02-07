@@ -207,6 +207,8 @@ class RealtimeAPI:
         self.function_call: dict[str, Any] | None = None
         self.function_call_args = ""
         self.mic_send_suppress_until = 0.0
+        # Tracks whether to start mic receiving on the first audio delta for the current response.
+        self._mic_receive_on_first_audio = False
         self.rate_limits: dict[str, Any] | None = None
         self.response_start_time: float | None = None
         self.websocket = None
@@ -1204,7 +1206,7 @@ class RealtimeAPI:
             if self.audio_player:
                 self.audio_player.start_response()
             self._audio_accum.clear()
-            self.mic.start_receiving()
+            self._mic_receive_on_first_audio = True
             self.response_in_progress = True
             self._speaking_started = False
             self._assistant_reply_accum = ""
@@ -1227,6 +1229,11 @@ class RealtimeAPI:
         elif event_type == "response.output_audio.delta":
             audio_data = base64.b64decode(event["delta"])
             self._audio_accum.extend(audio_data)
+
+            if self._mic_receive_on_first_audio and not self.mic.is_receiving:
+                self._mic_receive_on_first_audio = False
+                log_info("Starting mic receiving on first audio delta.")
+                self.mic.start_receiving()
 
             if not self._speaking_started:
                 self._speaking_started = True
