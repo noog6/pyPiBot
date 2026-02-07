@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+import subprocess
 import time
 from typing import Any, Awaitable, Callable
 
@@ -51,9 +53,29 @@ async def read_environment() -> dict[str, Any]:
 
     sensor = LPS22HBSensor.get_instance()
     air_pressure, air_temperature = sensor.read_value()
+    cpu_temperature = None
+    cpu_status = "unavailable"
+    try:
+        result = subprocess.run(
+            ["vcgencmd", "measure_temp"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    else:
+        match = re.search(r"([0-9]+(?:\.[0-9]+)?)", result.stdout)
+        if match:
+            cpu_temperature = float(match.group(1))
+            cpu_status = "ok"
     return {
         "air_pressure": air_pressure,
         "air_temperature": air_temperature,
+        "air_temperature_context": "LPS22HB onboard ambient sensor inside Theo",
+        "cpu_temperature": cpu_temperature,
+        "cpu_temperature_context": "Broadcom SoC core temperature (vcgencmd)",
+        "cpu_temperature_status": cpu_status,
         "pressure_unit": "hPa",
         "temperature_unit": "C",
     }
@@ -317,8 +339,10 @@ tools.append(
         "type": "function",
         "name": "read_environment",
         "description": (
-            "Fetch Theo's internal air pressure and temperature from the LPS22HB sensor. "
-            "This is Theo's onboard reading, not external weather data. "
+            "Fetch Theo's onboard environment readings. "
+            "Includes air pressure/ambient temperature from the LPS22HB sensor (inside Theo), "
+            "plus the SoC core CPU temperature via vcgencmd (often higher than ambient). "
+            "This is onboard data, not external weather. "
             "Return values in hPa and Celsius."
         ),
         "parameters": {
