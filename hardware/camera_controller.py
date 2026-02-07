@@ -314,23 +314,41 @@ class CameraController:
             return
 
         retry_delays = (2, 5, 10)
+        retryable_errnos = {errno.EBUSY, errno.EREMOTEIO, errno.EIO, errno.ETIMEDOUT}
         for attempt, delay in enumerate(retry_delays, start=1):
+            is_last_attempt = attempt == len(retry_delays)
             try:
                 self.imx500 = IMX500(str(model_file))
                 self.imx500_device_id = self.imx500.get_device_id()
+                if not self.imx500_device_id:
+                    logger.warning(
+                        "[CAMERA] IMX500 device ID unavailable (attempt %s/%s)%s",
+                        attempt,
+                        len(retry_delays),
+                        "; giving up." if is_last_attempt else f"; retrying in {delay}s.",
+                    )
+                    self.imx500 = None
+                    self.imx500_device_id = None
+                    if not is_last_attempt:
+                        time.sleep(delay)
+                        continue
+                    break
                 logger.info("[CAMERA] IMX500 device detected: %s", self.imx500_device_id)
                 return
             except OSError as exc:
-                if getattr(exc, "errno", None) != errno.EBUSY:
+                if getattr(exc, "errno", None) not in retryable_errnos:
                     logger.warning("[CAMERA] IMX500 initialization failed; skipping setup: %s", exc)
                     break
                 logger.warning(
-                    "[CAMERA] IMX500 busy during firmware upload (attempt %s/%s); retrying in %ss.",
+                    "[CAMERA] IMX500 initialization issue (attempt %s/%s); retrying in %ss.",
                     attempt,
                     len(retry_delays),
                     delay,
                 )
-                time.sleep(delay)
+                if not is_last_attempt:
+                    time.sleep(delay)
+                    continue
+                break
             except Exception as exc:
                 logger.warning("[CAMERA] IMX500 initialization failed; skipping setup: %s", exc)
                 break
