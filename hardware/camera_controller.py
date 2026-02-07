@@ -145,6 +145,7 @@ class CameraController:
             current_time = millis()
             if current_time >= next_vision_loop_time:
                 next_vision_loop_time = current_time + self.vision_loop_period_ms
+                self.vision_loop_index += 1
 
                 if self._send_in_flight.is_set():
                     time.sleep(0.01)
