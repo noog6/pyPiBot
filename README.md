@@ -1,13 +1,25 @@
 # pyPiBot
 
-This is a Raspberry Pi robot assistant that combines AI interaction, hardware
-control, and user-facing I/O in a clean, extensible Python codebase.
+A Raspberry Pi–based AI control system for a small robotic observer, integrating
+perception, interaction, and hardware control.
 
 ## Current Focus
 
 - Target hardware: Raspberry Pi Zero W and Raspberry Pi Zero 2.
 - Initial AI provider: OpenAI realtime models.
 - Deployment target: systemd-managed service with git-based updates.
+
+## What this is / What this isn’t
+
+**What this is**
+- A Raspberry Pi–hosted control stack for a small robotic observer (“Theo”).
+- A Python codebase that ties together perception, interaction, motion, and GPIO.
+- A foundation for running the runtime as a managed service on Raspberry Pi OS.
+
+**What this isn’t**
+- A fully autonomous or safety-certified robotics platform.
+- A general-purpose robotics framework or drop-in SDK for arbitrary hardware.
+- A project that self-modifies or claims unattended decision authority.
 
 ## Project Layout
 
