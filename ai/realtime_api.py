@@ -209,6 +209,8 @@ class RealtimeAPI:
         self.mic_send_suppress_until = 0.0
         # Tracks whether to start mic receiving on the first audio delta for the current response.
         self._mic_receive_on_first_audio = False
+        # Tracks whether any audio was produced for the current response.
+        self._response_has_audio = False
         self.rate_limits: dict[str, Any] | None = None
         self.response_start_time: float | None = None
         self.websocket = None
@@ -1207,6 +1209,7 @@ class RealtimeAPI:
                 self.audio_player.start_response()
             self._audio_accum.clear()
             self._mic_receive_on_first_audio = True
+            self._response_has_audio = False
             self.response_in_progress = True
             self._speaking_started = False
             self._assistant_reply_accum = ""
@@ -1229,6 +1232,7 @@ class RealtimeAPI:
         elif event_type == "response.output_audio.delta":
             audio_data = base64.b64decode(event["delta"])
             self._audio_accum.extend(audio_data)
+            self._response_has_audio = True
 
             if self._mic_receive_on_first_audio and not self.mic.is_receiving:
                 self._mic_receive_on_first_audio = False
@@ -1724,6 +1728,7 @@ class RealtimeAPI:
         self.response_in_progress = False
         self.state_manager.update_state(InteractionState.IDLE, "response done")
         logger.info("Received response.done event.")
+        self._maybe_restore_mic_after_silent_response("response.done")
         if event:
             self._last_response_metadata = {
                 "event_type": event.get("type"),
@@ -1746,6 +1751,7 @@ class RealtimeAPI:
         self.response_in_progress = False
         self.state_manager.update_state(InteractionState.IDLE, "response completed")
         logger.info("Received response.completed event.")
+        self._maybe_restore_mic_after_silent_response("response.completed")
         if event:
             self._last_response_metadata = {
                 "event_type": event.get("type"),
@@ -1774,6 +1780,20 @@ class RealtimeAPI:
             self.response_in_progress = True
         else:
             logger.error("Unhandled error: %s", error_message)
+
+    def _maybe_restore_mic_after_silent_response(self, event_name: str) -> None:
+        if self._response_has_audio:
+            return
+        log_warning(
+            "No output audio detected for %s; restoring mic from receiving to recording.",
+            event_name,
+        )
+        if self.audio_player:
+            self.audio_player.close_response()
+            return
+        if self.mic.is_receiving:
+            self.mic.stop_receiving()
+        self.mic.start_recording()
 
     async def handle_speech_stopped(self, websocket: Any) -> None:
         self.mic.stop_recording()
