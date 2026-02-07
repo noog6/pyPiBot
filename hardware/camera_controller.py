@@ -311,9 +311,15 @@ class CameraController:
             logger.warning("[CAMERA] IMX500 class not available; skipping setup.")
             return
 
-        self.imx500 = IMX500(str(model_file))
-        self.picam2.capture_metadata()
-        self.imx500_device_id = self.imx500.get_device_id()
+        try:
+            self.imx500 = IMX500(str(model_file))
+            self.picam2.capture_metadata()
+            self.imx500_device_id = self.imx500.get_device_id()
+        except Exception as exc:
+            logger.warning("[CAMERA] IMX500 initialization failed; skipping setup: %s", exc)
+            self.imx500 = None
+            self.imx500_device_id = None
+            return
         logger.info("[CAMERA] IMX500 device detected: %s", self.imx500_device_id)
 
     def _reset_warmup(self) -> None:
