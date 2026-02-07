@@ -122,13 +122,14 @@ class MemoryManager:
         *,
         query: str | None = None,
         limit: int = 5,
+        session_id: str | None = None,
     ) -> list[MemorySummary]:
         bounded_limit = _clamp(limit, 1, MAX_RECALL_LIMIT)
         entries = self._store.search_memories(
             query=query,
             limit=bounded_limit,
             user_id=self._active_user_id,
-            session_id=self._active_session_id,
+            session_id=session_id,
         )
         return [MemorySummary.from_entry(entry) for entry in entries]
 
