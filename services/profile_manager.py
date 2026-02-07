@@ -7,6 +7,8 @@ import json
 from typing import Any
 
 from config import ConfigController
+from services.memory_manager import MemoryManager
+from services.reflection_manager import ReflectionManager
 from storage.user_profiles import UserProfile, UserProfileStore
 
 
@@ -58,6 +60,8 @@ class ProfileManager:
 
     def set_active_user_id(self, user_id: str) -> None:
         self._active_user_id = user_id
+        MemoryManager.get_instance().set_active_user_id(user_id)
+        ReflectionManager.get_instance().set_active_user_id(user_id)
 
     def get_active_user_id(self) -> str:
         return self._active_user_id
