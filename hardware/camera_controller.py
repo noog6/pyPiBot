@@ -7,6 +7,7 @@ import threading
 import time
 import traceback
 from typing import Any
+import errno
 import concurrent.futures
 from collections import deque
 from datetime import datetime
@@ -65,13 +66,6 @@ class CameraController:
         self._main_size = (640, 480)
         self._lores_size = (160, 90)
         self._last_luma = None
-        self.camera_configuration = self.picam2.create_preview_configuration(
-            main={"size": self._main_size, "format": "RGB888"},
-            lores={"size": self._lores_size, "format": "YUV420"},
-            buffer_count=2,
-        )
-        self.picam2.configure(self.camera_configuration)
-        self.picam2.start()
 
         self._vision_loop_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -98,7 +92,15 @@ class CameraController:
         self._configure_warmup()
         self.imx500 = None
         self.imx500_device_id = None
-        self._configure_imx500()
+        self._configure_imx500_pre_config()
+        self.camera_configuration = self.picam2.create_preview_configuration(
+            main={"size": self._main_size, "format": "RGB888"},
+            lores={"size": self._lores_size, "format": "YUV420"},
+            buffer_count=2,
+        )
+        self.picam2.configure(self.camera_configuration)
+        self.picam2.start()
+        self._configure_imx500_post_start()
 
         CameraController._instance = self
 
@@ -281,7 +283,7 @@ class CameraController:
         self._warmup_ms = max(int(config.get("camera_warmup_ms", 1000)), 0)
         self._reset_warmup()
 
-    def _configure_imx500(self) -> None:
+    def _configure_imx500_pre_config(self) -> None:
         config = ConfigController.get_instance().get_config()
         imx500_enabled = bool(config.get("imx500_enabled", True))
         if not imx500_enabled:
@@ -311,16 +313,37 @@ class CameraController:
             logger.warning("[CAMERA] IMX500 class not available; skipping setup.")
             return
 
-        try:
-            self.imx500 = IMX500(str(model_file))
-            self.picam2.capture_metadata()
-            self.imx500_device_id = self.imx500.get_device_id()
-        except Exception as exc:
-            logger.warning("[CAMERA] IMX500 initialization failed; skipping setup: %s", exc)
-            self.imx500 = None
-            self.imx500_device_id = None
+        retry_delays = (2, 5, 10)
+        for attempt, delay in enumerate(retry_delays, start=1):
+            try:
+                self.imx500 = IMX500(str(model_file))
+                self.imx500_device_id = self.imx500.get_device_id()
+                logger.info("[CAMERA] IMX500 device detected: %s", self.imx500_device_id)
+                return
+            except OSError as exc:
+                if getattr(exc, "errno", None) != errno.EBUSY:
+                    logger.warning("[CAMERA] IMX500 initialization failed; skipping setup: %s", exc)
+                    break
+                logger.warning(
+                    "[CAMERA] IMX500 busy during firmware upload (attempt %s/%s); retrying in %ss.",
+                    attempt,
+                    len(retry_delays),
+                    delay,
+                )
+                time.sleep(delay)
+            except Exception as exc:
+                logger.warning("[CAMERA] IMX500 initialization failed; skipping setup: %s", exc)
+                break
+        self.imx500 = None
+        self.imx500_device_id = None
+
+    def _configure_imx500_post_start(self) -> None:
+        if not self.imx500:
             return
-        logger.info("[CAMERA] IMX500 device detected: %s", self.imx500_device_id)
+        try:
+            self.picam2.capture_metadata()
+        except Exception as exc:
+            logger.warning("[CAMERA] IMX500 metadata capture failed: %s", exc)
 
     def _reset_warmup(self) -> None:
         self._warmup_start_ms = millis()
