@@ -2026,6 +2026,8 @@ class RealtimeAPI:
 
                 await asyncio.sleep(0.03)
 
+        except asyncio.CancelledError:
+            logger.info("Audio send loop cancelled. Closing the connection.")
         except KeyboardInterrupt:
             logger.info("Keyboard interrupt received. Closing the connection.")
         finally:
