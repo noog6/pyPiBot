@@ -115,7 +115,11 @@ class CameraController:
     def stop_vision_loop(self) -> None:
         if self._vision_loop_thread is not None:
             self._stop_event.set()
-            self._vision_loop_thread.join()
+            self._vision_loop_thread.join(timeout=2.0)
+            if self._vision_loop_thread.is_alive():
+                logger.warning("[CAMERA] Control loop did not stop within timeout")
+                self._shutdown_image_saver()
+                return
             self._vision_loop_thread = None
             logger.info("[CAMERA] Control loop stopped at index: %s", self.vision_loop_index)
             self.vision_loop_index = 0
