@@ -1089,7 +1089,11 @@ class RealtimeAPI:
 
                         self.websocket = websocket
 
-                        self.loop.add_signal_handler(signal.SIGTERM, self.shutdown_handler)
+                        try:
+                            self.loop.add_signal_handler(signal.SIGTERM, self.shutdown_handler)
+                            self.loop.add_signal_handler(signal.SIGINT, self.shutdown_handler)
+                        except (NotImplementedError, RuntimeError):
+                            logger.debug("Signal handlers unavailable; relying on task cancellation.")
 
                         if self.prompts:
                             await self.send_initial_prompts(websocket)
@@ -2026,10 +2030,34 @@ class RealtimeAPI:
             logger.info("Keyboard interrupt received. Closing the connection.")
         finally:
             self.exit_event.set()
-            await websocket.close()
+            await self._close_websocket("audio loop exiting", websocket=websocket)
 
     def shutdown_handler(self) -> None:
-        logger.info("Received SIGTERM. Initiating graceful shutdown...")
-        if self.loop:
+        logger.info("Received shutdown signal. Initiating graceful shutdown...")
+        if self.loop and self.loop.is_running():
+            self.loop.call_soon_threadsafe(self._request_shutdown)
             for task in asyncio.all_tasks(self.loop):
                 task.cancel()
+
+    def _request_shutdown(self) -> None:
+        self.exit_event.set()
+        if self.websocket:
+            self.loop.create_task(self._close_websocket("signal"))
+
+    async def _close_websocket(
+        self,
+        reason: str,
+        *,
+        websocket: Any | None = None,
+        timeout_s: float = 2.0,
+    ) -> None:
+        ws = websocket or self.websocket
+        if not ws:
+            return
+        try:
+            await asyncio.wait_for(ws.close(), timeout=timeout_s)
+            logger.info("WebSocket closed (%s).", reason)
+        except asyncio.TimeoutError:
+            logger.warning("Timed out closing WebSocket (%s).", reason)
+        except Exception as exc:
+            logger.warning("Failed to close WebSocket (%s): %s", reason, exc)
