@@ -21,8 +21,6 @@ file_logging_enabled: true
 save_camera_images: false
 camera_warmup_frames: 5
 camera_warmup_ms: 1000
-imx500_enabled: true
-imx500_model_path: "/usr/share/imx500-models/imx500_network_mobilenet_v2.rpk"
 
 # Realtime audio detection
 prefix_padding_ms: 500

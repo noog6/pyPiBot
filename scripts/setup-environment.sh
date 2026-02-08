@@ -16,7 +16,6 @@ sudo apt-get install -y \
   joystick \
   libasound-dev \
   libsndfile1 \
-  imx500-all \
   portaudio19-dev \
   pulseaudio \
   python3 \
