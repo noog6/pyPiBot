@@ -1191,6 +1191,10 @@ class RealtimeAPI:
                 event = json.loads(message)
                 log_ws_event("Incoming", event)
                 await self.handle_event(event, websocket)
+            except asyncio.CancelledError:
+                log_info("WebSocket receive loop cancelled.")
+                self._note_disconnect("websocket loop cancelled")
+                break
             except ConnectionClosed:
                 log_warning("⚠️ WebSocket connection lost.")
                 self._note_disconnect("websocket connection closed")
