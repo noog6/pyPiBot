@@ -27,6 +27,7 @@ imx500_enabled: false
 imx500_model: "yolo11n_pp"
 imx500_fps_cap: 5
 imx500_min_confidence: 0.4
+imx500_event_buffer_size: 50
 imx500_interesting_classes:
   - "person"
   - "cat"

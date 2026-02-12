@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import json
 import threading
 import time
 import traceback
 from typing import Any
-import concurrent.futures
 from collections import deque
 from datetime import datetime
+from pathlib import Path
 
 from config import ConfigController
 from core.logging import logger
@@ -302,14 +304,54 @@ class CameraController:
         millis_part = int(time.time() * 1000) % 1000
         filename = f"image_{timestamp}_{millis_part:03d}_{self._image_save_index:06d}.jpg"
         path = self._image_save_dir / filename
+        detection_json_path = path.with_suffix(".detections.json")
+        detection_payload = self._latest_detection_payload()
         image_copy = image.copy()
         self._image_save_executor.submit(self._write_image, image_copy, path)
+        if detection_payload is not None:
+            self._image_save_executor.submit(
+                self._write_detection_artifact,
+                detection_json_path,
+                detection_payload,
+            )
 
     def _write_image(self, image: Any, path: Any) -> None:
         try:
             image.save(path, format="JPEG", quality=85)
         except Exception as exc:
             logger.exception("[CAMERA] Failed to save image to %s: %s", path, exc)
+
+    def _latest_detection_payload(self) -> dict[str, Any] | None:
+        try:
+            from hardware.imx500_controller import Imx500Controller
+        except Exception:
+            return None
+
+        controller = Imx500Controller.get_instance()
+        event = controller.get_latest_event()
+        if event is None:
+            return None
+        return {
+            "timestamp_ms": int(event.timestamp_ms),
+            "frame_id": event.frame_id,
+            "source": event.source,
+            "detections": [
+                {
+                    "label": item.label,
+                    "confidence": item.confidence,
+                    "bbox": list(item.bbox),
+                    "metadata": item.metadata,
+                }
+                for item in event.detections
+            ],
+        }
+
+    def _write_detection_artifact(self, path: Path, payload: dict[str, Any]) -> None:
+        try:
+            with path.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle, separators=(",", ":"), sort_keys=True)
+        except Exception as exc:
+            logger.exception("[CAMERA] Failed to save detections to %s: %s", path, exc)
 
     def lores_changed(self, luma: Any, threshold: float = 7.0) -> tuple[bool, float]:
         if not self._warmup_done:

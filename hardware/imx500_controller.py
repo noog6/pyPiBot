@@ -2,24 +2,17 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections import deque
+import copy
+from dataclasses import dataclass
 import importlib.util
 import threading
 import time
-from typing import Any, Callable
+from typing import Callable
 
 from config import ConfigController
 from core.logging import logger
-
-
-@dataclass(frozen=True)
-class Detection:
-    """Temporary detection schema for IMX500 object detection snapshots."""
-
-    label: str
-    confidence: float
-    bbox: tuple[float, float, float, float]
-    metadata: dict[str, Any] = field(default_factory=dict)
+from vision.detections import Detection, DetectionEvent
 
 
 @dataclass(frozen=True)
@@ -30,6 +23,7 @@ class Imx500Settings:
     model: str = "yolo11n_pp"
     fps_cap: int = 5
     min_confidence: float = 0.4
+    event_buffer_size: int = 50
     interesting_classes: tuple[str, ...] = (
         "person",
         "cat",
@@ -55,11 +49,13 @@ class Imx500Controller:
         self._disabled_reason = ""
         self._warning_logged = False
 
-        self._latest_detections: list[Detection] = []
-        self._latest_timestamp: float = 0.0
-        self._subscribers: set[Callable[[list[Detection], float], None]] = set()
-
         self.settings = self._load_settings()
+
+        self._latest_event: DetectionEvent | None = None
+        self._event_buffer: deque[DetectionEvent] = deque(
+            maxlen=max(self.settings.event_buffer_size, 1)
+        )
+        self._subscribers: set[Callable[[list[Detection], float], None]] = set()
 
         Imx500Controller._instance = self
 
@@ -117,8 +113,29 @@ class Imx500Controller:
     def get_latest_detections(self) -> list[Detection]:
         """Return the most recent detection snapshot."""
 
+        latest = self.get_latest_event()
+        if latest is None:
+            return []
+        return [self._clone_detection(item) for item in latest.detections]
+
+    def get_latest_event(self) -> DetectionEvent | None:
+        """Return latest stable detection event snapshot for non-blocking readers."""
+
         with self._lock:
-            return list(self._latest_detections)
+            event = self._latest_event
+        if event is None:
+            return None
+        return self._clone_event(event)
+
+    def get_recent_events(self, n: int = 10) -> list[DetectionEvent]:
+        """Return up to ``n`` events ordered from oldest to newest."""
+
+        with self._lock:
+            events = list(self._event_buffer)
+        if n <= 0:
+            return []
+        selected = events[-n:]
+        return [self._clone_event(event) for event in selected]
 
     def subscribe(self, callback: Callable[[list[Detection], float], None]) -> None:
         """Subscribe to future detection updates."""
@@ -144,15 +161,28 @@ class Imx500Controller:
         Note: this internal helper is for future integration points.
         """
 
-        ts = timestamp if timestamp is not None else time.time()
+        timestamp_s = timestamp if timestamp is not None else time.time()
+        timestamp_ms = int(timestamp_s * 1000)
+        event = DetectionEvent(
+            timestamp_ms=timestamp_ms,
+            detections=[self._clone_detection(item) for item in detections],
+            source="imx500",
+        )
+        event_for_callbacks = self._clone_event(event)
+
         with self._lock:
-            self._latest_detections = list(detections)
-            self._latest_timestamp = ts
+            self._latest_event = event
+            self._event_buffer.append(event)
             subscribers = list(self._subscribers)
+
+        self._log_interesting_detection(event)
 
         for callback in subscribers:
             try:
-                callback(list(detections), ts)
+                callback(
+                    [self._clone_detection(item) for item in event_for_callbacks.detections],
+                    timestamp_s,
+                )
             except Exception:
                 logger.exception("[IMX500] Subscriber callback failed")
 
@@ -170,6 +200,7 @@ class Imx500Controller:
             model=str(config.get("imx500_model", "yolo11n_pp")),
             fps_cap=int(config.get("imx500_fps_cap", 5)),
             min_confidence=float(config.get("imx500_min_confidence", 0.4)),
+            event_buffer_size=int(config.get("imx500_event_buffer_size", 50)),
             interesting_classes=classes,
         )
 
@@ -190,6 +221,41 @@ class Imx500Controller:
             return True, ""
 
         return False, "missing IMX500 extras"
+
+    def _log_interesting_detection(self, event: DetectionEvent) -> None:
+        interesting_labels = {label.lower() for label in self.settings.interesting_classes}
+        matches = [
+            det
+            for det in event.detections
+            if det.label.lower() in interesting_labels
+            and det.confidence >= self.settings.min_confidence
+        ]
+        if not matches:
+            return
+        labels = ", ".join(
+            f"{det.label}:{det.confidence:.2f}" for det in matches[:3]
+        )
+        logger.info(
+            "[IMX500] Interesting detections (%d total): %s",
+            len(matches),
+            labels,
+        )
+
+    def _clone_detection(self, detection: Detection) -> Detection:
+        return Detection(
+            label=detection.label,
+            confidence=float(detection.confidence),
+            bbox=tuple(detection.bbox),
+            metadata=copy.deepcopy(detection.metadata),
+        )
+
+    def _clone_event(self, event: DetectionEvent) -> DetectionEvent:
+        return DetectionEvent(
+            timestamp_ms=int(event.timestamp_ms),
+            detections=[self._clone_detection(item) for item in event.detections],
+            frame_id=event.frame_id,
+            source=event.source,
+        )
 
     def _log_warning_once(self, message: str) -> None:
         if self._warning_logged:
