@@ -37,6 +37,7 @@ class Imx500Settings:
     status_log_period_s: float = 15.0
     startup_grace_s: float = 30.0
     startup_retry_interval_s: float = 2.0
+    startup_max_attach_retries: int = 3
 
 
 class Imx500Controller:
@@ -75,6 +76,7 @@ class Imx500Controller:
         self._last_error = ""
         self._last_error_monotonic: float | None = None
         self._startup_attempts = 0
+        self._consecutive_attach_failures = 0
 
         Imx500Controller._instance = self
 
@@ -163,6 +165,7 @@ class Imx500Controller:
         period_s = 1.0 / max(1, self.settings.fps_cap)
         model = self.settings.model
         retry_interval_s = max(0.5, float(self.settings.startup_retry_interval_s))
+        max_attach_retries = max(1, int(self.settings.startup_max_attach_retries))
 
         while not self._worker_stop.is_set():
             camera: Any = None
@@ -171,6 +174,8 @@ class Imx500Controller:
                 with self._lock:
                     self._startup_attempts += 1
                 camera, model_stack = self._create_imx500_stack(model)
+                with self._lock:
+                    self._consecutive_attach_failures = 0
                 self._clear_last_error()
                 logger.info("[IMX500] Worker attached to camera stack (model=%s)", model)
 
@@ -192,14 +197,33 @@ class Imx500Controller:
                     self._worker_stop.wait(sleep_s)
             except Exception as exc:
                 self._record_last_error(str(exc))
-                logger.warning(
-                    "[IMX500] Worker camera attach failed (%s). Retrying in %.1fs",
+                should_retry = self._record_attach_failure_and_should_retry(max_attach_retries)
+                if should_retry:
+                    logger.warning(
+                        "[IMX500] Worker camera attach failed (%s). Retrying in %.1fs",
+                        exc,
+                        retry_interval_s,
+                    )
+                    self._worker_stop.wait(retry_interval_s)
+                    continue
+
+                logger.error(
+                    "[IMX500] Worker camera attach failed repeatedly (%s). "
+                    "Disabling IMX500 worker after %s attempts.",
                     exc,
-                    retry_interval_s,
+                    max_attach_retries,
                 )
-                self._worker_stop.wait(retry_interval_s)
+                with self._lock:
+                    self._available = False
+                    self._disabled_reason = "camera busy or unavailable"
+                self._worker_stop.set()
             finally:
                 self._shutdown_imx500_stack(camera, model_stack)
+
+    def _record_attach_failure_and_should_retry(self, max_attach_retries: int) -> bool:
+        with self._lock:
+            self._consecutive_attach_failures += 1
+            return self._consecutive_attach_failures < max_attach_retries
 
     def _create_imx500_stack(self, model: str) -> tuple[Any, Any]:
         picamera2_module = importlib.import_module("picamera2")
@@ -550,6 +574,7 @@ class Imx500Controller:
             status_log_period_s=float(config.get("imx500_status_log_period_s", 15.0)),
             startup_grace_s=float(config.get("imx500_startup_grace_s", 30.0)),
             startup_retry_interval_s=float(config.get("imx500_startup_retry_interval_s", 2.0)),
+            startup_max_attach_retries=int(config.get("imx500_startup_max_attach_retries", 3)),
         )
 
     def _record_last_error(self, message: str) -> None:

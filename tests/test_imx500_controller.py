@@ -207,3 +207,35 @@ def test_worker_retries_after_camera_attach_failure(monkeypatch) -> None:
     assert attempts["count"] >= 2
     assert status["startup_attempts"] >= 2
     assert status["last_error"] == ""
+
+
+def test_worker_stops_retrying_after_max_attach_failures(monkeypatch) -> None:
+    _reset_singleton()
+    monkeypatch.setattr(
+        Imx500Controller,
+        "_load_settings",
+        lambda self: Imx500Settings(
+            enabled=True,
+            startup_retry_interval_s=0.01,
+            startup_max_attach_retries=2,
+        ),
+    )
+    monkeypatch.setattr(Imx500Controller, "_check_backend_available", lambda self: (True, ""))
+
+    def always_fail(self, model: str):
+        raise RuntimeError("Camera __init__ sequence did not complete.")
+
+    monkeypatch.setattr(Imx500Controller, "_create_imx500_stack", always_fail)
+
+    controller = Imx500Controller.get_instance()
+    controller.start()
+    time.sleep(1.2)
+
+    status = controller.get_runtime_status()
+
+    assert status["startup_attempts"] == 2
+    assert status["loop_alive"] == 0
+    assert status["backend_available"] == 0
+    assert "did not complete" in status["last_error"]
+
+    controller.stop()
