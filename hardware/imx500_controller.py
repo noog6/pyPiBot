@@ -125,11 +125,15 @@ class Imx500Controller:
                 logger.warning("[IMX500] Worker did not stop within timeout")
 
         with self._lock:
-            self._worker_thread = None
+            if self._worker_thread is worker and (worker is None or not worker.is_alive()):
+                self._worker_thread = None
 
     def _start_worker_locked(self) -> None:
-        if self._worker_thread is not None and self._worker_thread.is_alive():
-            return
+        if self._worker_thread is not None:
+            if self._worker_thread.is_alive():
+                logger.warning("[IMX500] Worker is still running; restart deferred")
+                return
+            self._worker_thread = None
         self._worker_stop.clear()
         self._worker_thread = threading.Thread(
             target=self._worker_loop,
@@ -259,6 +263,8 @@ class Imx500Controller:
 
             label = self._extract_label(payload)
             bbox = self._extract_bbox(payload)
+            if bbox is None:
+                return None
             metadata = {k: v for k, v in payload.items() if k not in {"label", "class", "class_name", "name", "score", "confidence", "bbox", "box", "rect", "rectangle", "x", "y", "w", "h", "width", "height", "xmin", "ymin", "xmax", "ymax"}}
             metadata["model"] = self.settings.model
 
@@ -321,25 +327,44 @@ class Imx500Controller:
         label = str(value).strip() if value is not None else "unknown"
         return label or "unknown"
 
-    def _extract_bbox(self, payload: dict[str, Any]) -> tuple[float, float, float, float]:
+    def _extract_bbox(self, payload: dict[str, Any]) -> tuple[float, float, float, float] | None:
         raw_bbox = payload.get("bbox", payload.get("box", payload.get("rect", payload.get("rectangle"))))
 
         if isinstance(raw_bbox, (list, tuple)) and len(raw_bbox) >= 4:
             x, y, w, h = raw_bbox[:4]
-            return self._normalize_bbox(float(x), float(y), float(w), float(h))
+            x_f = self._to_finite_float(x)
+            y_f = self._to_finite_float(y)
+            w_f = self._to_finite_float(w)
+            h_f = self._to_finite_float(h)
+            if None in (x_f, y_f, w_f, h_f):
+                return None
+            return self._normalize_bbox(x_f, y_f, w_f, h_f)
 
         if {"xmin", "ymin", "xmax", "ymax"}.issubset(payload.keys()):
-            xmin = float(payload.get("xmin", 0.0))
-            ymin = float(payload.get("ymin", 0.0))
-            xmax = float(payload.get("xmax", xmin))
-            ymax = float(payload.get("ymax", ymin))
+            xmin = self._to_finite_float(payload.get("xmin", 0.0))
+            ymin = self._to_finite_float(payload.get("ymin", 0.0))
+            xmax = self._to_finite_float(payload.get("xmax", xmin))
+            ymax = self._to_finite_float(payload.get("ymax", ymin))
+            if None in (xmin, ymin, xmax, ymax):
+                return None
             return self._normalize_bbox(xmin, ymin, xmax - xmin, ymax - ymin)
 
-        x = float(payload.get("x", 0.0))
-        y = float(payload.get("y", 0.0))
-        w = float(payload.get("w", payload.get("width", 1.0)))
-        h = float(payload.get("h", payload.get("height", 1.0)))
+        x = self._to_finite_float(payload.get("x", 0.0))
+        y = self._to_finite_float(payload.get("y", 0.0))
+        w = self._to_finite_float(payload.get("w", payload.get("width", 1.0)))
+        h = self._to_finite_float(payload.get("h", payload.get("height", 1.0)))
+        if None in (x, y, w, h):
+            return None
         return self._normalize_bbox(x, y, w, h)
+
+    def _to_finite_float(self, value: Any) -> float | None:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if math.isnan(number) or math.isinf(number):
+            return None
+        return number
 
     def _normalize_bbox(self, x: float, y: float, w: float, h: float) -> tuple[float, float, float, float]:
         x = max(0.0, min(1.0, x))

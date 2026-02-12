@@ -77,3 +77,51 @@ def test_convert_raw_detections_filters_low_confidence(monkeypatch) -> None:
     assert frame_id >= 1
     assert len(detections) == 1
     assert detections[0].label == "person"
+
+
+def test_start_worker_does_not_clear_stop_when_previous_worker_alive(monkeypatch) -> None:
+    _reset_singleton()
+    monkeypatch.setattr(Imx500Controller, "_load_settings", lambda self: Imx500Settings(enabled=True))
+
+    controller = Imx500Controller.get_instance()
+
+    class AliveThread:
+        def __init__(self) -> None:
+            self.started = False
+
+        def is_alive(self) -> bool:
+            return True
+
+        def start(self) -> None:
+            self.started = True
+
+    prior_worker = AliveThread()
+    controller._worker_thread = prior_worker
+    controller._worker_stop.set()
+
+    controller._start_worker_locked()
+
+    assert controller._worker_stop.is_set()
+    assert controller._worker_thread is prior_worker
+    assert not prior_worker.started
+
+
+def test_convert_raw_detections_skips_invalid_bbox_payloads(monkeypatch) -> None:
+    _reset_singleton()
+    monkeypatch.setattr(
+        Imx500Controller,
+        "_load_settings",
+        lambda self: Imx500Settings(enabled=True, min_confidence=0.1),
+    )
+
+    controller = Imx500Controller.get_instance()
+    detections, frame_id = controller._convert_raw_detections(
+        [
+            {"label": "bad", "confidence": 0.9, "bbox": (None, 0.1, 0.2, 0.2)},
+            {"label": "good", "confidence": 0.8, "bbox": (0.2, 0.2, 0.2, 0.2)},
+        ]
+    )
+
+    assert frame_id >= 1
+    assert len(detections) == 1
+    assert detections[0].label == "good"
