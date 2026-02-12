@@ -5,10 +5,12 @@ from __future__ import annotations
 from collections import deque
 import copy
 from dataclasses import dataclass
+import importlib
 import importlib.util
+import math
 import threading
 import time
-from typing import Callable
+from typing import Any, Callable
 
 from config import ConfigController
 from core.logging import logger
@@ -56,6 +58,9 @@ class Imx500Controller:
             maxlen=max(self.settings.event_buffer_size, 1)
         )
         self._subscribers: set[Callable[[list[Detection], float], None]] = set()
+        self._worker_thread: threading.Thread | None = None
+        self._worker_stop = threading.Event()
+        self._frame_id = 0
 
         Imx500Controller._instance = self
 
@@ -100,15 +105,248 @@ class Imx500Controller:
                 self.settings.fps_cap,
                 self.settings.min_confidence,
             )
+            self._start_worker_locked()
 
     def stop(self) -> None:
         """Stop the IMX500 subsystem (safe to call repeatedly)."""
 
+        worker: threading.Thread | None = None
         with self._lock:
             if not self._started:
                 return
             self._started = False
             self._available = False
+            self._worker_stop.set()
+            worker = self._worker_thread
+
+        if worker is not None:
+            worker.join(timeout=2.0)
+            if worker.is_alive():
+                logger.warning("[IMX500] Worker did not stop within timeout")
+
+        with self._lock:
+            self._worker_thread = None
+
+    def _start_worker_locked(self) -> None:
+        if self._worker_thread is not None and self._worker_thread.is_alive():
+            return
+        self._worker_stop.clear()
+        self._worker_thread = threading.Thread(
+            target=self._worker_loop,
+            name="imx500-detection-worker",
+            daemon=True,
+        )
+        self._worker_thread.start()
+
+    def _worker_loop(self) -> None:
+        camera: Any = None
+        model_stack: Any = None
+        period_s = 1.0 / max(1, self.settings.fps_cap)
+        model = self.settings.model
+
+        try:
+            camera, model_stack = self._create_imx500_stack(model)
+            logger.info("[IMX500] Worker attached to camera stack (model=%s)", model)
+            while not self._worker_stop.is_set():
+                loop_start = time.monotonic()
+                timestamp_s = time.time()
+                raw_detections = []
+                try:
+                    raw_detections, timestamp_s = self._read_raw_detections(camera, model_stack)
+                except Exception:
+                    logger.exception("[IMX500] Failed to read frame detections")
+
+                detections, frame_id = self._convert_raw_detections(raw_detections)
+                self._publish_detections(detections, timestamp=timestamp_s, frame_id=frame_id)
+
+                elapsed_s = time.monotonic() - loop_start
+                sleep_s = max(0.0, period_s - elapsed_s)
+                self._worker_stop.wait(sleep_s)
+        except Exception as exc:
+            logger.exception("[IMX500] Worker initialization failed: %s", exc)
+        finally:
+            self._shutdown_imx500_stack(camera, model_stack)
+
+    def _create_imx500_stack(self, model: str) -> tuple[Any, Any]:
+        picamera2_module = importlib.import_module("picamera2")
+        picamera = picamera2_module.Picamera2()
+
+        model_stack = None
+        try:
+            imx500_module = importlib.import_module("picamera2.devices.imx500")
+            model_stack_cls = getattr(imx500_module, "IMX500", None)
+            if model_stack_cls is not None:
+                model_stack = model_stack_cls(model=model)
+        except Exception:
+            model_stack = None
+
+        if model_stack is not None and hasattr(model_stack, "create_preview_configuration"):
+            config = model_stack.create_preview_configuration()
+            picamera.configure(config)
+        else:
+            picamera.configure(picamera.create_preview_configuration())
+
+        picamera.start()
+        return picamera, model_stack
+
+    def _shutdown_imx500_stack(self, camera: Any, model_stack: Any) -> None:
+        if model_stack is not None and hasattr(model_stack, "close"):
+            try:
+                model_stack.close()
+            except Exception:
+                logger.exception("[IMX500] Failed to close IMX500 model stack")
+
+        if camera is not None:
+            for method_name in ("stop", "close"):
+                method = getattr(camera, method_name, None)
+                if callable(method):
+                    try:
+                        method()
+                    except Exception:
+                        logger.exception("[IMX500] Failed to %s camera", method_name)
+
+    def _read_raw_detections(self, camera: Any, model_stack: Any) -> tuple[list[Any], float]:
+        timestamp_s = time.time()
+
+        if model_stack is not None and hasattr(model_stack, "get_outputs"):
+            outputs = model_stack.get_outputs()
+            return list(outputs) if outputs is not None else [], timestamp_s
+
+        metadata = camera.capture_metadata()
+        if isinstance(metadata, dict):
+            timestamp_raw = metadata.get("SensorTimestamp")
+            if isinstance(timestamp_raw, (int, float)):
+                timestamp_s = float(timestamp_raw) / 1_000_000_000.0
+
+            for key in (
+                "imx500_detections",
+                "detections",
+                "objects",
+                "ai_outputs",
+                "imx500",
+            ):
+                candidate = metadata.get(key)
+                if candidate is not None:
+                    return list(candidate) if isinstance(candidate, list) else [candidate], timestamp_s
+
+        return [], timestamp_s
+
+    def _convert_raw_detections(self, raw_detections: list[Any]) -> tuple[list[Detection], int]:
+        normalized: list[Detection] = []
+        for raw in raw_detections:
+            detection = self._convert_single_detection(raw)
+            if detection is None:
+                continue
+            normalized.append(detection)
+
+        with self._lock:
+            self._frame_id += 1
+            frame_id = self._frame_id
+
+        return normalized, frame_id
+
+    def _convert_single_detection(self, raw: Any) -> Detection | None:
+        if isinstance(raw, Detection):
+            detection = raw
+        else:
+            payload = self._to_mapping(raw)
+            if payload is None:
+                return None
+
+            confidence = self._extract_confidence(payload)
+            if confidence < self.settings.min_confidence:
+                return None
+
+            label = self._extract_label(payload)
+            bbox = self._extract_bbox(payload)
+            metadata = {k: v for k, v in payload.items() if k not in {"label", "class", "class_name", "name", "score", "confidence", "bbox", "box", "rect", "rectangle", "x", "y", "w", "h", "width", "height", "xmin", "ymin", "xmax", "ymax"}}
+            metadata["model"] = self.settings.model
+
+            detection = Detection(
+                label=label,
+                confidence=confidence,
+                bbox=bbox,
+                metadata=metadata,
+            )
+
+        if detection.confidence < self.settings.min_confidence:
+            return None
+
+        return detection
+
+    def _to_mapping(self, raw: Any) -> dict[str, Any] | None:
+        if isinstance(raw, dict):
+            return raw
+
+        mapping: dict[str, Any] = {}
+        for field in (
+            "label",
+            "class",
+            "class_name",
+            "name",
+            "score",
+            "confidence",
+            "bbox",
+            "box",
+            "rect",
+            "rectangle",
+            "x",
+            "y",
+            "w",
+            "h",
+            "width",
+            "height",
+            "xmin",
+            "ymin",
+            "xmax",
+            "ymax",
+        ):
+            if hasattr(raw, field):
+                mapping[field] = getattr(raw, field)
+
+        return mapping or None
+
+    def _extract_confidence(self, payload: dict[str, Any]) -> float:
+        value = payload.get("score", payload.get("confidence", 0.0))
+        try:
+            confidence = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        if math.isnan(confidence) or math.isinf(confidence):
+            return 0.0
+        return max(0.0, min(1.0, confidence))
+
+    def _extract_label(self, payload: dict[str, Any]) -> str:
+        value = payload.get("label", payload.get("class_name", payload.get("class", payload.get("name", "unknown"))))
+        label = str(value).strip() if value is not None else "unknown"
+        return label or "unknown"
+
+    def _extract_bbox(self, payload: dict[str, Any]) -> tuple[float, float, float, float]:
+        raw_bbox = payload.get("bbox", payload.get("box", payload.get("rect", payload.get("rectangle"))))
+
+        if isinstance(raw_bbox, (list, tuple)) and len(raw_bbox) >= 4:
+            x, y, w, h = raw_bbox[:4]
+            return self._normalize_bbox(float(x), float(y), float(w), float(h))
+
+        if {"xmin", "ymin", "xmax", "ymax"}.issubset(payload.keys()):
+            xmin = float(payload.get("xmin", 0.0))
+            ymin = float(payload.get("ymin", 0.0))
+            xmax = float(payload.get("xmax", xmin))
+            ymax = float(payload.get("ymax", ymin))
+            return self._normalize_bbox(xmin, ymin, xmax - xmin, ymax - ymin)
+
+        x = float(payload.get("x", 0.0))
+        y = float(payload.get("y", 0.0))
+        w = float(payload.get("w", payload.get("width", 1.0)))
+        h = float(payload.get("h", payload.get("height", 1.0)))
+        return self._normalize_bbox(x, y, w, h)
+
+    def _normalize_bbox(self, x: float, y: float, w: float, h: float) -> tuple[float, float, float, float]:
+        x = max(0.0, min(1.0, x))
+        y = max(0.0, min(1.0, y))
+        w = max(0.0, min(1.0 - x, w))
+        h = max(0.0, min(1.0 - y, h))
+        return (x, y, w, h)
 
     def get_latest_detections(self) -> list[Detection]:
         """Return the most recent detection snapshot."""
@@ -155,7 +393,12 @@ class Imx500Controller:
         with self._lock:
             return self._available
 
-    def _publish_detections(self, detections: list[Detection], timestamp: float | None = None) -> None:
+    def _publish_detections(
+        self,
+        detections: list[Detection],
+        timestamp: float | None = None,
+        frame_id: int | None = None,
+    ) -> None:
         """Publish a new detection snapshot to subscribers.
 
         Note: this internal helper is for future integration points.
@@ -166,6 +409,7 @@ class Imx500Controller:
         event = DetectionEvent(
             timestamp_ms=timestamp_ms,
             detections=[self._clone_detection(item) for item in detections],
+            frame_id=frame_id,
             source="imx500",
         )
         event_for_callbacks = self._clone_event(event)
