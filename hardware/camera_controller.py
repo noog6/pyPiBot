@@ -218,10 +218,10 @@ class CameraController:
                     if attention is not None and attention.should_burst(attention_state):
                         burst_count = attention.get_burst_count()
                         for _ in range(max(0, burst_count - 1)):
-                            if self._stop_event.is_set() or self._send_in_flight.is_set():
+                            if self._stop_event.is_set():
                                 break
                             time.sleep(0.08)
-                            self._capture_and_dispatch_image()
+                            self._capture_and_dispatch_image(prefer_queue_if_in_flight=True)
 
                 except Exception as exc:
                     self._send_in_flight.clear()
@@ -292,9 +292,14 @@ class CameraController:
         future.add_done_callback(self._clear_send_flag)
         return True
 
-    def _capture_and_dispatch_image(self) -> None:
+    def _capture_and_dispatch_image(self, prefer_queue_if_in_flight: bool = False) -> None:
         new_image = self.take_main_pil()
         self._save_image_async(new_image)
+
+        if prefer_queue_if_in_flight and self._send_in_flight.is_set():
+            self._queue_pending_image(new_image)
+            return
+
         if self._can_send_realtime():
             self._send_in_flight.set()
             if not self._queue_image_send(new_image):
