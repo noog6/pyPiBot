@@ -28,6 +28,8 @@ imx500_model: "yolo11n_pp"
 imx500_fps_cap: 5
 imx500_min_confidence: 0.4
 imx500_event_buffer_size: 50
+imx500_status_log_period_s: 15
+imx500_startup_grace_s: 30
 imx500_interesting_classes:
   - "person"
   - "cat"

@@ -125,3 +125,50 @@ def test_convert_raw_detections_skips_invalid_bbox_payloads(monkeypatch) -> None
     assert frame_id >= 1
     assert len(detections) == 1
     assert detections[0].label == "good"
+
+
+def test_runtime_status_tracks_recent_detection_metrics(monkeypatch) -> None:
+    _reset_singleton()
+    monkeypatch.setattr(
+        Imx500Controller,
+        "_load_settings",
+        lambda self: Imx500Settings(enabled=True, min_confidence=0.1),
+    )
+
+    controller = Imx500Controller.get_instance()
+    controller._publish_detections(
+        [
+            _imx500.Detection(
+                label="person",
+                confidence=0.91,
+                bbox=(0.1, 0.1, 0.2, 0.2),
+                metadata={},
+            )
+        ],
+        timestamp=time.time(),
+        frame_id=1,
+    )
+
+    status = controller.get_runtime_status()
+    assert status["events_published"] == 1
+    assert status["detection_events_published"] == 1
+    assert status["last_event_age_s"] >= 0.0
+    assert status["last_detection_age_s"] >= 0.0
+    assert "person:0.91" in status["last_classes_confidences"]
+
+
+def test_warns_when_no_detection_events_after_grace(monkeypatch) -> None:
+    _reset_singleton()
+    monkeypatch.setattr(
+        Imx500Controller,
+        "_load_settings",
+        lambda self: Imx500Settings(enabled=True, startup_grace_s=5.0, status_log_period_s=10.0),
+    )
+
+    controller = Imx500Controller.get_instance()
+    controller._available = True
+    controller._start_monotonic = 10.0
+
+    controller._maybe_log_status(now_monotonic=16.0)
+
+    assert controller._no_detections_warning_logged is True
