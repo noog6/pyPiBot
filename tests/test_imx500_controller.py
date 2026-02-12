@@ -239,3 +239,77 @@ def test_worker_stops_retrying_after_max_attach_failures(monkeypatch) -> None:
     assert "did not complete" in status["last_error"]
 
     controller.stop()
+
+
+def test_resolve_model_path_maps_known_nickname(monkeypatch) -> None:
+    _reset_singleton()
+    monkeypatch.setattr(Imx500Controller, "_load_settings", lambda self: Imx500Settings(enabled=False))
+
+    controller = Imx500Controller.get_instance()
+
+    resolved = controller._resolve_model_path("yolo11n_pp")
+
+    assert resolved == _imx500.DEFAULT_IMX500_MODEL_PATH
+
+
+def test_resolve_model_path_warns_on_unknown_nickname(monkeypatch) -> None:
+    _reset_singleton()
+    monkeypatch.setattr(Imx500Controller, "_load_settings", lambda self: Imx500Settings(enabled=False))
+
+    controller = Imx500Controller.get_instance()
+
+    warnings = []
+    monkeypatch.setattr(_imx500.logger, "warning", lambda msg, *args: warnings.append(msg % args))
+
+    resolved = controller._resolve_model_path("custom_alias")
+
+    assert resolved == "custom_alias"
+    assert any("no known .rpk mapping" in warning for warning in warnings)
+
+
+def test_create_imx500_stack_uses_positional_constructor(monkeypatch) -> None:
+    _reset_singleton()
+    monkeypatch.setattr(Imx500Controller, "_load_settings", lambda self: Imx500Settings(enabled=False))
+
+    controller = Imx500Controller.get_instance()
+
+    calls = {}
+
+    class FakePicamera2:
+        def create_preview_configuration(self):
+            return {"preview": True}
+
+        def configure(self, config):
+            calls["config"] = config
+
+        def start(self):
+            calls["started"] = True
+
+    class FakePicameraModule:
+        Picamera2 = FakePicamera2
+
+    class FakeModelStack:
+        def __init__(self, model):
+            calls["model_arg"] = model
+
+        def create_preview_configuration(self):
+            return {"from_model": True}
+
+    class FakeImx500Module:
+        IMX500 = FakeModelStack
+
+    def fake_import_module(name: str):
+        if name == "picamera2":
+            return FakePicameraModule
+        if name == "picamera2.devices.imx500":
+            return FakeImx500Module
+        raise AssertionError(f"Unexpected import: {name}")
+
+    monkeypatch.setattr(_imx500.importlib, "import_module", fake_import_module)
+
+    _, model_stack = controller._create_imx500_stack("/tmp/model.rpk")
+
+    assert isinstance(model_stack, FakeModelStack)
+    assert calls["model_arg"] == "/tmp/model.rpk"
+    assert calls["config"] == {"from_model": True}
+    assert calls["started"] is True
