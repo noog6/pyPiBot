@@ -77,6 +77,9 @@ Default keys include:
 - `stop_words` and `stop_word_cooldown_s` to pause tool execution on emergency phrases
 - `health`, `ops`, and `alerts` for operational health probes, budgets, and alert policy
 - `governance` settings (autonomy level, autonomy windows, budgets, and tool tier specs)
+- `imx500_enabled`, `imx500_model`, `imx500_fps_cap`, `imx500_min_confidence`, and `imx500_interesting_classes` for optional IMX500 object-detection settings
+
+IMX500 controller skeleton lives at `hardware/imx500_controller.py`. It is disabled by default and will no-op with a single warning when dependencies are unavailable.
 
 ## Systemd Deployment
 
