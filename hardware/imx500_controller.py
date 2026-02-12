@@ -17,12 +17,21 @@ from core.logging import logger
 from vision.detections import Detection, DetectionEvent
 
 
+DEFAULT_IMX500_MODEL_PATH = "/usr/share/imx500-models/imx500_network_yolo11n_pp.rpk"
+IMX500_MODEL_NICKNAME_MAP: dict[str, str] = {
+    "yolo11n_pp": DEFAULT_IMX500_MODEL_PATH,
+    "imx500_network_yolo11n_pp": DEFAULT_IMX500_MODEL_PATH,
+    "mobilenetv2_ssd": "/usr/share/imx500-models/imx500_network_mobilenetv2_ssd.rpk",
+    "efficientdet_lite0_pp": "/usr/share/imx500-models/imx500_network_efficientdet_lite0_pp.rpk",
+}
+
+
 @dataclass(frozen=True)
 class Imx500Settings:
     """Runtime settings for IMX500 detection."""
 
     enabled: bool = False
-    model: str = "yolo11n_pp"
+    model: str = DEFAULT_IMX500_MODEL_PATH
     fps_cap: int = 5
     min_confidence: float = 0.4
     event_buffer_size: int = 50
@@ -234,7 +243,7 @@ class Imx500Controller:
             imx500_module = importlib.import_module("picamera2.devices.imx500")
             model_stack_cls = getattr(imx500_module, "IMX500", None)
             if model_stack_cls is not None:
-                model_stack = model_stack_cls(model=model)
+                model_stack = model_stack_cls(model)
         except Exception:
             model_stack = None
 
@@ -564,9 +573,12 @@ class Imx500Controller:
         else:
             classes = Imx500Settings().interesting_classes
 
+        configured_model = str(config.get("imx500_model", DEFAULT_IMX500_MODEL_PATH))
+        resolved_model = self._resolve_model_path(configured_model)
+
         return Imx500Settings(
             enabled=bool(config.get("imx500_enabled", False)),
-            model=str(config.get("imx500_model", "yolo11n_pp")),
+            model=resolved_model,
             fps_cap=int(config.get("imx500_fps_cap", 5)),
             min_confidence=float(config.get("imx500_min_confidence", 0.4)),
             event_buffer_size=int(config.get("imx500_event_buffer_size", 50)),
@@ -576,6 +588,26 @@ class Imx500Controller:
             startup_retry_interval_s=float(config.get("imx500_startup_retry_interval_s", 2.0)),
             startup_max_attach_retries=int(config.get("imx500_startup_max_attach_retries", 3)),
         )
+
+    def _resolve_model_path(self, configured_model: str) -> str:
+        normalized = configured_model.strip()
+        if not normalized:
+            return DEFAULT_IMX500_MODEL_PATH
+
+        mapped_path = IMX500_MODEL_NICKNAME_MAP.get(normalized)
+        if mapped_path is not None:
+            return mapped_path
+
+        is_nickname = "/" not in normalized and not normalized.endswith(".rpk")
+        if is_nickname:
+            logger.warning(
+                "[IMX500] Model nickname '%s' has no known .rpk mapping; "
+                "expected absolute path like %s",
+                normalized,
+                DEFAULT_IMX500_MODEL_PATH,
+            )
+
+        return normalized
 
     def _record_last_error(self, message: str) -> None:
         with self._lock:

@@ -24,7 +24,7 @@ camera_warmup_ms: 1000
 
 # IMX500 object detection (skeleton; optional)
 imx500_enabled: false
-imx500_model: "yolo11n_pp"
+imx500_model: "/usr/share/imx500-models/imx500_network_yolo11n_pp.rpk"
 imx500_fps_cap: 5
 imx500_min_confidence: 0.4
 imx500_event_buffer_size: 50
