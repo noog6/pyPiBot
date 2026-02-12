@@ -51,6 +51,10 @@ def _safe_connection_closed_ok() -> type[BaseException] | None:
     return getattr(websockets, "ConnectionClosedOK", None)
 
 
+def _epoch_millis() -> int:
+    return int(time.time() * 1000)
+
+
 class CameraController:
     """Singleton controller for camera capture and vision loop."""
 
@@ -101,6 +105,10 @@ class CameraController:
         self._warmup_frames_seen = 0
         self._warmup_done = True
         self._configure_warmup()
+        self._detection_max_age_ms = 2000
+        self._detection_injection_cooldown_ms = 2500
+        self._last_injected_detection_timestamp_ms = 0
+        self._configure_detection_freshness()
 
         CameraController._instance = self
 
@@ -175,13 +183,18 @@ class CameraController:
                     luma = self.take_lores_luma()
                     changed, score = self.lores_changed(luma, threshold=7.0)
                     imx500_event = self._get_latest_imx500_event()
+                    fresh_imx500_event = self._get_fresh_detection_event(
+                        imx500_event,
+                        current_time,
+                        now_epoch_ms=_epoch_millis(),
+                    )
                     attention = self._get_attention_controller()
                     attention_state = AttentionState.IDLE
                     if attention is not None:
                         attention_state = attention.update(
                             now_ms=current_time,
                             mad_changed=changed,
-                            detections=imx500_event,
+                            detections=fresh_imx500_event,
                         )
                         effective_period_ms = attention.get_capture_period_ms(
                             attention_state,
@@ -190,14 +203,19 @@ class CameraController:
 
                     interesting_detection = self._is_interesting_detection(
                         attention,
-                        imx500_event,
+                        fresh_imx500_event,
+                    )
+                    self._dispatch_detection_summary_if_needed(
+                        fresh_imx500_event,
+                        interesting_detection,
+                        current_time,
                     )
                     should_send = changed or interesting_detection
                     if attention is not None:
                         should_send = should_send or attention.should_send_image(
                             attention_state,
                             changed,
-                            imx500_event,
+                            fresh_imx500_event,
                         )
 
                     next_vision_loop_time = current_time + effective_period_ms
@@ -330,6 +348,37 @@ class CameraController:
         except Exception:
             return None
 
+    def _get_fresh_detection_event(
+        self,
+        event: DetectionEvent | None,
+        now_ms: int,
+        now_epoch_ms: int | None = None,
+    ) -> DetectionEvent | None:
+        if event is None:
+            return None
+        event_ts_ms = int(event.timestamp_ms)
+        age_candidates_ms: list[int] = []
+
+        monotonic_age_ms = int(now_ms) - event_ts_ms
+        if monotonic_age_ms >= 0:
+            age_candidates_ms.append(monotonic_age_ms)
+
+        wall_now_ms = _epoch_millis() if now_epoch_ms is None else int(now_epoch_ms)
+        wall_age_ms = wall_now_ms - event_ts_ms
+        if wall_age_ms >= 0:
+            age_candidates_ms.append(wall_age_ms)
+
+        age_ms = min(age_candidates_ms) if age_candidates_ms else 0
+        if age_ms <= self._detection_max_age_ms:
+            return event
+        logger.debug(
+            "[CAMERA] Ignoring stale detection event source=%s age_ms=%s max_age_ms=%s",
+            event.source,
+            age_ms,
+            self._detection_max_age_ms,
+        )
+        return None
+
     def _is_interesting_detection(
         self,
         attention: AttentionController | None,
@@ -369,6 +418,32 @@ class CameraController:
         finally:
             self._send_in_flight.clear()
 
+    def _dispatch_detection_summary_if_needed(
+        self,
+        event: DetectionEvent | None,
+        is_interesting: bool,
+        now_ms: int,
+    ) -> None:
+        if not is_interesting or event is None:
+            return
+        if event.source != "imx500":
+            return
+        if now_ms - self._last_injected_detection_timestamp_ms < self._detection_injection_cooldown_ms:
+            return
+        if not self.realtime_instance:
+            return
+        send_summary = getattr(self.realtime_instance, "send_detection_summary_to_assistant", None)
+        if not callable(send_summary):
+            return
+        loop = getattr(self.realtime_instance, "loop", None)
+        if loop is None or not loop.is_running():
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(send_summary(event), loop)
+            self._last_injected_detection_timestamp_ms = int(now_ms)
+        except Exception:
+            logger.exception("[CAMERA] Failed to dispatch detection summary injection")
+
     def _configure_image_saving(self) -> None:
         config = ConfigController.get_instance().get_config()
         self._image_save_enabled = bool(config.get("save_camera_images", False))
@@ -386,6 +461,14 @@ class CameraController:
         self._warmup_frames = max(int(config.get("camera_warmup_frames", 5)), 0)
         self._warmup_ms = max(int(config.get("camera_warmup_ms", 1000)), 0)
         self._reset_warmup()
+
+    def _configure_detection_freshness(self) -> None:
+        config = ConfigController.get_instance().get_config()
+        self._detection_max_age_ms = max(int(config.get("detection_event_max_age_ms", 2000)), 0)
+        self._detection_injection_cooldown_ms = max(
+            int(config.get("detection_injection_cooldown_ms", 2500)),
+            0,
+        )
 
     def _reset_warmup(self) -> None:
         self._warmup_start_ms = millis()
