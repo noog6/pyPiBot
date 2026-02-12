@@ -17,6 +17,8 @@ from config import ConfigController
 from core.logging import logger
 from motion.motion_controller import MotionController, millis
 from storage.controller import StorageController
+from vision.attention import AttentionController, AttentionState
+from vision.detections import DetectionEvent
 
 
 def _require_camera_deps() -> tuple[Any, Any, Any]:
@@ -90,6 +92,8 @@ class CameraController:
         self._image_save_dir = None
         self._pending_images: deque[Any] = deque(maxlen=3)
         self._pending_lock = threading.Lock()
+        self._attention_controller: AttentionController | None = None
+        self._imx500_controller: Any = None
         self._configure_image_saving()
         self._warmup_frames = 0
         self._warmup_ms = 0
@@ -150,8 +154,9 @@ class CameraController:
         while not self._stop_event.is_set():
             current_time = millis()
             if current_time >= next_vision_loop_time:
-                next_vision_loop_time = current_time + self.vision_loop_period_ms
                 self.vision_loop_index += 1
+                effective_period_ms = self.vision_loop_period_ms
+                next_vision_loop_time = current_time + effective_period_ms
 
                 if self._send_in_flight.is_set():
                     time.sleep(0.01)
@@ -169,20 +174,54 @@ class CameraController:
                 try:
                     luma = self.take_lores_luma()
                     changed, score = self.lores_changed(luma, threshold=7.0)
-                    if not changed:
+                    imx500_event = self._get_latest_imx500_event()
+                    attention = self._get_attention_controller()
+                    attention_state = AttentionState.IDLE
+                    if attention is not None:
+                        attention_state = attention.update(
+                            now_ms=current_time,
+                            mad_changed=changed,
+                            detections=imx500_event,
+                        )
+                        effective_period_ms = attention.get_capture_period_ms(
+                            attention_state,
+                            self.vision_loop_period_ms,
+                        )
+
+                    interesting_detection = self._is_interesting_detection(
+                        attention,
+                        imx500_event,
+                    )
+                    should_send = changed or interesting_detection
+                    if attention is not None:
+                        should_send = should_send or attention.should_send_image(
+                            attention_state,
+                            changed,
+                            imx500_event,
+                        )
+
+                    next_vision_loop_time = current_time + effective_period_ms
+                    if not should_send:
                         time.sleep(0.01)
                         continue
 
-                    logger.info("[CAMERA] change detected (mad=%.2f)", score)
+                    logger.info(
+                        "[CAMERA] trigger state=%s mad=%.2f changed=%s detection=%s",
+                        attention_state.value,
+                        score,
+                        changed,
+                        interesting_detection,
+                    )
 
-                    new_image = self.take_main_pil()
-                    self._save_image_async(new_image)
-                    if self._can_send_realtime():
-                        self._send_in_flight.set()
-                        if not self._queue_image_send(new_image):
-                            self._send_in_flight.clear()
-                    else:
-                        self._queue_pending_image(new_image)
+                    self._capture_and_dispatch_image()
+
+                    if attention is not None and attention.should_burst(attention_state):
+                        burst_count = attention.get_burst_count()
+                        for _ in range(max(0, burst_count - 1)):
+                            if self._stop_event.is_set() or self._send_in_flight.is_set():
+                                break
+                            time.sleep(0.08)
+                            self._capture_and_dispatch_image()
 
                 except Exception as exc:
                     self._send_in_flight.clear()
@@ -252,6 +291,48 @@ class CameraController:
             return False
         future.add_done_callback(self._clear_send_flag)
         return True
+
+    def _capture_and_dispatch_image(self) -> None:
+        new_image = self.take_main_pil()
+        self._save_image_async(new_image)
+        if self._can_send_realtime():
+            self._send_in_flight.set()
+            if not self._queue_image_send(new_image):
+                self._send_in_flight.clear()
+        else:
+            self._queue_pending_image(new_image)
+
+    def _get_attention_controller(self) -> AttentionController | None:
+        if self._attention_controller is not None:
+            return self._attention_controller
+        try:
+            controller = AttentionController.get_instance()
+        except Exception:
+            logger.exception("[CAMERA] Attention controller unavailable; using MAD-only gating")
+            return None
+        if not controller.config.enabled:
+            return None
+        self._attention_controller = controller
+        return self._attention_controller
+
+    def _get_latest_imx500_event(self) -> DetectionEvent | None:
+        try:
+            if self._imx500_controller is None:
+                from hardware.imx500_controller import Imx500Controller
+
+                self._imx500_controller = Imx500Controller.get_instance()
+            return self._imx500_controller.get_latest_event()
+        except Exception:
+            return None
+
+    def _is_interesting_detection(
+        self,
+        attention: AttentionController | None,
+        event: DetectionEvent | None,
+    ) -> bool:
+        if attention is not None:
+            return attention.is_interesting_event(event)
+        return event is not None and len(event.detections) > 0
 
     def _clear_send_flag(self, fut: Any) -> None:
         ConnectionClosedOK = _safe_connection_closed_ok()
