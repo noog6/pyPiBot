@@ -34,6 +34,8 @@ class Imx500Settings:
         "cup",
         "keyboard",
     )
+    status_log_period_s: float = 15.0
+    startup_grace_s: float = 30.0
 
 
 class Imx500Controller:
@@ -61,6 +63,14 @@ class Imx500Controller:
         self._worker_thread: threading.Thread | None = None
         self._worker_stop = threading.Event()
         self._frame_id = 0
+        self._events_published = 0
+        self._detection_events_published = 0
+        self._last_publish_monotonic: float | None = None
+        self._last_detection_monotonic: float | None = None
+        self._last_detection_classes: tuple[str, ...] = ()
+        self._start_monotonic: float | None = None
+        self._last_status_log_monotonic: float = 0.0
+        self._no_detections_warning_logged = False
 
         Imx500Controller._instance = self
 
@@ -105,6 +115,9 @@ class Imx500Controller:
                 self.settings.fps_cap,
                 self.settings.min_confidence,
             )
+            now = time.monotonic()
+            self._start_monotonic = now
+            self._last_status_log_monotonic = now
             self._start_worker_locked()
 
     def stop(self) -> None:
@@ -162,6 +175,7 @@ class Imx500Controller:
 
                 detections, frame_id = self._convert_raw_detections(raw_detections)
                 self._publish_detections(detections, timestamp=timestamp_s, frame_id=frame_id)
+                self._maybe_log_status(time.monotonic())
 
                 elapsed_s = time.monotonic() - loop_start
                 sleep_s = max(0.0, period_s - elapsed_s)
@@ -418,6 +432,41 @@ class Imx500Controller:
         with self._lock:
             return self._available
 
+    def get_runtime_status(self) -> dict[str, int | float | str]:
+        """Return runtime IMX500 status metrics for ops health and diagnostics."""
+
+        now = time.monotonic()
+        with self._lock:
+            worker_alive = bool(self._worker_thread and self._worker_thread.is_alive())
+            enabled = self.settings.enabled
+            backend_available = self._available
+            events_published = self._events_published
+            detection_events_published = self._detection_events_published
+            last_publish_age_s = (
+                now - self._last_publish_monotonic
+                if self._last_publish_monotonic is not None
+                else -1.0
+            )
+            last_detection_age_s = (
+                now - self._last_detection_monotonic
+                if self._last_detection_monotonic is not None
+                else -1.0
+            )
+            last_classes = ", ".join(self._last_detection_classes)
+
+        return {
+            "enabled": int(enabled),
+            "backend_available": int(backend_available),
+            "loop_alive": int(worker_alive),
+            "events_published": events_published,
+            "detection_events_published": detection_events_published,
+            "last_event_age_s": round(last_publish_age_s, 3) if last_publish_age_s >= 0.0 else -1.0,
+            "last_detection_age_s": round(last_detection_age_s, 3)
+            if last_detection_age_s >= 0.0
+            else -1.0,
+            "last_classes_confidences": last_classes,
+        }
+
     def _publish_detections(
         self,
         detections: list[Detection],
@@ -443,6 +492,7 @@ class Imx500Controller:
             self._latest_event = event
             self._event_buffer.append(event)
             subscribers = list(self._subscribers)
+            self._record_publish_metrics_locked(event)
 
         self._log_interesting_detection(event)
 
@@ -471,7 +521,67 @@ class Imx500Controller:
             min_confidence=float(config.get("imx500_min_confidence", 0.4)),
             event_buffer_size=int(config.get("imx500_event_buffer_size", 50)),
             interesting_classes=classes,
+            status_log_period_s=float(config.get("imx500_status_log_period_s", 15.0)),
+            startup_grace_s=float(config.get("imx500_startup_grace_s", 30.0)),
         )
+
+    def _record_publish_metrics_locked(self, event: DetectionEvent) -> None:
+        now = time.monotonic()
+        self._events_published += 1
+        self._last_publish_monotonic = now
+        if not event.detections:
+            return
+        self._detection_events_published += 1
+        self._last_detection_monotonic = now
+        self._last_detection_classes = tuple(
+            f"{detection.label}:{detection.confidence:.2f}"
+            for detection in event.detections[:3]
+        )
+
+    def _maybe_log_status(self, now_monotonic: float) -> None:
+        status_log_period_s = max(10.0, min(30.0, self.settings.status_log_period_s))
+        startup_grace_s = max(0.0, self.settings.startup_grace_s)
+
+        should_log_status = False
+        warning_message = ""
+        with self._lock:
+            if (now_monotonic - self._last_status_log_monotonic) >= status_log_period_s:
+                self._last_status_log_monotonic = now_monotonic
+                should_log_status = True
+
+            if (
+                self.settings.enabled
+                and self._available
+                and self._start_monotonic is not None
+                and not self._no_detections_warning_logged
+                and self._detection_events_published <= 0
+                and (now_monotonic - self._start_monotonic) >= startup_grace_s
+            ):
+                elapsed_s = int(now_monotonic - self._start_monotonic)
+                warning_message = (
+                    "IMX500 enabled and backend available, but no detection "
+                    f"events published in {elapsed_s}s."
+                )
+                self._no_detections_warning_logged = True
+
+        if should_log_status:
+            status = self.get_runtime_status()
+            logger.info(
+                "[IMX500] Status: backend_available=%s loop_alive=%s "
+                "events_published=%s detection_events_published=%s "
+                "last_event_age_s=%s last_detection_age_s=%s "
+                "last_classes_confidences=%s",
+                status["backend_available"],
+                status["loop_alive"],
+                status["events_published"],
+                status["detection_events_published"],
+                status["last_event_age_s"],
+                status["last_detection_age_s"],
+                status["last_classes_confidences"] or "none",
+            )
+
+        if warning_message:
+            logger.warning("[IMX500] %s", warning_message)
 
     def _check_backend_available(self) -> tuple[bool, str]:
         if importlib.util.find_spec("picamera2") is None:

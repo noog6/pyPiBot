@@ -26,6 +26,7 @@ from services.health_probes import (
     probe_motion,
     probe_network,
     probe_realtime_session,
+    probe_imx500,
 )
 from motion.gestures import gesture_idle
 from motion.motion_controller import MotionController
@@ -257,6 +258,7 @@ class OpsOrchestrator:
             probe_battery(),
             probe_motion(),
             probe_realtime_session(realtime_api),
+            probe_imx500(),
         ]
         if network_enabled:
             results.append(probe_network(network_host, network_timeout))
