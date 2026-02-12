@@ -251,8 +251,8 @@ def probe_imx500() -> HealthProbeResult:
     detection_events_published = int(status.get("detection_events_published", 0))
 
     if not enabled:
-        health_status = HealthStatus.DEGRADED
-        summary = "IMX500 disabled"
+        health_status = HealthStatus.OK
+        summary = "IMX500 disabled by config"
     elif not backend_available:
         health_status = HealthStatus.FAILING
         summary = "IMX500 backend unavailable"

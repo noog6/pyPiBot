@@ -58,3 +58,27 @@ def test_probe_imx500_failing_when_backend_unavailable(monkeypatch) -> None:
 
     assert result.status is HealthStatus.FAILING
     assert "backend unavailable" in result.summary.lower()
+
+
+def test_probe_imx500_ok_when_disabled(monkeypatch) -> None:
+    controller = _FakeImxController(
+        {
+            "enabled": 0,
+            "backend_available": 0,
+            "loop_alive": 0,
+            "events_published": 0,
+            "detection_events_published": 0,
+            "last_event_age_s": -1.0,
+            "last_detection_age_s": -1.0,
+            "last_classes_confidences": "",
+        }
+    )
+    monkeypatch.setattr(
+        "services.health_probes.Imx500Controller.get_instance",
+        lambda: controller,
+    )
+
+    result = probe_imx500()
+
+    assert result.status is HealthStatus.OK
+    assert "disabled" in result.summary.lower()
