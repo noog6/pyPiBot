@@ -36,6 +36,22 @@ imx500_interesting_classes:
   - "cup"
   - "keyboard"
 
+# Attention state machine (MAD + optional IMX500 detections)
+attention_enabled: true
+attention_curious_timeout_ms: 3000
+attention_engage_confirm_ms: 1200
+attention_cooldown_timeout_ms: 3500
+attention_cooldown_reengage_window_ms: 1500
+attention_mad_repeat_count: 2
+attention_mad_window_ms: 1200
+attention_engaged_capture_period_ms: 1500
+attention_burst_enabled: true
+attention_burst_count: 3
+attention_burst_cooldown_ms: 2500
+attention_interesting_classes:
+  - "person"
+attention_min_confidence: 0.45
+
 # Realtime audio detection
 prefix_padding_ms: 500
 silence_threshold: 0.2
