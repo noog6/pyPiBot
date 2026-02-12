@@ -178,8 +178,12 @@ class Imx500Controller:
             return False, "missing picamera2"
 
         # IMX500 support may be exposed via this helper module on Raspberry Pi stacks.
-        if importlib.util.find_spec("picamera2.devices.imx500") is not None:
-            return True, ""
+        try:
+            if importlib.util.find_spec("picamera2.devices.imx500") is not None:
+                return True, ""
+        except ModuleNotFoundError:
+            # picamera2 may not be installed as a package with importable submodules.
+            pass
 
         # Some environments package IMX500 support under top-level module names.
         if importlib.util.find_spec("imx500") is not None:
