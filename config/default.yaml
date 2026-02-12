@@ -31,6 +31,7 @@ imx500_event_buffer_size: 50
 imx500_status_log_period_s: 15
 imx500_startup_grace_s: 30
 imx500_startup_retry_interval_s: 2
+imx500_startup_max_attach_retries: 3
 imx500_interesting_classes:
   - "person"
   - "cat"
