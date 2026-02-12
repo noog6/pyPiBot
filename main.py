@@ -10,7 +10,7 @@ import sys
 from ai import RealtimeAPI
 from config import ConfigController
 from core.logging import enable_file_logging, logger
-from hardware import CameraController
+from hardware import CameraController, Imx500Controller
 from interaction.stderr_suppression import suppress_noisy_stderr
 from motion import MotionController
 from storage.controller import StorageController
@@ -157,6 +157,14 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         logger.warning("Camera controller unavailable: %s", exc)
 
+    imx500_controller = None
+    try:
+        logger.info("Starting IMX500 controller...")
+        imx500_controller = Imx500Controller.get_instance()
+        imx500_controller.start()
+    except Exception as exc:
+        logger.warning("IMX500 controller unavailable: %s", exc)
+
     imu_monitor = None
     imu_event_handler = None
     try:
@@ -205,6 +213,8 @@ def main(argv: list[str] | None = None) -> int:
                 camera_instance.stop_vision_loop()
         if motion_controller:
             motion_controller.stop_control_loop()
+        if imx500_controller:
+            imx500_controller.stop()
         if imu_monitor:
             if imu_event_handler:
                 imu_monitor.unregister_event_handler(imu_event_handler)
