@@ -337,7 +337,25 @@ class CameraController:
     ) -> bool:
         if attention is not None:
             return attention.is_interesting_event(event)
-        return event is not None and len(event.detections) > 0
+        return self._is_interesting_detection_fallback(event)
+
+    def _is_interesting_detection_fallback(self, event: DetectionEvent | None) -> bool:
+        if event is None:
+            return False
+        config = ConfigController.get_instance().get_config()
+        labels_value = config.get("attention_interesting_classes", ["person"])
+        if isinstance(labels_value, list):
+            labels = {str(item).lower() for item in labels_value}
+        else:
+            labels = {"person"}
+        min_confidence = float(config.get("attention_min_confidence", 0.45))
+        for detection in event.detections:
+            if (
+                detection.label.lower() in labels
+                and float(detection.confidence) >= min_confidence
+            ):
+                return True
+        return False
 
     def _clear_send_flag(self, fut: Any) -> None:
         ConnectionClosedOK = _safe_connection_closed_ok()

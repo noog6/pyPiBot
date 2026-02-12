@@ -1,7 +1,8 @@
 import threading
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from hardware.camera_controller import CameraController
+from vision.detections import Detection, DetectionEvent
 
 
 def _bare_camera_controller() -> CameraController:
@@ -32,3 +33,31 @@ def test_capture_dispatch_default_path_sends_realtime() -> None:
 
     controller._queue_image_send.assert_called_once()
     assert controller._send_in_flight.is_set()
+
+
+def test_is_interesting_detection_fallback_honors_label_and_confidence() -> None:
+    controller = _bare_camera_controller()
+    event = DetectionEvent(
+        timestamp_ms=1000,
+        detections=[Detection(label="cup", confidence=0.99, bbox=(0.0, 0.0, 1.0, 1.0))],
+    )
+
+    with patch("hardware.camera_controller.ConfigController.get_instance") as get_instance:
+        config = {
+            "attention_interesting_classes": ["person"],
+            "attention_min_confidence": 0.8,
+        }
+        get_instance.return_value.get_config.return_value = config
+        assert controller._is_interesting_detection(attention=None, event=event) is False
+
+
+def test_is_interesting_detection_fallback_matches_attention_defaults() -> None:
+    controller = _bare_camera_controller()
+    event = DetectionEvent(
+        timestamp_ms=1000,
+        detections=[Detection(label="person", confidence=0.9, bbox=(0.0, 0.0, 1.0, 1.0))],
+    )
+
+    with patch("hardware.camera_controller.ConfigController.get_instance") as get_instance:
+        get_instance.return_value.get_config.return_value = {}
+        assert controller._is_interesting_detection(attention=None, event=event) is True
