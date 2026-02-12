@@ -172,3 +172,38 @@ def test_warns_when_no_detection_events_after_grace(monkeypatch) -> None:
     controller._maybe_log_status(now_monotonic=16.0)
 
     assert controller._no_detections_warning_logged is True
+
+
+def test_worker_retries_after_camera_attach_failure(monkeypatch) -> None:
+    _reset_singleton()
+    monkeypatch.setattr(
+        Imx500Controller,
+        "_load_settings",
+        lambda self: Imx500Settings(enabled=True, fps_cap=30, startup_retry_interval_s=0.01),
+    )
+    monkeypatch.setattr(Imx500Controller, "_check_backend_available", lambda self: (True, ""))
+
+    attempts = {"count": 0}
+
+    def fake_create(self, model: str):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise RuntimeError("Device or resource busy")
+        return object(), None
+
+    def fake_read(self, camera, model_stack):
+        self._worker_stop.set()
+        return ([], time.time())
+
+    monkeypatch.setattr(Imx500Controller, "_create_imx500_stack", fake_create)
+    monkeypatch.setattr(Imx500Controller, "_read_raw_detections", fake_read)
+
+    controller = Imx500Controller.get_instance()
+    controller.start()
+    time.sleep(0.65)
+    controller.stop()
+
+    status = controller.get_runtime_status()
+    assert attempts["count"] >= 2
+    assert status["startup_attempts"] >= 2
+    assert status["last_error"] == ""
