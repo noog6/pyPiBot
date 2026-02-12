@@ -22,6 +22,19 @@ save_camera_images: false
 camera_warmup_frames: 5
 camera_warmup_ms: 1000
 
+# IMX500 object detection (skeleton; optional)
+imx500_enabled: false
+imx500_model: "yolo11n_pp"
+imx500_fps_cap: 5
+imx500_min_confidence: 0.4
+imx500_interesting_classes:
+  - "person"
+  - "cat"
+  - "dog"
+  - "cell phone"
+  - "cup"
+  - "keyboard"
+
 # Realtime audio detection
 prefix_padding_ms: 500
 silence_threshold: 0.2

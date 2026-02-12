@@ -6,11 +6,12 @@ import argparse
 import asyncio
 import logging
 import sys
+import threading
 
 from ai import RealtimeAPI
 from config import ConfigController
 from core.logging import enable_file_logging, logger
-from hardware import CameraController
+from hardware import CameraController, Imx500Controller
 from interaction.stderr_suppression import suppress_noisy_stderr
 from motion import MotionController
 from storage.controller import StorageController
@@ -157,6 +158,30 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         logger.warning("Camera controller unavailable: %s", exc)
 
+    imx500_controller = None
+    imx500_start_thread = None
+
+    def _start_imx500_async() -> None:
+        try:
+            assert imx500_controller is not None
+            imx500_controller.start()
+            logger.info("IMX500 controller startup complete")
+        except Exception as exc:
+            logger.warning("IMX500 controller startup failed: %s", exc)
+
+    try:
+        logger.info("Initializing IMX500 controller...")
+        imx500_controller = Imx500Controller.get_instance()
+        logger.info("Starting IMX500 controller in background thread...")
+        imx500_start_thread = threading.Thread(
+            target=_start_imx500_async,
+            name="imx500-startup",
+            daemon=True,
+        )
+        imx500_start_thread.start()
+    except Exception as exc:
+        logger.warning("IMX500 controller unavailable: %s", exc)
+
     imu_monitor = None
     imu_event_handler = None
     try:
@@ -205,6 +230,12 @@ def main(argv: list[str] | None = None) -> int:
                 camera_instance.stop_vision_loop()
         if motion_controller:
             motion_controller.stop_control_loop()
+        if imx500_start_thread and imx500_start_thread.is_alive():
+            imx500_start_thread.join(timeout=2.0)
+            if imx500_start_thread.is_alive():
+                logger.warning("IMX500 startup thread still running during shutdown")
+        if imx500_controller:
+            imx500_controller.stop()
         if imu_monitor:
             if imu_event_handler:
                 imu_monitor.unregister_event_handler(imu_event_handler)
