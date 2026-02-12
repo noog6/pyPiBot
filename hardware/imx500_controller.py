@@ -36,6 +36,7 @@ class Imx500Settings:
     )
     status_log_period_s: float = 15.0
     startup_grace_s: float = 30.0
+    startup_retry_interval_s: float = 2.0
 
 
 class Imx500Controller:
@@ -71,6 +72,9 @@ class Imx500Controller:
         self._start_monotonic: float | None = None
         self._last_status_log_monotonic: float = 0.0
         self._no_detections_warning_logged = False
+        self._last_error = ""
+        self._last_error_monotonic: float | None = None
+        self._startup_attempts = 0
 
         Imx500Controller._instance = self
 
@@ -156,34 +160,46 @@ class Imx500Controller:
         self._worker_thread.start()
 
     def _worker_loop(self) -> None:
-        camera: Any = None
-        model_stack: Any = None
         period_s = 1.0 / max(1, self.settings.fps_cap)
         model = self.settings.model
+        retry_interval_s = max(0.5, float(self.settings.startup_retry_interval_s))
 
-        try:
-            camera, model_stack = self._create_imx500_stack(model)
-            logger.info("[IMX500] Worker attached to camera stack (model=%s)", model)
-            while not self._worker_stop.is_set():
-                loop_start = time.monotonic()
-                timestamp_s = time.time()
-                raw_detections = []
-                try:
-                    raw_detections, timestamp_s = self._read_raw_detections(camera, model_stack)
-                except Exception:
-                    logger.exception("[IMX500] Failed to read frame detections")
+        while not self._worker_stop.is_set():
+            camera: Any = None
+            model_stack: Any = None
+            try:
+                with self._lock:
+                    self._startup_attempts += 1
+                camera, model_stack = self._create_imx500_stack(model)
+                self._clear_last_error()
+                logger.info("[IMX500] Worker attached to camera stack (model=%s)", model)
 
-                detections, frame_id = self._convert_raw_detections(raw_detections)
-                self._publish_detections(detections, timestamp=timestamp_s, frame_id=frame_id)
-                self._maybe_log_status(time.monotonic())
+                while not self._worker_stop.is_set():
+                    loop_start = time.monotonic()
+                    timestamp_s = time.time()
+                    raw_detections = []
+                    try:
+                        raw_detections, timestamp_s = self._read_raw_detections(camera, model_stack)
+                    except Exception:
+                        logger.exception("[IMX500] Failed to read frame detections")
 
-                elapsed_s = time.monotonic() - loop_start
-                sleep_s = max(0.0, period_s - elapsed_s)
-                self._worker_stop.wait(sleep_s)
-        except Exception as exc:
-            logger.exception("[IMX500] Worker initialization failed: %s", exc)
-        finally:
-            self._shutdown_imx500_stack(camera, model_stack)
+                    detections, frame_id = self._convert_raw_detections(raw_detections)
+                    self._publish_detections(detections, timestamp=timestamp_s, frame_id=frame_id)
+                    self._maybe_log_status(time.monotonic())
+
+                    elapsed_s = time.monotonic() - loop_start
+                    sleep_s = max(0.0, period_s - elapsed_s)
+                    self._worker_stop.wait(sleep_s)
+            except Exception as exc:
+                self._record_last_error(str(exc))
+                logger.warning(
+                    "[IMX500] Worker camera attach failed (%s). Retrying in %.1fs",
+                    exc,
+                    retry_interval_s,
+                )
+                self._worker_stop.wait(retry_interval_s)
+            finally:
+                self._shutdown_imx500_stack(camera, model_stack)
 
     def _create_imx500_stack(self, model: str) -> tuple[Any, Any]:
         picamera2_module = importlib.import_module("picamera2")
@@ -453,6 +469,13 @@ class Imx500Controller:
                 else -1.0
             )
             last_classes = ", ".join(self._last_detection_classes)
+            last_error = self._last_error
+            startup_attempts = self._startup_attempts
+            last_error_age_s = (
+                now - self._last_error_monotonic
+                if self._last_error_monotonic is not None
+                else -1.0
+            )
 
         return {
             "enabled": int(enabled),
@@ -465,6 +488,9 @@ class Imx500Controller:
             if last_detection_age_s >= 0.0
             else -1.0,
             "last_classes_confidences": last_classes,
+            "startup_attempts": startup_attempts,
+            "last_error": last_error,
+            "last_error_age_s": round(last_error_age_s, 3) if last_error_age_s >= 0.0 else -1.0,
         }
 
     def _publish_detections(
@@ -523,7 +549,18 @@ class Imx500Controller:
             interesting_classes=classes,
             status_log_period_s=float(config.get("imx500_status_log_period_s", 15.0)),
             startup_grace_s=float(config.get("imx500_startup_grace_s", 30.0)),
+            startup_retry_interval_s=float(config.get("imx500_startup_retry_interval_s", 2.0)),
         )
+
+    def _record_last_error(self, message: str) -> None:
+        with self._lock:
+            self._last_error = message
+            self._last_error_monotonic = time.monotonic()
+
+    def _clear_last_error(self) -> None:
+        with self._lock:
+            self._last_error = ""
+            self._last_error_monotonic = None
 
     def _record_publish_metrics_locked(self, event: DetectionEvent) -> None:
         now = time.monotonic()

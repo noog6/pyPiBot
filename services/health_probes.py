@@ -249,6 +249,7 @@ def probe_imx500() -> HealthProbeResult:
     backend_available = bool(status.get("backend_available", 0))
     loop_alive = bool(status.get("loop_alive", 0))
     detection_events_published = int(status.get("detection_events_published", 0))
+    last_error = str(status.get("last_error", ""))
 
     if not enabled:
         health_status = HealthStatus.OK
@@ -259,6 +260,9 @@ def probe_imx500() -> HealthProbeResult:
     elif not loop_alive:
         health_status = HealthStatus.FAILING
         summary = "IMX500 inference loop inactive"
+    elif last_error:
+        health_status = HealthStatus.DEGRADED
+        summary = "IMX500 retrying camera attach"
     elif detection_events_published <= 0:
         health_status = HealthStatus.DEGRADED
         summary = "IMX500 active; no detection events yet"
@@ -274,10 +278,13 @@ def probe_imx500() -> HealthProbeResult:
         "detection_events_published": detection_events_published,
         "last_event_age_s": float(status.get("last_event_age_s", -1.0)),
         "last_detection_age_s": float(status.get("last_detection_age_s", -1.0)),
+        "startup_attempts": int(status.get("startup_attempts", 0)),
     }
     last_classes_confidences = status.get("last_classes_confidences", "")
     if isinstance(last_classes_confidences, str):
         details["last_classes_confidences"] = last_classes_confidences
+    if last_error:
+        details["last_error"] = last_error
 
     return HealthProbeResult(
         name="imx500",
