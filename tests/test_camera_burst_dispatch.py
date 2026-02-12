@@ -61,3 +61,31 @@ def test_is_interesting_detection_fallback_matches_attention_defaults() -> None:
     with patch("hardware.camera_controller.ConfigController.get_instance") as get_instance:
         get_instance.return_value.get_config.return_value = {}
         assert controller._is_interesting_detection(attention=None, event=event) is True
+
+
+def test_get_fresh_detection_event_uses_wall_clock_for_epoch_timestamps() -> None:
+    controller = _bare_camera_controller()
+    controller._detection_max_age_ms = 2000
+    event = DetectionEvent(timestamp_ms=1_000_000, detections=[])
+
+    fresh = controller._get_fresh_detection_event(
+        event,
+        now_ms=50_000,
+        now_epoch_ms=1_005_500,
+    )
+
+    assert fresh is None
+
+
+def test_get_fresh_detection_event_keeps_monotonic_timestamps_fresh() -> None:
+    controller = _bare_camera_controller()
+    controller._detection_max_age_ms = 2000
+    event = DetectionEvent(timestamp_ms=120_000, detections=[])
+
+    fresh = controller._get_fresh_detection_event(
+        event,
+        now_ms=121_200,
+        now_epoch_ms=1_700_000_000_000,
+    )
+
+    assert fresh is event

@@ -51,6 +51,10 @@ def _safe_connection_closed_ok() -> type[BaseException] | None:
     return getattr(websockets, "ConnectionClosedOK", None)
 
 
+def _epoch_millis() -> int:
+    return int(time.time() * 1000)
+
+
 class CameraController:
     """Singleton controller for camera capture and vision loop."""
 
@@ -182,6 +186,7 @@ class CameraController:
                     fresh_imx500_event = self._get_fresh_detection_event(
                         imx500_event,
                         current_time,
+                        now_epoch_ms=_epoch_millis(),
                     )
                     attention = self._get_attention_controller()
                     attention_state = AttentionState.IDLE
@@ -347,10 +352,23 @@ class CameraController:
         self,
         event: DetectionEvent | None,
         now_ms: int,
+        now_epoch_ms: int | None = None,
     ) -> DetectionEvent | None:
         if event is None:
             return None
-        age_ms = max(0, int(now_ms) - int(event.timestamp_ms))
+        event_ts_ms = int(event.timestamp_ms)
+        age_candidates_ms: list[int] = []
+
+        monotonic_age_ms = int(now_ms) - event_ts_ms
+        if monotonic_age_ms >= 0:
+            age_candidates_ms.append(monotonic_age_ms)
+
+        wall_now_ms = _epoch_millis() if now_epoch_ms is None else int(now_epoch_ms)
+        wall_age_ms = wall_now_ms - event_ts_ms
+        if wall_age_ms >= 0:
+            age_candidates_ms.append(wall_age_ms)
+
+        age_ms = min(age_candidates_ms) if age_candidates_ms else 0
         if age_ms <= self._detection_max_age_ms:
             return event
         logger.debug(
