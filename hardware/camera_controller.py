@@ -67,16 +67,14 @@ class CameraController:
         Picamera2, numpy, pil_image = _require_camera_deps()
         self._np = numpy
         self._pil_image = pil_image
+        self._imx500_model_stack = self._create_imx500_model_stack_if_enabled()
+        camera_num = getattr(self._imx500_model_stack, "camera_num", None)
 
-        self.picam2 = Picamera2()
+        self.picam2 = Picamera2(camera_num) if isinstance(camera_num, int) else Picamera2()
         self._main_size = (640, 480)
         self._lores_size = (160, 90)
         self._last_luma = None
-        self.camera_configuration = self.picam2.create_preview_configuration(
-            main={"size": self._main_size, "format": "RGB888"},
-            lores={"size": self._lores_size, "format": "YUV420"},
-            buffer_count=2,
-        )
+        self.camera_configuration = self._create_camera_configuration()
         self.picam2.configure(self.camera_configuration)
         self.picam2.start()
 
@@ -117,6 +115,54 @@ class CameraController:
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
+
+    def get_imx500_model_stack(self) -> Any:
+        return self._imx500_model_stack
+
+    def _create_camera_configuration(self) -> Any:
+        if self._imx500_model_stack is not None and hasattr(
+            self._imx500_model_stack,
+            "create_preview_configuration",
+        ):
+            try:
+                return self._imx500_model_stack.create_preview_configuration(
+                    main={"size": self._main_size, "format": "RGB888"},
+                    lores={"size": self._lores_size, "format": "YUV420"},
+                    buffer_count=2,
+                )
+            except TypeError:
+                return self._imx500_model_stack.create_preview_configuration()
+
+        return self.picam2.create_preview_configuration(
+            main={"size": self._main_size, "format": "RGB888"},
+            lores={"size": self._lores_size, "format": "YUV420"},
+            buffer_count=2,
+        )
+
+    def _create_imx500_model_stack_if_enabled(self) -> Any:
+        config = ConfigController.get_instance().get_config()
+        if not bool(config.get("imx500_enabled", False)):
+            return None
+
+        model = str(config.get("imx500_model", ""))
+        try:
+            from hardware.imx500_controller import (
+                DEFAULT_IMX500_MODEL_PATH,
+                IMX500_MODEL_NICKNAME_MAP,
+            )
+
+            resolved = IMX500_MODEL_NICKNAME_MAP.get(model.lower(), model)
+            model = resolved if resolved else DEFAULT_IMX500_MODEL_PATH
+            import importlib
+
+            imx500_module = importlib.import_module("picamera2.devices.imx500")
+            model_cls = getattr(imx500_module, "IMX500", None)
+            if model_cls is None:
+                return None
+            return model_cls(model)
+        except Exception as exc:
+            logger.warning("[CAMERA] IMX500 model stack unavailable: %s", exc)
+            return None
 
     def start_vision_loop(self, vision_loop_period_ms: int = 15000) -> None:
         if self._vision_loop_thread is None or not self._vision_loop_thread.is_alive():

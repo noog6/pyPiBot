@@ -1,5 +1,6 @@
 import time
 
+import pytest
 import importlib.util
 import sys
 from pathlib import Path
@@ -30,13 +31,13 @@ def test_worker_lifecycle_and_publishing(monkeypatch) -> None:
     shutdown_calls = []
 
     def fake_create(self, model: str):
-        return object(), {"model": model}
+        return object(), {"model": model}, True
 
     def fake_read(self, camera, model_stack):
         return ([{"label": "person", "confidence": 0.95, "bbox": (0.1, 0.1, 0.2, 0.2)}], time.time())
 
-    def fake_shutdown(self, camera, model_stack):
-        shutdown_calls.append((camera, model_stack))
+    def fake_shutdown(self, camera, model_stack, owns_camera_stack):
+        shutdown_calls.append((camera, model_stack, owns_camera_stack))
 
     monkeypatch.setattr(Imx500Controller, "_create_imx500_stack", fake_create)
     monkeypatch.setattr(Imx500Controller, "_read_raw_detections", fake_read)
@@ -189,10 +190,10 @@ def test_worker_retries_after_camera_attach_failure(monkeypatch) -> None:
         attempts["count"] += 1
         if attempts["count"] == 1:
             raise RuntimeError("Device or resource busy")
-        return object(), None
+        return object(), None, True
 
-    def fake_read(self, camera, model_stack):
-        self._worker_stop.set()
+    def fake_read(controller, camera, model_stack):
+        controller._worker_stop.set()
         return ([], time.time())
 
     monkeypatch.setattr(Imx500Controller, "_create_imx500_stack", fake_create)
@@ -307,9 +308,31 @@ def test_create_imx500_stack_uses_positional_constructor(monkeypatch) -> None:
 
     monkeypatch.setattr(_imx500.importlib, "import_module", fake_import_module)
 
-    _, model_stack = controller._create_imx500_stack("/tmp/model.rpk")
+    _, model_stack, owns_camera_stack = controller._create_imx500_stack("/tmp/model.rpk")
 
     assert isinstance(model_stack, FakeModelStack)
     assert calls["model_arg"] == "/tmp/model.rpk"
     assert calls["config"] == {"from_model": True}
     assert calls["started"] is True
+    assert owns_camera_stack is True
+
+
+def test_create_imx500_stack_prefers_camera_controller_stack(monkeypatch) -> None:
+    _reset_singleton()
+    monkeypatch.setattr(Imx500Controller, "_load_settings", lambda self: Imx500Settings(enabled=False))
+
+    controller = Imx500Controller.get_instance()
+
+    shared_camera = object()
+    shared_model_stack = object()
+    monkeypatch.setattr(
+        Imx500Controller,
+        "_get_camera_controller_stack",
+        lambda self: (shared_camera, shared_model_stack),
+    )
+
+    camera, model_stack, owns_camera_stack = controller._create_imx500_stack("/tmp/model.rpk")
+
+    assert camera is shared_camera
+    assert model_stack is shared_model_stack
+    assert owns_camera_stack is False
