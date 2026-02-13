@@ -179,14 +179,19 @@ class Imx500Controller:
         while not self._worker_stop.is_set():
             camera: Any = None
             model_stack: Any = None
+            owns_camera_stack = True
             try:
                 with self._lock:
                     self._startup_attempts += 1
-                camera, model_stack = self._create_imx500_stack(model)
+                camera, model_stack, owns_camera_stack = self._create_imx500_stack(model)
                 with self._lock:
                     self._consecutive_attach_failures = 0
                 self._clear_last_error()
-                logger.info("[IMX500] Worker attached to camera stack (model=%s)", model)
+                logger.info(
+                    "[IMX500] Worker attached to %s camera stack (model=%s)",
+                    "shared" if not owns_camera_stack else "dedicated",
+                    model,
+                )
 
                 while not self._worker_stop.is_set():
                     loop_start = time.monotonic()
@@ -227,14 +232,18 @@ class Imx500Controller:
                     self._disabled_reason = "camera busy or unavailable"
                 self._worker_stop.set()
             finally:
-                self._shutdown_imx500_stack(camera, model_stack)
+                self._shutdown_imx500_stack(camera, model_stack, owns_camera_stack)
 
     def _record_attach_failure_and_should_retry(self, max_attach_retries: int) -> bool:
         with self._lock:
             self._consecutive_attach_failures += 1
             return self._consecutive_attach_failures < max_attach_retries
 
-    def _create_imx500_stack(self, model: str) -> tuple[Any, Any]:
+    def _create_imx500_stack(self, model: str) -> tuple[Any, Any, bool]:
+        shared_camera, shared_model_stack = self._get_camera_controller_stack()
+        if shared_camera is not None:
+            return shared_camera, shared_model_stack, False
+
         picamera2_module = importlib.import_module("picamera2")
         picamera = picamera2_module.Picamera2()
 
@@ -254,9 +263,32 @@ class Imx500Controller:
             picamera.configure(picamera.create_preview_configuration())
 
         picamera.start()
-        return picamera, model_stack
+        return picamera, model_stack, True
 
-    def _shutdown_imx500_stack(self, camera: Any, model_stack: Any) -> None:
+    def _get_camera_controller_stack(self) -> tuple[Any | None, Any | None]:
+        """Return shared camera/model handles when CameraController owns the camera."""
+
+        try:
+            from hardware.camera_controller import CameraController
+
+            instance = CameraController._instance
+            if instance is None:
+                return None, None
+            camera = getattr(instance, "picam2", None)
+            if camera is None:
+                return None, None
+            model_stack = None
+            getter = getattr(instance, "get_imx500_model_stack", None)
+            if callable(getter):
+                model_stack = getter()
+            return camera, model_stack
+        except Exception:
+            return None, None
+
+    def _shutdown_imx500_stack(self, camera: Any, model_stack: Any, owns_camera_stack: bool) -> None:
+        if not owns_camera_stack:
+            return
+
         if model_stack is not None and hasattr(model_stack, "close"):
             try:
                 model_stack.close()
@@ -274,12 +306,20 @@ class Imx500Controller:
 
     def _read_raw_detections(self, camera: Any, model_stack: Any) -> tuple[list[Any], float]:
         timestamp_s = time.time()
+        metadata = camera.capture_metadata()
 
         if model_stack is not None and hasattr(model_stack, "get_outputs"):
-            outputs = model_stack.get_outputs()
-            return list(outputs) if outputs is not None else [], timestamp_s
+            try:
+                outputs = model_stack.get_outputs(metadata, add_batch=True)
+            except TypeError:
+                outputs = model_stack.get_outputs()
 
-        metadata = camera.capture_metadata()
+            if outputs is None:
+                return [], timestamp_s
+            if isinstance(outputs, (list, tuple)):
+                return list(outputs), timestamp_s
+            return [outputs], timestamp_s
+
         if isinstance(metadata, dict):
             timestamp_raw = metadata.get("SensorTimestamp")
             if isinstance(timestamp_raw, (int, float)):
