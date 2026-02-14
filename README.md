@@ -77,15 +77,6 @@ Default keys include:
 - `stop_words` and `stop_word_cooldown_s` to pause tool execution on emergency phrases
 - `health`, `ops`, and `alerts` for operational health probes, budgets, and alert policy
 - `governance` settings (autonomy level, autonomy windows, budgets, and tool tier specs)
-- `imx500_enabled`, `imx500_model`, `imx500_fps_cap`, `imx500_min_confidence`, `imx500_event_buffer_size`, `imx500_status_log_period_s`, `imx500_startup_grace_s`, and `imx500_interesting_classes` for optional IMX500 object-detection settings
-
-IMX500 controller skeleton lives at `hardware/imx500_controller.py`. It is disabled by default and will no-op with a single warning when dependencies are unavailable. Detection payload types are defined in `vision/detections.py`: `Detection` and `DetectionEvent` with normalized `(x, y, w, h)` bounding boxes in `[0..1]`. The controller keeps a ring buffer of time-ordered events and exposes `get_latest_event()` / `get_recent_events()` for non-blocking reads.
-
-Theo now includes an attention state machine in `vision/attention.py` with states `IDLE -> CURIOUS -> ENGAGED -> COOLDOWN`. The camera loop blends lores MAD motion changes and optional IMX500 detections to decide when to capture/send frames. Triggers are: repeated MAD hits, interesting classes (default `person`) above `attention_min_confidence`, and state-driven continuation while curious/engaged.
-
-Attention is configured with `attention_*` keys (for example `attention_enabled`, curious/engaged/cooldown timing, MAD repeat window, `attention_engaged_capture_period_ms`, and burst settings such as `attention_burst_count`). If IMX500 is disabled/unavailable, attention still operates safely from MAD-only signals, and the camera loop remains non-blocking.
-
-When `save_camera_images: true`, camera captures are still written asynchronously; if an IMX500 event is available, a sibling JSON sidecar is also written (for example `image_*.jpg` with `image_*.detections.json`).
 
 ## Systemd Deployment
 

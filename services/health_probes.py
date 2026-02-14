@@ -10,7 +10,6 @@ from typing import Any, Mapping
 
 from core.ops_models import HealthStatus
 from services.battery_monitor import BatteryMonitor
-from hardware.imx500_controller import Imx500Controller
 
 
 @dataclass(frozen=True)
@@ -234,61 +233,6 @@ def probe_realtime_session(realtime_api: Any | None) -> HealthProbeResult:
     return HealthProbeResult(
         name="realtime",
         status=status,
-        summary=summary,
-        details=details,
-    )
-
-
-def probe_imx500() -> HealthProbeResult:
-    """Probe IMX500 controller health and publishability."""
-
-    controller = Imx500Controller.get_instance()
-    status = controller.get_runtime_status()
-
-    enabled = bool(status.get("enabled", 0))
-    backend_available = bool(status.get("backend_available", 0))
-    loop_alive = bool(status.get("loop_alive", 0))
-    detection_events_published = int(status.get("detection_events_published", 0))
-    last_error = str(status.get("last_error", ""))
-
-    if not enabled:
-        health_status = HealthStatus.OK
-        summary = "IMX500 disabled by config"
-    elif not backend_available:
-        health_status = HealthStatus.FAILING
-        summary = "IMX500 backend unavailable"
-    elif not loop_alive:
-        health_status = HealthStatus.FAILING
-        summary = "IMX500 inference loop inactive"
-    elif last_error:
-        health_status = HealthStatus.DEGRADED
-        summary = "IMX500 retrying camera attach"
-    elif detection_events_published <= 0:
-        health_status = HealthStatus.DEGRADED
-        summary = "IMX500 active; no detection events yet"
-    else:
-        health_status = HealthStatus.OK
-        summary = "IMX500 active"
-
-    details: dict[str, str | float | int] = {
-        "enabled": int(enabled),
-        "backend_available": int(backend_available),
-        "loop_alive": int(loop_alive),
-        "events_published": int(status.get("events_published", 0)),
-        "detection_events_published": detection_events_published,
-        "last_event_age_s": float(status.get("last_event_age_s", -1.0)),
-        "last_detection_age_s": float(status.get("last_detection_age_s", -1.0)),
-        "startup_attempts": int(status.get("startup_attempts", 0)),
-    }
-    last_classes_confidences = status.get("last_classes_confidences", "")
-    if isinstance(last_classes_confidences, str):
-        details["last_classes_confidences"] = last_classes_confidences
-    if last_error:
-        details["last_error"] = last_error
-
-    return HealthProbeResult(
-        name="imx500",
-        status=health_status,
         summary=summary,
         details=details,
     )

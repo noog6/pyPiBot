@@ -61,7 +61,6 @@ from motion.gesture_library import DEFAULT_GESTURES
 from services.profile_manager import ProfileManager
 from services.reflection_manager import ReflectionManager
 from storage import StorageController
-from vision.detections import DetectionEvent
 
 RESPONSE_DONE_REFLECTION_PROMPT = """Summarize what changed. Any anomalies? Should anything be remembered?
 Return ONLY valid JSON with keys: summary, remember_memory.
@@ -392,56 +391,6 @@ class RealtimeAPI:
         self._log_injection_event(event, request_response)
         self._send_text_message(message, request_response=request_response)
 
-    async def send_detection_summary_to_assistant(self, event: DetectionEvent) -> None:
-        if event.source != "imx500":
-            return
-        if not self.websocket:
-            log_warning("Unable to send detection summary to assistant, websocket not available")
-            return
-        summary_text, metadata = self._build_detection_summary_payload(event)
-        text_event = {
-            "type": "conversation.item.create",
-            "item": {
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_text", "text": summary_text}],
-            },
-        }
-        log_ws_event("Detection", text_event)
-        self._track_outgoing_event(text_event)
-        await self.websocket.send(json.dumps(text_event))
-        await self._stimuli_coordinator.enqueue(
-            trigger="detection_summary",
-            metadata=metadata,
-            priority=self._get_injection_priority("detection_summary"),
-        )
-
-    def _build_detection_summary_payload(
-        self,
-        event: DetectionEvent,
-    ) -> tuple[str, dict[str, Any]]:
-        ranked = sorted(event.detections, key=lambda item: item.confidence, reverse=True)
-        top_items = ranked[:3]
-        labels = ", ".join(f"{item.label}:{item.confidence:.2f}" for item in top_items)
-        if not labels:
-            labels = "none"
-        summary_text = (
-            "[IMX500 detection summary] "
-            f"source={event.source} timestamp_ms={int(event.timestamp_ms)} "
-            f"frame_id={event.frame_id if event.frame_id is not None else 'n/a'} "
-            f"count={len(event.detections)} top={labels}"
-        )
-        metadata = {
-            "source": event.source,
-            "timestamp_ms": int(event.timestamp_ms),
-            "frame_id": event.frame_id,
-            "count": len(event.detections),
-            "detections": [
-                {"label": item.label, "confidence": float(item.confidence)} for item in top_items
-            ],
-        }
-        return summary_text, metadata
-
     def _log_injection_event(self, event: Event, request_response: bool) -> None:
         metadata = event.metadata or {}
         parts = [
@@ -507,15 +456,6 @@ class RealtimeAPI:
                 f"{voltage:.2f}V ({percent:.1f}% of range) "
                 f"severity={severity}",
                 severity != "info",
-            )
-        if event.source == "imx500":
-            metadata = event.metadata
-            labels = metadata.get("detections")
-            return (
-                "IMX500 detection signal: "
-                f"count={metadata.get('count', 0)} "
-                f"top={labels} timestamp_ms={metadata.get('timestamp_ms')}",
-                True,
             )
         return f"{event.source} event: {event.metadata}", True
 
