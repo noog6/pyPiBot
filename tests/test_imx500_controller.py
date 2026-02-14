@@ -336,3 +336,22 @@ def test_create_imx500_stack_prefers_camera_controller_stack(monkeypatch) -> Non
     assert camera is shared_camera
     assert model_stack is shared_model_stack
     assert owns_camera_stack is False
+
+
+def test_capture_metadata_uses_non_blocking_on_shared_camera(monkeypatch) -> None:
+    _reset_singleton()
+    monkeypatch.setattr(Imx500Controller, "_load_settings", lambda self: Imx500Settings(enabled=False))
+
+    controller = Imx500Controller.get_instance()
+    calls: list[bool] = []
+
+    class FakeCamera:
+        def capture_metadata(self, wait=True):
+            calls.append(bool(wait))
+            return {"detections": []}
+
+    controller._using_shared_camera_stack = True
+    metadata = controller._capture_metadata(FakeCamera())
+
+    assert metadata == {"detections": []}
+    assert calls == [False]

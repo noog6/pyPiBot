@@ -86,6 +86,7 @@ class Imx500Controller:
         self._last_error_monotonic: float | None = None
         self._startup_attempts = 0
         self._consecutive_attach_failures = 0
+        self._using_shared_camera_stack = False
 
         Imx500Controller._instance = self
 
@@ -186,6 +187,7 @@ class Imx500Controller:
                 camera, model_stack, owns_camera_stack = self._create_imx500_stack(model)
                 with self._lock:
                     self._consecutive_attach_failures = 0
+                    self._using_shared_camera_stack = not owns_camera_stack
                 self._clear_last_error()
                 logger.info(
                     "[IMX500] Worker attached to %s camera stack (model=%s)",
@@ -230,8 +232,11 @@ class Imx500Controller:
                 with self._lock:
                     self._available = False
                     self._disabled_reason = "camera busy or unavailable"
+                    self._using_shared_camera_stack = False
                 self._worker_stop.set()
             finally:
+                with self._lock:
+                    self._using_shared_camera_stack = False
                 self._shutdown_imx500_stack(camera, model_stack, owns_camera_stack)
 
     def _record_attach_failure_and_should_retry(self, max_attach_retries: int) -> bool:
@@ -306,7 +311,9 @@ class Imx500Controller:
 
     def _read_raw_detections(self, camera: Any, model_stack: Any) -> tuple[list[Any], float]:
         timestamp_s = time.time()
-        metadata = camera.capture_metadata()
+        metadata = self._capture_metadata(camera)
+        if metadata is None:
+            return [], timestamp_s
 
         if model_stack is not None and hasattr(model_stack, "get_outputs"):
             try:
@@ -337,6 +344,25 @@ class Imx500Controller:
                     return list(candidate) if isinstance(candidate, list) else [candidate], timestamp_s
 
         return [], timestamp_s
+
+    def _capture_metadata(self, camera: Any) -> Any:
+        """Capture metadata without blocking shutdown on shared-camera stacks."""
+
+        with self._lock:
+            using_shared_camera = self._using_shared_camera_stack
+
+        capture_metadata = getattr(camera, "capture_metadata", None)
+        if not callable(capture_metadata):
+            return None
+
+        if using_shared_camera:
+            try:
+                return capture_metadata(wait=False)
+            except TypeError:
+                # Older picamera2 versions do not expose wait= for capture_metadata.
+                pass
+
+        return capture_metadata()
 
     def _convert_raw_detections(self, raw_detections: list[Any]) -> tuple[list[Detection], int]:
         normalized: list[Detection] = []
