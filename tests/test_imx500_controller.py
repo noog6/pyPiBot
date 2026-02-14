@@ -355,3 +355,44 @@ def test_capture_metadata_uses_non_blocking_on_shared_camera(monkeypatch) -> Non
 
     assert metadata == {"detections": []}
     assert calls == [False]
+
+
+def test_capture_metadata_resolves_async_job_result(monkeypatch) -> None:
+    _reset_singleton()
+    monkeypatch.setattr(Imx500Controller, "_load_settings", lambda self: Imx500Settings(enabled=False))
+
+    controller = Imx500Controller.get_instance()
+
+    class FakeJob:
+        def get_result(self, timeout=0):
+            return {"detections": [1]}
+
+    class FakeCamera:
+        def capture_metadata(self, wait=True):
+            assert wait is False
+            return FakeJob()
+
+    controller._using_shared_camera_stack = True
+    metadata = controller._capture_metadata(FakeCamera())
+
+    assert metadata == {"detections": [1]}
+
+
+def test_read_raw_detections_skips_non_mapping_metadata_for_model_stack(monkeypatch) -> None:
+    _reset_singleton()
+    monkeypatch.setattr(Imx500Controller, "_load_settings", lambda self: Imx500Settings(enabled=False))
+
+    controller = Imx500Controller.get_instance()
+    warnings: list[str] = []
+    monkeypatch.setattr(_imx500.logger, "warning", lambda msg, *args: warnings.append(msg % args))
+
+    class FakeModelStack:
+        def get_outputs(self, metadata, add_batch=True):
+            raise AssertionError("get_outputs should not be called for non-dict metadata")
+
+    monkeypatch.setattr(controller, "_capture_metadata", lambda camera: object())
+    detections, timestamp_s = controller._read_raw_detections(object(), FakeModelStack())
+
+    assert detections == []
+    assert isinstance(timestamp_s, float)
+    assert any("expected dict" in item for item in warnings)

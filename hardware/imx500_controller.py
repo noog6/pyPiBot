@@ -87,6 +87,7 @@ class Imx500Controller:
         self._startup_attempts = 0
         self._consecutive_attach_failures = 0
         self._using_shared_camera_stack = False
+        self._last_read_error_log_monotonic: float = 0.0
 
         Imx500Controller._instance = self
 
@@ -202,7 +203,7 @@ class Imx500Controller:
                     try:
                         raw_detections, timestamp_s = self._read_raw_detections(camera, model_stack)
                     except Exception:
-                        logger.exception("[IMX500] Failed to read frame detections")
+                        self._log_read_error("Failed to read frame detections", with_exception=True)
 
                     detections, frame_id = self._convert_raw_detections(raw_detections)
                     self._publish_detections(detections, timestamp=timestamp_s, frame_id=frame_id)
@@ -316,10 +317,23 @@ class Imx500Controller:
             return [], timestamp_s
 
         if model_stack is not None and hasattr(model_stack, "get_outputs"):
+            if not isinstance(metadata, dict):
+                self._log_read_error(
+                    "Skipping IMX500 output parse; metadata is %s (expected dict)"
+                    % type(metadata).__name__
+                )
+                return [], timestamp_s
             try:
                 outputs = model_stack.get_outputs(metadata, add_batch=True)
             except TypeError:
                 outputs = model_stack.get_outputs()
+            except Exception as exc:
+                self._record_last_error(str(exc))
+                self._log_read_error(
+                    "Failed model_stack.get_outputs with metadata type=%s: %s"
+                    % (type(metadata).__name__, exc)
+                )
+                return [], timestamp_s
 
             if outputs is None:
                 return [], timestamp_s
@@ -357,12 +371,46 @@ class Imx500Controller:
 
         if using_shared_camera:
             try:
-                return capture_metadata(wait=False)
+                metadata = capture_metadata(wait=False)
             except TypeError:
                 # Older picamera2 versions do not expose wait= for capture_metadata.
-                pass
+                metadata = capture_metadata()
+            return self._resolve_async_metadata(metadata)
 
         return capture_metadata()
+
+    def _resolve_async_metadata(self, metadata: Any) -> Any:
+        """Attempt to resolve async picamera job objects into metadata mappings."""
+
+        if metadata is None or isinstance(metadata, dict):
+            return metadata
+
+        for method_name in ("get_result", "result", "wait"):
+            method = getattr(metadata, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                resolved = method(timeout=0)
+            except TypeError:
+                try:
+                    resolved = method()
+                except Exception:
+                    return metadata
+            except Exception:
+                return metadata
+            return resolved
+
+        return metadata
+
+    def _log_read_error(self, message: str, with_exception: bool = False) -> None:
+        now = time.monotonic()
+        if (now - self._last_read_error_log_monotonic) < 5.0:
+            return
+        self._last_read_error_log_monotonic = now
+        if with_exception:
+            logger.exception("[IMX500] %s", message)
+            return
+        logger.warning("[IMX500] %s", message)
 
     def _convert_raw_detections(self, raw_detections: list[Any]) -> tuple[list[Detection], int]:
         normalized: list[Detection] = []
