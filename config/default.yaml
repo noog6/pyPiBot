@@ -22,40 +22,6 @@ save_camera_images: false
 camera_warmup_frames: 5
 camera_warmup_ms: 1000
 
-# IMX500 object detection (skeleton; optional)
-imx500_enabled: false
-imx500_model: "/usr/share/imx500-models/imx500_network_yolo11n_pp.rpk"
-imx500_fps_cap: 5
-imx500_min_confidence: 0.4
-imx500_event_buffer_size: 50
-imx500_status_log_period_s: 15
-imx500_startup_grace_s: 30
-imx500_startup_retry_interval_s: 2
-imx500_startup_max_attach_retries: 3
-imx500_interesting_classes:
-  - "person"
-  - "cat"
-  - "dog"
-  - "cell phone"
-  - "cup"
-  - "keyboard"
-
-# Attention state machine (MAD + optional IMX500 detections)
-attention_enabled: true
-attention_curious_timeout_ms: 3000
-attention_engage_confirm_ms: 1200
-attention_cooldown_timeout_ms: 3500
-attention_cooldown_reengage_window_ms: 1500
-attention_mad_repeat_count: 2
-attention_mad_window_ms: 1200
-attention_engaged_capture_period_ms: 1500
-attention_burst_enabled: true
-attention_burst_count: 3
-attention_burst_cooldown_ms: 2500
-attention_interesting_classes:
-  - "person"
-attention_min_confidence: 0.45
-
 # Realtime audio detection
 prefix_padding_ms: 500
 silence_threshold: 0.2

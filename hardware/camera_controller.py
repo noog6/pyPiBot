@@ -3,22 +3,18 @@
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
-import json
 import threading
 import time
 import traceback
 from typing import Any
+import concurrent.futures
 from collections import deque
 from datetime import datetime
-from pathlib import Path
 
 from config import ConfigController
 from core.logging import logger
 from motion.motion_controller import MotionController, millis
 from storage.controller import StorageController
-from vision.attention import AttentionController, AttentionState
-from vision.detections import DetectionEvent
 
 
 def _require_camera_deps() -> tuple[Any, Any, Any]:
@@ -51,10 +47,6 @@ def _safe_connection_closed_ok() -> type[BaseException] | None:
     return getattr(websockets, "ConnectionClosedOK", None)
 
 
-def _epoch_millis() -> int:
-    return int(time.time() * 1000)
-
-
 class CameraController:
     """Singleton controller for camera capture and vision loop."""
 
@@ -67,14 +59,16 @@ class CameraController:
         Picamera2, numpy, pil_image = _require_camera_deps()
         self._np = numpy
         self._pil_image = pil_image
-        self._imx500_model_stack = self._create_imx500_model_stack_if_enabled()
-        camera_num = getattr(self._imx500_model_stack, "camera_num", None)
 
-        self.picam2 = Picamera2(camera_num) if isinstance(camera_num, int) else Picamera2()
+        self.picam2 = Picamera2()
         self._main_size = (640, 480)
         self._lores_size = (160, 90)
         self._last_luma = None
-        self.camera_configuration = self._create_camera_configuration()
+        self.camera_configuration = self.picam2.create_preview_configuration(
+            main={"size": self._main_size, "format": "RGB888"},
+            lores={"size": self._lores_size, "format": "YUV420"},
+            buffer_count=2,
+        )
         self.picam2.configure(self.camera_configuration)
         self.picam2.start()
 
@@ -94,8 +88,6 @@ class CameraController:
         self._image_save_dir = None
         self._pending_images: deque[Any] = deque(maxlen=3)
         self._pending_lock = threading.Lock()
-        self._attention_controller: AttentionController | None = None
-        self._imx500_controller: Any = None
         self._configure_image_saving()
         self._warmup_frames = 0
         self._warmup_ms = 0
@@ -103,10 +95,6 @@ class CameraController:
         self._warmup_frames_seen = 0
         self._warmup_done = True
         self._configure_warmup()
-        self._detection_max_age_ms = 2000
-        self._detection_injection_cooldown_ms = 2500
-        self._last_injected_detection_timestamp_ms = 0
-        self._configure_detection_freshness()
 
         CameraController._instance = self
 
@@ -115,54 +103,6 @@ class CameraController:
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
-
-    def get_imx500_model_stack(self) -> Any:
-        return self._imx500_model_stack
-
-    def _create_camera_configuration(self) -> Any:
-        if self._imx500_model_stack is not None and hasattr(
-            self._imx500_model_stack,
-            "create_preview_configuration",
-        ):
-            try:
-                return self._imx500_model_stack.create_preview_configuration(
-                    main={"size": self._main_size, "format": "RGB888"},
-                    lores={"size": self._lores_size, "format": "YUV420"},
-                    buffer_count=2,
-                )
-            except TypeError:
-                return self._imx500_model_stack.create_preview_configuration()
-
-        return self.picam2.create_preview_configuration(
-            main={"size": self._main_size, "format": "RGB888"},
-            lores={"size": self._lores_size, "format": "YUV420"},
-            buffer_count=2,
-        )
-
-    def _create_imx500_model_stack_if_enabled(self) -> Any:
-        config = ConfigController.get_instance().get_config()
-        if not bool(config.get("imx500_enabled", False)):
-            return None
-
-        model = str(config.get("imx500_model", ""))
-        try:
-            from hardware.imx500_controller import (
-                DEFAULT_IMX500_MODEL_PATH,
-                IMX500_MODEL_NICKNAME_MAP,
-            )
-
-            resolved = IMX500_MODEL_NICKNAME_MAP.get(model.lower(), model)
-            model = resolved if resolved else DEFAULT_IMX500_MODEL_PATH
-            import importlib
-
-            imx500_module = importlib.import_module("picamera2.devices.imx500")
-            model_cls = getattr(imx500_module, "IMX500", None)
-            if model_cls is None:
-                return None
-            return model_cls(model)
-        except Exception as exc:
-            logger.warning("[CAMERA] IMX500 model stack unavailable: %s", exc)
-            return None
 
     def start_vision_loop(self, vision_loop_period_ms: int = 15000) -> None:
         if self._vision_loop_thread is None or not self._vision_loop_thread.is_alive():
@@ -208,9 +148,8 @@ class CameraController:
         while not self._stop_event.is_set():
             current_time = millis()
             if current_time >= next_vision_loop_time:
+                next_vision_loop_time = current_time + self.vision_loop_period_ms
                 self.vision_loop_index += 1
-                effective_period_ms = self.vision_loop_period_ms
-                next_vision_loop_time = current_time + effective_period_ms
 
                 if self._send_in_flight.is_set():
                     time.sleep(0.01)
@@ -228,64 +167,20 @@ class CameraController:
                 try:
                     luma = self.take_lores_luma()
                     changed, score = self.lores_changed(luma, threshold=7.0)
-                    imx500_event = self._get_latest_imx500_event()
-                    fresh_imx500_event = self._get_fresh_detection_event(
-                        imx500_event,
-                        current_time,
-                        now_epoch_ms=_epoch_millis(),
-                    )
-                    attention = self._get_attention_controller()
-                    attention_state = AttentionState.IDLE
-                    if attention is not None:
-                        attention_state = attention.update(
-                            now_ms=current_time,
-                            mad_changed=changed,
-                            detections=fresh_imx500_event,
-                        )
-                        effective_period_ms = attention.get_capture_period_ms(
-                            attention_state,
-                            self.vision_loop_period_ms,
-                        )
-
-                    interesting_detection = self._is_interesting_detection(
-                        attention,
-                        fresh_imx500_event,
-                    )
-                    self._dispatch_detection_summary_if_needed(
-                        fresh_imx500_event,
-                        interesting_detection,
-                        current_time,
-                    )
-                    should_send = changed or interesting_detection
-                    if attention is not None:
-                        should_send = should_send or attention.should_send_image(
-                            attention_state,
-                            changed,
-                            fresh_imx500_event,
-                        )
-
-                    next_vision_loop_time = current_time + effective_period_ms
-                    if not should_send:
+                    if not changed:
                         time.sleep(0.01)
                         continue
 
-                    logger.info(
-                        "[CAMERA] trigger state=%s mad=%.2f changed=%s detection=%s",
-                        attention_state.value,
-                        score,
-                        changed,
-                        interesting_detection,
-                    )
+                    logger.info("[CAMERA] change detected (mad=%.2f)", score)
 
-                    self._capture_and_dispatch_image()
-
-                    if attention is not None and attention.should_burst(attention_state):
-                        burst_count = attention.get_burst_count()
-                        for _ in range(max(0, burst_count - 1)):
-                            if self._stop_event.is_set():
-                                break
-                            time.sleep(0.08)
-                            self._capture_and_dispatch_image(prefer_queue_if_in_flight=True)
+                    new_image = self.take_main_pil()
+                    self._save_image_async(new_image)
+                    if self._can_send_realtime():
+                        self._send_in_flight.set()
+                        if not self._queue_image_send(new_image):
+                            self._send_in_flight.clear()
+                    else:
+                        self._queue_pending_image(new_image)
 
                 except Exception as exc:
                     self._send_in_flight.clear()
@@ -356,102 +251,6 @@ class CameraController:
         future.add_done_callback(self._clear_send_flag)
         return True
 
-    def _capture_and_dispatch_image(self, prefer_queue_if_in_flight: bool = False) -> None:
-        new_image = self.take_main_pil()
-        self._save_image_async(new_image)
-
-        if prefer_queue_if_in_flight and self._send_in_flight.is_set():
-            self._queue_pending_image(new_image)
-            return
-
-        if self._can_send_realtime():
-            self._send_in_flight.set()
-            if not self._queue_image_send(new_image):
-                self._send_in_flight.clear()
-        else:
-            self._queue_pending_image(new_image)
-
-    def _get_attention_controller(self) -> AttentionController | None:
-        if self._attention_controller is not None:
-            return self._attention_controller
-        try:
-            controller = AttentionController.get_instance()
-        except Exception:
-            logger.exception("[CAMERA] Attention controller unavailable; using MAD-only gating")
-            return None
-        if not controller.config.enabled:
-            return None
-        self._attention_controller = controller
-        return self._attention_controller
-
-    def _get_latest_imx500_event(self) -> DetectionEvent | None:
-        try:
-            if self._imx500_controller is None:
-                from hardware.imx500_controller import Imx500Controller
-
-                self._imx500_controller = Imx500Controller.get_instance()
-            return self._imx500_controller.get_latest_event()
-        except Exception:
-            return None
-
-    def _get_fresh_detection_event(
-        self,
-        event: DetectionEvent | None,
-        now_ms: int,
-        now_epoch_ms: int | None = None,
-    ) -> DetectionEvent | None:
-        if event is None:
-            return None
-        event_ts_ms = int(event.timestamp_ms)
-        age_candidates_ms: list[int] = []
-
-        monotonic_age_ms = int(now_ms) - event_ts_ms
-        if monotonic_age_ms >= 0:
-            age_candidates_ms.append(monotonic_age_ms)
-
-        wall_now_ms = _epoch_millis() if now_epoch_ms is None else int(now_epoch_ms)
-        wall_age_ms = wall_now_ms - event_ts_ms
-        if wall_age_ms >= 0:
-            age_candidates_ms.append(wall_age_ms)
-
-        age_ms = min(age_candidates_ms) if age_candidates_ms else 0
-        if age_ms <= self._detection_max_age_ms:
-            return event
-        logger.debug(
-            "[CAMERA] Ignoring stale detection event source=%s age_ms=%s max_age_ms=%s",
-            event.source,
-            age_ms,
-            self._detection_max_age_ms,
-        )
-        return None
-
-    def _is_interesting_detection(
-        self,
-        attention: AttentionController | None,
-        event: DetectionEvent | None,
-    ) -> bool:
-        if attention is not None:
-            return attention.is_interesting_event(event)
-        return self._is_interesting_detection_fallback(event)
-
-    def _is_interesting_detection_fallback(self, event: DetectionEvent | None) -> bool:
-        if event is None:
-            return False
-        config = ConfigController.get_instance().get_config()
-        labels_value = config.get("attention_interesting_classes", ["person"])
-        if isinstance(labels_value, list):
-            labels = {str(item).lower() for item in labels_value}
-        else:
-            labels = {"person"}
-        min_confidence = float(config.get("attention_min_confidence", 0.45))
-        for detection in event.detections:
-            if (
-                detection.label.lower() in labels
-                and float(detection.confidence) >= min_confidence
-            ):
-                return True
-        return False
-
     def _clear_send_flag(self, fut: Any) -> None:
         ConnectionClosedOK = _safe_connection_closed_ok()
         try:
@@ -463,32 +262,6 @@ class CameraController:
                 logger.exception("[CAMERA] [WARN] Image send failed: %s", exc)
         finally:
             self._send_in_flight.clear()
-
-    def _dispatch_detection_summary_if_needed(
-        self,
-        event: DetectionEvent | None,
-        is_interesting: bool,
-        now_ms: int,
-    ) -> None:
-        if not is_interesting or event is None:
-            return
-        if event.source != "imx500":
-            return
-        if now_ms - self._last_injected_detection_timestamp_ms < self._detection_injection_cooldown_ms:
-            return
-        if not self.realtime_instance:
-            return
-        send_summary = getattr(self.realtime_instance, "send_detection_summary_to_assistant", None)
-        if not callable(send_summary):
-            return
-        loop = getattr(self.realtime_instance, "loop", None)
-        if loop is None or not loop.is_running():
-            return
-        try:
-            asyncio.run_coroutine_threadsafe(send_summary(event), loop)
-            self._last_injected_detection_timestamp_ms = int(now_ms)
-        except Exception:
-            logger.exception("[CAMERA] Failed to dispatch detection summary injection")
 
     def _configure_image_saving(self) -> None:
         config = ConfigController.get_instance().get_config()
@@ -507,14 +280,6 @@ class CameraController:
         self._warmup_frames = max(int(config.get("camera_warmup_frames", 5)), 0)
         self._warmup_ms = max(int(config.get("camera_warmup_ms", 1000)), 0)
         self._reset_warmup()
-
-    def _configure_detection_freshness(self) -> None:
-        config = ConfigController.get_instance().get_config()
-        self._detection_max_age_ms = max(int(config.get("detection_event_max_age_ms", 2000)), 0)
-        self._detection_injection_cooldown_ms = max(
-            int(config.get("detection_injection_cooldown_ms", 2500)),
-            0,
-        )
 
     def _reset_warmup(self) -> None:
         self._warmup_start_ms = millis()
@@ -537,54 +302,14 @@ class CameraController:
         millis_part = int(time.time() * 1000) % 1000
         filename = f"image_{timestamp}_{millis_part:03d}_{self._image_save_index:06d}.jpg"
         path = self._image_save_dir / filename
-        detection_json_path = path.with_suffix(".detections.json")
-        detection_payload = self._latest_detection_payload()
         image_copy = image.copy()
         self._image_save_executor.submit(self._write_image, image_copy, path)
-        if detection_payload is not None:
-            self._image_save_executor.submit(
-                self._write_detection_artifact,
-                detection_json_path,
-                detection_payload,
-            )
 
     def _write_image(self, image: Any, path: Any) -> None:
         try:
             image.save(path, format="JPEG", quality=85)
         except Exception as exc:
             logger.exception("[CAMERA] Failed to save image to %s: %s", path, exc)
-
-    def _latest_detection_payload(self) -> dict[str, Any] | None:
-        try:
-            from hardware.imx500_controller import Imx500Controller
-        except Exception:
-            return None
-
-        controller = Imx500Controller.get_instance()
-        event = controller.get_latest_event()
-        if event is None:
-            return None
-        return {
-            "timestamp_ms": int(event.timestamp_ms),
-            "frame_id": event.frame_id,
-            "source": event.source,
-            "detections": [
-                {
-                    "label": item.label,
-                    "confidence": item.confidence,
-                    "bbox": list(item.bbox),
-                    "metadata": item.metadata,
-                }
-                for item in event.detections
-            ],
-        }
-
-    def _write_detection_artifact(self, path: Path, payload: dict[str, Any]) -> None:
-        try:
-            with path.open("w", encoding="utf-8") as handle:
-                json.dump(payload, handle, separators=(",", ":"), sort_keys=True)
-        except Exception as exc:
-            logger.exception("[CAMERA] Failed to save detections to %s: %s", path, exc)
 
     def lores_changed(self, luma: Any, threshold: float = 7.0) -> tuple[bool, float]:
         if not self._warmup_done:
