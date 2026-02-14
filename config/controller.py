@@ -56,7 +56,7 @@ class ConfigController:
             if override_config:
                 config = self._deep_merge(config, override_config)
 
-        self.config = config
+        self.config = self._normalize_legacy_config(config)
 
     def save_config(self, config: dict[str, Any]) -> None:
         """Persist configuration to override.yaml, archiving previous overrides."""
@@ -103,3 +103,49 @@ class ConfigController:
             else:
                 merged[key] = value
         return merged
+
+    def _normalize_legacy_config(self, config: dict[str, Any]) -> dict[str, Any]:
+        """Normalize config while preserving backwards-compatible battery keys."""
+
+        normalized = dict(config)
+        battery_cfg = dict(normalized.get("battery") or {})
+        response_cfg = dict(battery_cfg.get("response") or {})
+
+        battery_cfg["voltage_min"] = float(
+            battery_cfg.get("voltage_min", normalized.get("battery_voltage_min", 7.0))
+        )
+        battery_cfg["voltage_max"] = float(
+            battery_cfg.get("voltage_max", normalized.get("battery_voltage_max", 8.4))
+        )
+        battery_cfg["warning_percent"] = float(
+            battery_cfg.get("warning_percent", normalized.get("battery_warning_percent", 50.0))
+        )
+        battery_cfg["critical_percent"] = float(
+            battery_cfg.get("critical_percent", normalized.get("battery_critical_percent", 25.0))
+        )
+        battery_cfg["hysteresis_percent"] = float(
+            battery_cfg.get("hysteresis_percent", normalized.get("battery_hysteresis_percent", 0.0))
+        )
+
+        response_cfg["enabled"] = bool(
+            response_cfg.get("enabled", normalized.get("battery_response_enabled", True))
+        )
+        response_cfg["cooldown_s"] = float(
+            response_cfg.get("cooldown_s", normalized.get("battery_response_cooldown_s", 60.0))
+        )
+        response_cfg["allow_warning"] = bool(
+            response_cfg.get("allow_warning", normalized.get("battery_response_allow_warning", True))
+        )
+        response_cfg["allow_critical"] = bool(
+            response_cfg.get("allow_critical", normalized.get("battery_response_allow_critical", True))
+        )
+        response_cfg["require_transition"] = bool(
+            response_cfg.get(
+                "require_transition",
+                normalized.get("battery_response_require_transition", False),
+            )
+        )
+
+        battery_cfg["response"] = response_cfg
+        normalized["battery"] = battery_cfg
+        return normalized

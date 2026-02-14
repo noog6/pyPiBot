@@ -37,6 +37,21 @@ audio:
 # Injected response throttling
 injection_response_cooldown_s: 2.0
 max_injection_responses_per_minute: 12
+
+# Battery monitoring and response behavior
+battery:
+  voltage_min: 7.0
+  voltage_max: 8.4
+  warning_percent: 50
+  critical_percent: 25
+  hysteresis_percent: 0
+  response:
+    enabled: true
+    cooldown_s: 60
+    allow_warning: true
+    allow_critical: true
+    require_transition: false
+
 # Operational budgets and micro-presence
 ops:
   budgets:

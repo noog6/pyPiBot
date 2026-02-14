@@ -119,3 +119,155 @@ Relevant configuration keys include:
 
 See `config/default.yaml` for defaults and in-line comments on each field.
 【F:config/default.yaml†L37-L61】【F:config/default.yaml†L200-L219】
+
+
+## Battery Event Lifecycle (Operator View)
+
+The battery path has two layers:
+
+1. **Telemetry/severity layer** in `BatteryMonitor` (sampling, thresholds,
+   hysteresis, transition metadata).
+2. **Conversation-response layer** in realtime injection policy (whether a
+   battery event should create a response).
+
+```text
+ADS1015 voltage read
+   ↓
+BatteryMonitor._build_event
+  - convert to percent_of_range
+  - apply warning/critical thresholds
+  - apply hysteresis to avoid flips
+  - derive transition + delta_percent + rapid_drop
+   ↓
+BatteryMonitor.create_event_bus_handler
+  - publish Event(source=battery, kind=status, metadata=...)
+  - set request_response based on battery.response policy
+   ↓
+RealtimeAPI.inject_event
+  - format battery text
+  - re-evaluate request_response from metadata + config
+  - optional query-context bypass for explicit user battery questions
+   ↓
+log line: source=battery kind=status create_response=true|false
+   ↓
+If true → response.create (assistant speaks)
+If false → passive telemetry only (no speaking)
+```
+
+## Battery Config Keys and Meanings
+
+All battery tuning lives under `battery:` in config.
+
+### Severity/telemetry keys
+
+- `battery.voltage_min` / `battery.voltage_max`
+  - Voltage range used to normalize battery percentage (`percent_of_range`).
+- `battery.warning_percent`
+  - Warning boundary (normalized percent, 0-100).
+- `battery.critical_percent`
+  - Critical boundary (normalized percent, 0-100).
+- `battery.hysteresis_percent`
+  - Stabilization margin to prevent warning/info boundary chatter.
+
+### Response policy keys
+
+- `battery.response.enabled`
+  - Global on/off for battery-triggered assistant responses.
+- `battery.response.cooldown_s`
+  - Minimum spacing between battery-triggered response requests.
+- `battery.response.allow_warning`
+  - Whether warning-level events are eligible to request a response.
+- `battery.response.allow_critical`
+  - Whether critical-level events are eligible to request a response.
+- `battery.response.require_transition`
+  - If true, steady-state repeats are suppressed and only transitions qualify.
+- `battery.response.query_context_window_s` (optional)
+  - Window for explicit user battery query context (e.g., “how’s battery?”),
+    allowing response bypass of normal suppression checks.
+
+## Tuning Examples
+
+### Quiet mode (minimal battery chatter)
+
+Use this when you want passive monitoring and very few spoken battery updates.
+
+```yaml
+battery:
+  warning_percent: 40
+  critical_percent: 20
+  hysteresis_percent: 8
+  response:
+    enabled: true
+    cooldown_s: 300
+    allow_warning: false
+    allow_critical: true
+    require_transition: true
+```
+
+Expected behavior:
+
+- No speaking for routine warning telemetry.
+- Speaking only on critical (or explicit user battery query context).
+- Fewer warning/info flips due to larger hysteresis.
+
+### Verbose mode (more proactive battery voice updates)
+
+Use this when you want conversational awareness during battery decline.
+
+```yaml
+battery:
+  warning_percent: 55
+  critical_percent: 25
+  hysteresis_percent: 3
+  response:
+    enabled: true
+    cooldown_s: 45
+    allow_warning: true
+    allow_critical: true
+    require_transition: false
+```
+
+Expected behavior:
+
+- Warning and critical updates can request responses more often.
+- Faster user awareness but more potential chatter.
+
+## Troubleshooting: Unexpected Battery Chatter
+
+Use this checklist in order:
+
+1. **Confirm policy log output**
+   - Check for lines with `source=battery kind=status create_response=...`.
+   - If `create_response=true` appears unexpectedly, inspect transition and
+     severity metadata on that event.
+2. **Check warning policy settings**
+   - If chatter is warning-heavy, set `allow_warning: false` or increase
+     `cooldown_s`.
+3. **Enable transition-only speaking**
+   - Set `require_transition: true` to suppress steady-state repeats.
+4. **Increase hysteresis**
+   - Raise `hysteresis_percent` if warning/info boundary jitter causes flips.
+5. **Validate query-context behavior**
+   - Recent explicit prompts like “how’s battery?” intentionally allow response
+     bypass for a short window (`query_context_window_s`).
+6. **Review thresholds for your battery chemistry**
+   - Mismatched `voltage_min/max` can exaggerate normalized swings.
+
+## Why `battery.warning_percent` May Differ from `ops.micro_presence.battery_min_percent`
+
+These values control different subsystems and should not be forced to match:
+
+- `battery.warning_percent` (battery monitor)
+  - Controls **telemetry severity** and possible conversational signaling.
+- `ops.micro_presence.battery_min_percent` (ops orchestrator)
+  - Controls whether **micro-presence gestures** are allowed.
+
+A common pattern is:
+
+- Keep micro-presence conservative (higher minimum battery reserve) to preserve
+  energy for core interaction.
+- Keep warning threshold lower (or differently tuned) so spoken warnings are
+  aligned with user expectations rather than gesture energy budget.
+
+This separation lets operators tune battery chatter and motion behavior
+independently, without code changes.

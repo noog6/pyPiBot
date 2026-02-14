@@ -226,6 +226,7 @@ class RealtimeAPI:
         self._last_user_input_text: str | None = None
         self._last_user_input_time: float | None = None
         self._last_user_input_source: str | None = None
+        self._last_user_battery_query_time: float | None = None
         self._last_outgoing_event_type: str | None = None
         self._last_outgoing_response_origin: str | None = None
         self._tool_call_records: list[dict[str, Any]] = []
@@ -240,6 +241,21 @@ class RealtimeAPI:
         self._injection_response_timestamps: deque[float] = deque()
         self._injection_response_triggers = config.get("injection_response_triggers") or {}
         self._injection_response_trigger_timestamps: dict[str, deque[float]] = {}
+        battery_cfg = config.get("battery") or {}
+        battery_response_cfg = battery_cfg.get("response") or {}
+        self._battery_response_enabled = bool(battery_response_cfg.get("enabled", True))
+        self._battery_response_allow_warning = bool(
+            battery_response_cfg.get("allow_warning", True)
+        )
+        self._battery_response_allow_critical = bool(
+            battery_response_cfg.get("allow_critical", True)
+        )
+        self._battery_response_require_transition = bool(
+            battery_response_cfg.get("require_transition", False)
+        )
+        self._battery_query_context_window_s = float(
+            battery_response_cfg.get("query_context_window_s", 45.0)
+        )
         self._image_response_mode = str(config.get("image_response_mode", "respond")).lower()
         self._image_response_enabled = self._image_response_mode != "catalog_only"
         self._reflection_enabled = bool(config.get("reflection_enabled", False))
@@ -386,10 +402,18 @@ class RealtimeAPI:
 
     def inject_event(self, event: Event) -> None:
         message, request_response = self._format_event_for_injection(event)
-        if event.request_response is not None:
+        bypass_response_suppression = False
+        if event.source == "battery":
+            request_response = self._should_request_battery_response(event, fallback=request_response)
+            bypass_response_suppression = request_response and self._is_battery_query_context_active()
+        elif event.request_response is not None:
             request_response = event.request_response
         self._log_injection_event(event, request_response)
-        self._send_text_message(message, request_response=request_response)
+        self._send_text_message(
+            message,
+            request_response=request_response,
+            bypass_response_suppression=bypass_response_suppression,
+        )
 
     def _log_injection_event(self, event: Event, request_response: bool) -> None:
         metadata = event.metadata or {}
@@ -408,7 +432,13 @@ class RealtimeAPI:
         parts.append(f"create_response={'true' if request_response else 'false'}")
         log_info(" ".join(parts))
 
-    def _send_text_message(self, message: str, request_response: bool = True) -> None:
+    def _send_text_message(
+        self,
+        message: str,
+        request_response: bool = True,
+        *,
+        bypass_response_suppression: bool = False,
+    ) -> None:
         if not self.loop:
             logger.debug("Unable to send message; event loop unavailable.")
             return
@@ -416,6 +446,7 @@ class RealtimeAPI:
             self.send_text_message_to_conversation(
                 message,
                 request_response=request_response,
+                bypass_response_suppression=bypass_response_suppression,
             ),
             self.loop,
         )
@@ -443,21 +474,80 @@ class RealtimeAPI:
             metadata = event.metadata
             percent = float(metadata.get("percent_of_range", 0.0)) * 100
             voltage = float(metadata.get("voltage", 0.0))
-            event_type = metadata.get("event_type")
+            severity = str(metadata.get("severity", "info"))
+            event_type = str(metadata.get("event_type", "status"))
+            transition = str(metadata.get("transition", "steady"))
+            delta_percent = float(metadata.get("delta_percent", 0.0))
+            rapid_drop = bool(metadata.get("rapid_drop", False))
+
             if event_type == "clear":
                 return (
                     "Battery warning cleared: "
-                    f"{voltage:.2f}V ({percent:.1f}% of range)",
+                    f"{voltage:.2f}V ({percent:.1f}% of range) transition={transition}",
                     False,
                 )
-            severity = metadata.get("severity", "info")
+
             return (
                 "Battery voltage: "
                 f"{voltage:.2f}V ({percent:.1f}% of range) "
-                f"severity={severity}",
-                severity != "info",
+                f"severity={severity} transition={transition} "
+                f"delta_percent={delta_percent:.1f} rapid_drop={str(rapid_drop).lower()}",
+                False,
             )
         return f"{event.source} event: {event.metadata}", True
+
+
+    def _should_request_battery_response(self, event: Event, *, fallback: bool = False) -> bool:
+        metadata = event.metadata or {}
+        severity = str(metadata.get("severity", "info"))
+        event_type = str(metadata.get("event_type", "status"))
+        transition = str(metadata.get("transition", "steady"))
+
+        if event_type == "clear" or severity == "info":
+            return self._is_battery_query_context_active()
+        if not self._battery_response_enabled:
+            return self._is_battery_query_context_active()
+
+        if self._is_battery_query_context_active():
+            return True
+
+        if severity == "critical" and self._battery_response_allow_critical:
+            if self._battery_response_require_transition:
+                return not transition.startswith("steady_")
+            return True
+
+        if severity == "warning" and self._battery_response_allow_warning:
+            if self._battery_response_require_transition:
+                return transition in {"enter_warning", "enter_critical", "delta_drop"}
+            return transition in {"enter_warning", "enter_critical", "delta_drop"}
+
+        return fallback and not transition.startswith("steady_")
+
+    def _is_battery_status_query(self, text: str) -> bool:
+        lowered = text.strip().lower()
+        if not lowered:
+            return False
+        query_tokens = (
+            "battery",
+            "battery level",
+            "charge",
+            "charging",
+            "voltage",
+            "power level",
+            "low battery",
+            "how's battery",
+            "hows battery",
+            "how is battery",
+        )
+        return any(token in lowered for token in query_tokens)
+
+    def _is_battery_query_context_active(self) -> bool:
+        if self._last_user_battery_query_time is None:
+            return False
+        return (
+            time.monotonic() - self._last_user_battery_query_time
+            <= self._battery_query_context_window_s
+        )
 
     def _handle_state_gesture(self, state: InteractionState) -> None:
         """Hook for gesture cues on state transitions."""
@@ -579,6 +669,8 @@ class RealtimeAPI:
         self._last_user_input_text = clean_text
         self._last_user_input_time = time.monotonic()
         self._last_user_input_source = source
+        if self._is_battery_status_query(clean_text):
+            self._last_user_battery_query_time = self._last_user_input_time
 
     def _find_stop_word(self, text: str) -> str | None:
         if not text or not self._stop_words:
@@ -1818,6 +1910,8 @@ class RealtimeAPI:
         self,
         text_message: str,
         request_response: bool = True,
+        *,
+        bypass_response_suppression: bool = False,
     ) -> None:
         self._record_user_input(text_message, source="text_message")
         if await self._handle_stop_word(text_message, self.websocket, source="text_message"):
@@ -1842,7 +1936,10 @@ class RealtimeAPI:
         if request_response:
             await self._stimuli_coordinator.enqueue(
                 trigger="text_message",
-                metadata={"text_length": len(text_message)},
+                metadata={
+                    "text_length": len(text_message),
+                    "bypass_limits": bypass_response_suppression,
+                },
                 priority=self._get_injection_priority("text_message"),
             )
 
@@ -1862,15 +1959,19 @@ class RealtimeAPI:
         trigger_timestamps = self._injection_response_trigger_timestamps.setdefault(
             trigger, deque()
         )
+        bypass_limits = bool(metadata.get("bypass_limits", False))
 
-        if self.response_in_progress:
+        if self.response_in_progress and not bypass_limits:
             if trigger == "image_message":
                 self._queue_pending_image_stimulus(trigger, metadata)
                 return
             logger.info("Skipping injected response (%s): response already in progress.", trigger)
             return
 
-        if self.state_manager.state not in (InteractionState.IDLE, InteractionState.LISTENING):
+        if (
+            self.state_manager.state not in (InteractionState.IDLE, InteractionState.LISTENING)
+            and not bypass_limits
+        ):
             logger.info(
                 "Skipping injected response (%s): invalid state %s.",
                 trigger,
@@ -1878,7 +1979,7 @@ class RealtimeAPI:
             )
             return
 
-        if trigger_cooldown_s > 0.0:
+        if trigger_cooldown_s > 0.0 and not bypass_limits:
             now = time.monotonic()
             last_ts = trigger_timestamps[-1] if trigger_timestamps else None
             if last_ts is not None and now - last_ts < trigger_cooldown_s:
@@ -1889,7 +1990,7 @@ class RealtimeAPI:
                 )
                 return
 
-        if trigger_max_per_minute > 0:
+        if trigger_max_per_minute > 0 and not bypass_limits:
             now = time.monotonic()
             while trigger_timestamps and now - trigger_timestamps[0] > 60:
                 trigger_timestamps.popleft()
@@ -1901,7 +2002,7 @@ class RealtimeAPI:
                 )
                 return
 
-        bypass_global_limits = trigger_priority > 0
+        bypass_global_limits = trigger_priority > 0 or bypass_limits
 
         if self._injection_response_cooldown_s > 0.0 and not bypass_global_limits:
             now = time.monotonic()
