@@ -33,6 +33,14 @@ def _make_api_stub() -> RealtimeAPI:
     return api
 
 
+def test_parse_confirmation_decision_accepts_go_ahead_phrasing() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+
+    assert api._parse_confirmation_decision("Please go ahead.") == "yes"
+    assert api._parse_confirmation_decision("go ahead and do it") == "yes"
+    assert api._parse_confirmation_decision("proceed") == "yes"
+
+
 def test_maybe_request_response_blocks_image_trigger_during_confirmation() -> None:
     api = _make_api_stub()
     sent: list[tuple[tuple[object, ...], dict[str, object]]] = []
