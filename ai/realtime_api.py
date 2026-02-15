@@ -2373,8 +2373,10 @@ class RealtimeAPI:
         log_ws_event("Outgoing", function_call_output)
         self._track_outgoing_event(function_call_output)
         await websocket.send(json.dumps(function_call_output))
-        response_create_event = {"type": "response.create"}
-        await self._send_response_create(websocket, response_create_event, origin="tool_output")
+        # Do not request another model response here.
+        # send_assistant_message() above already produced the spoken approval prompt,
+        # and a second response.create can get deferred during AWAITING_CONFIRMATION,
+        # then replayed later as an unrelated extra spoken response.
         self._presented_actions.add(action.id)
         self.function_call = None
         self.function_call_args = ""
