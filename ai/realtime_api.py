@@ -7,6 +7,7 @@ import base64
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
+import hashlib
 from io import BytesIO
 import json
 import os
@@ -218,6 +219,8 @@ class RealtimeAPI:
         self._audio_accum = bytearray()
         self._audio_accum_bytes_target = 9600
         self.response_in_progress = False
+        self._response_in_flight = False
+        self._response_create_queue: deque[dict[str, Any]] = deque()
         self.function_call: dict[str, Any] | None = None
         self.function_call_args = ""
         self.mic_send_suppress_until = 0.0
@@ -287,6 +290,7 @@ class RealtimeAPI:
         tool_specs = build_tool_specs(governance_cfg.get("tool_specs") or {})
         self._governance = GovernanceLayer(tool_specs, config)
         self._pending_action: PendingAction | None = None
+        self._awaiting_confirmation_completion = False
         self._approval_timeout_s = float(config.get("approval_timeout_s", 30.0))
         self._tool_definitions = {tool["name"]: tool for tool in tools}
         self._storage = StorageController.get_instance()
@@ -340,6 +344,8 @@ class RealtimeAPI:
         self._research_permission_required = bool(research_cfg.get("permission_required", True))
         self._research_service = build_openai_service_or_null(config)
         self._pending_research_request: ResearchRequest | None = None
+        self._tool_call_dedupe_ttl_s = float(research_cfg.get("tool_call_dedupe_ttl_s", 30.0))
+        self._last_executed_tool_call: dict[str, Any] | None = None
 
     def get_event_bus(self) -> EventBus:
         return self.event_bus
@@ -944,15 +950,87 @@ class RealtimeAPI:
             f"- alternatives: {alternatives}"
         )
 
+    def _build_tool_call_fingerprint(self, tool_name: str, args: dict[str, Any]) -> str:
+        payload = json.dumps({"tool": tool_name, "args": args}, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _is_duplicate_tool_call(self, tool_name: str, args: dict[str, Any]) -> bool:
+        if not self._last_executed_tool_call:
+            return False
+        now = time.monotonic()
+        age = now - float(self._last_executed_tool_call.get("timestamp", 0.0))
+        if age > self._tool_call_dedupe_ttl_s:
+            return False
+        fingerprint = self._build_tool_call_fingerprint(tool_name, args)
+        return fingerprint == self._last_executed_tool_call.get("fingerprint")
+
+    def _record_executed_tool_call(self, tool_name: str, args: dict[str, Any]) -> None:
+        self._last_executed_tool_call = {
+            "tool": tool_name,
+            "fingerprint": self._build_tool_call_fingerprint(tool_name, args),
+            "timestamp": time.monotonic(),
+        }
+
+    async def _send_response_create(
+        self,
+        websocket: Any,
+        response_create_event: dict[str, Any],
+        *,
+        origin: str,
+        record_ai_call: bool = False,
+    ) -> bool:
+        if self._response_in_flight:
+            logger.info("Deferring response.create while another response is active (origin=%s).", origin)
+            self._response_create_queue.append(
+                {
+                    "websocket": websocket,
+                    "event": response_create_event,
+                    "origin": origin,
+                    "record_ai_call": record_ai_call,
+                }
+            )
+            return False
+        log_ws_event("Outgoing", response_create_event)
+        self._track_outgoing_event(response_create_event, origin=origin)
+        await websocket.send(json.dumps(response_create_event))
+        self._response_in_flight = True
+        if record_ai_call:
+            self._record_ai_call()
+        return True
+
+    async def _drain_response_create_queue(self) -> None:
+        if self._response_in_flight or not self._response_create_queue:
+            return
+        queued = self._response_create_queue.popleft()
+        await self._send_response_create(
+            queued["websocket"],
+            queued["event"],
+            origin=queued["origin"],
+            record_ai_call=bool(queued.get("record_ai_call", False)),
+        )
+
+    async def _add_no_tools_follow_up_instruction(self, websocket: Any) -> None:
+        instruction_event = {
+            "type": "conversation.item.create",
+            "item": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Research already completed; answer using the tool results; do not call perform_research again.",
+                    }
+                ],
+            },
+        }
+        log_ws_event("Outgoing", instruction_event)
+        self._track_outgoing_event(instruction_event)
+        await websocket.send(json.dumps(instruction_event))
+
     def _clear_pending_action(self) -> None:
         if self._pending_action:
             self._presented_actions.discard(self._pending_action.action.id)
         self._pending_action = None
-        if self.orchestration_state.phase == OrchestrationPhase.AWAITING_CONFIRMATION:
-            self.orchestration_state.transition(
-                OrchestrationPhase.IDLE,
-                reason="pending confirmation cleared",
-            )
 
     def _parse_confirmation_decision(self, text: str) -> str:
         normalized = " ".join(re.sub(r"[^\w\s]", " ", text.lower()).split())
@@ -1005,6 +1083,11 @@ class RealtimeAPI:
                 status="cancelled",
             )
             self._clear_pending_action()
+            self._awaiting_confirmation_completion = False
+            self.orchestration_state.transition(
+                OrchestrationPhase.IDLE,
+                reason="confirmation cancelled by stop word",
+            )
             return True
         now = time.monotonic()
         pending = self._pending_action
@@ -1016,6 +1099,11 @@ class RealtimeAPI:
                 websocket,
             )
             self._clear_pending_action()
+            self._awaiting_confirmation_completion = False
+            self.orchestration_state.transition(
+                OrchestrationPhase.IDLE,
+                reason="confirmation timeout",
+            )
             return True
 
         normalized = text.strip()
@@ -1033,7 +1121,14 @@ class RealtimeAPI:
         if decision == "yes":
             logger.info("CONFIRMATION_ACCEPTED tool=%s", action.tool_name)
             staging = pending.staging or self._stage_action(action)
-            await self._execute_action(action, staging, websocket)
+            self._awaiting_confirmation_completion = True
+            await self._execute_action(
+                action,
+                staging,
+                websocket,
+                force_no_tools_followup=True,
+                inject_no_tools_instruction=True,
+            )
             self._clear_pending_action()
             return True
 
@@ -1046,6 +1141,11 @@ class RealtimeAPI:
                 status="cancelled",
             )
             self._clear_pending_action()
+            self._awaiting_confirmation_completion = False
+            self.orchestration_state.transition(
+                OrchestrationPhase.IDLE,
+                reason="confirmation rejected",
+            )
             return True
 
         pending.retry_count += 1
@@ -1056,6 +1156,11 @@ class RealtimeAPI:
                 websocket,
             )
             self._clear_pending_action()
+            self._awaiting_confirmation_completion = False
+            self.orchestration_state.transition(
+                OrchestrationPhase.IDLE,
+                reason="confirmation timeout",
+            )
             return True
 
         await self.send_assistant_message(
@@ -1474,6 +1579,7 @@ class RealtimeAPI:
             self._audio_accum.clear()
             self._mic_receive_on_first_audio = True
             self.response_in_progress = True
+            self._response_in_flight = True
             self._speaking_started = False
             self._assistant_reply_accum = ""
             self._tool_call_records = []
@@ -1612,6 +1718,39 @@ class RealtimeAPI:
                 self.function_call = None
                 self.function_call_args = ""
                 return
+            if self._is_duplicate_tool_call(function_name, args):
+                logger.info(
+                    "Skipping duplicate tool call within TTL: tool=%s call_id=%s",
+                    function_name,
+                    call_id,
+                )
+                if function_name == "perform_research":
+                    await self._add_no_tools_follow_up_instruction(websocket)
+                function_call_output = {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": json.dumps(
+                            {
+                                "status": "redundant",
+                                "message": "Duplicate tool call ignored; use previous tool results.",
+                                "tool": function_name,
+                            }
+                        ),
+                    },
+                }
+                log_ws_event("Outgoing", function_call_output)
+                self._track_outgoing_event(function_call_output)
+                await websocket.send(json.dumps(function_call_output))
+                await self._send_response_create(
+                    websocket,
+                    {"type": "response.create", "response": {"tool_choice": "none"}},
+                    origin="tool_output",
+                )
+                self.function_call = None
+                self.function_call_args = ""
+                return
             dry_run_requested = self._extract_dry_run_flag(args)
             action = self._governance.build_action_packet(
                 function_name,
@@ -1673,6 +1812,8 @@ class RealtimeAPI:
         *,
         action: ActionPacket | None = None,
         staging: dict[str, Any] | None = None,
+        force_no_tools_followup: bool = False,
+        inject_no_tools_instruction: bool = False,
     ) -> None:
         if function_name in function_map:
             try:
@@ -1721,10 +1862,12 @@ class RealtimeAPI:
         log_ws_event("Outgoing", function_call_output)
         self._track_outgoing_event(function_call_output)
         await websocket.send(json.dumps(function_call_output))
-        response_create_event = {"type": "response.create"}
-        log_ws_event("Outgoing", response_create_event)
-        self._track_outgoing_event(response_create_event, origin="tool_output")
-        await websocket.send(json.dumps(response_create_event))
+        if inject_no_tools_instruction:
+            await self._add_no_tools_follow_up_instruction(websocket)
+        response_create_event: dict[str, Any] = {"type": "response.create"}
+        if force_no_tools_followup:
+            response_create_event["response"] = {"tool_choice": "none"}
+        await self._send_response_create(websocket, response_create_event, origin="tool_output")
 
         self.function_call = None
         self.function_call_args = ""
@@ -1734,6 +1877,9 @@ class RealtimeAPI:
         action: ActionPacket,
         staging: dict[str, Any],
         websocket: Any,
+        *,
+        force_no_tools_followup: bool = False,
+        inject_no_tools_instruction: bool = False,
     ) -> None:
         if not staging.get("valid", True):
             await self._reject_tool_call(
@@ -1758,7 +1904,10 @@ class RealtimeAPI:
             websocket,
             action=action,
             staging=staging,
+            force_no_tools_followup=force_no_tools_followup,
+            inject_no_tools_instruction=inject_no_tools_instruction,
         )
+        self._record_executed_tool_call(action.tool_name, action.tool_args)
         self._governance.record_execution(action)
         self._presented_actions.discard(action.id)
 
@@ -1780,6 +1929,7 @@ class RealtimeAPI:
             OrchestrationPhase.AWAITING_CONFIRMATION,
             reason=f"needs confirmation for {action.tool_name}",
         )
+        self._awaiting_confirmation_completion = False
         message = self._build_approval_prompt(action)
         await self.send_assistant_message(message, websocket)
         function_call_output = {
@@ -1805,9 +1955,7 @@ class RealtimeAPI:
         self._track_outgoing_event(function_call_output)
         await websocket.send(json.dumps(function_call_output))
         response_create_event = {"type": "response.create"}
-        log_ws_event("Outgoing", response_create_event)
-        self._track_outgoing_event(response_create_event, origin="tool_output")
-        await websocket.send(json.dumps(response_create_event))
+        await self._send_response_create(websocket, response_create_event, origin="tool_output")
         self._presented_actions.add(action.id)
         self.function_call = None
         self.function_call_args = ""
@@ -1866,9 +2014,7 @@ class RealtimeAPI:
         self._track_outgoing_event(function_call_output)
         await websocket.send(json.dumps(function_call_output))
         response_create_event = {"type": "response.create"}
-        log_ws_event("Outgoing", response_create_event)
-        self._track_outgoing_event(response_create_event, origin="tool_output")
-        await websocket.send(json.dumps(response_create_event))
+        await self._send_response_create(websocket, response_create_event, origin="tool_output")
         self._presented_actions.add(action.id)
 
     async def _send_dry_run_output(
@@ -1907,9 +2053,7 @@ class RealtimeAPI:
         self._track_outgoing_event(function_call_output)
         await websocket.send(json.dumps(function_call_output))
         response_create_event = {"type": "response.create"}
-        log_ws_event("Outgoing", response_create_event)
-        self._track_outgoing_event(response_create_event, origin="tool_output")
-        await websocket.send(json.dumps(response_create_event))
+        await self._send_response_create(websocket, response_create_event, origin="tool_output")
         self.function_call = None
         self.function_call_args = ""
 
@@ -1946,9 +2090,7 @@ class RealtimeAPI:
         self._track_outgoing_event(function_call_output)
         await websocket.send(json.dumps(function_call_output))
         response_create_event = {"type": "response.create"}
-        log_ws_event("Outgoing", response_create_event)
-        self._track_outgoing_event(response_create_event, origin="tool_output")
-        await websocket.send(json.dumps(response_create_event))
+        await self._send_response_create(websocket, response_create_event, origin="tool_output")
         self._presented_actions.discard(action.id)
         self.function_call = None
         self.function_call_args = ""
@@ -2042,6 +2184,7 @@ class RealtimeAPI:
 
     async def handle_response_done(self, event: dict[str, Any] | None = None) -> None:
         self.response_in_progress = False
+        self._response_in_flight = False
         self.state_manager.update_state(InteractionState.IDLE, "response done")
         logger.info("Received response.done event.")
         if event:
@@ -2050,20 +2193,32 @@ class RealtimeAPI:
                 "response": event.get("response"),
                 "rate_limits": self.rate_limits,
             }
-        self.orchestration_state.transition(
-            OrchestrationPhase.REFLECT,
-            reason="response done",
-        )
-        self._enqueue_response_done_reflection("response done")
-        self.orchestration_state.transition(
-            OrchestrationPhase.IDLE,
-            reason="response done reflection",
-        )
+        if self.orchestration_state.phase == OrchestrationPhase.AWAITING_CONFIRMATION:
+            if self._pending_action:
+                logger.info("Staying in AWAITING_CONFIRMATION until user accepts/rejects.")
+            elif self._awaiting_confirmation_completion:
+                self._awaiting_confirmation_completion = False
+                self.orchestration_state.transition(
+                    OrchestrationPhase.IDLE,
+                    reason="confirmation follow-up completed",
+                )
+        else:
+            self.orchestration_state.transition(
+                OrchestrationPhase.REFLECT,
+                reason="response done",
+            )
+            self._enqueue_response_done_reflection("response done")
+            self.orchestration_state.transition(
+                OrchestrationPhase.IDLE,
+                reason="response done reflection",
+            )
+        await self._drain_response_create_queue()
         if self._pending_image_stimulus and not self._pending_image_flush_after_playback:
             await self._flush_pending_image_stimulus("response done")
 
     async def handle_response_completed(self, event: dict[str, Any] | None = None) -> None:
         self.response_in_progress = False
+        self._response_in_flight = False
         self.state_manager.update_state(InteractionState.IDLE, "response completed")
         logger.info("Received response.completed event.")
         if event:
@@ -2072,15 +2227,26 @@ class RealtimeAPI:
                 "response": event.get("response"),
                 "rate_limits": self.rate_limits,
             }
-        self.orchestration_state.transition(
-            OrchestrationPhase.REFLECT,
-            reason="response completed",
-        )
-        self._maybe_enqueue_reflection("response completed")
-        self.orchestration_state.transition(
-            OrchestrationPhase.IDLE,
-            reason="reflection enqueued",
-        )
+        if self.orchestration_state.phase == OrchestrationPhase.AWAITING_CONFIRMATION:
+            if self._pending_action:
+                logger.info("Staying in AWAITING_CONFIRMATION until user accepts/rejects.")
+            elif self._awaiting_confirmation_completion:
+                self._awaiting_confirmation_completion = False
+                self.orchestration_state.transition(
+                    OrchestrationPhase.IDLE,
+                    reason="confirmation follow-up completed",
+                )
+        else:
+            self.orchestration_state.transition(
+                OrchestrationPhase.REFLECT,
+                reason="response completed",
+            )
+            self._maybe_enqueue_reflection("response completed")
+            self.orchestration_state.transition(
+                OrchestrationPhase.IDLE,
+                reason="reflection enqueued",
+            )
+        await self._drain_response_create_queue()
         if self._pending_image_stimulus and not self._pending_image_flush_after_playback:
             await self._flush_pending_image_stimulus("response completed")
 
@@ -2090,8 +2256,9 @@ class RealtimeAPI:
         if "buffer is empty" in error_message:
             logger.info("Received 'buffer is empty' error, no audio data sent.")
         elif "Conversation already has an active response" in error_message:
-            logger.info("Received 'active response' error, adjusting response flow.")
+            logger.warning("Received 'active response' error despite response.create serialization.")
             self.response_in_progress = True
+            self._response_in_flight = True
         else:
             logger.error("Unhandled error: %s", error_message)
 
@@ -2131,10 +2298,12 @@ class RealtimeAPI:
             logger.info("Skipping startup response: AI call budget exhausted.")
             return
         response_create_event = {"type": "response.create"}
-        log_ws_event("Outgoing", response_create_event)
-        self._track_outgoing_event(response_create_event, origin="prompt")
-        await websocket.send(json.dumps(response_create_event))
-        self._record_ai_call()
+        await self._send_response_create(
+            websocket,
+            response_create_event,
+            origin="prompt",
+            record_ai_call=True,
+        )
 
     async def send_text_message_to_conversation(
         self,
@@ -2299,13 +2468,16 @@ class RealtimeAPI:
         log_info(
             f"Requesting injected response for {trigger} with metadata {response_metadata}."
         )
-        log_ws_event("Outgoing", response_create_event)
-        self._track_outgoing_event(response_create_event, origin="injection")
-        await self.websocket.send(json.dumps(response_create_event))
-        now = time.monotonic()
-        self._injection_response_timestamps.append(now)
-        trigger_timestamps.append(now)
-        self._record_ai_call()
+        sent_now = await self._send_response_create(
+            self.websocket,
+            response_create_event,
+            origin="injection",
+            record_ai_call=True,
+        )
+        if sent_now:
+            now = time.monotonic()
+            self._injection_response_timestamps.append(now)
+            trigger_timestamps.append(now)
 
     def _get_injection_priority(self, trigger: str) -> int:
         trigger_config = self._injection_response_triggers.get(trigger, {})
