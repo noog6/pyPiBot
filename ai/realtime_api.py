@@ -2359,7 +2359,13 @@ class RealtimeAPI:
         else:
             log_warning("Unable to send image to assistant, websocket not available")
 
-    async def send_assistant_message(self, message: str, websocket: Any) -> None:
+    async def send_assistant_message(
+        self,
+        message: str,
+        websocket: Any,
+        *,
+        speak: bool = True,
+    ) -> None:
         assistant_item = {
             "type": "conversation.item.create",
             "item": {
@@ -2370,6 +2376,14 @@ class RealtimeAPI:
         }
         log_ws_event("Outgoing", assistant_item)
         await websocket.send(json.dumps(assistant_item))
+        if not speak:
+            return
+
+        await self._send_response_create(
+            websocket,
+            {"type": "response.create", "response": {}},
+            origin="assistant_message",
+        )
 
     async def send_error_message_to_assistant(self, error_message: str, websocket: Any) -> None:
         error_item = {
