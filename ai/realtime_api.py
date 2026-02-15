@@ -359,6 +359,9 @@ class RealtimeAPI:
 
         realtime_cfg = config.get("realtime") or {}
         self._debug_vad = bool(realtime_cfg.get("debug_vad", False))
+        self._awaiting_confirmation_allowed_sources = (
+            self._load_awaiting_confirmation_source_policy(realtime_cfg)
+        )
         self._utterance_counter = 0
         self._active_utterance: dict[str, Any] | None = None
         self._recent_input_levels: deque[dict[str, float]] = deque(maxlen=256)
@@ -420,11 +423,112 @@ class RealtimeAPI:
         self._alert_policy.emit(self.event_bus, alert)
 
     def is_ready_for_injections(self) -> bool:
+        injector_ready, _ = self._can_accept_external_stimulus("event_injector", "probe")
         return (
             self.ready_event.is_set()
             and self.websocket is not None
             and self.loop is not None
             and self.loop.is_running()
+            and injector_ready
+        )
+
+    def _load_awaiting_confirmation_source_policy(
+        self,
+        realtime_cfg: dict[str, Any],
+    ) -> set[tuple[str, str | None]]:
+        raw_entries = realtime_cfg.get(
+            "awaiting_confirmation_allowed_sources",
+            ["battery:critical", "imu:critical"],
+        )
+        policy: set[tuple[str, str | None]] = set()
+        if not isinstance(raw_entries, list):
+            log_warning(
+                "realtime.awaiting_confirmation_allowed_sources should be a list; got %s.",
+                type(raw_entries).__name__,
+            )
+            return policy
+        for entry in raw_entries:
+            if not isinstance(entry, str) or not entry.strip():
+                continue
+            source, _, kind = entry.strip().lower().partition(":")
+            if not source:
+                continue
+            policy.add((source, kind or None))
+        return policy
+
+    def _can_accept_external_stimulus(
+        self,
+        source: str,
+        kind: str,
+        *,
+        priority: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> tuple[bool, str]:
+        phase = getattr(self.orchestration_state, "phase", None)
+        phase_name = getattr(phase, "value", str(phase))
+        normalized_source = str(source).lower()
+        normalized_kind = self._normalize_external_stimulus_kind(kind, metadata)
+        normalized_priority = (priority or "").lower()
+
+        pending_action = getattr(self, "_pending_action", None)
+        response_in_progress = bool(getattr(self, "response_in_progress", False))
+
+        if (
+            pending_action is not None
+            and phase == OrchestrationPhase.AWAITING_CONFIRMATION
+            and not self._is_allowed_awaiting_confirmation_stimulus(
+                normalized_source,
+                normalized_kind,
+                normalized_priority,
+            )
+        ):
+            return False, "awaiting_confirmation_policy"
+
+        if response_in_progress:
+            return False, "response_in_progress"
+
+        state = getattr(self.state_manager, "state", None)
+        if state not in (InteractionState.IDLE, InteractionState.LISTENING):
+            state_name = getattr(state, "value", str(state))
+            return False, f"interaction_state={state_name}"
+
+        return True, f"phase={phase_name}"
+
+    def _normalize_external_stimulus_kind(
+        self,
+        kind: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        if metadata:
+            severity = metadata.get("severity")
+            if isinstance(severity, str) and severity.strip():
+                return severity.strip().lower()
+        return str(kind).strip().lower() or "unknown"
+
+    def _is_allowed_awaiting_confirmation_stimulus(
+        self,
+        source: str,
+        kind: str,
+        priority: str,
+    ) -> bool:
+        if priority not in {"critical", "high"}:
+            return False
+        for allowed_source, allowed_kind in self._awaiting_confirmation_allowed_sources:
+            if source != allowed_source:
+                continue
+            if allowed_kind in (None, "*", kind):
+                return True
+        return False
+
+    def _log_suppressed_stimulus(self, source: str, kind: str, reason: str) -> None:
+        phase = getattr(self.orchestration_state, "phase", None)
+        phase_name = getattr(phase, "value", str(phase))
+        logger.info(
+            "Suppressed external stimulus source=%s kind=%s phase=%s reason=%s",
+            source,
+            kind,
+            phase_name,
+            reason,
         )
 
     def get_session_health(self) -> dict[str, Any]:
@@ -474,6 +578,19 @@ class RealtimeAPI:
             self._last_outgoing_response_origin = origin
 
     def inject_event(self, event: Event) -> None:
+        allowed, reason = self._can_accept_external_stimulus(
+            event.source,
+            event.kind,
+            priority=event.priority,
+            metadata=event.metadata,
+        )
+        if not allowed:
+            self._log_suppressed_stimulus(
+                event.source,
+                self._normalize_external_stimulus_kind(event.kind, event.metadata),
+                reason,
+            )
+            return
         message, request_response = self._format_event_for_injection(event)
         bypass_response_suppression = False
         if event.source == "battery":
@@ -1103,6 +1220,15 @@ class RealtimeAPI:
         if self._response_in_flight or not self._response_create_queue:
             return
         queued = self._response_create_queue.popleft()
+        queued_trigger = self._extract_response_create_trigger(queued.get("event") or {})
+        if not self._can_release_queued_response_create(queued_trigger):
+            self._response_create_queue.appendleft(queued)
+            logger.info(
+                "Deferring queued response.create origin=%s trigger=%s while awaiting confirmation.",
+                queued.get("origin"),
+                queued_trigger,
+            )
+            return
         await self._send_response_create(
             queued["websocket"],
             queued["event"],
@@ -1110,6 +1236,30 @@ class RealtimeAPI:
             record_ai_call=bool(queued.get("record_ai_call", False)),
             debug_context=queued.get("debug_context"),
         )
+
+    def _extract_response_create_trigger(self, response_create_event: dict[str, Any]) -> str:
+        response_payload = response_create_event.get("response") if isinstance(response_create_event, dict) else None
+        metadata = response_payload.get("metadata") if isinstance(response_payload, dict) else None
+        trigger = metadata.get("trigger") if isinstance(metadata, dict) else None
+        if isinstance(trigger, str) and trigger.strip():
+            return trigger.strip().lower()
+        return "unknown"
+
+    def _is_awaiting_confirmation_phase(self) -> bool:
+        phase = getattr(self.orchestration_state, "phase", None)
+        return phase == OrchestrationPhase.AWAITING_CONFIRMATION
+
+    def _is_user_confirmation_trigger(self, trigger: str, metadata: dict[str, Any]) -> bool:
+        normalized = str(trigger).strip().lower()
+        if normalized == "text_message":
+            return True
+        source = str(metadata.get("source", "")).strip().lower()
+        return source in {"user_audio", "user_text", "voice_confirmation", "text_confirmation"}
+
+    def _can_release_queued_response_create(self, trigger: str) -> bool:
+        if self._pending_action is None and not self._is_awaiting_confirmation_phase():
+            return True
+        return self._is_user_confirmation_trigger(trigger, {})
 
     async def _add_no_tools_follow_up_instruction(self, websocket: Any) -> None:
         instruction_event = {
@@ -2164,7 +2314,11 @@ class RealtimeAPI:
         )
         self._awaiting_confirmation_completion = False
         message = self._build_approval_prompt(action)
-        await self.send_assistant_message(message, websocket)
+        await self.send_assistant_message(
+            message,
+            websocket,
+            response_metadata={"trigger": "confirmation_prompt", "approval_flow": "true"},
+        )
         function_call_output = {
             "type": "conversation.item.create",
             "item": {
@@ -2330,6 +2484,14 @@ class RealtimeAPI:
 
     async def send_image_to_assistant(self, new_image: Any) -> None:
         if self.websocket:
+            allowed, reason = self._can_accept_external_stimulus(
+                "camera",
+                "image",
+                priority="normal",
+            )
+            if not allowed:
+                self._log_suppressed_stimulus("camera", "image", reason)
+                return
             bytes_buffer = BytesIO()
             new_image.save(bytes_buffer, format="JPEG", quality=55, optimize=True)
             encoded_image = base64.b64encode(bytes_buffer.getvalue()).decode("utf-8")
@@ -2365,6 +2527,7 @@ class RealtimeAPI:
         websocket: Any,
         *,
         speak: bool = True,
+        response_metadata: dict[str, Any] | None = None,
     ) -> None:
         assistant_item = {
             "type": "conversation.item.create",
@@ -2379,9 +2542,14 @@ class RealtimeAPI:
         if not speak:
             return
 
+        metadata = {"origin": "assistant_message"}
+        if response_metadata:
+            metadata.update(response_metadata)
+        if self._pending_action is not None or self._is_awaiting_confirmation_phase():
+            metadata.setdefault("approval_flow", "true")
         await self._send_response_create(
             websocket,
-            {"type": "response.create", "response": {}},
+            {"type": "response.create", "response": {"metadata": metadata}},
             origin="assistant_message",
         )
 
@@ -2604,6 +2772,16 @@ class RealtimeAPI:
             log_warning("Skipping injected response (%s): websocket unavailable.", trigger)
             return
 
+        if self._pending_action is not None or self._is_awaiting_confirmation_phase():
+            if not self._is_user_confirmation_trigger(trigger, metadata):
+                logger.info(
+                    "Suppressing duplicate non-user response request trigger=%s phase=%s pending_action=%s",
+                    trigger,
+                    getattr(getattr(self.orchestration_state, "phase", None), "value", "unknown"),
+                    self._pending_action is not None,
+                )
+                return
+
         trigger_config = self._injection_response_triggers.get(trigger, {})
         trigger_cooldown_s = float(
             trigger_config.get("cooldown_s", self._injection_response_cooldown_s)
@@ -2709,7 +2887,10 @@ class RealtimeAPI:
             "trigger": trigger,
             "priority": str(trigger_priority),
             "stimulus": json.dumps(metadata, sort_keys=True),
+            "origin": "injection",
         }
+        if self._pending_action is not None or self._is_awaiting_confirmation_phase():
+            response_metadata["approval_flow"] = "true"
         response_create_event = {
             "type": "response.create",
             "response": {"metadata": response_metadata},
@@ -2750,6 +2931,12 @@ class RealtimeAPI:
 
     async def _flush_pending_image_stimulus(self, reason: str) -> None:
         if not self._pending_image_stimulus:
+            return
+        if self._pending_action is not None or self._is_awaiting_confirmation_phase():
+            logger.info(
+                "Deferring pending image stimulus flush after %s: awaiting confirmation unresolved.",
+                reason,
+            )
             return
         if self.response_in_progress:
             logger.info(
