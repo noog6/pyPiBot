@@ -1990,6 +1990,16 @@ class RealtimeAPI:
 
     async def send_initial_prompts(self, websocket: Any) -> None:
         logger.info("Sending %s prompts: %s", len(self.prompts), self.prompts)
+        if self.prompts and len(self.prompts) == 1:
+            startup_prompt = self.prompts[0]
+            if await self._maybe_process_research_intent(
+                startup_prompt,
+                websocket,
+                source="startup_prompt",
+            ):
+                self._record_user_input(startup_prompt, source="startup_prompt")
+                return
+
         content = [{"type": "input_text", "text": prompt} for prompt in self.prompts]
         if self.prompts:
             self._record_user_input(self.prompts[-1], source="startup_prompt")
