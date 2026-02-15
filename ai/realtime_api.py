@@ -14,6 +14,7 @@ import re
 import signal
 import threading
 import time
+import uuid
 from typing import Any
 from urllib import request
 from urllib.parse import urlparse
@@ -61,6 +62,7 @@ from motion.gesture_library import DEFAULT_GESTURES
 from services.profile_manager import ProfileManager
 from services.reflection_manager import ReflectionManager
 from services.research import ResearchRequest, build_openai_service_or_null, has_research_intent
+from services.research.research_transcript import write_research_transcript
 from storage import StorageController
 
 RESPONSE_DONE_REFLECTION_PROMPT = """Summarize what changed. Any anomalies? Should anything be remembered?
@@ -1059,7 +1061,31 @@ class RealtimeAPI:
             reason="research dispatch",
         )
         logger.info("[Research] Dispatched")
-        packet = await asyncio.to_thread(self._research_service.request_research, request)
+        research_id = f"research_{uuid.uuid4().hex}"
+        packet = None
+        try:
+            packet = await asyncio.to_thread(self._research_service.request_research, request)
+        except Exception as exc:  # noqa: BLE001 - keep runtime resilient to provider failures
+            logger.warning("[Research] Request failed: %s", exc)
+        finally:
+            storage = getattr(self, "_storage", None)
+            if storage is not None:
+                storage_info = storage.get_storage_info()
+                _ = write_research_transcript(
+                    run_dir=storage_info.run_dir,
+                    run_id=storage_info.run_id,
+                    request=request,
+                    packet=packet,
+                    research_id=research_id,
+                )
+
+        if packet is None:
+            await self.send_assistant_message(
+                "I wasn't able to complete that research request this time. Please try again.",
+                websocket,
+            )
+            return
+
         realtime_payload = packet.to_realtime_payload()
         if packet.status == "disabled" or not self._research_enabled:
             await self.send_assistant_message(
