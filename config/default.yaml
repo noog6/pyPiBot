@@ -237,6 +237,9 @@ research:
   provider: "openai"
   packet_schema: "research_packet_v1"
   permission_required: true
+  tool_call_dedupe_ttl_s: 30
+  spoken_response_dedupe_ttl_s: 60
+  debug_response_create_trace: false
   openai:
     enabled: true
     model: "gpt-4.1-mini"
