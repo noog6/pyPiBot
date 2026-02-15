@@ -251,3 +251,23 @@ def test_execute_function_call_suppresses_duplicate_research_spoken_response() -
             realtime_module.function_map["perform_research"] = original
 
     assert call_count == 1
+
+
+def test_research_permission_prompt_triggers_spoken_followup_response() -> None:
+    api = _make_api_stub()
+    api._research_permission_required = True
+    api._pending_research_request = None
+    websocket = _FakeWebsocket()
+
+    handled = asyncio.run(
+        api._maybe_process_research_intent(
+            "Can you search online for the servo hat docs?",
+            websocket,
+            source="input_audio_transcription",
+        )
+    )
+
+    assert handled is True
+    assert api._pending_research_request is not None
+    assert websocket.messages[0]["type"] == "conversation.item.create"
+    assert websocket.messages[1]["type"] == "response.create"
