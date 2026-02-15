@@ -1310,7 +1310,10 @@ class RealtimeAPI:
             "okay",
             "approve",
             "do it",
+            "go ahead",
+            "proceed",
             "please do",
+            "please go ahead",
         }
         no_tokens = {
             "no",
@@ -1324,7 +1327,16 @@ class RealtimeAPI:
             "dont",
             "don't",
         }
-        yes_prefixes = ("yes ", "yeah ", "yep ", "sure ", "do it ")
+        yes_prefixes = (
+            "yes ",
+            "yeah ",
+            "yep ",
+            "sure ",
+            "do it ",
+            "go ahead",
+            "please go ahead",
+            "proceed",
+        )
         no_prefixes = ("no ", "nope ", "nah ", "cancel ", "stop ")
         if normalized in yes_tokens or normalized.startswith(yes_prefixes):
             return "yes"
