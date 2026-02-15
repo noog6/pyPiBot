@@ -228,12 +228,12 @@ health:
 
 # Research subsystem (scaffold only; no live web calls)
 research:
-  enabled: false
-  provider: "null"
+  enabled: true
+  provider: "openai"
   packet_schema: "research_packet_v1"
   permission_required: true
   openai:
-    enabled: false
+    enabled: true
     model: "gpt-4.1-mini"
     timeout_s: 30
     max_output_chars: 2400
