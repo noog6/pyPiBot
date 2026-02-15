@@ -1040,6 +1040,14 @@ class RealtimeAPI:
         if not has_research_intent(text):
             return False
 
+        if source == "input_audio_transcription":
+            preview = self._clip_text(" ".join(text.split()), limit=80)
+            logger.info(
+                "[Research] Transcript intent detected (source=%s, preview=%s)",
+                source,
+                preview,
+            )
+
         request = ResearchRequest(prompt=text, context={"source": source})
         logger.info("[Research] Requested from %s", source)
 
@@ -1354,6 +1362,9 @@ class RealtimeAPI:
                 "output_modalities": ["audio"],
                 "audio": {
                     "input": {
+                        "transcription": {
+                            "model": "gpt-4o-mini-transcribe",
+                        },
                         "turn_detection": {
                             "type": "server_vad",
                             "threshold": SILENCE_THRESHOLD,
