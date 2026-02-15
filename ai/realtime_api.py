@@ -222,6 +222,7 @@ class RealtimeAPI:
         self.response_in_progress = False
         self._response_in_flight = False
         self._response_create_queue: deque[dict[str, Any]] = deque()
+        self._audio_playback_busy = False
         self.function_call: dict[str, Any] | None = None
         self.function_call_args = ""
         self.mic_send_suppress_until = 0.0
@@ -1195,8 +1196,11 @@ class RealtimeAPI:
                 ctx.get("research_id"),
                 f"{delta_ms:.1f}" if delta_ms is not None else "n/a",
             )
-        if self._response_in_flight:
-            logger.info("Deferring response.create while another response is active (origin=%s).", origin)
+        if self._response_in_flight or self._audio_playback_busy:
+            if self._response_in_flight:
+                logger.info("Deferring response.create while another response is active (origin=%s).", origin)
+            else:
+                logger.info("Deferring response.create while audio playback is still active (origin=%s).", origin)
             self._response_create_queue.append(
                 {
                     "websocket": websocket,
@@ -1217,7 +1221,7 @@ class RealtimeAPI:
         return True
 
     async def _drain_response_create_queue(self) -> None:
-        if self._response_in_flight or not self._response_create_queue:
+        if self._response_in_flight or self._audio_playback_busy or not self._response_create_queue:
             return
         queue_len = len(self._response_create_queue)
         for _ in range(queue_len):
@@ -1737,6 +1741,7 @@ class RealtimeAPI:
 
     def _on_playback_complete(self) -> None:
         logger.info("Playback complete -> restarting mic")
+        self._audio_playback_busy = False
 
         self.mic.stop_receiving()
         self.mic_send_suppress_until = time.monotonic() + 1.2
@@ -1750,6 +1755,8 @@ class RealtimeAPI:
                 logger.exception("Failed to send input_audio_buffer.clear")
 
         self.mic.start_recording()
+        if self._response_create_queue:
+            asyncio.create_task(self._drain_response_create_queue())
         if self._pending_image_flush_after_playback and self._pending_image_stimulus:
             self._pending_image_flush_after_playback = False
             self._schedule_pending_image_flush("playback complete")
@@ -1960,6 +1967,7 @@ class RealtimeAPI:
             self._assistant_reply_accum += delta
             self.state_manager.update_state(InteractionState.SPEAKING, "text output")
         elif event_type == "response.output_audio.delta":
+            self._audio_playback_busy = True
             audio_data = base64.b64decode(event["delta"])
             self._audio_accum.extend(audio_data)
 

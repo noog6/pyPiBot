@@ -30,6 +30,9 @@ def _make_api_stub() -> RealtimeAPI:
     api.state_manager = type("State", (), {"state": InteractionState.IDLE})()
     api._response_in_flight = False
     api._response_create_queue = deque()
+    api._audio_playback_busy = False
+    api._last_response_create_ts = None
+    api._response_create_debug_trace = False
     return api
 
 
@@ -181,3 +184,52 @@ def test_drain_response_create_queue_skips_blocked_head_and_releases_approval_pr
     remaining = api._response_create_queue[0]
     metadata = remaining["event"]["response"]["metadata"]
     assert metadata["trigger"] == "image_message"
+
+
+def test_send_response_create_defers_while_audio_playback_busy() -> None:
+    api = _make_api_stub()
+    api._audio_playback_busy = True
+    sent_payloads: list[str] = []
+
+    class _SendWs:
+        async def send(self, payload: str) -> None:
+            sent_payloads.append(payload)
+
+    websocket = _SendWs()
+    sent_now = asyncio.run(
+        api._send_response_create(
+            websocket,
+            {"type": "response.create"},
+            origin="tool_output",
+        )
+    )
+
+    assert sent_now is False
+    assert sent_payloads == []
+    assert len(api._response_create_queue) == 1
+
+
+def test_drain_response_create_queue_waits_for_audio_playback_complete() -> None:
+    api = _make_api_stub()
+    api._audio_playback_busy = True
+    api._response_create_queue.append(
+        {
+            "websocket": api.websocket,
+            "event": {"type": "response.create"},
+            "origin": "tool_output",
+            "record_ai_call": False,
+            "debug_context": None,
+        }
+    )
+    sent: list[str] = []
+
+    async def _send_response_create(*args, **kwargs):
+        sent.append("sent")
+        return True
+
+    api._send_response_create = _send_response_create
+
+    asyncio.run(api._drain_response_create_queue())
+
+    assert sent == []
+    assert len(api._response_create_queue) == 1
