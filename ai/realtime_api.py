@@ -1051,7 +1051,7 @@ class RealtimeAPI:
             return True
 
         await self._dispatch_research_request(request, websocket)
-        return False
+        return True
 
     async def _dispatch_research_request(self, request: ResearchRequest, websocket: Any) -> None:
         self.orchestration_state.transition(
@@ -1059,7 +1059,7 @@ class RealtimeAPI:
             reason="research dispatch",
         )
         logger.info("[Research] Dispatched")
-        packet = self._research_service.request_research(request)
+        packet = await asyncio.to_thread(self._research_service.request_research, request)
         realtime_payload = packet.to_realtime_payload()
         if packet.status == "disabled" or not self._research_enabled:
             await self.send_assistant_message(

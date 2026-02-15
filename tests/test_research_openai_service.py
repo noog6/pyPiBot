@@ -93,6 +93,18 @@ def test_allowlist_blocks_localhost_target(tmp_path: Path) -> None:
     assert any(note.startswith("blocked_by_domain_policy:") for note in packet.safety_notes)
 
 
+def test_allowlist_blocks_loopback_alias_and_decimal_forms(tmp_path: Path) -> None:
+    svc = _FakeOpenAIResearchService(
+        search_result={"best_url": "", "sources": [], "search_summary": "summary", "safety_notes": []},
+        extract_result="{}",
+        budget_state_file=str(tmp_path / "budget.json"),
+        cache_dir=str(tmp_path / "cache"),
+        firecrawl_allowlist_mode="public",
+    )
+
+    assert svc._is_url_allowed("https://127.1/internal")[0] is False
+    assert svc._is_url_allowed("https://2130706433/internal")[0] is False
+
 def test_malicious_markdown_flags_prompt_injection_and_schema(tmp_path: Path) -> None:
     malicious_markdown = """
     # Fake datasheet

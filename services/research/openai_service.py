@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import socket
 from typing import Any
 from urllib import parse, request
 
@@ -463,13 +464,20 @@ class OpenAIResearchService(ResearchService):
 
         if host in {"localhost", "127.0.0.1", "::1"} or host.endswith(".local"):
             return False, "localhost_blocked"
+        ip = None
         try:
             ip = ipaddress.ip_address(host)
+        except ValueError:
+            try:
+                ip = ipaddress.ip_address(socket.inet_aton(host))
+            except (OSError, ValueError):
+                ip = None
+
+        if ip is not None:
             if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
                 return False, "private_ip_blocked"
-        except ValueError:
-            if host.endswith(".internal"):
-                return False, "internal_tld_blocked"
+        elif host.endswith(".internal"):
+            return False, "internal_tld_blocked"
 
         if mode == "explicit":
             if not self._firecrawl_allowlist_domains:
