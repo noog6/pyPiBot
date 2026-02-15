@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
 import json
@@ -82,6 +83,16 @@ Response metadata: {response_metadata}
 
 ALLOWED_OUTBOUND_HOSTS = {"api.openai.com"}
 ALLOWED_OUTBOUND_SCHEMES = {"https", "wss"}
+
+
+@dataclass
+class PendingAction:
+    action: ActionPacket
+    staging: dict[str, Any]
+    original_intent: str
+    created_at: float
+    retry_count: int = 0
+    max_retries: int = 2
 
 
 def _validate_outbound_endpoint(url: str) -> None:
@@ -275,9 +286,8 @@ class RealtimeAPI:
         _validate_tool_specs(governance_cfg.get("tool_specs") or {}, tools)
         tool_specs = build_tool_specs(governance_cfg.get("tool_specs") or {})
         self._governance = GovernanceLayer(tool_specs, config)
-        self._pending_action: ActionPacket | None = None
-        self._pending_action_staging: dict[str, Any] | None = None
-        self._approval_timeout_s = float(config.get("approval_timeout_s", 90.0))
+        self._pending_action: PendingAction | None = None
+        self._approval_timeout_s = float(config.get("approval_timeout_s", 30.0))
         self._tool_definitions = {tool["name"]: tool for tool in tools}
         self._storage = StorageController.get_instance()
         self._presented_actions: set[str] = set()
@@ -718,10 +728,10 @@ class RealtimeAPI:
             self._tool_execution_disabled_until = max(self._tool_execution_disabled_until, now)
         if self._pending_action:
             await self._reject_tool_call(
-                self._pending_action,
+                self._pending_action.action,
                 f"Stop word '{stop_word}' detected; tool execution paused.",
                 websocket,
-                staging=self._pending_action_staging,
+                staging=self._pending_action.staging,
                 status="cancelled",
             )
             self._clear_pending_action()
@@ -936,9 +946,47 @@ class RealtimeAPI:
 
     def _clear_pending_action(self) -> None:
         if self._pending_action:
-            self._presented_actions.discard(self._pending_action.id)
+            self._presented_actions.discard(self._pending_action.action.id)
         self._pending_action = None
-        self._pending_action_staging = None
+        if self.orchestration_state.phase == OrchestrationPhase.AWAITING_CONFIRMATION:
+            self.orchestration_state.transition(
+                OrchestrationPhase.IDLE,
+                reason="pending confirmation cleared",
+            )
+
+    def _parse_confirmation_decision(self, text: str) -> str:
+        normalized = " ".join(re.sub(r"[^\w\s]", " ", text.lower()).split())
+        if not normalized:
+            return "unclear"
+        yes_tokens = {
+            "yes",
+            "y",
+            "yeah",
+            "yep",
+            "sure",
+            "ok",
+            "okay",
+            "approve",
+            "do it",
+            "please do",
+        }
+        no_tokens = {
+            "no",
+            "n",
+            "nope",
+            "nah",
+            "deny",
+            "cancel",
+            "stop",
+            "do not",
+            "dont",
+            "don't",
+        }
+        if normalized in yes_tokens or normalized.startswith("yes "):
+            return "yes"
+        if normalized in no_tokens or normalized.startswith("no "):
+            return "no"
+        return "unclear"
 
     async def _maybe_handle_approval_response(
         self, text: str, websocket: Any
@@ -950,17 +998,19 @@ class RealtimeAPI:
         cooldown_remaining = self._tool_execution_cooldown_remaining()
         if cooldown_remaining > 0:
             await self._reject_tool_call(
-                self._pending_action,
+                self._pending_action.action,
                 f"Tool execution paused for {cooldown_remaining:.0f}s due to stop word.",
                 websocket,
-                staging=self._pending_action_staging,
+                staging=self._pending_action.staging,
                 status="cancelled",
             )
             self._clear_pending_action()
             return True
         now = time.monotonic()
-        action = self._pending_action
+        pending = self._pending_action
+        action = pending.action
         if action.expiry_ts is not None and now > action.expiry_ts:
+            logger.info("CONFIRMATION_TIMEOUT tool=%s", action.tool_name)
             await self.send_assistant_message(
                 "Approval window expired. Please ask again if you still want this.",
                 websocket,
@@ -968,24 +1018,27 @@ class RealtimeAPI:
             self._clear_pending_action()
             return True
 
-        normalized = text.strip().lower()
+        normalized = text.strip()
         if not normalized:
             return False
 
-        requires_phrase = action.tier >= 3
-        approved = False
-        if requires_phrase:
-            approved = normalized in {"yes, do it now", "yes do it now"}
-        else:
-            approved = normalized in {"yes", "y", "approve", "ok", "okay"}
+        decision = self._parse_confirmation_decision(normalized)
+        logger.info(
+            'CONFIRMATION_CANDIDATE transcript="%s" len=%d decision=%s',
+            self._clip_text(normalized, limit=100),
+            len(normalized),
+            decision,
+        )
 
-        if approved:
-            staging = self._pending_action_staging or self._stage_action(action)
+        if decision == "yes":
+            logger.info("CONFIRMATION_ACCEPTED tool=%s", action.tool_name)
+            staging = pending.staging or self._stage_action(action)
             await self._execute_action(action, staging, websocket)
             self._clear_pending_action()
             return True
 
-        if normalized in {"no", "n", "deny", "cancel"}:
+        if decision == "no":
+            logger.info("CONFIRMATION_REJECTED tool=%s", action.tool_name)
             await self._reject_tool_call(
                 action,
                 "User declined approval.",
@@ -995,9 +1048,11 @@ class RealtimeAPI:
             self._clear_pending_action()
             return True
 
-        if normalized in {"modify", "change"}:
+        pending.retry_count += 1
+        if pending.retry_count > pending.max_retries:
+            logger.info("CONFIRMATION_TIMEOUT tool=%s", action.tool_name)
             await self.send_assistant_message(
-                "Okay. Tell me what to change and I will restage the action.",
+                "I couldn't confirm this action. Please ask again if you still want it.",
                 websocket,
             )
             self._clear_pending_action()
@@ -1477,6 +1532,8 @@ class RealtimeAPI:
             transcript = self._extract_transcript(event)
             if transcript:
                 self._record_user_input(transcript, source="input_audio_transcription")
+                if await self._maybe_handle_approval_response(transcript, websocket):
+                    return
                 if await self._handle_stop_word(
                     transcript,
                     websocket,
@@ -1484,8 +1541,6 @@ class RealtimeAPI:
                 ):
                     return
                 if await self._maybe_handle_research_permission_response(transcript, websocket):
-                    return
-                if await self._maybe_handle_approval_response(transcript, websocket):
                     return
                 if await self._maybe_process_research_intent(
                     transcript,
@@ -1547,6 +1602,16 @@ class RealtimeAPI:
                 args = json.loads(self.function_call_args) if self.function_call_args else {}
             except json.JSONDecodeError:
                 args = {}
+            if self._pending_action:
+                logger.info(
+                    "Suppressing tool call while awaiting confirmation: incoming=%s pending=%s",
+                    function_name,
+                    self._pending_action.action.tool_name,
+                )
+                await self._send_awaiting_confirmation_output(call_id, websocket)
+                self.function_call = None
+                self.function_call_args = ""
+                return
             dry_run_requested = self._extract_dry_run_flag(args)
             action = self._governance.build_action_packet(
                 function_name,
@@ -1582,9 +1647,13 @@ class RealtimeAPI:
                 await self._execute_action(action, staging, websocket)
             elif decision.needs_confirmation:
                 action.requires_confirmation = True
-                self._pending_action = action
-                self._pending_action_staging = staging
                 action.expiry_ts = time.monotonic() + self._approval_timeout_s
+                self._pending_action = PendingAction(
+                    action=action,
+                    staging=staging,
+                    original_intent=self._last_user_input_text or "",
+                    created_at=time.monotonic(),
+                )
                 await self._request_tool_confirmation(action, decision.reason, websocket, staging)
             else:
                 await self._reject_tool_call(
@@ -1702,6 +1771,15 @@ class RealtimeAPI:
     ) -> None:
         summary = action.summary()
         tool_metadata = self._governance.describe_tool(action.tool_name)
+        logger.info(
+            "Entering AWAITING_CONFIRMATION tool=%s args=%s",
+            action.tool_name,
+            json.dumps(action.tool_args, sort_keys=True),
+        )
+        self.orchestration_state.transition(
+            OrchestrationPhase.AWAITING_CONFIRMATION,
+            reason=f"needs confirmation for {action.tool_name}",
+        )
         message = self._build_approval_prompt(action)
         await self.send_assistant_message(message, websocket)
         function_call_output = {
@@ -1733,6 +1811,29 @@ class RealtimeAPI:
         self._presented_actions.add(action.id)
         self.function_call = None
         self.function_call_args = ""
+
+    async def _send_awaiting_confirmation_output(self, call_id: str, websocket: Any) -> None:
+        if not self._pending_action:
+            return
+        pending = self._pending_action
+        action = pending.action
+        payload = {
+            "status": "awaiting_confirmation",
+            "tool": action.tool_name,
+            "message": "Awaiting explicit yes/no confirmation for pending action.",
+            "action_packet": action.to_payload(),
+        }
+        function_call_output = {
+            "type": "conversation.item.create",
+            "item": {
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": json.dumps(payload),
+            },
+        }
+        log_ws_event("Outgoing", function_call_output)
+        self._track_outgoing_event(function_call_output)
+        await websocket.send(json.dumps(function_call_output))
 
     async def _present_action(
         self,
@@ -2045,9 +2146,9 @@ class RealtimeAPI:
         self._record_user_input(text_message, source="text_message")
         if await self._handle_stop_word(text_message, self.websocket, source="text_message"):
             return
-        if await self._maybe_handle_research_permission_response(text_message, self.websocket):
-            return
         if await self._maybe_handle_approval_response(text_message, self.websocket):
+            return
+        if await self._maybe_handle_research_permission_response(text_message, self.websocket):
             return
         if await self._maybe_process_research_intent(
             text_message,
