@@ -1220,8 +1220,9 @@ class RealtimeAPI:
         if self._response_in_flight or not self._response_create_queue:
             return
         queued = self._response_create_queue.popleft()
-        queued_trigger = self._extract_response_create_trigger(queued.get("event") or {})
-        if not self._can_release_queued_response_create(queued_trigger):
+        response_metadata = self._extract_response_create_metadata(queued.get("event") or {})
+        queued_trigger = self._extract_response_create_trigger(response_metadata)
+        if not self._can_release_queued_response_create(queued_trigger, response_metadata):
             self._response_create_queue.appendleft(queued)
             logger.info(
                 "Deferring queued response.create origin=%s trigger=%s while awaiting confirmation.",
@@ -1237,9 +1238,14 @@ class RealtimeAPI:
             debug_context=queued.get("debug_context"),
         )
 
-    def _extract_response_create_trigger(self, response_create_event: dict[str, Any]) -> str:
+    def _extract_response_create_metadata(self, response_create_event: dict[str, Any]) -> dict[str, Any]:
         response_payload = response_create_event.get("response") if isinstance(response_create_event, dict) else None
         metadata = response_payload.get("metadata") if isinstance(response_payload, dict) else None
+        if not isinstance(metadata, dict):
+            return {}
+        return metadata
+
+    def _extract_response_create_trigger(self, metadata: dict[str, Any]) -> str:
         trigger = metadata.get("trigger") if isinstance(metadata, dict) else None
         if isinstance(trigger, str) and trigger.strip():
             return trigger.strip().lower()
@@ -1256,10 +1262,13 @@ class RealtimeAPI:
         source = str(metadata.get("source", "")).strip().lower()
         return source in {"user_audio", "user_text", "voice_confirmation", "text_confirmation"}
 
-    def _can_release_queued_response_create(self, trigger: str) -> bool:
+    def _can_release_queued_response_create(self, trigger: str, metadata: dict[str, Any]) -> bool:
         if self._pending_action is None and not self._is_awaiting_confirmation_phase():
             return True
-        return self._is_user_confirmation_trigger(trigger, {})
+        if self._is_user_confirmation_trigger(trigger, metadata):
+            return True
+        approval_flow = str(metadata.get("approval_flow", "")).strip().lower()
+        return approval_flow in {"true", "1", "yes"}
 
     async def _add_no_tools_follow_up_instruction(self, websocket: Any) -> None:
         instruction_event = {
