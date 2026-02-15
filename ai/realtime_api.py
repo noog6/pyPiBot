@@ -1219,24 +1219,27 @@ class RealtimeAPI:
     async def _drain_response_create_queue(self) -> None:
         if self._response_in_flight or not self._response_create_queue:
             return
-        queued = self._response_create_queue.popleft()
-        response_metadata = self._extract_response_create_metadata(queued.get("event") or {})
-        queued_trigger = self._extract_response_create_trigger(response_metadata)
-        if not self._can_release_queued_response_create(queued_trigger, response_metadata):
-            self._response_create_queue.appendleft(queued)
-            logger.info(
-                "Deferring queued response.create origin=%s trigger=%s while awaiting confirmation.",
-                queued.get("origin"),
-                queued_trigger,
+        queue_len = len(self._response_create_queue)
+        for _ in range(queue_len):
+            queued = self._response_create_queue.popleft()
+            response_metadata = self._extract_response_create_metadata(queued.get("event") or {})
+            queued_trigger = self._extract_response_create_trigger(response_metadata)
+            if not self._can_release_queued_response_create(queued_trigger, response_metadata):
+                self._response_create_queue.append(queued)
+                logger.info(
+                    "Deferring queued response.create origin=%s trigger=%s while awaiting confirmation.",
+                    queued.get("origin"),
+                    queued_trigger,
+                )
+                continue
+            await self._send_response_create(
+                queued["websocket"],
+                queued["event"],
+                origin=queued["origin"],
+                record_ai_call=bool(queued.get("record_ai_call", False)),
+                debug_context=queued.get("debug_context"),
             )
             return
-        await self._send_response_create(
-            queued["websocket"],
-            queued["event"],
-            origin=queued["origin"],
-            record_ai_call=bool(queued.get("record_ai_call", False)),
-            debug_context=queued.get("debug_context"),
-        )
 
     def _extract_response_create_metadata(self, response_create_event: dict[str, Any]) -> dict[str, Any]:
         response_payload = response_create_event.get("response") if isinstance(response_create_event, dict) else None
