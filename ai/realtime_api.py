@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import audioop
 import base64
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime
+import hashlib
 from io import BytesIO
 import json
 import os
@@ -14,6 +17,7 @@ import re
 import signal
 import threading
 import time
+import uuid
 from typing import Any
 from urllib import request
 from urllib.parse import urlparse
@@ -60,6 +64,8 @@ from motion import (
 from motion.gesture_library import DEFAULT_GESTURES
 from services.profile_manager import ProfileManager
 from services.reflection_manager import ReflectionManager
+from services.research import ResearchRequest, build_openai_service_or_null, has_research_intent
+from services.research.research_transcript import write_research_transcript
 from storage import StorageController
 
 RESPONSE_DONE_REFLECTION_PROMPT = """Summarize what changed. Any anomalies? Should anything be remembered?
@@ -79,6 +85,16 @@ Response metadata: {response_metadata}
 
 ALLOWED_OUTBOUND_HOSTS = {"api.openai.com"}
 ALLOWED_OUTBOUND_SCHEMES = {"https", "wss"}
+
+
+@dataclass
+class PendingAction:
+    action: ActionPacket
+    staging: dict[str, Any]
+    original_intent: str
+    created_at: float
+    retry_count: int = 0
+    max_retries: int = 2
 
 
 def _validate_outbound_endpoint(url: str) -> None:
@@ -204,6 +220,9 @@ class RealtimeAPI:
         self._audio_accum = bytearray()
         self._audio_accum_bytes_target = 9600
         self.response_in_progress = False
+        self._response_in_flight = False
+        self._response_create_queue: deque[dict[str, Any]] = deque()
+        self._audio_playback_busy = False
         self.function_call: dict[str, Any] | None = None
         self.function_call_args = ""
         self.mic_send_suppress_until = 0.0
@@ -272,9 +291,9 @@ class RealtimeAPI:
         _validate_tool_specs(governance_cfg.get("tool_specs") or {}, tools)
         tool_specs = build_tool_specs(governance_cfg.get("tool_specs") or {})
         self._governance = GovernanceLayer(tool_specs, config)
-        self._pending_action: ActionPacket | None = None
-        self._pending_action_staging: dict[str, Any] | None = None
-        self._approval_timeout_s = float(config.get("approval_timeout_s", 90.0))
+        self._pending_action: PendingAction | None = None
+        self._awaiting_confirmation_completion = False
+        self._approval_timeout_s = float(config.get("approval_timeout_s", 30.0))
         self._tool_definitions = {tool["name"]: tool for tool in tools}
         self._storage = StorageController.get_instance()
         self._presented_actions: set[str] = set()
@@ -322,6 +341,64 @@ class RealtimeAPI:
         self._last_disconnect_reason: str | None = None
         self._last_failure_reason: str | None = None
 
+        research_cfg = config.get("research") or {}
+        self._research_enabled = bool(research_cfg.get("enabled", False))
+        self._research_permission_required = bool(research_cfg.get("permission_required", True))
+        self._research_service = build_openai_service_or_null(config)
+        self._pending_research_request: ResearchRequest | None = None
+        self._tool_call_dedupe_ttl_s = float(research_cfg.get("tool_call_dedupe_ttl_s", 30.0))
+        self._research_spoken_response_dedupe_ttl_s = float(
+            research_cfg.get("spoken_response_dedupe_ttl_s", 60.0)
+        )
+        self._spoken_research_response_ids: dict[str, float] = {}
+        self._response_create_debug_trace = bool(
+            research_cfg.get("debug_response_create_trace", False)
+        )
+        self._last_response_create_ts: float | None = None
+        self._active_response_id: str | None = None
+        self._last_executed_tool_call: dict[str, Any] | None = None
+
+        realtime_cfg = config.get("realtime") or {}
+        self._debug_vad = bool(realtime_cfg.get("debug_vad", False))
+        self._awaiting_confirmation_allowed_sources = (
+            self._load_awaiting_confirmation_source_policy(realtime_cfg)
+        )
+        self._utterance_counter = 0
+        self._active_utterance: dict[str, Any] | None = None
+        self._recent_input_levels: deque[dict[str, float]] = deque(maxlen=256)
+        self._minimum_non_confirmation_duration_ms = int(
+            realtime_cfg.get("minimum_non_confirmation_duration_ms", 120)
+        )
+        self._vad_turn_detection = self._resolve_vad_turn_detection(config)
+
+    def _resolve_vad_turn_detection(self, config: dict[str, Any]) -> dict[str, float | int | bool]:
+        realtime_cfg = config.get("realtime") or {}
+        profile_name = str(realtime_cfg.get("vad_profile", "default"))
+        profiles = realtime_cfg.get("vad_profiles") or {}
+        profile_cfg = profiles.get(profile_name) or profiles.get("default") or {}
+
+        threshold = float(
+            profile_cfg.get("threshold", config.get("silence_threshold", SILENCE_THRESHOLD))
+        )
+        prefix_padding_ms = int(
+            profile_cfg.get("prefix_padding_ms", config.get("prefix_padding_ms", PREFIX_PADDING_MS))
+        )
+        silence_duration_ms = int(
+            profile_cfg.get(
+                "silence_duration_ms",
+                config.get("silence_duration_ms", SILENCE_DURATION_MS),
+            )
+        )
+
+        return {
+            "profile": profile_name,
+            "threshold": threshold,
+            "prefix_padding_ms": prefix_padding_ms,
+            "silence_duration_ms": silence_duration_ms,
+            "create_response": True,
+            "interrupt_response": True,
+        }
+
     def get_event_bus(self) -> EventBus:
         return self.event_bus
 
@@ -347,11 +424,112 @@ class RealtimeAPI:
         self._alert_policy.emit(self.event_bus, alert)
 
     def is_ready_for_injections(self) -> bool:
+        injector_ready, _ = self._can_accept_external_stimulus("event_injector", "probe")
         return (
             self.ready_event.is_set()
             and self.websocket is not None
             and self.loop is not None
             and self.loop.is_running()
+            and injector_ready
+        )
+
+    def _load_awaiting_confirmation_source_policy(
+        self,
+        realtime_cfg: dict[str, Any],
+    ) -> set[tuple[str, str | None]]:
+        raw_entries = realtime_cfg.get(
+            "awaiting_confirmation_allowed_sources",
+            ["battery:critical", "imu:critical"],
+        )
+        policy: set[tuple[str, str | None]] = set()
+        if not isinstance(raw_entries, list):
+            log_warning(
+                "realtime.awaiting_confirmation_allowed_sources should be a list; got %s.",
+                type(raw_entries).__name__,
+            )
+            return policy
+        for entry in raw_entries:
+            if not isinstance(entry, str) or not entry.strip():
+                continue
+            source, _, kind = entry.strip().lower().partition(":")
+            if not source:
+                continue
+            policy.add((source, kind or None))
+        return policy
+
+    def _can_accept_external_stimulus(
+        self,
+        source: str,
+        kind: str,
+        *,
+        priority: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> tuple[bool, str]:
+        phase = getattr(self.orchestration_state, "phase", None)
+        phase_name = getattr(phase, "value", str(phase))
+        normalized_source = str(source).lower()
+        normalized_kind = self._normalize_external_stimulus_kind(kind, metadata)
+        normalized_priority = (priority or "").lower()
+
+        pending_action = getattr(self, "_pending_action", None)
+        response_in_progress = bool(getattr(self, "response_in_progress", False))
+
+        if (
+            pending_action is not None
+            and phase == OrchestrationPhase.AWAITING_CONFIRMATION
+            and not self._is_allowed_awaiting_confirmation_stimulus(
+                normalized_source,
+                normalized_kind,
+                normalized_priority,
+            )
+        ):
+            return False, "awaiting_confirmation_policy"
+
+        if response_in_progress:
+            return False, "response_in_progress"
+
+        state = getattr(self.state_manager, "state", None)
+        if state not in (InteractionState.IDLE, InteractionState.LISTENING):
+            state_name = getattr(state, "value", str(state))
+            return False, f"interaction_state={state_name}"
+
+        return True, f"phase={phase_name}"
+
+    def _normalize_external_stimulus_kind(
+        self,
+        kind: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        if metadata:
+            severity = metadata.get("severity")
+            if isinstance(severity, str) and severity.strip():
+                return severity.strip().lower()
+        return str(kind).strip().lower() or "unknown"
+
+    def _is_allowed_awaiting_confirmation_stimulus(
+        self,
+        source: str,
+        kind: str,
+        priority: str,
+    ) -> bool:
+        if priority not in {"critical", "high"}:
+            return False
+        for allowed_source, allowed_kind in self._awaiting_confirmation_allowed_sources:
+            if source != allowed_source:
+                continue
+            if allowed_kind in (None, "*", kind):
+                return True
+        return False
+
+    def _log_suppressed_stimulus(self, source: str, kind: str, reason: str) -> None:
+        phase = getattr(self.orchestration_state, "phase", None)
+        phase_name = getattr(phase, "value", str(phase))
+        logger.info(
+            "Suppressed external stimulus source=%s kind=%s phase=%s reason=%s",
+            source,
+            kind,
+            phase_name,
+            reason,
         )
 
     def get_session_health(self) -> dict[str, Any]:
@@ -401,6 +579,19 @@ class RealtimeAPI:
             self._last_outgoing_response_origin = origin
 
     def inject_event(self, event: Event) -> None:
+        allowed, reason = self._can_accept_external_stimulus(
+            event.source,
+            event.kind,
+            priority=event.priority,
+            metadata=event.metadata,
+        )
+        if not allowed:
+            self._log_suppressed_stimulus(
+                event.source,
+                self._normalize_external_stimulus_kind(event.kind, event.metadata),
+                reason,
+            )
+            return
         message, request_response = self._format_event_for_injection(event)
         bypass_response_suppression = False
         if event.source == "battery":
@@ -709,10 +900,10 @@ class RealtimeAPI:
             self._tool_execution_disabled_until = max(self._tool_execution_disabled_until, now)
         if self._pending_action:
             await self._reject_tool_call(
-                self._pending_action,
+                self._pending_action.action,
                 f"Stop word '{stop_word}' detected; tool execution paused.",
                 websocket,
-                staging=self._pending_action_staging,
+                staging=self._pending_action.staging,
                 status="cancelled",
             )
             self._clear_pending_action()
@@ -925,11 +1116,310 @@ class RealtimeAPI:
             f"- alternatives: {alternatives}"
         )
 
+    def _build_tool_call_fingerprint(self, tool_name: str, args: dict[str, Any]) -> str:
+        payload = json.dumps({"tool": tool_name, "args": args}, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _is_duplicate_tool_call(self, tool_name: str, args: dict[str, Any]) -> bool:
+        if not self._last_executed_tool_call:
+            return False
+        now = time.monotonic()
+        age = now - float(self._last_executed_tool_call.get("timestamp", 0.0))
+        if age > self._tool_call_dedupe_ttl_s:
+            return False
+        fingerprint = self._build_tool_call_fingerprint(tool_name, args)
+        return fingerprint == self._last_executed_tool_call.get("fingerprint")
+
+    def _record_executed_tool_call(self, tool_name: str, args: dict[str, Any]) -> None:
+        self._last_executed_tool_call = {
+            "tool": tool_name,
+            "fingerprint": self._build_tool_call_fingerprint(tool_name, args),
+            "timestamp": time.monotonic(),
+        }
+
+    def _prune_spoken_research_response_ids(self, now: float) -> None:
+        if not self._spoken_research_response_ids:
+            return
+        ttl = self._research_spoken_response_dedupe_ttl_s
+        expired = [
+            research_id
+            for research_id, ts in self._spoken_research_response_ids.items()
+            if now - ts > ttl
+        ]
+        for research_id in expired:
+            self._spoken_research_response_ids.pop(research_id, None)
+
+    def _mark_or_suppress_research_spoken_response(self, research_id: str | None) -> bool:
+        if not research_id:
+            return False
+        now = time.monotonic()
+        self._prune_spoken_research_response_ids(now)
+        existing_ts = self._spoken_research_response_ids.get(research_id)
+        if existing_ts is not None:
+            age_ms = (now - existing_ts) * 1000.0
+            logger.info(
+                "[Research] Suppressing duplicate spoken response (research_id=%s, age_ms=%.1f)",
+                research_id,
+                age_ms,
+            )
+            return True
+        self._spoken_research_response_ids[research_id] = now
+        return False
+
+    def _extract_research_id(self, result: Any) -> str | None:
+        if not isinstance(result, dict):
+            return None
+        research_id = result.get("research_id")
+        return str(research_id) if research_id else None
+
+    async def _send_response_create(
+        self,
+        websocket: Any,
+        response_create_event: dict[str, Any],
+        *,
+        origin: str,
+        record_ai_call: bool = False,
+        debug_context: dict[str, Any] | None = None,
+    ) -> bool:
+        now = time.monotonic()
+        delta_ms = None
+        if self._last_response_create_ts is not None:
+            delta_ms = (now - self._last_response_create_ts) * 1000.0
+        if self._response_create_debug_trace:
+            ctx = debug_context or {}
+            logger.info(
+                "[Debug][response.create] active_response_id=%s origin=%s tool=%s call_id=%s research_id=%s delta_ms=%s",
+                self._active_response_id,
+                origin,
+                ctx.get("tool_name"),
+                ctx.get("call_id"),
+                ctx.get("research_id"),
+                f"{delta_ms:.1f}" if delta_ms is not None else "n/a",
+            )
+        if self._response_in_flight or self._audio_playback_busy:
+            if self._response_in_flight:
+                logger.info("Deferring response.create while another response is active (origin=%s).", origin)
+            else:
+                logger.info("Deferring response.create while audio playback is still active (origin=%s).", origin)
+            self._response_create_queue.append(
+                {
+                    "websocket": websocket,
+                    "event": response_create_event,
+                    "origin": origin,
+                    "record_ai_call": record_ai_call,
+                    "debug_context": debug_context,
+                }
+            )
+            return False
+        log_ws_event("Outgoing", response_create_event)
+        self._track_outgoing_event(response_create_event, origin=origin)
+        await websocket.send(json.dumps(response_create_event))
+        self._last_response_create_ts = now
+        self._response_in_flight = True
+        if record_ai_call:
+            self._record_ai_call()
+        return True
+
+    async def _drain_response_create_queue(self) -> None:
+        if self._response_in_flight or self._audio_playback_busy or not self._response_create_queue:
+            return
+        queue_len = len(self._response_create_queue)
+        for _ in range(queue_len):
+            queued = self._response_create_queue.popleft()
+            response_metadata = self._extract_response_create_metadata(queued.get("event") or {})
+            queued_trigger = self._extract_response_create_trigger(response_metadata)
+            if not self._can_release_queued_response_create(queued_trigger, response_metadata):
+                self._response_create_queue.append(queued)
+                logger.info(
+                    "Deferring queued response.create origin=%s trigger=%s while awaiting confirmation.",
+                    queued.get("origin"),
+                    queued_trigger,
+                )
+                continue
+            await self._send_response_create(
+                queued["websocket"],
+                queued["event"],
+                origin=queued["origin"],
+                record_ai_call=bool(queued.get("record_ai_call", False)),
+                debug_context=queued.get("debug_context"),
+            )
+            return
+
+    def _extract_response_create_metadata(self, response_create_event: dict[str, Any]) -> dict[str, Any]:
+        response_payload = response_create_event.get("response") if isinstance(response_create_event, dict) else None
+        metadata = response_payload.get("metadata") if isinstance(response_payload, dict) else None
+        if not isinstance(metadata, dict):
+            return {}
+        return metadata
+
+    def _extract_response_create_trigger(self, metadata: dict[str, Any]) -> str:
+        trigger = metadata.get("trigger") if isinstance(metadata, dict) else None
+        if isinstance(trigger, str) and trigger.strip():
+            return trigger.strip().lower()
+        return "unknown"
+
+    def _is_awaiting_confirmation_phase(self) -> bool:
+        phase = getattr(self.orchestration_state, "phase", None)
+        return phase == OrchestrationPhase.AWAITING_CONFIRMATION
+
+    def _is_user_confirmation_trigger(self, trigger: str, metadata: dict[str, Any]) -> bool:
+        normalized = str(trigger).strip().lower()
+        if normalized == "text_message":
+            return True
+        source = str(metadata.get("source", "")).strip().lower()
+        return source in {"user_audio", "user_text", "voice_confirmation", "text_confirmation"}
+
+    def _can_release_queued_response_create(self, trigger: str, metadata: dict[str, Any]) -> bool:
+        if self._pending_action is None and not self._is_awaiting_confirmation_phase():
+            return True
+        if self._is_user_confirmation_trigger(trigger, metadata):
+            return True
+        approval_flow = str(metadata.get("approval_flow", "")).strip().lower()
+        return approval_flow in {"true", "1", "yes"}
+
+    async def _add_no_tools_follow_up_instruction(self, websocket: Any) -> None:
+        instruction_event = {
+            "type": "conversation.item.create",
+            "item": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Research already completed; answer using the tool results; do not call perform_research again.",
+                    }
+                ],
+            },
+        }
+        log_ws_event("Outgoing", instruction_event)
+        self._track_outgoing_event(instruction_event)
+        await websocket.send(json.dumps(instruction_event))
+
     def _clear_pending_action(self) -> None:
         if self._pending_action:
-            self._presented_actions.discard(self._pending_action.id)
+            self._presented_actions.discard(self._pending_action.action.id)
         self._pending_action = None
-        self._pending_action_staging = None
+
+    def _parse_confirmation_decision(self, text: str) -> str:
+        normalized = " ".join(re.sub(r"[^\w\s]", " ", text.lower()).split())
+        if not normalized:
+            return "unclear"
+        yes_tokens = {
+            "yes",
+            "y",
+            "yeah",
+            "yep",
+            "sure",
+            "ok",
+            "okay",
+            "approve",
+            "do it",
+            "go ahead",
+            "proceed",
+            "please do",
+            "please go ahead",
+        }
+        no_tokens = {
+            "no",
+            "n",
+            "nope",
+            "nah",
+            "deny",
+            "cancel",
+            "stop",
+            "do not",
+            "dont",
+            "don't",
+        }
+        yes_prefixes = (
+            "yes ",
+            "yeah ",
+            "yep ",
+            "sure ",
+            "do it ",
+            "go ahead",
+            "please go ahead",
+            "proceed",
+        )
+        no_prefixes = ("no ", "nope ", "nah ", "cancel ", "stop ")
+        if normalized in yes_tokens or normalized.startswith(yes_prefixes):
+            return "yes"
+        if normalized in no_tokens or normalized.startswith(no_prefixes):
+            return "no"
+        return "unclear"
+
+    def _sample_audio_levels(self, audio_bytes: bytes) -> tuple[float | None, float | None]:
+        if not audio_bytes:
+            return None, None
+        try:
+            rms = audioop.rms(audio_bytes, 2) / 32768.0
+            peak = audioop.max(audio_bytes, 2) / 32768.0
+        except audioop.error:
+            return None, None
+        return rms, peak
+
+    def _refresh_utterance_audio_levels(self) -> None:
+        if not self._active_utterance:
+            return
+        start_ts = self._active_utterance.get("t_start")
+        if start_ts is None:
+            return
+        samples = [s for s in self._recent_input_levels if s["t"] >= start_ts]
+        if not samples:
+            return
+        rms_values = [s["rms"] for s in samples if s.get("rms") is not None]
+        peak_values = [s["peak"] for s in samples if s.get("peak") is not None]
+        if rms_values:
+            self._active_utterance["rms_estimate"] = sum(rms_values) / len(rms_values)
+        if peak_values:
+            self._active_utterance["peak_estimate"] = max(peak_values)
+
+    def _log_utterance_envelope(self, event_name: str) -> None:
+        if not self._debug_vad or not self._active_utterance:
+            return
+        env = self._active_utterance
+        logger.info(
+            "VAD_UTTERANCE event=%s id=%s t_start=%.3f t_stop=%s duration_ms=%s rms=%s peak=%s transcript=%s len=%s confirmation_candidate=%s decision=%s suppressed=%s",
+            event_name,
+            env.get("utterance_id"),
+            env.get("t_start", 0.0),
+            f"{env.get('t_stop'):.3f}" if env.get("t_stop") is not None else "n/a",
+            int(env.get("duration_ms")) if env.get("duration_ms") is not None else "n/a",
+            f"{env.get('rms_estimate'):.4f}" if env.get("rms_estimate") is not None else "n/a",
+            f"{env.get('peak_estimate'):.4f}" if env.get("peak_estimate") is not None else "n/a",
+            self._clip_text(env.get("transcript"), limit=60),
+            env.get("transcript_len", 0),
+            env.get("confirmation_candidate", False),
+            env.get("decision", "unclear"),
+            env.get("suppressed", False),
+        )
+
+    def _is_noise_like_transcript(self, transcript: str) -> bool:
+        normalized = " ".join(re.sub(r"[^\w\s]", " ", transcript.lower()).split())
+        if not normalized:
+            return True
+        return normalized in {"uh", "um", "hmm", "mm", "ah", "er"}
+
+    def _should_suppress_short_utterance(self, transcript: str | None, duration_ms: float | None) -> bool:
+        duration = float(duration_ms) if duration_ms is not None else 0.0
+        text = transcript or ""
+        decision = self._parse_confirmation_decision(text)
+        if decision in {"yes", "no"}:
+            return False
+        if duration >= self._minimum_non_confirmation_duration_ms:
+            return False
+        return self._is_noise_like_transcript(text)
+
+    async def _suppress_guardrail_response(self, websocket: Any, transcript: str | None) -> None:
+        logger.info(
+            "VAD_GUARDRAIL_SUPPRESSED min_duration_ms=%s transcript=%s",
+            self._minimum_non_confirmation_duration_ms,
+            self._clip_text(transcript, limit=80),
+        )
+        cancel_event = {"type": "response.cancel"}
+        log_ws_event("Outgoing", cancel_event)
+        self._track_outgoing_event(cancel_event, origin="vad_guardrail")
+        await websocket.send(json.dumps(cancel_event))
 
     async def _maybe_handle_approval_response(
         self, text: str, websocket: Any
@@ -941,42 +1431,64 @@ class RealtimeAPI:
         cooldown_remaining = self._tool_execution_cooldown_remaining()
         if cooldown_remaining > 0:
             await self._reject_tool_call(
-                self._pending_action,
+                self._pending_action.action,
                 f"Tool execution paused for {cooldown_remaining:.0f}s due to stop word.",
                 websocket,
-                staging=self._pending_action_staging,
+                staging=self._pending_action.staging,
                 status="cancelled",
             )
             self._clear_pending_action()
+            self._awaiting_confirmation_completion = False
+            self.orchestration_state.transition(
+                OrchestrationPhase.IDLE,
+                reason="confirmation cancelled by stop word",
+            )
             return True
         now = time.monotonic()
-        action = self._pending_action
+        pending = self._pending_action
+        action = pending.action
         if action.expiry_ts is not None and now > action.expiry_ts:
+            logger.info("CONFIRMATION_TIMEOUT tool=%s", action.tool_name)
             await self.send_assistant_message(
                 "Approval window expired. Please ask again if you still want this.",
                 websocket,
             )
             self._clear_pending_action()
+            self._awaiting_confirmation_completion = False
+            self.orchestration_state.transition(
+                OrchestrationPhase.IDLE,
+                reason="confirmation timeout",
+            )
             return True
 
-        normalized = text.strip().lower()
+        normalized = text.strip()
         if not normalized:
             return False
 
-        requires_phrase = action.tier >= 3
-        approved = False
-        if requires_phrase:
-            approved = normalized in {"yes, do it now", "yes do it now"}
-        else:
-            approved = normalized in {"yes", "y", "approve", "ok", "okay"}
+        decision = self._parse_confirmation_decision(normalized)
+        logger.info(
+            'CONFIRMATION_CANDIDATE transcript="%s" len=%d decision=%s',
+            self._clip_text(normalized, limit=100),
+            len(normalized),
+            decision,
+        )
 
-        if approved:
-            staging = self._pending_action_staging or self._stage_action(action)
-            await self._execute_action(action, staging, websocket)
+        if decision == "yes":
+            logger.info("CONFIRMATION_ACCEPTED tool=%s", action.tool_name)
+            staging = pending.staging or self._stage_action(action)
+            self._awaiting_confirmation_completion = True
+            await self._execute_action(
+                action,
+                staging,
+                websocket,
+                force_no_tools_followup=True,
+                inject_no_tools_instruction=True,
+            )
             self._clear_pending_action()
             return True
 
-        if normalized in {"no", "n", "deny", "cancel"}:
+        if decision == "no":
+            logger.info("CONFIRMATION_REJECTED tool=%s", action.tool_name)
             await self._reject_tool_call(
                 action,
                 "User declined approval.",
@@ -984,14 +1496,26 @@ class RealtimeAPI:
                 status="cancelled",
             )
             self._clear_pending_action()
+            self._awaiting_confirmation_completion = False
+            self.orchestration_state.transition(
+                OrchestrationPhase.IDLE,
+                reason="confirmation rejected",
+            )
             return True
 
-        if normalized in {"modify", "change"}:
+        pending.retry_count += 1
+        if pending.retry_count > pending.max_retries:
+            logger.info("CONFIRMATION_TIMEOUT tool=%s", action.tool_name)
             await self.send_assistant_message(
-                "Okay. Tell me what to change and I will restage the action.",
+                "I couldn't confirm this action. Please ask again if you still want it.",
                 websocket,
             )
             self._clear_pending_action()
+            self._awaiting_confirmation_completion = False
+            self.orchestration_state.transition(
+                OrchestrationPhase.IDLE,
+                reason="confirmation timeout",
+            )
             return True
 
         await self.send_assistant_message(
@@ -999,6 +1523,105 @@ class RealtimeAPI:
             websocket,
         )
         return True
+
+    async def _maybe_handle_research_permission_response(self, text: str, websocket: Any) -> bool:
+        if self._pending_research_request is None:
+            return False
+
+        normalized = text.strip().lower()
+        if normalized in {"yes", "y", "okay", "ok", "approve"}:
+            request = self._pending_research_request
+            self._pending_research_request = None
+            logger.info("[Research] Permission granted by user")
+            await self._dispatch_research_request(request, websocket)
+            return True
+
+        if normalized in {"no", "n", "deny", "cancel"}:
+            self._pending_research_request = None
+            logger.info("[Research] Permission denied by user")
+            await self.send_assistant_message(
+                "Understood — I won't perform web research right now.",
+                websocket,
+            )
+            return True
+
+        await self.send_assistant_message(
+            "For research permission, please reply yes or no.",
+            websocket,
+        )
+        return True
+
+    async def _maybe_process_research_intent(self, text: str, websocket: Any, *, source: str) -> bool:
+        if not has_research_intent(text):
+            return False
+
+        if source == "input_audio_transcription":
+            preview = self._clip_text(" ".join(text.split()), limit=80)
+            logger.info(
+                "[Research] Transcript intent detected (source=%s, preview=%s)",
+                source,
+                preview,
+            )
+
+        request = ResearchRequest(prompt=text, context={"source": source})
+        logger.info("[Research] Requested from %s", source)
+
+        if self._research_permission_required:
+            self._pending_research_request = request
+            logger.info("[Research] Permission asked")
+            await self.send_assistant_message(
+                "I can do a web lookup for that. Do I have your permission to proceed? (yes/no)",
+                websocket,
+            )
+            return True
+
+        await self._dispatch_research_request(request, websocket)
+        return True
+
+    async def _dispatch_research_request(self, request: ResearchRequest, websocket: Any) -> None:
+        self.orchestration_state.transition(
+            OrchestrationPhase.PLAN,
+            reason="research dispatch",
+        )
+        logger.info("[Research] Dispatched")
+        research_id = f"research_{uuid.uuid4().hex}"
+        packet = None
+        try:
+            packet = await asyncio.to_thread(self._research_service.request_research, request)
+        except Exception as exc:  # noqa: BLE001 - keep runtime resilient to provider failures
+            logger.warning("[Research] Request failed: %s", exc)
+        finally:
+            storage = getattr(self, "_storage", None)
+            if storage is not None:
+                storage_info = storage.get_storage_info()
+                _ = write_research_transcript(
+                    run_dir=storage_info.run_dir,
+                    run_id=storage_info.run_id,
+                    request=request,
+                    packet=packet,
+                    research_id=research_id,
+                )
+
+        if packet is None:
+            await self.send_assistant_message(
+                "I wasn't able to complete that research request this time. Please try again.",
+                websocket,
+            )
+            return
+
+        realtime_payload = packet.to_realtime_payload()
+        if packet.status == "disabled" or not self._research_enabled:
+            await self.send_assistant_message(
+                "Research is currently disabled in config, so I'll answer without web lookup.",
+                websocket,
+            )
+            return
+
+        await self.send_assistant_message(
+            realtime_payload["answer_summary"]
+            or "Research request accepted. I'll summarize findings without quoting raw web content.",
+            websocket,
+        )
 
     def _build_response_done_prompt(self, trigger: str) -> str:
         tool_calls = self._clip_text(
@@ -1118,6 +1741,7 @@ class RealtimeAPI:
 
     def _on_playback_complete(self) -> None:
         logger.info("Playback complete -> restarting mic")
+        self._audio_playback_busy = False
 
         self.mic.stop_receiving()
         self.mic_send_suppress_until = time.monotonic() + 1.2
@@ -1131,6 +1755,8 @@ class RealtimeAPI:
                 logger.exception("Failed to send input_audio_buffer.clear")
 
         self.mic.start_recording()
+        if self._response_create_queue:
+            asyncio.create_task(self._drain_response_create_queue())
         if self._pending_image_flush_after_playback and self._pending_image_stimulus:
             self._pending_image_flush_after_playback = False
             self._schedule_pending_image_flush("playback complete")
@@ -1246,6 +1872,13 @@ class RealtimeAPI:
             profile_context.to_instruction_block(),
             lessons_block,
         )
+        logger.info(
+            "Using VAD profile=%s threshold=%.2f prefix_padding_ms=%s silence_duration_ms=%s",
+            self._vad_turn_detection["profile"],
+            self._vad_turn_detection["threshold"],
+            self._vad_turn_detection["prefix_padding_ms"],
+            self._vad_turn_detection["silence_duration_ms"],
+        )
         session_update = {
             "type": "session.update",
             "session": {
@@ -1254,13 +1887,16 @@ class RealtimeAPI:
                 "output_modalities": ["audio"],
                 "audio": {
                     "input": {
+                        "transcription": {
+                            "model": "gpt-4o-mini-transcribe",
+                        },
                         "turn_detection": {
                             "type": "server_vad",
-                            "threshold": SILENCE_THRESHOLD,
-                            "prefix_padding_ms": PREFIX_PADDING_MS,
-                            "silence_duration_ms": SILENCE_DURATION_MS,
-                            "create_response": True,
-                            "interrupt_response": True,
+                            "threshold": self._vad_turn_detection["threshold"],
+                            "prefix_padding_ms": self._vad_turn_detection["prefix_padding_ms"],
+                            "silence_duration_ms": self._vad_turn_detection["silence_duration_ms"],
+                            "create_response": self._vad_turn_detection["create_response"],
+                            "interrupt_response": self._vad_turn_detection["interrupt_response"],
                         },
                     },
                     "output": {
@@ -1299,6 +1935,9 @@ class RealtimeAPI:
             if self._last_outgoing_event_type == "response.create":
                 origin = self._last_outgoing_response_origin or "unknown"
             log_info(f"response.created: origin={origin}")
+            response = event.get("response") or {}
+            response_id = response.get("id")
+            self._active_response_id = str(response_id) if response_id else None
             self.orchestration_state.transition(
                 OrchestrationPhase.PLAN,
                 reason="response created",
@@ -1308,6 +1947,7 @@ class RealtimeAPI:
             self._audio_accum.clear()
             self._mic_receive_on_first_audio = True
             self.response_in_progress = True
+            self._response_in_flight = True
             self._speaking_started = False
             self._assistant_reply_accum = ""
             self._tool_call_records = []
@@ -1327,6 +1967,7 @@ class RealtimeAPI:
             self._assistant_reply_accum += delta
             self.state_manager.update_state(InteractionState.SPEAKING, "text output")
         elif event_type == "response.output_audio.delta":
+            self._audio_playback_busy = True
             audio_data = base64.b64decode(event["delta"])
             self._audio_accum.extend(audio_data)
 
@@ -1364,26 +2005,73 @@ class RealtimeAPI:
             await self.handle_error(event, websocket)
         elif event_type == "conversation.item.input_audio_transcription.completed":
             transcript = self._extract_transcript(event)
+            if self._active_utterance is not None:
+                self._active_utterance["transcript"] = transcript or ""
+                self._active_utterance["transcript_len"] = len((transcript or "").strip())
+                decision = self._parse_confirmation_decision(transcript or "")
+                self._active_utterance["confirmation_candidate"] = decision in {"yes", "no"}
+                self._active_utterance["decision"] = decision
+                duration_ms = self._active_utterance.get("duration_ms")
+                suppressed = self._should_suppress_short_utterance(transcript, duration_ms)
+                self._active_utterance["suppressed"] = suppressed
+                if suppressed:
+                    await self._suppress_guardrail_response(websocket, transcript)
+                self._log_utterance_envelope(event_type)
+                if suppressed:
+                    return
             if transcript:
                 self._record_user_input(transcript, source="input_audio_transcription")
+                if await self._maybe_handle_approval_response(transcript, websocket):
+                    return
                 if await self._handle_stop_word(
                     transcript,
                     websocket,
                     source="input_audio_transcription",
                 ):
                     return
-                if await self._maybe_handle_approval_response(transcript, websocket):
+                if await self._maybe_handle_research_permission_response(transcript, websocket):
+                    return
+                if await self._maybe_process_research_intent(
+                    transcript,
+                    websocket,
+                    source="input_audio_transcription",
+                ):
                     return
         elif event_type == "input_audio_buffer.speech_started":
             logger.info("Speech detected, listening...")
+            self._utterance_counter += 1
+            self._active_utterance = {
+                "utterance_id": self._utterance_counter,
+                "t_start": time.monotonic(),
+                "t_stop": None,
+                "duration_ms": None,
+                "rms_estimate": None,
+                "peak_estimate": None,
+                "transcript": "",
+                "transcript_len": 0,
+                "confirmation_candidate": False,
+                "decision": "unclear",
+                "suppressed": False,
+            }
+            self._log_utterance_envelope(event_type)
             self.orchestration_state.transition(
                 OrchestrationPhase.SENSE,
                 reason="speech started",
             )
             self.state_manager.update_state(InteractionState.LISTENING, "speech started")
         elif event_type == "input_audio_buffer.speech_stopped":
+            if self._active_utterance is not None:
+                self._active_utterance["t_stop"] = time.monotonic()
+                self._active_utterance["duration_ms"] = (
+                    self._active_utterance["t_stop"] - self._active_utterance["t_start"]
+                ) * 1000.0
+                self._refresh_utterance_audio_levels()
+                self._log_utterance_envelope(event_type)
             await self.handle_speech_stopped(websocket)
             self.state_manager.update_state(InteractionState.THINKING, "speech stopped")
+        elif event_type == "input_audio_buffer.committed":
+            self._refresh_utterance_audio_levels()
+            self._log_utterance_envelope(event_type)
         elif event_type == "rate_limits.updated":
             rl = {r["name"]: r for r in event.get("rate_limits", [])}
             self.rate_limits = rl
@@ -1428,6 +2116,42 @@ class RealtimeAPI:
                 args = json.loads(self.function_call_args) if self.function_call_args else {}
             except json.JSONDecodeError:
                 args = {}
+            if self._pending_action:
+                logger.info(
+                    "Suppressing tool call while awaiting confirmation: incoming=%s pending=%s",
+                    function_name,
+                    self._pending_action.action.tool_name,
+                )
+                await self._send_awaiting_confirmation_output(call_id, websocket)
+                self.function_call = None
+                self.function_call_args = ""
+                return
+            if self._is_duplicate_tool_call(function_name, args):
+                logger.info(
+                    "Skipping duplicate tool call within TTL: tool=%s call_id=%s",
+                    function_name,
+                    call_id,
+                )
+                function_call_output = {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": json.dumps(
+                            {
+                                "status": "redundant",
+                                "message": "Duplicate tool call ignored; use previous tool results.",
+                                "tool": function_name,
+                            }
+                        ),
+                    },
+                }
+                log_ws_event("Outgoing", function_call_output)
+                self._track_outgoing_event(function_call_output)
+                await websocket.send(json.dumps(function_call_output))
+                self.function_call = None
+                self.function_call_args = ""
+                return
             dry_run_requested = self._extract_dry_run_flag(args)
             action = self._governance.build_action_packet(
                 function_name,
@@ -1463,9 +2187,13 @@ class RealtimeAPI:
                 await self._execute_action(action, staging, websocket)
             elif decision.needs_confirmation:
                 action.requires_confirmation = True
-                self._pending_action = action
-                self._pending_action_staging = staging
                 action.expiry_ts = time.monotonic() + self._approval_timeout_s
+                self._pending_action = PendingAction(
+                    action=action,
+                    staging=staging,
+                    original_intent=self._last_user_input_text or "",
+                    created_at=time.monotonic(),
+                )
                 await self._request_tool_confirmation(action, decision.reason, websocket, staging)
             else:
                 await self._reject_tool_call(
@@ -1485,6 +2213,8 @@ class RealtimeAPI:
         *,
         action: ActionPacket | None = None,
         staging: dict[str, Any] | None = None,
+        force_no_tools_followup: bool = False,
+        inject_no_tools_instruction: bool = False,
     ) -> None:
         if function_name in function_map:
             try:
@@ -1533,10 +2263,26 @@ class RealtimeAPI:
         log_ws_event("Outgoing", function_call_output)
         self._track_outgoing_event(function_call_output)
         await websocket.send(json.dumps(function_call_output))
-        response_create_event = {"type": "response.create"}
-        log_ws_event("Outgoing", response_create_event)
-        self._track_outgoing_event(response_create_event, origin="tool_output")
-        await websocket.send(json.dumps(response_create_event))
+        if inject_no_tools_instruction:
+            await self._add_no_tools_follow_up_instruction(websocket)
+        research_id = self._extract_research_id(result) if function_name == "perform_research" else None
+        if self._mark_or_suppress_research_spoken_response(research_id):
+            self.function_call = None
+            self.function_call_args = ""
+            return
+        response_create_event: dict[str, Any] = {"type": "response.create"}
+        if force_no_tools_followup:
+            response_create_event["response"] = {"tool_choice": "none"}
+        await self._send_response_create(
+            websocket,
+            response_create_event,
+            origin="tool_output",
+            debug_context={
+                "tool_name": function_name,
+                "call_id": call_id,
+                "research_id": research_id,
+            },
+        )
 
         self.function_call = None
         self.function_call_args = ""
@@ -1546,6 +2292,9 @@ class RealtimeAPI:
         action: ActionPacket,
         staging: dict[str, Any],
         websocket: Any,
+        *,
+        force_no_tools_followup: bool = False,
+        inject_no_tools_instruction: bool = False,
     ) -> None:
         if not staging.get("valid", True):
             await self._reject_tool_call(
@@ -1570,7 +2319,10 @@ class RealtimeAPI:
             websocket,
             action=action,
             staging=staging,
+            force_no_tools_followup=force_no_tools_followup,
+            inject_no_tools_instruction=inject_no_tools_instruction,
         )
+        self._record_executed_tool_call(action.tool_name, action.tool_args)
         self._governance.record_execution(action)
         self._presented_actions.discard(action.id)
 
@@ -1583,8 +2335,22 @@ class RealtimeAPI:
     ) -> None:
         summary = action.summary()
         tool_metadata = self._governance.describe_tool(action.tool_name)
+        logger.info(
+            "Entering AWAITING_CONFIRMATION tool=%s args=%s",
+            action.tool_name,
+            json.dumps(action.tool_args, sort_keys=True),
+        )
+        self.orchestration_state.transition(
+            OrchestrationPhase.AWAITING_CONFIRMATION,
+            reason=f"needs confirmation for {action.tool_name}",
+        )
+        self._awaiting_confirmation_completion = False
         message = self._build_approval_prompt(action)
-        await self.send_assistant_message(message, websocket)
+        await self.send_assistant_message(
+            message,
+            websocket,
+            response_metadata={"trigger": "confirmation_prompt", "approval_flow": "true"},
+        )
         function_call_output = {
             "type": "conversation.item.create",
             "item": {
@@ -1607,13 +2373,36 @@ class RealtimeAPI:
         log_ws_event("Outgoing", function_call_output)
         self._track_outgoing_event(function_call_output)
         await websocket.send(json.dumps(function_call_output))
-        response_create_event = {"type": "response.create"}
-        log_ws_event("Outgoing", response_create_event)
-        self._track_outgoing_event(response_create_event, origin="tool_output")
-        await websocket.send(json.dumps(response_create_event))
+        # Do not request another model response here.
+        # send_assistant_message() above already produced the spoken approval prompt,
+        # and a second response.create can get deferred during AWAITING_CONFIRMATION,
+        # then replayed later as an unrelated extra spoken response.
         self._presented_actions.add(action.id)
         self.function_call = None
         self.function_call_args = ""
+
+    async def _send_awaiting_confirmation_output(self, call_id: str, websocket: Any) -> None:
+        if not self._pending_action:
+            return
+        pending = self._pending_action
+        action = pending.action
+        payload = {
+            "status": "awaiting_confirmation",
+            "tool": action.tool_name,
+            "message": "Awaiting explicit yes/no confirmation for pending action.",
+            "action_packet": action.to_payload(),
+        }
+        function_call_output = {
+            "type": "conversation.item.create",
+            "item": {
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": json.dumps(payload),
+            },
+        }
+        log_ws_event("Outgoing", function_call_output)
+        self._track_outgoing_event(function_call_output)
+        await websocket.send(json.dumps(function_call_output))
 
     async def _present_action(
         self,
@@ -1646,9 +2435,7 @@ class RealtimeAPI:
         self._track_outgoing_event(function_call_output)
         await websocket.send(json.dumps(function_call_output))
         response_create_event = {"type": "response.create"}
-        log_ws_event("Outgoing", response_create_event)
-        self._track_outgoing_event(response_create_event, origin="tool_output")
-        await websocket.send(json.dumps(response_create_event))
+        await self._send_response_create(websocket, response_create_event, origin="tool_output")
         self._presented_actions.add(action.id)
 
     async def _send_dry_run_output(
@@ -1687,9 +2474,7 @@ class RealtimeAPI:
         self._track_outgoing_event(function_call_output)
         await websocket.send(json.dumps(function_call_output))
         response_create_event = {"type": "response.create"}
-        log_ws_event("Outgoing", response_create_event)
-        self._track_outgoing_event(response_create_event, origin="tool_output")
-        await websocket.send(json.dumps(response_create_event))
+        await self._send_response_create(websocket, response_create_event, origin="tool_output")
         self.function_call = None
         self.function_call_args = ""
 
@@ -1726,15 +2511,21 @@ class RealtimeAPI:
         self._track_outgoing_event(function_call_output)
         await websocket.send(json.dumps(function_call_output))
         response_create_event = {"type": "response.create"}
-        log_ws_event("Outgoing", response_create_event)
-        self._track_outgoing_event(response_create_event, origin="tool_output")
-        await websocket.send(json.dumps(response_create_event))
+        await self._send_response_create(websocket, response_create_event, origin="tool_output")
         self._presented_actions.discard(action.id)
         self.function_call = None
         self.function_call_args = ""
 
     async def send_image_to_assistant(self, new_image: Any) -> None:
         if self.websocket:
+            allowed, reason = self._can_accept_external_stimulus(
+                "camera",
+                "image",
+                priority="normal",
+            )
+            if not allowed:
+                self._log_suppressed_stimulus("camera", "image", reason)
+                return
             bytes_buffer = BytesIO()
             new_image.save(bytes_buffer, format="JPEG", quality=55, optimize=True)
             encoded_image = base64.b64encode(bytes_buffer.getvalue()).decode("utf-8")
@@ -1764,7 +2555,14 @@ class RealtimeAPI:
         else:
             log_warning("Unable to send image to assistant, websocket not available")
 
-    async def send_assistant_message(self, message: str, websocket: Any) -> None:
+    async def send_assistant_message(
+        self,
+        message: str,
+        websocket: Any,
+        *,
+        speak: bool = True,
+        response_metadata: dict[str, Any] | None = None,
+    ) -> None:
         assistant_item = {
             "type": "conversation.item.create",
             "item": {
@@ -1775,6 +2573,19 @@ class RealtimeAPI:
         }
         log_ws_event("Outgoing", assistant_item)
         await websocket.send(json.dumps(assistant_item))
+        if not speak:
+            return
+
+        metadata = {"origin": "assistant_message"}
+        if response_metadata:
+            metadata.update(response_metadata)
+        if self._pending_action is not None or self._is_awaiting_confirmation_phase():
+            metadata.setdefault("approval_flow", "true")
+        await self._send_response_create(
+            websocket,
+            {"type": "response.create", "response": {"metadata": metadata}},
+            origin="assistant_message",
+        )
 
     async def send_error_message_to_assistant(self, error_message: str, websocket: Any) -> None:
         error_item = {
@@ -1822,6 +2633,8 @@ class RealtimeAPI:
 
     async def handle_response_done(self, event: dict[str, Any] | None = None) -> None:
         self.response_in_progress = False
+        self._response_in_flight = False
+        self._active_response_id = None
         self.state_manager.update_state(InteractionState.IDLE, "response done")
         logger.info("Received response.done event.")
         if event:
@@ -1830,20 +2643,33 @@ class RealtimeAPI:
                 "response": event.get("response"),
                 "rate_limits": self.rate_limits,
             }
-        self.orchestration_state.transition(
-            OrchestrationPhase.REFLECT,
-            reason="response done",
-        )
-        self._enqueue_response_done_reflection("response done")
-        self.orchestration_state.transition(
-            OrchestrationPhase.IDLE,
-            reason="response done reflection",
-        )
+        if self.orchestration_state.phase == OrchestrationPhase.AWAITING_CONFIRMATION:
+            if self._pending_action:
+                logger.info("Staying in AWAITING_CONFIRMATION until user accepts/rejects.")
+            elif self._awaiting_confirmation_completion:
+                self._awaiting_confirmation_completion = False
+                self.orchestration_state.transition(
+                    OrchestrationPhase.IDLE,
+                    reason="confirmation follow-up completed",
+                )
+        else:
+            self.orchestration_state.transition(
+                OrchestrationPhase.REFLECT,
+                reason="response done",
+            )
+            self._enqueue_response_done_reflection("response done")
+            self.orchestration_state.transition(
+                OrchestrationPhase.IDLE,
+                reason="response done reflection",
+            )
+        await self._drain_response_create_queue()
         if self._pending_image_stimulus and not self._pending_image_flush_after_playback:
             await self._flush_pending_image_stimulus("response done")
 
     async def handle_response_completed(self, event: dict[str, Any] | None = None) -> None:
         self.response_in_progress = False
+        self._response_in_flight = False
+        self._active_response_id = None
         self.state_manager.update_state(InteractionState.IDLE, "response completed")
         logger.info("Received response.completed event.")
         if event:
@@ -1852,15 +2678,26 @@ class RealtimeAPI:
                 "response": event.get("response"),
                 "rate_limits": self.rate_limits,
             }
-        self.orchestration_state.transition(
-            OrchestrationPhase.REFLECT,
-            reason="response completed",
-        )
-        self._maybe_enqueue_reflection("response completed")
-        self.orchestration_state.transition(
-            OrchestrationPhase.IDLE,
-            reason="reflection enqueued",
-        )
+        if self.orchestration_state.phase == OrchestrationPhase.AWAITING_CONFIRMATION:
+            if self._pending_action:
+                logger.info("Staying in AWAITING_CONFIRMATION until user accepts/rejects.")
+            elif self._awaiting_confirmation_completion:
+                self._awaiting_confirmation_completion = False
+                self.orchestration_state.transition(
+                    OrchestrationPhase.IDLE,
+                    reason="confirmation follow-up completed",
+                )
+        else:
+            self.orchestration_state.transition(
+                OrchestrationPhase.REFLECT,
+                reason="response completed",
+            )
+            self._maybe_enqueue_reflection("response completed")
+            self.orchestration_state.transition(
+                OrchestrationPhase.IDLE,
+                reason="reflection enqueued",
+            )
+        await self._drain_response_create_queue()
         if self._pending_image_stimulus and not self._pending_image_flush_after_playback:
             await self._flush_pending_image_stimulus("response completed")
 
@@ -1870,8 +2707,9 @@ class RealtimeAPI:
         if "buffer is empty" in error_message:
             logger.info("Received 'buffer is empty' error, no audio data sent.")
         elif "Conversation already has an active response" in error_message:
-            logger.info("Received 'active response' error, adjusting response flow.")
+            logger.warning("Received 'active response' error despite response.create serialization.")
             self.response_in_progress = True
+            self._response_in_flight = True
         else:
             logger.error("Unhandled error: %s", error_message)
 
@@ -1882,6 +2720,16 @@ class RealtimeAPI:
 
     async def send_initial_prompts(self, websocket: Any) -> None:
         logger.info("Sending %s prompts: %s", len(self.prompts), self.prompts)
+        if self.prompts and len(self.prompts) == 1:
+            startup_prompt = self.prompts[0]
+            if await self._maybe_process_research_intent(
+                startup_prompt,
+                websocket,
+                source="startup_prompt",
+            ):
+                self._record_user_input(startup_prompt, source="startup_prompt")
+                return
+
         content = [{"type": "input_text", "text": prompt} for prompt in self.prompts]
         if self.prompts:
             self._record_user_input(self.prompts[-1], source="startup_prompt")
@@ -1901,10 +2749,12 @@ class RealtimeAPI:
             logger.info("Skipping startup response: AI call budget exhausted.")
             return
         response_create_event = {"type": "response.create"}
-        log_ws_event("Outgoing", response_create_event)
-        self._track_outgoing_event(response_create_event, origin="prompt")
-        await websocket.send(json.dumps(response_create_event))
-        self._record_ai_call()
+        await self._send_response_create(
+            websocket,
+            response_create_event,
+            origin="prompt",
+            record_ai_call=True,
+        )
 
     async def send_text_message_to_conversation(
         self,
@@ -1917,6 +2767,14 @@ class RealtimeAPI:
         if await self._handle_stop_word(text_message, self.websocket, source="text_message"):
             return
         if await self._maybe_handle_approval_response(text_message, self.websocket):
+            return
+        if await self._maybe_handle_research_permission_response(text_message, self.websocket):
+            return
+        if await self._maybe_process_research_intent(
+            text_message,
+            self.websocket,
+            source="text_message",
+        ):
             return
         self.orchestration_state.transition(
             OrchestrationPhase.SENSE,
@@ -1947,6 +2805,16 @@ class RealtimeAPI:
         if not self.websocket:
             log_warning("Skipping injected response (%s): websocket unavailable.", trigger)
             return
+
+        if self._pending_action is not None or self._is_awaiting_confirmation_phase():
+            if not self._is_user_confirmation_trigger(trigger, metadata):
+                logger.info(
+                    "Suppressing duplicate non-user response request trigger=%s phase=%s pending_action=%s",
+                    trigger,
+                    getattr(getattr(self.orchestration_state, "phase", None), "value", "unknown"),
+                    self._pending_action is not None,
+                )
+                return
 
         trigger_config = self._injection_response_triggers.get(trigger, {})
         trigger_cooldown_s = float(
@@ -2053,7 +2921,10 @@ class RealtimeAPI:
             "trigger": trigger,
             "priority": str(trigger_priority),
             "stimulus": json.dumps(metadata, sort_keys=True),
+            "origin": "injection",
         }
+        if self._pending_action is not None or self._is_awaiting_confirmation_phase():
+            response_metadata["approval_flow"] = "true"
         response_create_event = {
             "type": "response.create",
             "response": {"metadata": response_metadata},
@@ -2061,13 +2932,16 @@ class RealtimeAPI:
         log_info(
             f"Requesting injected response for {trigger} with metadata {response_metadata}."
         )
-        log_ws_event("Outgoing", response_create_event)
-        self._track_outgoing_event(response_create_event, origin="injection")
-        await self.websocket.send(json.dumps(response_create_event))
-        now = time.monotonic()
-        self._injection_response_timestamps.append(now)
-        trigger_timestamps.append(now)
-        self._record_ai_call()
+        sent_now = await self._send_response_create(
+            self.websocket,
+            response_create_event,
+            origin="injection",
+            record_ai_call=True,
+        )
+        if sent_now:
+            now = time.monotonic()
+            self._injection_response_timestamps.append(now)
+            trigger_timestamps.append(now)
 
     def _get_injection_priority(self, trigger: str) -> int:
         trigger_config = self._injection_response_triggers.get(trigger, {})
@@ -2091,6 +2965,12 @@ class RealtimeAPI:
 
     async def _flush_pending_image_stimulus(self, reason: str) -> None:
         if not self._pending_image_stimulus:
+            return
+        if self._pending_action is not None or self._is_awaiting_confirmation_phase():
+            logger.info(
+                "Deferring pending image stimulus flush after %s: awaiting confirmation unresolved.",
+                reason,
+            )
             return
         if self.response_in_progress:
             logger.info(
@@ -2119,6 +2999,10 @@ class RealtimeAPI:
 
                 audio_data = self.mic.get_audio_data()
                 if audio_data:
+                    rms, peak = self._sample_audio_levels(audio_data)
+                    self._recent_input_levels.append(
+                        {"t": time.monotonic(), "rms": rms, "peak": peak}
+                    )
                     base64_audio = base64_encode_audio(audio_data)
                     if base64_audio:
                         audio_event = {
