@@ -148,4 +148,65 @@ class ConfigController:
 
         battery_cfg["response"] = response_cfg
         normalized["battery"] = battery_cfg
+
+        research_cfg = dict(normalized.get("research") or {})
+        research_cfg["enabled"] = bool(research_cfg.get("enabled", False))
+        research_cfg["provider"] = str(research_cfg.get("provider", "null"))
+        research_cfg["packet_schema"] = str(
+            research_cfg.get("packet_schema", "research_packet_v1")
+        )
+        research_cfg["permission_required"] = bool(
+            research_cfg.get("permission_required", True)
+        )
+        openai_cfg = dict(research_cfg.get("openai") or {})
+        openai_cfg["enabled"] = bool(openai_cfg.get("enabled", False))
+        openai_cfg["model"] = str(openai_cfg.get("model", "gpt-4.1-mini"))
+        openai_cfg["timeout_s"] = float(openai_cfg.get("timeout_s", 30.0))
+        openai_cfg["max_output_chars"] = int(openai_cfg.get("max_output_chars", 2400))
+        openai_cfg["max_facts"] = int(openai_cfg.get("max_facts", 8))
+        openai_cfg["max_sources"] = int(openai_cfg.get("max_sources", 6))
+        research_cfg["openai"] = openai_cfg
+
+        firecrawl_cfg = dict(research_cfg.get("firecrawl") or {})
+        firecrawl_cfg["enabled"] = bool(firecrawl_cfg.get("enabled", False))
+        firecrawl_cfg["max_pages"] = int(firecrawl_cfg.get("max_pages", 1))
+        firecrawl_cfg["max_markdown_chars"] = int(
+            firecrawl_cfg.get("max_markdown_chars", 20000)
+        )
+        firecrawl_cfg["cache_dir"] = str(
+            firecrawl_cfg.get("cache_dir", "./var/research_cache")
+        )
+        firecrawl_cfg["cache_ttl_hours"] = int(
+            firecrawl_cfg.get("cache_ttl_hours", 24)
+        )
+        firecrawl_cfg["allowlist_mode"] = str(
+            firecrawl_cfg.get("allowlist_mode", "public")
+        )
+        allowlist_domains = firecrawl_cfg.get("allowlist_domains") or []
+        firecrawl_cfg["allowlist_domains"] = [
+            str(item)
+            for item in allowlist_domains
+            if isinstance(item, str) and item.strip()
+        ]
+        research_cfg["firecrawl"] = firecrawl_cfg
+
+        budget_cfg = dict(research_cfg.get("budget") or {})
+        budget_cfg["daily_limit"] = int(budget_cfg.get("daily_limit", 20))
+        budget_cfg["state_file"] = str(
+            budget_cfg.get("state_file", "./var/research_budget.json")
+        )
+        research_cfg["budget"] = budget_cfg
+
+        cache_cfg = dict(research_cfg.get("cache") or {})
+        cache_cfg["dir"] = str(cache_cfg.get("dir", "./var/research_cache"))
+        cache_cfg["ttl_hours"] = int(cache_cfg.get("ttl_hours", 24))
+        research_cfg["cache"] = cache_cfg
+
+        escalation_cfg = dict(research_cfg.get("escalation") or {})
+        escalation_cfg["enabled"] = bool(escalation_cfg.get("enabled", False))
+        escalation_cfg["max_rounds"] = int(escalation_cfg.get("max_rounds", 1))
+        research_cfg["escalation"] = escalation_cfg
+
+        normalized["research"] = research_cfg
+
         return normalized

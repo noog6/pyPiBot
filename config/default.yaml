@@ -225,3 +225,34 @@ health:
     enabled: false
     host: "api.openai.com"
     timeout_s: 2.0
+
+# Research subsystem (scaffold only; no live web calls)
+research:
+  enabled: false
+  provider: "null"
+  packet_schema: "research_packet_v1"
+  permission_required: true
+  openai:
+    enabled: false
+    model: "gpt-4.1-mini"
+    timeout_s: 30
+    max_output_chars: 2400
+    max_facts: 8
+    max_sources: 6
+  firecrawl:
+    enabled: false
+    max_pages: 1
+    max_markdown_chars: 20000
+    cache_dir: "./var/research_cache"
+    cache_ttl_hours: 24
+    allowlist_mode: "public"  # off | public | explicit
+    allowlist_domains: []
+  budget:
+    daily_limit: 20
+    state_file: "./var/research_budget.json"
+  cache:
+    dir: "./var/research_cache"
+    ttl_hours: 24
+  escalation:
+    enabled: false
+    max_rounds: 1

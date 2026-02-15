@@ -60,6 +60,7 @@ from motion import (
 from motion.gesture_library import DEFAULT_GESTURES
 from services.profile_manager import ProfileManager
 from services.reflection_manager import ReflectionManager
+from services.research import ResearchRequest, build_openai_service_or_null, has_research_intent
 from storage import StorageController
 
 RESPONSE_DONE_REFLECTION_PROMPT = """Summarize what changed. Any anomalies? Should anything be remembered?
@@ -321,6 +322,12 @@ class RealtimeAPI:
         self._last_connect_time: float | None = None
         self._last_disconnect_reason: str | None = None
         self._last_failure_reason: str | None = None
+
+        research_cfg = config.get("research") or {}
+        self._research_enabled = bool(research_cfg.get("enabled", False))
+        self._research_permission_required = bool(research_cfg.get("permission_required", True))
+        self._research_service = build_openai_service_or_null(config)
+        self._pending_research_request: ResearchRequest | None = None
 
     def get_event_bus(self) -> EventBus:
         return self.event_bus
@@ -1000,6 +1007,73 @@ class RealtimeAPI:
         )
         return True
 
+    async def _maybe_handle_research_permission_response(self, text: str, websocket: Any) -> bool:
+        if self._pending_research_request is None:
+            return False
+
+        normalized = text.strip().lower()
+        if normalized in {"yes", "y", "okay", "ok", "approve"}:
+            request = self._pending_research_request
+            self._pending_research_request = None
+            logger.info("[Research] Permission granted by user")
+            await self._dispatch_research_request(request, websocket)
+            return True
+
+        if normalized in {"no", "n", "deny", "cancel"}:
+            self._pending_research_request = None
+            logger.info("[Research] Permission denied by user")
+            await self.send_assistant_message(
+                "Understood — I won't perform web research right now.",
+                websocket,
+            )
+            return True
+
+        await self.send_assistant_message(
+            "For research permission, please reply yes or no.",
+            websocket,
+        )
+        return True
+
+    async def _maybe_process_research_intent(self, text: str, websocket: Any, *, source: str) -> bool:
+        if not has_research_intent(text):
+            return False
+
+        request = ResearchRequest(prompt=text, context={"source": source})
+        logger.info("[Research] Requested from %s", source)
+
+        if self._research_permission_required:
+            self._pending_research_request = request
+            logger.info("[Research] Permission asked")
+            await self.send_assistant_message(
+                "I can do a web lookup for that. Do I have your permission to proceed? (yes/no)",
+                websocket,
+            )
+            return True
+
+        await self._dispatch_research_request(request, websocket)
+        return False
+
+    async def _dispatch_research_request(self, request: ResearchRequest, websocket: Any) -> None:
+        self.orchestration_state.transition(
+            OrchestrationPhase.PLAN,
+            reason="research dispatch",
+        )
+        logger.info("[Research] Dispatched")
+        packet = self._research_service.request_research(request)
+        realtime_payload = packet.to_realtime_payload()
+        if packet.status == "disabled" or not self._research_enabled:
+            await self.send_assistant_message(
+                "Research is currently disabled in config, so I'll answer without web lookup.",
+                websocket,
+            )
+            return
+
+        await self.send_assistant_message(
+            realtime_payload["answer_summary"]
+            or "Research request accepted. I'll summarize findings without quoting raw web content.",
+            websocket,
+        )
+
     def _build_response_done_prompt(self, trigger: str) -> str:
         tool_calls = self._clip_text(
             json.dumps(self._tool_call_records, ensure_ascii=False)
@@ -1372,7 +1446,15 @@ class RealtimeAPI:
                     source="input_audio_transcription",
                 ):
                     return
+                if await self._maybe_handle_research_permission_response(transcript, websocket):
+                    return
                 if await self._maybe_handle_approval_response(transcript, websocket):
+                    return
+                if await self._maybe_process_research_intent(
+                    transcript,
+                    websocket,
+                    source="input_audio_transcription",
+                ):
                     return
         elif event_type == "input_audio_buffer.speech_started":
             logger.info("Speech detected, listening...")
@@ -1916,7 +1998,15 @@ class RealtimeAPI:
         self._record_user_input(text_message, source="text_message")
         if await self._handle_stop_word(text_message, self.websocket, source="text_message"):
             return
+        if await self._maybe_handle_research_permission_response(text_message, self.websocket):
+            return
         if await self._maybe_handle_approval_response(text_message, self.websocket):
+            return
+        if await self._maybe_process_research_intent(
+            text_message,
+            self.websocket,
+            source="text_message",
+        ):
             return
         self.orchestration_state.transition(
             OrchestrationPhase.SENSE,
