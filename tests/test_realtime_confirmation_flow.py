@@ -72,6 +72,15 @@ def _make_api_stub() -> RealtimeAPI:
     api._tool_call_dedupe_ttl_s = 30.0
     api._last_executed_tool_call = None
     api._awaiting_confirmation_completion = False
+    api._tool_call_records = []
+    api._last_tool_call_results = []
+    api.function_call = None
+    api.function_call_args = ""
+    api._spoken_research_response_ids = {}
+    api._research_spoken_response_dedupe_ttl_s = 60.0
+    api._response_create_debug_trace = False
+    api._last_response_create_ts = None
+    api._active_response_id = None
     api._track_outgoing_event = lambda *args, **kwargs: None
     return api
 
@@ -180,18 +189,6 @@ def test_post_confirmation_duplicate_tool_call_is_deduped_without_reentering_con
     assert api.orchestration_state.phase != OrchestrationPhase.AWAITING_CONFIRMATION
     assert api._pending_action is None
 
-    instruction_messages = [
-        msg
-        for msg in websocket.messages
-        if msg.get("type") == "conversation.item.create"
-        and msg.get("item", {}).get("type") == "message"
-    ]
-    assert any(
-        "Research already completed" in content.get("text", "")
-        for msg in instruction_messages
-        for content in msg.get("item", {}).get("content", [])
-    )
-
     function_outputs = [
         msg
         for msg in websocket.messages
@@ -204,5 +201,34 @@ def test_post_confirmation_duplicate_tool_call_is_deduped_without_reentering_con
     )
 
     response_creates = [msg for msg in websocket.messages if msg.get("type") == "response.create"]
-    assert response_creates
-    assert response_creates[-1].get("response", {}).get("tool_choice") == "none"
+    assert not response_creates
+
+
+def test_execute_function_call_suppresses_duplicate_research_spoken_response() -> None:
+    api = _make_api_stub()
+    websocket = _FakeWebsocket()
+
+    call_count = 0
+
+    async def _fake_research(**kwargs):
+        return {"research_id": "research-123", "answer_summary": "done"}
+
+    async def _fake_send_response_create(websocket, event, *, origin, record_ai_call=False, debug_context=None):
+        nonlocal call_count
+        call_count += 1
+        websocket.messages.append(event)
+        return True
+
+    from ai import realtime_api as realtime_module
+
+    original = realtime_module.function_map.get("perform_research")
+    realtime_module.function_map["perform_research"] = _fake_research
+    api._send_response_create = _fake_send_response_create
+    try:
+        asyncio.run(api.execute_function_call("perform_research", "call-1", {"query": "q"}, websocket))
+        asyncio.run(api.execute_function_call("perform_research", "call-2", {"query": "q"}, websocket))
+    finally:
+        if original is not None:
+            realtime_module.function_map["perform_research"] = original
+
+    assert call_count == 1

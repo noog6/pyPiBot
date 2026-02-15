@@ -345,6 +345,15 @@ class RealtimeAPI:
         self._research_service = build_openai_service_or_null(config)
         self._pending_research_request: ResearchRequest | None = None
         self._tool_call_dedupe_ttl_s = float(research_cfg.get("tool_call_dedupe_ttl_s", 30.0))
+        self._research_spoken_response_dedupe_ttl_s = float(
+            research_cfg.get("spoken_response_dedupe_ttl_s", 60.0)
+        )
+        self._spoken_research_response_ids: dict[str, float] = {}
+        self._response_create_debug_trace = bool(
+            research_cfg.get("debug_response_create_trace", False)
+        )
+        self._last_response_create_ts: float | None = None
+        self._active_response_id: str | None = None
         self._last_executed_tool_call: dict[str, Any] | None = None
 
     def get_event_bus(self) -> EventBus:
@@ -971,6 +980,41 @@ class RealtimeAPI:
             "timestamp": time.monotonic(),
         }
 
+    def _prune_spoken_research_response_ids(self, now: float) -> None:
+        if not self._spoken_research_response_ids:
+            return
+        ttl = self._research_spoken_response_dedupe_ttl_s
+        expired = [
+            research_id
+            for research_id, ts in self._spoken_research_response_ids.items()
+            if now - ts > ttl
+        ]
+        for research_id in expired:
+            self._spoken_research_response_ids.pop(research_id, None)
+
+    def _mark_or_suppress_research_spoken_response(self, research_id: str | None) -> bool:
+        if not research_id:
+            return False
+        now = time.monotonic()
+        self._prune_spoken_research_response_ids(now)
+        existing_ts = self._spoken_research_response_ids.get(research_id)
+        if existing_ts is not None:
+            age_ms = (now - existing_ts) * 1000.0
+            logger.info(
+                "[Research] Suppressing duplicate spoken response (research_id=%s, age_ms=%.1f)",
+                research_id,
+                age_ms,
+            )
+            return True
+        self._spoken_research_response_ids[research_id] = now
+        return False
+
+    def _extract_research_id(self, result: Any) -> str | None:
+        if not isinstance(result, dict):
+            return None
+        research_id = result.get("research_id")
+        return str(research_id) if research_id else None
+
     async def _send_response_create(
         self,
         websocket: Any,
@@ -978,7 +1022,23 @@ class RealtimeAPI:
         *,
         origin: str,
         record_ai_call: bool = False,
+        debug_context: dict[str, Any] | None = None,
     ) -> bool:
+        now = time.monotonic()
+        delta_ms = None
+        if self._last_response_create_ts is not None:
+            delta_ms = (now - self._last_response_create_ts) * 1000.0
+        if self._response_create_debug_trace:
+            ctx = debug_context or {}
+            logger.info(
+                "[Debug][response.create] active_response_id=%s origin=%s tool=%s call_id=%s research_id=%s delta_ms=%s",
+                self._active_response_id,
+                origin,
+                ctx.get("tool_name"),
+                ctx.get("call_id"),
+                ctx.get("research_id"),
+                f"{delta_ms:.1f}" if delta_ms is not None else "n/a",
+            )
         if self._response_in_flight:
             logger.info("Deferring response.create while another response is active (origin=%s).", origin)
             self._response_create_queue.append(
@@ -987,12 +1047,14 @@ class RealtimeAPI:
                     "event": response_create_event,
                     "origin": origin,
                     "record_ai_call": record_ai_call,
+                    "debug_context": debug_context,
                 }
             )
             return False
         log_ws_event("Outgoing", response_create_event)
         self._track_outgoing_event(response_create_event, origin=origin)
         await websocket.send(json.dumps(response_create_event))
+        self._last_response_create_ts = now
         self._response_in_flight = True
         if record_ai_call:
             self._record_ai_call()
@@ -1007,6 +1069,7 @@ class RealtimeAPI:
             queued["event"],
             origin=queued["origin"],
             record_ai_call=bool(queued.get("record_ai_call", False)),
+            debug_context=queued.get("debug_context"),
         )
 
     async def _add_no_tools_follow_up_instruction(self, websocket: Any) -> None:
@@ -1570,6 +1633,9 @@ class RealtimeAPI:
             if self._last_outgoing_event_type == "response.create":
                 origin = self._last_outgoing_response_origin or "unknown"
             log_info(f"response.created: origin={origin}")
+            response = event.get("response") or {}
+            response_id = response.get("id")
+            self._active_response_id = str(response_id) if response_id else None
             self.orchestration_state.transition(
                 OrchestrationPhase.PLAN,
                 reason="response created",
@@ -1724,8 +1790,6 @@ class RealtimeAPI:
                     function_name,
                     call_id,
                 )
-                if function_name == "perform_research":
-                    await self._add_no_tools_follow_up_instruction(websocket)
                 function_call_output = {
                     "type": "conversation.item.create",
                     "item": {
@@ -1743,11 +1807,6 @@ class RealtimeAPI:
                 log_ws_event("Outgoing", function_call_output)
                 self._track_outgoing_event(function_call_output)
                 await websocket.send(json.dumps(function_call_output))
-                await self._send_response_create(
-                    websocket,
-                    {"type": "response.create", "response": {"tool_choice": "none"}},
-                    origin="tool_output",
-                )
                 self.function_call = None
                 self.function_call_args = ""
                 return
@@ -1864,10 +1923,24 @@ class RealtimeAPI:
         await websocket.send(json.dumps(function_call_output))
         if inject_no_tools_instruction:
             await self._add_no_tools_follow_up_instruction(websocket)
+        research_id = self._extract_research_id(result) if function_name == "perform_research" else None
+        if self._mark_or_suppress_research_spoken_response(research_id):
+            self.function_call = None
+            self.function_call_args = ""
+            return
         response_create_event: dict[str, Any] = {"type": "response.create"}
         if force_no_tools_followup:
             response_create_event["response"] = {"tool_choice": "none"}
-        await self._send_response_create(websocket, response_create_event, origin="tool_output")
+        await self._send_response_create(
+            websocket,
+            response_create_event,
+            origin="tool_output",
+            debug_context={
+                "tool_name": function_name,
+                "call_id": call_id,
+                "research_id": research_id,
+            },
+        )
 
         self.function_call = None
         self.function_call_args = ""
@@ -2185,6 +2258,7 @@ class RealtimeAPI:
     async def handle_response_done(self, event: dict[str, Any] | None = None) -> None:
         self.response_in_progress = False
         self._response_in_flight = False
+        self._active_response_id = None
         self.state_manager.update_state(InteractionState.IDLE, "response done")
         logger.info("Received response.done event.")
         if event:
@@ -2219,6 +2293,7 @@ class RealtimeAPI:
     async def handle_response_completed(self, event: dict[str, Any] | None = None) -> None:
         self.response_in_progress = False
         self._response_in_flight = False
+        self._active_response_id = None
         self.state_manager.update_state(InteractionState.IDLE, "response completed")
         logger.info("Received response.completed event.")
         if event:
