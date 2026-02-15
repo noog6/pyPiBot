@@ -92,3 +92,36 @@ def test_drain_response_create_queue_defers_injection_while_confirmation_pending
 
     assert sent == []
     assert len(api._response_create_queue) == 1
+
+
+def test_drain_response_create_queue_allows_approval_flow_prompt() -> None:
+    api = _make_api_stub()
+    api._response_create_queue.append(
+        {
+            "websocket": api.websocket,
+            "event": {
+                "type": "response.create",
+                "response": {
+                    "metadata": {
+                        "origin": "assistant_message",
+                        "approval_flow": "true",
+                    }
+                },
+            },
+            "origin": "assistant_message",
+            "record_ai_call": False,
+            "debug_context": None,
+        }
+    )
+    sent: list[str] = []
+
+    async def _send_response_create(*args, **kwargs):
+        sent.append("sent")
+        return True
+
+    api._send_response_create = _send_response_create
+
+    asyncio.run(api._drain_response_create_queue())
+
+    assert sent == ["sent"]
+    assert len(api._response_create_queue) == 0
