@@ -30,6 +30,9 @@ realtime:
   debug_vad: false
   vad_profile: "short_confirmations"
   minimum_non_confirmation_duration_ms: 120
+  awaiting_confirmation_allowed_sources:
+    - "battery:critical"
+    - "imu:critical"
   vad_profiles:
     default:
       threshold: 0.20
