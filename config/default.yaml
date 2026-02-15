@@ -194,6 +194,11 @@ governance:
       reversible: false
       cost_hint: "med"
       safety_tags: ["storage"]
+    perform_research:
+      tier: 2
+      reversible: false
+      cost_hint: "expensive"
+      safety_tags: ["network", "research"]
 # Image response injection mode ("respond" or "catalog_only")
 image_response_mode: "catalog_only"
 injection_response_triggers:
