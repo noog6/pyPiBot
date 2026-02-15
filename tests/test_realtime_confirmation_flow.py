@@ -125,3 +125,51 @@ def test_drain_response_create_queue_allows_approval_flow_prompt() -> None:
 
     assert sent == ["sent"]
     assert len(api._response_create_queue) == 0
+
+
+def test_drain_response_create_queue_skips_blocked_head_and_releases_approval_prompt() -> None:
+    api = _make_api_stub()
+    api._response_create_queue.append(
+        {
+            "websocket": api.websocket,
+            "event": {
+                "type": "response.create",
+                "response": {"metadata": {"trigger": "image_message", "origin": "injection"}},
+            },
+            "origin": "injection",
+            "record_ai_call": False,
+            "debug_context": None,
+        }
+    )
+    api._response_create_queue.append(
+        {
+            "websocket": api.websocket,
+            "event": {
+                "type": "response.create",
+                "response": {
+                    "metadata": {
+                        "origin": "assistant_message",
+                        "approval_flow": "true",
+                    }
+                },
+            },
+            "origin": "assistant_message",
+            "record_ai_call": False,
+            "debug_context": None,
+        }
+    )
+    sent: list[str] = []
+
+    async def _send_response_create(*args, **kwargs):
+        sent.append(kwargs["origin"])
+        return True
+
+    api._send_response_create = _send_response_create
+
+    asyncio.run(api._drain_response_create_queue())
+
+    assert sent == ["assistant_message"]
+    assert len(api._response_create_queue) == 1
+    remaining = api._response_create_queue[0]
+    metadata = remaining["event"]["response"]["metadata"]
+    assert metadata["trigger"] == "image_message"
