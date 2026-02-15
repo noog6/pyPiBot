@@ -73,3 +73,30 @@ def test_dispatch_research_uses_worker_thread(monkeypatch) -> None:
     assert len(thread_calls) == 1
     assert service.calls and service.calls[0].prompt == "find sensor pinout"
     assert sent == ["researched"]
+
+
+def test_send_initial_prompt_routes_research_intent() -> None:
+    api = _make_api_stub()
+    api.prompts = ["Can you search the web for Waveshare Servo Driver HAT voltage requirements?"]
+
+    calls: list[str] = []
+
+    async def _dispatch(request: ResearchRequest, websocket: object) -> None:
+        calls.append(request.prompt)
+
+    api._dispatch_research_request = _dispatch
+    api._research_permission_required = False
+
+    class _FakeWebsocket:
+        def __init__(self) -> None:
+            self.events: list[str] = []
+
+        async def send(self, payload: str) -> None:
+            self.events.append(payload)
+
+    ws = _FakeWebsocket()
+
+    asyncio.run(api.send_initial_prompts(ws))
+
+    assert calls == [api.prompts[0]]
+    assert ws.events == []
