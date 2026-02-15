@@ -82,6 +82,7 @@ def _make_api_stub() -> RealtimeAPI:
     api._last_response_create_ts = None
     api._active_response_id = None
     api._track_outgoing_event = lambda *args, **kwargs: None
+    api._minimum_non_confirmation_duration_ms = 120
     return api
 
 
@@ -95,6 +96,24 @@ def test_confirmation_parser_handles_yes_no_unclear() -> None:
     assert api._parse_confirmation_decision("nope") == "no"
     assert api._parse_confirmation_decision("maybe later") == "unclear"
 
+
+
+def test_confirmation_parser_accepts_short_alternates() -> None:
+    api = _make_api_stub()
+
+    assert api._parse_confirmation_decision("yeah") == "yes"
+    assert api._parse_confirmation_decision("yep go ahead") == "yes"
+    assert api._parse_confirmation_decision("sure, do it") == "yes"
+    assert api._parse_confirmation_decision("do it now") == "yes"
+
+
+def test_short_utterance_guardrail_allows_confirmation_and_suppresses_noise() -> None:
+    api = _make_api_stub()
+
+    assert api._should_suppress_short_utterance("yes", 80) is False
+    assert api._should_suppress_short_utterance("", 80) is True
+    assert api._should_suppress_short_utterance("um", 80) is True
+    assert api._should_suppress_short_utterance("please continue", 80) is False
 
 def test_yes_executes_pending_action_once_and_clears_state() -> None:
     api = _make_api_stub()

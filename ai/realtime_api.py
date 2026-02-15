@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import audioop
 import base64
 from collections import deque
 from dataclasses import dataclass
@@ -355,6 +356,44 @@ class RealtimeAPI:
         self._last_response_create_ts: float | None = None
         self._active_response_id: str | None = None
         self._last_executed_tool_call: dict[str, Any] | None = None
+
+        realtime_cfg = config.get("realtime") or {}
+        self._debug_vad = bool(realtime_cfg.get("debug_vad", False))
+        self._utterance_counter = 0
+        self._active_utterance: dict[str, Any] | None = None
+        self._recent_input_levels: deque[dict[str, float]] = deque(maxlen=256)
+        self._minimum_non_confirmation_duration_ms = int(
+            realtime_cfg.get("minimum_non_confirmation_duration_ms", 120)
+        )
+        self._vad_turn_detection = self._resolve_vad_turn_detection(config)
+
+    def _resolve_vad_turn_detection(self, config: dict[str, Any]) -> dict[str, float | int | bool]:
+        realtime_cfg = config.get("realtime") or {}
+        profile_name = str(realtime_cfg.get("vad_profile", "default"))
+        profiles = realtime_cfg.get("vad_profiles") or {}
+        profile_cfg = profiles.get(profile_name) or profiles.get("default") or {}
+
+        threshold = float(
+            profile_cfg.get("threshold", config.get("silence_threshold", SILENCE_THRESHOLD))
+        )
+        prefix_padding_ms = int(
+            profile_cfg.get("prefix_padding_ms", config.get("prefix_padding_ms", PREFIX_PADDING_MS))
+        )
+        silence_duration_ms = int(
+            profile_cfg.get(
+                "silence_duration_ms",
+                config.get("silence_duration_ms", SILENCE_DURATION_MS),
+            )
+        )
+
+        return {
+            "profile": profile_name,
+            "threshold": threshold,
+            "prefix_padding_ms": prefix_padding_ms,
+            "silence_duration_ms": silence_duration_ms,
+            "create_response": True,
+            "interrupt_response": True,
+        }
 
     def get_event_bus(self) -> EventBus:
         return self.event_bus
@@ -1123,11 +1162,86 @@ class RealtimeAPI:
             "dont",
             "don't",
         }
-        if normalized in yes_tokens or normalized.startswith("yes "):
+        yes_prefixes = ("yes ", "yeah ", "yep ", "sure ", "do it ")
+        no_prefixes = ("no ", "nope ", "nah ", "cancel ", "stop ")
+        if normalized in yes_tokens or normalized.startswith(yes_prefixes):
             return "yes"
-        if normalized in no_tokens or normalized.startswith("no "):
+        if normalized in no_tokens or normalized.startswith(no_prefixes):
             return "no"
         return "unclear"
+
+    def _sample_audio_levels(self, audio_bytes: bytes) -> tuple[float | None, float | None]:
+        if not audio_bytes:
+            return None, None
+        try:
+            rms = audioop.rms(audio_bytes, 2) / 32768.0
+            peak = audioop.max(audio_bytes, 2) / 32768.0
+        except audioop.error:
+            return None, None
+        return rms, peak
+
+    def _refresh_utterance_audio_levels(self) -> None:
+        if not self._active_utterance:
+            return
+        start_ts = self._active_utterance.get("t_start")
+        if start_ts is None:
+            return
+        samples = [s for s in self._recent_input_levels if s["t"] >= start_ts]
+        if not samples:
+            return
+        rms_values = [s["rms"] for s in samples if s.get("rms") is not None]
+        peak_values = [s["peak"] for s in samples if s.get("peak") is not None]
+        if rms_values:
+            self._active_utterance["rms_estimate"] = sum(rms_values) / len(rms_values)
+        if peak_values:
+            self._active_utterance["peak_estimate"] = max(peak_values)
+
+    def _log_utterance_envelope(self, event_name: str) -> None:
+        if not self._debug_vad or not self._active_utterance:
+            return
+        env = self._active_utterance
+        logger.info(
+            "VAD_UTTERANCE event=%s id=%s t_start=%.3f t_stop=%s duration_ms=%s rms=%s peak=%s transcript=%s len=%s confirmation_candidate=%s decision=%s suppressed=%s",
+            event_name,
+            env.get("utterance_id"),
+            env.get("t_start", 0.0),
+            f"{env.get('t_stop'):.3f}" if env.get("t_stop") is not None else "n/a",
+            int(env.get("duration_ms")) if env.get("duration_ms") is not None else "n/a",
+            f"{env.get('rms_estimate'):.4f}" if env.get("rms_estimate") is not None else "n/a",
+            f"{env.get('peak_estimate'):.4f}" if env.get("peak_estimate") is not None else "n/a",
+            self._clip_text(env.get("transcript"), limit=60),
+            env.get("transcript_len", 0),
+            env.get("confirmation_candidate", False),
+            env.get("decision", "unclear"),
+            env.get("suppressed", False),
+        )
+
+    def _is_noise_like_transcript(self, transcript: str) -> bool:
+        normalized = " ".join(re.sub(r"[^\w\s]", " ", transcript.lower()).split())
+        if not normalized:
+            return True
+        return normalized in {"uh", "um", "hmm", "mm", "ah", "er"}
+
+    def _should_suppress_short_utterance(self, transcript: str | None, duration_ms: float | None) -> bool:
+        duration = float(duration_ms) if duration_ms is not None else 0.0
+        text = transcript or ""
+        decision = self._parse_confirmation_decision(text)
+        if decision in {"yes", "no"}:
+            return False
+        if duration >= self._minimum_non_confirmation_duration_ms:
+            return False
+        return self._is_noise_like_transcript(text)
+
+    async def _suppress_guardrail_response(self, websocket: Any, transcript: str | None) -> None:
+        logger.info(
+            "VAD_GUARDRAIL_SUPPRESSED min_duration_ms=%s transcript=%s",
+            self._minimum_non_confirmation_duration_ms,
+            self._clip_text(transcript, limit=80),
+        )
+        cancel_event = {"type": "response.cancel"}
+        log_ws_event("Outgoing", cancel_event)
+        self._track_outgoing_event(cancel_event, origin="vad_guardrail")
+        await websocket.send(json.dumps(cancel_event))
 
     async def _maybe_handle_approval_response(
         self, text: str, websocket: Any
@@ -1577,6 +1691,13 @@ class RealtimeAPI:
             profile_context.to_instruction_block(),
             lessons_block,
         )
+        logger.info(
+            "Using VAD profile=%s threshold=%.2f prefix_padding_ms=%s silence_duration_ms=%s",
+            self._vad_turn_detection["profile"],
+            self._vad_turn_detection["threshold"],
+            self._vad_turn_detection["prefix_padding_ms"],
+            self._vad_turn_detection["silence_duration_ms"],
+        )
         session_update = {
             "type": "session.update",
             "session": {
@@ -1590,11 +1711,11 @@ class RealtimeAPI:
                         },
                         "turn_detection": {
                             "type": "server_vad",
-                            "threshold": SILENCE_THRESHOLD,
-                            "prefix_padding_ms": PREFIX_PADDING_MS,
-                            "silence_duration_ms": SILENCE_DURATION_MS,
-                            "create_response": True,
-                            "interrupt_response": True,
+                            "threshold": self._vad_turn_detection["threshold"],
+                            "prefix_padding_ms": self._vad_turn_detection["prefix_padding_ms"],
+                            "silence_duration_ms": self._vad_turn_detection["silence_duration_ms"],
+                            "create_response": self._vad_turn_detection["create_response"],
+                            "interrupt_response": self._vad_turn_detection["interrupt_response"],
                         },
                     },
                     "output": {
@@ -1702,6 +1823,20 @@ class RealtimeAPI:
             await self.handle_error(event, websocket)
         elif event_type == "conversation.item.input_audio_transcription.completed":
             transcript = self._extract_transcript(event)
+            if self._active_utterance is not None:
+                self._active_utterance["transcript"] = transcript or ""
+                self._active_utterance["transcript_len"] = len((transcript or "").strip())
+                decision = self._parse_confirmation_decision(transcript or "")
+                self._active_utterance["confirmation_candidate"] = decision in {"yes", "no"}
+                self._active_utterance["decision"] = decision
+                duration_ms = self._active_utterance.get("duration_ms")
+                suppressed = self._should_suppress_short_utterance(transcript, duration_ms)
+                self._active_utterance["suppressed"] = suppressed
+                if suppressed:
+                    await self._suppress_guardrail_response(websocket, transcript)
+                self._log_utterance_envelope(event_type)
+                if suppressed:
+                    return
             if transcript:
                 self._record_user_input(transcript, source="input_audio_transcription")
                 if await self._maybe_handle_approval_response(transcript, websocket):
@@ -1722,14 +1857,39 @@ class RealtimeAPI:
                     return
         elif event_type == "input_audio_buffer.speech_started":
             logger.info("Speech detected, listening...")
+            self._utterance_counter += 1
+            self._active_utterance = {
+                "utterance_id": self._utterance_counter,
+                "t_start": time.monotonic(),
+                "t_stop": None,
+                "duration_ms": None,
+                "rms_estimate": None,
+                "peak_estimate": None,
+                "transcript": "",
+                "transcript_len": 0,
+                "confirmation_candidate": False,
+                "decision": "unclear",
+                "suppressed": False,
+            }
+            self._log_utterance_envelope(event_type)
             self.orchestration_state.transition(
                 OrchestrationPhase.SENSE,
                 reason="speech started",
             )
             self.state_manager.update_state(InteractionState.LISTENING, "speech started")
         elif event_type == "input_audio_buffer.speech_stopped":
+            if self._active_utterance is not None:
+                self._active_utterance["t_stop"] = time.monotonic()
+                self._active_utterance["duration_ms"] = (
+                    self._active_utterance["t_stop"] - self._active_utterance["t_start"]
+                ) * 1000.0
+                self._refresh_utterance_audio_levels()
+                self._log_utterance_envelope(event_type)
             await self.handle_speech_stopped(websocket)
             self.state_manager.update_state(InteractionState.THINKING, "speech stopped")
+        elif event_type == "input_audio_buffer.committed":
+            self._refresh_utterance_audio_levels()
+            self._log_utterance_envelope(event_type)
         elif event_type == "rate_limits.updated":
             rl = {r["name"]: r for r in event.get("rate_limits", [])}
             self.rate_limits = rl
@@ -2604,6 +2764,10 @@ class RealtimeAPI:
 
                 audio_data = self.mic.get_audio_data()
                 if audio_data:
+                    rms, peak = self._sample_audio_levels(audio_data)
+                    self._recent_input_levels.append(
+                        {"t": time.monotonic(), "rms": rms, "peak": peak}
+                    )
                     base64_audio = base64_encode_audio(audio_data)
                     if base64_audio:
                         audio_event = {
