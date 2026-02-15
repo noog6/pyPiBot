@@ -233,3 +233,56 @@ def test_drain_response_create_queue_waits_for_audio_playback_complete() -> None
 
     assert sent == []
     assert len(api._response_create_queue) == 1
+
+
+def test_request_tool_confirmation_sends_single_spoken_prompt() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api.orchestration_state = type("S", (), {"phase": OrchestrationPhase.IDLE, "transition": lambda *args, **kwargs: None})()
+    api._awaiting_confirmation_completion = False
+    api._presented_actions = set()
+    api.function_call = "perform_research"
+    api.function_call_args = '{"query":"x"}'
+    api._governance = type("Gov", (), {"describe_tool": lambda *args, **kwargs: {"tier": 2}})()
+    api._build_approval_prompt = lambda action: "Need approval"
+
+    calls = {"assistant": 0, "response_create": 0}
+
+    async def _assistant_message(*args, **kwargs):
+        calls["assistant"] += 1
+
+    async def _send_response_create(*args, **kwargs):
+        calls["response_create"] += 1
+        return True
+
+    api.send_assistant_message = _assistant_message
+    api._send_response_create = _send_response_create
+
+    sent_payloads: list[str] = []
+
+    class _Ws:
+        async def send(self, payload: str) -> None:
+            sent_payloads.append(payload)
+
+    from ai.governance import ActionPacket
+
+    action = ActionPacket(
+        id="call_123",
+        tool_name="perform_research",
+        tool_args={"query": "waveshare"},
+        tier=2,
+        what="research",
+        why="user asked",
+        impact="none",
+        rollback="n/a",
+        alternatives=[],
+        confidence=0.3,
+        cost="expensive",
+        risk_flags=[],
+        requires_confirmation=True,
+    )
+
+    asyncio.run(api._request_tool_confirmation(action, "needs confirmation", _Ws(), {"valid": True}))
+
+    assert calls["assistant"] == 1
+    assert calls["response_create"] == 0
+    assert sent_payloads
