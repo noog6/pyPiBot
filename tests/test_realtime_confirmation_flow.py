@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 import json
 import time
 
@@ -34,6 +35,11 @@ class _FailGovernance:
         raise AssertionError("governance.review should not run while awaiting confirmation")
 
 
+class _FailBuildGovernance:
+    def build_action_packet(self, *args, **kwargs):  # pragma: no cover - should never run in this test
+        raise AssertionError("governance.build_action_packet should not run for duplicate call")
+
+
 
 def _action_packet() -> ActionPacket:
     return ActionPacket(
@@ -61,6 +67,12 @@ def _make_api_stub() -> RealtimeAPI:
     api._tool_execution_disabled_until = 0.0
     api._presented_actions = set()
     api.orchestration_state = _FakeOrchestrationState()
+    api._response_in_flight = False
+    api._response_create_queue = deque()
+    api._tool_call_dedupe_ttl_s = 30.0
+    api._last_executed_tool_call = None
+    api._awaiting_confirmation_completion = False
+    api._track_outgoing_event = lambda *args, **kwargs: None
     return api
 
 
@@ -87,7 +99,7 @@ def test_yes_executes_pending_action_once_and_clears_state() -> None:
 
     executed: list[str] = []
 
-    async def _execute_action(action, staging, websocket):
+    async def _execute_action(action, staging, websocket, **kwargs):
         executed.append(action.id)
 
     async def _reject_tool_call(*args, **kwargs):  # pragma: no cover - should not run
@@ -132,3 +144,65 @@ def test_handle_function_call_suppresses_duplicate_while_awaiting_confirmation()
     assert suppressed == ["call-duplicate"]
     assert api.function_call is None
     assert api.function_call_args == ""
+
+
+def test_post_confirmation_duplicate_tool_call_is_deduped_without_reentering_confirmation() -> None:
+    api = _make_api_stub()
+    action = _action_packet()
+    api._pending_action = PendingAction(
+        action=action,
+        staging={"valid": True},
+        original_intent="research request",
+        created_at=time.monotonic(),
+    )
+    api._governance = _FailBuildGovernance()
+
+    async def _send_assistant_message(message: str, websocket) -> None:
+        return None
+
+    async def _execute_action(action, staging, websocket, **kwargs):
+        api._record_executed_tool_call(action.tool_name, action.tool_args)
+
+    api.send_assistant_message = _send_assistant_message
+    api._execute_action = _execute_action
+
+    websocket = _FakeWebsocket()
+    handled = asyncio.run(api._maybe_handle_approval_response("yes", websocket))
+    assert handled is True
+    assert api._pending_action is None
+
+    api.orchestration_state.phase = OrchestrationPhase.IDLE
+    api.function_call = {"name": "perform_research", "call_id": "call-2"}
+    api.function_call_args = json.dumps({"query": "datasheet vin"})
+
+    asyncio.run(api.handle_function_call({}, websocket))
+
+    assert api.orchestration_state.phase != OrchestrationPhase.AWAITING_CONFIRMATION
+    assert api._pending_action is None
+
+    instruction_messages = [
+        msg
+        for msg in websocket.messages
+        if msg.get("type") == "conversation.item.create"
+        and msg.get("item", {}).get("type") == "message"
+    ]
+    assert any(
+        "Research already completed" in content.get("text", "")
+        for msg in instruction_messages
+        for content in msg.get("item", {}).get("content", [])
+    )
+
+    function_outputs = [
+        msg
+        for msg in websocket.messages
+        if msg.get("type") == "conversation.item.create"
+        and msg.get("item", {}).get("type") == "function_call_output"
+    ]
+    assert any(
+        json.loads(msg["item"]["output"]).get("status") == "redundant"
+        for msg in function_outputs
+    )
+
+    response_creates = [msg for msg in websocket.messages if msg.get("type") == "response.create"]
+    assert response_creates
+    assert response_creates[-1].get("response", {}).get("tool_choice") == "none"
