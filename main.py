@@ -218,7 +218,13 @@ def main(argv: list[str] | None = None) -> int:
                 battery_monitor.unregister_event_handler(battery_event_handler)
             battery_monitor.stop_loop()
         if ops_orchestrator:
-            ops_status = ops_orchestrator.stop_loop()
+            try:
+                ops_status = ops_orchestrator.stop_loop()
+            except KeyboardInterrupt:
+                logger.warning(
+                    "Interrupted while stopping ops orchestrator; continuing shutdown."
+                )
+                ops_status = "interrupted"
             if ops_status != "stopped":
                 logger.warning(
                     "Ops orchestrator shutdown incomplete (status=%s forced_shutdown_continuation=%s)",

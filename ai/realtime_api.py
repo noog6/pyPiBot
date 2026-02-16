@@ -2023,6 +2023,9 @@ class RealtimeAPI:
         self._response_done_reflection_task = asyncio.create_task(_runner())
 
     def _on_playback_complete(self) -> None:
+        if self.exit_event.is_set():
+            logger.info("Playback complete during shutdown -> skipping mic restart")
+            return
         logger.info("Playback complete -> restarting mic")
         self._audio_playback_busy = False
 

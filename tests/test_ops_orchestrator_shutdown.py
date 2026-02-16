@@ -124,3 +124,32 @@ def test_stop_loop_timeout_warning_includes_probe_blocker_metadata(monkeypatch) 
     finally:
         probe_blocker.set()
         assert orchestrator.stop_loop(timeout_s=0.2, grace_period_s=0.2) == "stopped"
+
+
+def test_stop_loop_handles_interrupt_while_collecting_timeout_metadata() -> None:
+    orchestrator = _new_orchestrator()
+
+    class FakeThread:
+        name = "fake-ops"
+        ident = 7
+
+        def join(self, timeout=None) -> None:
+            return None
+
+        def is_alive(self) -> bool:
+            return True
+
+    class InterruptingLock:
+        def __enter__(self):
+            raise KeyboardInterrupt
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    orchestrator._loop_thread = FakeThread()  # type: ignore[assignment]
+    orchestrator._lock = InterruptingLock()  # type: ignore[assignment]
+
+    status = orchestrator.stop_loop(timeout_s=0.01, grace_period_s=0.01)
+
+    assert status == "timed_out"
+    assert orchestrator.forced_shutdown_continuation() is True

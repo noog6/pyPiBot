@@ -51,3 +51,47 @@ def test_close_guard_allows_single_timeout_log_for_concurrent_shutdown_paths(mon
         assert len(timeout_warnings) == 1
 
     asyncio.run(_run_test())
+
+
+class _MicStub:
+    def __init__(self) -> None:
+        self.stop_receiving_calls = 0
+        self.start_recording_calls = 0
+
+    def stop_receiving(self) -> None:
+        self.stop_receiving_calls += 1
+
+    def start_recording(self) -> None:
+        self.start_recording_calls += 1
+
+
+class _EventStub:
+    def __init__(self, set_state: bool) -> None:
+        self._set = set_state
+
+    def is_set(self) -> bool:
+        return self._set
+
+
+def test_playback_complete_skips_mic_restart_during_shutdown(monkeypatch) -> None:
+    info_logs: list[str] = []
+
+    monkeypatch.setattr(
+        "ai.realtime_api.logger.info",
+        lambda message, *args: info_logs.append(message % args if args else message),
+    )
+
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api.exit_event = _EventStub(True)
+    api.mic = _MicStub()
+    api.websocket = None
+    api._audio_playback_busy = True
+    api._response_create_queue = []
+    api._pending_image_flush_after_playback = False
+    api._pending_image_stimulus = None
+
+    api._on_playback_complete()
+
+    assert api.mic.stop_receiving_calls == 0
+    assert api.mic.start_recording_calls == 0
+    assert "Playback complete during shutdown -> skipping mic restart" in info_logs
