@@ -246,6 +246,7 @@ class RealtimeAPI:
         self._mic_receive_on_first_audio = False
         self.rate_limits: dict[str, Any] | None = None
         self._warned_missing_rate_limit_buckets: set[str] = set()
+        self._last_rate_limit_present_buckets: set[str] = set()
         self.response_start_time: float | None = None
         self.websocket = None
         self._ws_close_lock = asyncio.Lock()
@@ -2381,6 +2382,7 @@ class RealtimeAPI:
             self._refresh_utterance_audio_levels()
             self._log_utterance_envelope(event_type)
         elif event_type == "rate_limits.updated":
+            expected_buckets = {"requests", "tokens"}
             rl = {
                 str(bucket.get("name")): bucket
                 for bucket in event.get("rate_limits", [])
@@ -2388,18 +2390,26 @@ class RealtimeAPI:
             }
             self.rate_limits = rl
 
+            present_buckets = expected_buckets.intersection(rl.keys())
             warned_missing_buckets = getattr(self, "_warned_missing_rate_limit_buckets", set())
-            missing_buckets = [name for name in ("requests", "tokens") if name not in rl]
-            unseen_missing_buckets = [
-                name for name in missing_buckets if name not in warned_missing_buckets
-            ]
-            if unseen_missing_buckets:
+            missing_buckets = expected_buckets.difference(present_buckets)
+            previous_present_buckets = getattr(self, "_last_rate_limit_present_buckets", set())
+            disappeared_buckets = previous_present_buckets.difference(present_buckets)
+            should_warn_missing_buckets = (
+                len(present_buckets) == 0
+                or bool(expected_buckets.intersection(disappeared_buckets))
+            )
+
+            if should_warn_missing_buckets and missing_buckets != warned_missing_buckets:
                 logger.warning(
                     "Realtime API rate_limits.updated missing expected bucket(s): %s",
-                    ", ".join(unseen_missing_buckets),
+                    ", ".join(sorted(missing_buckets)),
                 )
-                warned_missing_buckets.update(unseen_missing_buckets)
-                self._warned_missing_rate_limit_buckets = warned_missing_buckets
+                self._warned_missing_rate_limit_buckets = set(missing_buckets)
+            elif not should_warn_missing_buckets and missing_buckets != warned_missing_buckets:
+                self._warned_missing_rate_limit_buckets = set()
+
+            self._last_rate_limit_present_buckets = set(present_buckets)
 
             req = rl.get("requests", {})
             tok = rl.get("tokens", {})
