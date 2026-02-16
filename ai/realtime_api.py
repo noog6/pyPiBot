@@ -241,6 +241,9 @@ class RealtimeAPI:
         self._warned_missing_rate_limit_buckets: set[str] = set()
         self.response_start_time: float | None = None
         self.websocket = None
+        self._ws_close_lock = asyncio.Lock()
+        self._ws_close_started = False
+        self._ws_close_done = False
         self.profile_manager = ProfileManager.get_instance()
         self._memory_manager = MemoryManager.get_instance()
         self.state_manager = InteractionStateManager()
@@ -2062,6 +2065,8 @@ class RealtimeAPI:
                         )
 
                         self.websocket = websocket
+                        self._ws_close_started = False
+                        self._ws_close_done = False
 
                         try:
                             self.loop.add_signal_handler(signal.SIGTERM, self.shutdown_handler)
@@ -3365,6 +3370,10 @@ class RealtimeAPI:
         ws = websocket or self.websocket
         if not ws:
             return
+        async with self._ws_close_lock:
+            if self._ws_close_started or self._ws_close_done:
+                return
+            self._ws_close_started = True
         try:
             await asyncio.wait_for(ws.close(), timeout=timeout_s)
             logger.info("WebSocket closed (%s).", reason)
@@ -3372,3 +3381,7 @@ class RealtimeAPI:
             logger.warning("Timed out closing WebSocket (%s).", reason)
         except Exception as exc:
             logger.warning("Failed to close WebSocket (%s): %s", reason, exc)
+        finally:
+            async with self._ws_close_lock:
+                self._ws_close_started = False
+                self._ws_close_done = True
