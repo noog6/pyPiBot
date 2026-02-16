@@ -17,7 +17,8 @@
 
 [Unit]
 Description=Theo Generative AI Robot Assistant
-After=network.target sound.target
+Wants=network-online.target
+After=network-online.target nss-lookup.target sound.target
 
 [Service]
 # Startup policy: best-effort sync. Theo should still boot even if git sync fails,
