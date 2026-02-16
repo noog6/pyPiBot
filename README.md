@@ -31,7 +31,7 @@ pyPiBot/
 ├── hardware/      # GPIO, sensors, and actuator drivers
 ├── interaction/   # Audio input/output and user interaction helpers
 ├── motion/        # Motion controller and keyframe sequencing
-├── services/      # External services/integrations (placeholder)
+├── services/      # External services/integrations (ops, memory, research)
 ├── storage/       # Persistent storage (SQLite) controller
 ├── systemd/       # systemd unit templates
 └── docs/          # Documentation (coding standards, requirements, setup)
@@ -77,6 +77,19 @@ Default keys include:
 - `stop_words` and `stop_word_cooldown_s` to pause tool execution on emergency phrases
 - `health`, `ops`, and `alerts` for operational health probes, budgets, and alert policy
 - `governance` settings (autonomy level, autonomy windows, budgets, and tool tier specs)
+- `research` settings for web-lookup behavior, user permission gating, provider wiring, budget limits, and cache controls
+
+### Web Research Capability (Scaffold)
+
+The runtime now includes a research subsystem scaffold that can:
+
+- detect explicit web-research intent in user text,
+- optionally ask for user permission before any web lookup,
+- execute the `perform_research` tool,
+- return a structured `research_packet_v1` summary with extracted facts/sources, and
+- persist per-request research transcripts under the current run directory.
+
+See [docs/web-research.md](docs/web-research.md) for configuration, behavior, and operations notes.
 
 ## Systemd Deployment
 
@@ -116,3 +129,4 @@ pytest -q
 - [docs/requirements.md](docs/requirements.md)
 - [docs/systemd-setup.md](docs/systemd-setup.md)
 - [docs/todo.md](docs/todo.md)
+- [docs/web-research.md](docs/web-research.md)

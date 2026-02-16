@@ -8,6 +8,7 @@ This guide describes how to run the Theo runtime as a systemd service.
 - Python virtual environment created under `.venv`.
 - Log directory created at `log/`.
 - `OPENAI_API_KEY` set in `/etc/environment` (or another file referenced by `EnvironmentFile` in the unit).
+- `FIRECRAWL_API_KEY` set as well if you enable `research.firecrawl.enabled: true`.
 
 ## Install the Service
 
@@ -51,4 +52,4 @@ Update the following fields in `systemd/pyPiBot.service` as needed:
 - `WorkingDirectory` path.
 - Log file paths in `StandardOutput` and `StandardError`.
 - `User` to the appropriate runtime user.
-- `EnvironmentFile` if you store `OPENAI_API_KEY` somewhere else.
+- `EnvironmentFile` if you store API keys (`OPENAI_API_KEY`, optional `FIRECRAWL_API_KEY`) somewhere else.
