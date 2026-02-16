@@ -11,6 +11,12 @@ def log_info(message: str, *args: object) -> None:
     LOGGER.info(message, *args)
 
 
+def log_debug(message: str, *args: object) -> None:
+    """Log debug-level motion message."""
+
+    LOGGER.debug(message, *args)
+
+
 def log_warning(message: str, *args: object) -> None:
     """Log warning-level motion message."""
 

@@ -312,7 +312,7 @@ def log_ws_event(direction: str, event: dict[str, Any]) -> None:
         _stash_unknown_event(direction, event_type, event)
     else:
         detail = event_type
-    logger.info(_format_text(f"{emoji} {icon} {detail}", style=style))
+    logger.debug(_format_text(f"{emoji} {icon} {detail}", style=style))
 
 
 def log_tool_call(function_name: str, args: Any, result: Any) -> None:
@@ -326,6 +326,10 @@ def log_error(message: str) -> None:
 
 def log_info(message: str, style: str = "bold white") -> None:
     logger.info(_format_text(message, style=style))
+
+
+def log_debug(message: str, style: str = "bold white") -> None:
+    logger.debug(_format_text(message, style=style))
 
 
 def log_warning(message: str) -> None:
@@ -573,15 +577,15 @@ def log_session_updated(event: Dict[str, Any], *, full_payload: Optional[bool] =
     if full_payload is None:
         full_payload = DEBUG_FULL_PAYLOAD
 
-    print(MARK_SUMMARY)
+    logger.debug(MARK_SUMMARY)
     summary = _extract_summary(event)
-    print(_headline(summary))
-    print(json.dumps(_normalize_for_log(summary), indent=2, ensure_ascii=False))
+    logger.info(_headline(summary))
+    logger.debug(json.dumps(_normalize_for_log(summary), indent=2, ensure_ascii=False))
 
     if not full_payload:
         return
 
-    print(MARK_PAYLOAD)
+    logger.debug(MARK_PAYLOAD)
     event2 = dict(event)
     event2 = _prune_nones(event2)
 
@@ -592,4 +596,4 @@ def log_session_updated(event: Dict[str, Any], *, full_payload: Optional[bool] =
     sess["tools"] = _compact_tools(sess.get("tools"))
 
     event2["session"] = sess
-    print(json.dumps(_normalize_for_log(event2), indent=2, ensure_ascii=False))
+    logger.debug(json.dumps(_normalize_for_log(event2), indent=2, ensure_ascii=False))
