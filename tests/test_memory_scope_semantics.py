@@ -67,6 +67,35 @@ def test_session_local_scope_is_isolated_by_session_id(tmp_path) -> None:
     assert [item.content for item in run_two_recall] == ["Temporary run-two note."]
 
 
+def test_user_global_scope_excludes_session_local_entries(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+
+    manager = _make_manager(store, session_id="run-1")
+    manager.remember_memory(
+        content="Stable cross-run preference.",
+        importance=4,
+        scope=MemoryScope.USER_GLOBAL,
+    )
+    manager.remember_memory(
+        content="Run-local scratch note.",
+        importance=5,
+        scope=MemoryScope.SESSION_LOCAL,
+    )
+
+    recalled = manager.recall_memories(
+        query="note",
+        scope=MemoryScope.USER_GLOBAL,
+    )
+
+    assert recalled == []
+
+    recalled_global = manager.recall_memories(
+        query="preference",
+        scope=MemoryScope.USER_GLOBAL,
+    )
+    assert [item.content for item in recalled_global] == ["Stable cross-run preference."]
+
+
 def test_session_local_scope_requires_session_id_for_write(tmp_path) -> None:
     store = MemoryStore(db_path=tmp_path / "memories.db")
     manager = _make_manager(store, session_id=None)

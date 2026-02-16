@@ -170,6 +170,9 @@ class MemoryStore:
                 return []
             query_parts.append("AND session_id = ?")
             params.append(session_id)
+        else:
+            # User-global reads must explicitly exclude session-local rows.
+            query_parts.append("AND session_id IS NULL")
 
         if pinned_only:
             query_parts.append("AND pinned = 1")
