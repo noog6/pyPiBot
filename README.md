@@ -85,8 +85,8 @@ Default keys include:
 The runtime includes a web-research subsystem that:
 
 - detects explicit web-research intent in user text,
-- runs the OpenAI-backed research path when research is enabled,
-- applies user confirmation gating when `research.permission_required` is enabled,
+- runs the OpenAI-backed research path in production when research is enabled,
+- controls user confirmation gating via `research.permission_required`,
 - keeps Firecrawl scraping optional (`research.firecrawl.enabled`) and disabled by default, and
 - returns a structured `research_packet_v1` summary with extracted facts/sources while persisting per-request transcripts under the current run directory.
 
