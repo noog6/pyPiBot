@@ -314,3 +314,131 @@ def test_request_tool_confirmation_sends_single_spoken_prompt() -> None:
     assert calls["assistant"] == 1
     assert calls["response_create"] == 0
     assert sent_payloads
+
+
+def _build_pending_action(*, expiry_ts=None):
+    from ai.governance import ActionPacket
+    from ai.realtime_api import PendingAction
+
+    action = ActionPacket(
+        id="call_pending",
+        tool_name="perform_research",
+        tool_args={"query": "status"},
+        tier=2,
+        what="research",
+        why="user asked",
+        impact="none",
+        rollback="n/a",
+        alternatives=[],
+        confidence=0.3,
+        cost="expensive",
+        risk_flags=[],
+        requires_confirmation=True,
+        expiry_ts=expiry_ts,
+    )
+    return PendingAction(
+        action=action,
+        staging={"valid": True},
+        original_intent="test",
+        created_at=0.0,
+    )
+
+
+def test_maybe_handle_approval_response_accept_transitions_after_execution() -> None:
+    api = _make_api_stub()
+    transitions: list[tuple[object, str | None]] = []
+
+    api.orchestration_state = type(
+        "S",
+        (),
+        {
+            "phase": OrchestrationPhase.AWAITING_CONFIRMATION,
+            "transition": lambda *args, **kwargs: transitions.append((args[1], kwargs.get("reason"))),
+        },
+    )()
+    api._pending_action = _build_pending_action()
+    api._awaiting_confirmation_completion = False
+    api._presented_actions = set()
+    api._handle_stop_word = lambda *args, **kwargs: asyncio.sleep(0, result=False)
+    api._tool_execution_cooldown_remaining = lambda: 0.0
+    api._stage_action = lambda action: {"valid": True}
+
+    executed: list[str] = []
+
+    async def _execute_action(*args, **kwargs):
+        executed.append("done")
+
+    api._execute_action = _execute_action
+
+    consumed = asyncio.run(api._maybe_handle_approval_response("yes", api.websocket))
+
+    assert consumed is True
+    assert executed == ["done"]
+    assert api._pending_action is None
+    assert transitions == []
+
+
+def test_maybe_handle_approval_response_reject_transitions_to_idle() -> None:
+    api = _make_api_stub()
+    transitions: list[tuple[object, str | None]] = []
+
+    api.orchestration_state = type(
+        "S",
+        (),
+        {
+            "phase": OrchestrationPhase.AWAITING_CONFIRMATION,
+            "transition": lambda *args, **kwargs: transitions.append((args[1], kwargs.get("reason"))),
+        },
+    )()
+    api._pending_action = _build_pending_action()
+    api._awaiting_confirmation_completion = False
+    api._presented_actions = set()
+    api._handle_stop_word = lambda *args, **kwargs: asyncio.sleep(0, result=False)
+    api._tool_execution_cooldown_remaining = lambda: 0.0
+
+    rejected: list[str] = []
+
+    async def _reject_tool_call(*args, **kwargs):
+        rejected.append("rejected")
+
+    api._reject_tool_call = _reject_tool_call
+
+    consumed = asyncio.run(api._maybe_handle_approval_response("no", api.websocket))
+
+    assert consumed is True
+    assert rejected == ["rejected"]
+    assert api._pending_action is None
+    assert transitions == [(OrchestrationPhase.IDLE, "confirmation rejected")]
+
+
+def test_maybe_handle_approval_response_timeout_transitions_to_idle() -> None:
+    api = _make_api_stub()
+    transitions: list[tuple[object, str | None]] = []
+
+    api.orchestration_state = type(
+        "S",
+        (),
+        {
+            "phase": OrchestrationPhase.AWAITING_CONFIRMATION,
+            "transition": lambda *args, **kwargs: transitions.append((args[1], kwargs.get("reason"))),
+        },
+    )()
+    api._pending_action = _build_pending_action(expiry_ts=-1.0)
+    api._awaiting_confirmation_completion = False
+    api._presented_actions = set()
+    api._handle_stop_word = lambda *args, **kwargs: asyncio.sleep(0, result=False)
+    api._tool_execution_cooldown_remaining = lambda: 0.0
+
+    sent_messages: list[str] = []
+
+    async def _send_assistant_message(message, *args, **kwargs):
+        sent_messages.append(message)
+
+    api.send_assistant_message = _send_assistant_message
+
+    consumed = asyncio.run(api._maybe_handle_approval_response("anything", api.websocket))
+
+    assert consumed is True
+    assert sent_messages
+    assert api._pending_action is None
+    assert transitions == [(OrchestrationPhase.IDLE, "confirmation timeout")]

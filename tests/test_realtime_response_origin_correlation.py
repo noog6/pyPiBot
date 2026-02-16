@@ -9,8 +9,13 @@ from ai.realtime_api import RealtimeAPI
 
 
 class _OrchestrationState:
+    def __init__(self) -> None:
+        self.transitions: list[tuple[object, str | None]] = []
+
     def transition(self, *args, **kwargs) -> None:
-        return None
+        phase = args[0] if args else None
+        reason = kwargs.get("reason")
+        self.transitions.append((phase, reason))
 
 
 class _StateManager:
@@ -73,3 +78,25 @@ def test_response_created_origin_correlation_distinguishes_tool_and_server_auto(
         "response.created: origin=server_auto",
     ]
     assert list(api._pending_response_create_origins) == []
+
+
+def test_response_created_from_confirmation_prompt_keeps_awaiting_phase(monkeypatch) -> None:
+    api = _build_api()
+    logs: list[str] = []
+    monkeypatch.setattr("ai.realtime_api.log_info", logs.append)
+    api._pending_action = object()
+
+    api._track_outgoing_event({"type": "response.create"}, origin="assistant_message")
+
+    asyncio.run(
+        api.handle_event(
+            {"type": "response.created", "response": {"id": "resp_confirmation_prompt"}},
+            websocket=None,
+        )
+    )
+
+    assert api.orchestration_state.transitions == []
+    assert (
+        "response.created consumed by confirmation flow; phase remains AWAITING_CONFIRMATION"
+        in logs
+    )
