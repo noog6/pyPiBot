@@ -70,6 +70,7 @@ class OpsOrchestrator:
         self._micro_presence_battery_min = 0.2
         self._micro_presence_health_allowed = {HealthStatus.OK, HealthStatus.DEGRADED}
         self._micro_presence_next_ts = time.monotonic()
+        self._forced_shutdown_continuation = False
         OpsOrchestrator._instance = self
 
     @classmethod
@@ -88,17 +89,55 @@ class OpsOrchestrator:
             self._loop_thread = threading.Thread(target=self._loop, daemon=True)
             self._loop_thread.start()
 
-    def stop_loop(self, timeout_s: float = 2.0) -> None:
+    def stop_loop(self, timeout_s: float = 2.0, grace_period_s: float = 0.2) -> str:
+        status = "stopped"
         if self._loop_thread is not None:
             self._stop_event.set()
-            self._loop_thread.join(timeout=timeout_s)
+            self._forced_shutdown_continuation = False
+            first_wait_started = time.monotonic()
+            try:
+                self._loop_thread.join(timeout=timeout_s)
+            except Exception as exc:
+                LOGGER.warning("[Ops] Loop thread join failed during shutdown: %s", exc)
+                self._forced_shutdown_continuation = True
+                return "timed_out"
+
+            first_wait_elapsed = time.monotonic() - first_wait_started
             if self._loop_thread.is_alive():
+                thread = self._loop_thread
                 LOGGER.warning(
-                    "[Ops] Loop thread did not exit within %.2fs; continuing shutdown.",
+                    "[Ops] Loop thread join timed out (thread=%s ident=%s elapsed=%.3fs timeout=%.3fs stop_event_set=%s).",
+                    thread.name,
+                    thread.ident,
+                    first_wait_elapsed,
                     timeout_s,
+                    self._stop_event.is_set(),
                 )
-                return
+
+                if grace_period_s > 0.0:
+                    try:
+                        self._loop_thread.join(timeout=grace_period_s)
+                    except Exception as exc:
+                        LOGGER.warning(
+                            "[Ops] Loop thread grace join failed (thread=%s ident=%s grace=%.3fs): %s",
+                            thread.name,
+                            thread.ident,
+                            grace_period_s,
+                            exc,
+                        )
+                        self._forced_shutdown_continuation = True
+                        return "timed_out"
+                if self._loop_thread.is_alive():
+                    self._forced_shutdown_continuation = True
+                    return "timed_out"
+
             self._loop_thread = None
+        return status
+
+    def forced_shutdown_continuation(self) -> bool:
+        """Return whether shutdown had to continue with the loop thread still alive."""
+
+        return self._forced_shutdown_continuation
 
     def is_loop_alive(self) -> bool:
         return self._loop_thread is not None and self._loop_thread.is_alive()
