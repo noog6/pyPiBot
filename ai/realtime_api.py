@@ -2227,14 +2227,11 @@ class RealtimeAPI:
             response = event.get("response") or {}
             response_id = response.get("id")
             self._active_response_id = str(response_id) if response_id else None
-            confirmation_prompt_origin = origin == "assistant_message"
-            pending_confirmation_active = (
-                getattr(self, "_pending_action", None) is not None and confirmation_prompt_origin
+            pending_confirmation_active = getattr(self, "_pending_action", None) is not None or (
+                self.orchestration_state.phase == OrchestrationPhase.AWAITING_CONFIRMATION
             )
             if pending_confirmation_active:
-                log_info(
-                    "response.created consumed by confirmation flow; phase remains AWAITING_CONFIRMATION"
-                )
+                log_info(f"response.created consumed by confirmation flow; origin={origin}")
             else:
                 self.orchestration_state.transition(
                     OrchestrationPhase.PLAN,
