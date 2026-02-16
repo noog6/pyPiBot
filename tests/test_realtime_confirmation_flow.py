@@ -658,6 +658,23 @@ def test_handle_function_call_duplicate_logs_skip_without_execution(caplog) -> N
     assert "Function call outcome: executing tool" not in caplog.text
 
 
+def test_handle_function_call_logs_tool_and_call_id_with_parse_status(monkeypatch, caplog) -> None:
+    api = _make_api_stub()
+    api.function_call = {"name": "perform_research", "call_id": "call_123"}
+    api.function_call_args = '{"query":'
+    api._pending_action = type("Pending", (), {"action": type("Action", (), {"tool_name": "noop"})()})()
+
+    async def _send_awaiting_confirmation_output(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(api, "_send_awaiting_confirmation_output", _send_awaiting_confirmation_output)
+
+    caplog.set_level(logging.INFO)
+    asyncio.run(api.handle_function_call({}, _Ws()))
+
+    assert "Function call received | tool=perform_research call_id=call_123 args_parsed=False" in caplog.text
+
+
 def test_handle_function_call_suppresses_immediate_recall_after_confirmation_timeout() -> None:
     api = _make_api_stub()
     api._pending_action = None
