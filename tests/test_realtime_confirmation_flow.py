@@ -41,6 +41,7 @@ def _make_api_stub() -> RealtimeAPI:
     api._confirmation_timeout_debounce_window_s = 5.0
     api._approval_timeout_s = 30.0
     api._last_user_input_text = None
+    api._pending_research_request = None
     return api
 
 
@@ -400,6 +401,41 @@ def test_handle_response_done_keeps_listening_state_without_idle_transition() ->
 
     assert api.state_manager.state == InteractionState.LISTENING
     assert transitions == []
+
+
+
+def test_maybe_process_research_intent_emits_single_permission_prompt_for_duplicate_request() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._pending_research_request = None
+    api._pending_action = None
+    api._research_permission_required = True
+    api._clip_text = lambda value, limit=80: value[:limit]
+
+    prompted: list[str] = []
+
+    async def _send_assistant_message(message, *args, **kwargs):
+        prompted.append(message)
+
+    api.send_assistant_message = _send_assistant_message
+
+    first = asyncio.run(
+        api._maybe_process_research_intent(
+            "search the web for market updates",
+            _Ws(),
+            source="input_audio_transcription",
+        )
+    )
+    second = asyncio.run(
+        api._maybe_process_research_intent(
+            "search the web for market updates",
+            _Ws(),
+            source="input_audio_transcription",
+        )
+    )
+
+    assert first is True
+    assert second is True
+    assert len(prompted) == 1
 
 
 def test_request_tool_confirmation_sends_single_spoken_prompt() -> None:
