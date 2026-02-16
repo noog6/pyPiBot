@@ -90,9 +90,11 @@ In addition to systemd-managed stdout/stderr logs, the application creates per-r
 
 - `log/<run_id>/run_<run_id>.log`
 
+Run IDs are incrementing integers persisted in `var/current_run` to avoid ambiguity across restarts.
+
 Example:
 
-- `log/20260212T144327Z/run_20260212T144327Z.log`
+- `log/314/run_314.log`
 
 This allows operators to inspect an individual run in isolation, while still keeping aggregated service-level logs.
 
@@ -114,7 +116,7 @@ sudo logrotate -f /etc/logrotate.d/pypibot
 ## Log types: systemd vs app-managed
 
 - **Systemd stdout/stderr logs** (`pyPiBot.log`, `pyPiBot-error.log`) capture process-level output configured by `StandardOutput`/`StandardError` in the unit file.
-- **App-managed per-run logs** (`log/<run_id>/run_<run_id>.log`) are created by the application to preserve run-scoped execution details.
+- **App-managed per-run logs** (`log/<run_id>/run_<run_id>.log`, for example `log/314/run_314.log`) are created by the application to preserve run-scoped execution details.
 
 Use systemd logs for service health and lifecycle troubleshooting; use per-run logs for investigating behavior within a specific run.
 
