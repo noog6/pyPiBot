@@ -274,7 +274,7 @@ health:
     host: "api.openai.com"
     timeout_s: 2.0
 
-# Research subsystem (scaffold only; no live web calls)
+# Research subsystem (OpenAI-backed research available when enabled)
 research:
   enabled: true
   provider: "openai"

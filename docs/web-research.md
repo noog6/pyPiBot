@@ -1,6 +1,6 @@
 # Web Research Subsystem
 
-This document describes the new web-research capability scaffold and how to configure it.
+This document describes the web-research capability and how to configure it.
 
 ## What It Does
 
@@ -16,14 +16,14 @@ At a high level:
 
 ## Default Behavior
 
-In `config/default.yaml`, research is enabled, but live Firecrawl web scraping is disabled by default:
+In `config/default.yaml`, research is enabled with the OpenAI provider, while live Firecrawl web scraping remains disabled by default:
 
 - `research.enabled: true`
 - `research.permission_required: true`
 - `research.provider: openai`
 - `research.firecrawl.enabled: false`
 
-This means the orchestration path is active and testable, but external scraping is opt-in.
+This means OpenAI-backed research can run in production when enabled, and optional Firecrawl scraping is opt-in.
 
 ## Configuration Reference
 
@@ -32,9 +32,9 @@ All keys below are under the top-level `research:` block.
 ### Core toggles
 
 - `enabled` — Global research on/off switch.
-- `provider` — Active provider (`openai` currently scaffolded).
+- `provider` — Active provider (`openai` by default).
 - `packet_schema` — Expected response schema (default `research_packet_v1`).
-- `permission_required` — If `true`, Theo asks before dispatching research.
+- `permission_required` — If `true`, Theo asks before dispatching research; if `false`, research runs without that confirmation gate.
 
 ### Realtime dedupe/debug
 
