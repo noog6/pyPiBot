@@ -84,6 +84,18 @@ journalctl -u pyPiBot.service -f
 journalctl -t pyPiBot-git-sync --since today
 ```
 
+## Application run logs
+
+In addition to systemd-managed stdout/stderr logs, the application creates per-run log files under:
+
+- `log/<run_id>/run_<run_id>.log`
+
+Example:
+
+- `log/20260212T144327Z/run_20260212T144327Z.log`
+
+This allows operators to inspect an individual run in isolation, while still keeping aggregated service-level logs.
+
 ## Log rotation
 
 A logrotate template is provided at `ops/logrotate/pypibot` to rotate:
@@ -98,6 +110,31 @@ Install it on the target host with:
 sudo cp ops/logrotate/pypibot /etc/logrotate.d/pypibot
 sudo logrotate -f /etc/logrotate.d/pypibot
 ```
+
+## Log types: systemd vs app-managed
+
+- **Systemd stdout/stderr logs** (`pyPiBot.log`, `pyPiBot-error.log`) capture process-level output configured by `StandardOutput`/`StandardError` in the unit file.
+- **App-managed per-run logs** (`log/<run_id>/run_<run_id>.log`) are created by the application to preserve run-scoped execution details.
+
+Use systemd logs for service health and lifecycle troubleshooting; use per-run logs for investigating behavior within a specific run.
+
+Per-run logs are intentionally managed directly by Theo and are not included in `ops/logrotate/pypibot`.
+
+## Operator verification checklist
+
+After deploying the updated logrotate config:
+
+1. Verify per-run logs are discoverable:
+   ```bash
+   find log -name 'run_*.log'
+   ```
+   Expect one or more matched files when runs have executed.
+
+2. Dry-run logrotate and verify systemd-level logs are included:
+   ```bash
+   sudo logrotate -d /etc/logrotate.d/pypibot
+   ```
+   Expect debug output showing consideration/rotation checks for `pyPiBot.log`, `pyPiBot-error.log`, and `git-sync.log` only (not `run_*.log`).
 
 ## Customization
 
