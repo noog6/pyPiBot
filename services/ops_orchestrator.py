@@ -6,6 +6,7 @@ from dataclasses import replace
 import random
 import threading
 import time
+from typing import Callable
 
 from config import ConfigController
 from core.logging import logger as LOGGER
@@ -71,6 +72,10 @@ class OpsOrchestrator:
         self._micro_presence_health_allowed = {HealthStatus.OK, HealthStatus.DEGRADED}
         self._micro_presence_next_ts = time.monotonic()
         self._forced_shutdown_continuation = False
+        self._loop_phase = "idle"
+        self._tick_started_at: float | None = None
+        self._active_probe_name: str | None = None
+        self._probe_started_monotonic: float | None = None
         OpsOrchestrator._instance = self
 
     @classmethod
@@ -105,13 +110,27 @@ class OpsOrchestrator:
             first_wait_elapsed = time.monotonic() - first_wait_started
             if self._loop_thread.is_alive():
                 thread = self._loop_thread
+                with self._lock:
+                    last_probe = self._active_probe_name
+                    probe_started_monotonic = self._probe_started_monotonic
+                    tick_started_at = self._tick_started_at
+                    loop_phase = self._loop_phase
+                probe_elapsed_s = (
+                    max(time.monotonic() - probe_started_monotonic, 0.0)
+                    if probe_started_monotonic is not None
+                    else None
+                )
                 LOGGER.warning(
-                    "[Ops] Loop thread join timed out (thread=%s ident=%s elapsed=%.3fs timeout=%.3fs stop_event_set=%s).",
+                    "[Ops] Loop thread join timed out (thread=%s ident=%s elapsed=%.3fs timeout=%.3fs stop_event_set=%s phase=%s last_probe=%s probe_elapsed_s=%s tick_started_at=%s).",
                     thread.name,
                     thread.ident,
                     first_wait_elapsed,
                     timeout_s,
                     self._stop_event.is_set(),
+                    loop_phase,
+                    last_probe,
+                    f"{probe_elapsed_s:.3f}" if probe_elapsed_s is not None else "n/a",
+                    f"{tick_started_at:.3f}" if tick_started_at is not None else "n/a",
                 )
 
                 if grace_period_s > 0.0:
@@ -164,12 +183,22 @@ class OpsOrchestrator:
 
     def _loop(self) -> None:
         while not self._stop_event.is_set():
+            tick_started_at = time.time()
+            with self._lock:
+                self._loop_phase = "tick"
+                self._tick_started_at = tick_started_at
             try:
                 self._tick()
             except Exception as exc:
                 LOGGER.exception("[Ops] Error in tick loop (retrying): %s", exc)
                 with self._lock:
                     self._counters.errors += 1
+            finally:
+                with self._lock:
+                    self._loop_phase = "idle"
+                    self._tick_started_at = None
+                    self._active_probe_name = None
+                    self._probe_started_monotonic = None
             self._stop_event.wait(timeout=self._loop_period_s)
 
     def _tick(self) -> None:
@@ -293,15 +322,33 @@ class OpsOrchestrator:
             network_timeout = self._network_probe_timeout_s
 
         results = [
-            probe_audio(realtime_api),
-            probe_battery(),
-            probe_motion(),
-            probe_realtime_session(realtime_api),
+            self._execute_probe("audio", lambda: probe_audio(realtime_api)),
+            self._execute_probe("battery", probe_battery),
+            self._execute_probe("motion", probe_motion),
+            self._execute_probe("realtime_session", lambda: probe_realtime_session(realtime_api)),
         ]
         if network_enabled:
-            results.append(probe_network(network_host, network_timeout))
+            results.append(
+                self._execute_probe(
+                    "network",
+                    lambda: probe_network(network_host, network_timeout),
+                )
+            )
         self._last_probe_results = list(results)
         return results
+
+    def _execute_probe(self, probe_name: str, probe_fn: Callable[[], HealthProbeResult]) -> HealthProbeResult:
+        started_monotonic = time.monotonic()
+        with self._lock:
+            self._loop_phase = f"probe:{probe_name}"
+            self._active_probe_name = probe_name
+            self._probe_started_monotonic = started_monotonic
+        try:
+            return probe_fn()
+        finally:
+            with self._lock:
+                self._loop_phase = "tick"
+                self._probe_started_monotonic = None
 
     def _apply_health_results(
         self,
