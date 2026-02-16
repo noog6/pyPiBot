@@ -626,6 +626,38 @@ def test_handle_function_call_transitions_to_act_when_execution_approved() -> No
     assert transitions == [(OrchestrationPhase.ACT, "function_call perform_research")]
 
 
+def test_handle_function_call_duplicate_logs_skip_without_execution(caplog) -> None:
+    api = _make_api_stub()
+    api._pending_action = None
+    api.function_call = {"name": "perform_research", "call_id": "call_duplicate"}
+    api.function_call_args = '{"query":"status"}'
+    api._is_duplicate_tool_call = lambda *args, **kwargs: True
+    api._is_suppressed_after_confirmation_timeout = lambda *args, **kwargs: False
+
+    executed: list[str] = []
+
+    async def _execute_action(*args, **kwargs):
+        executed.append("done")
+
+    api._execute_action = _execute_action
+
+    sent_payloads: list[dict[str, object]] = []
+
+    class _SendWs:
+        async def send(self, payload: str) -> None:
+            sent_payloads.append(json.loads(payload))
+
+    caplog.set_level(logging.INFO)
+    asyncio.run(api.handle_function_call({}, _SendWs()))
+
+    assert len(sent_payloads) == 1
+    output_payload = json.loads(sent_payloads[0]["item"]["output"])
+    assert output_payload["status"] == "redundant"
+    assert executed == []
+    assert "Function call outcome: skipped duplicate" in caplog.text
+    assert "Function call outcome: executing tool" not in caplog.text
+
+
 def test_handle_function_call_suppresses_immediate_recall_after_confirmation_timeout() -> None:
     api = _make_api_stub()
     api._pending_action = None

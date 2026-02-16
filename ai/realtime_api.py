@@ -2367,18 +2367,14 @@ class RealtimeAPI:
         if self.function_call:
             function_name = self.function_call.get("name")
             call_id = self.function_call.get("call_id")
-            logger.info(
-                "Function call: %s with args: %s",
-                function_name,
-                self.function_call_args,
-            )
+            logger.info("Function call received")
             try:
                 args = json.loads(self.function_call_args) if self.function_call_args else {}
             except json.JSONDecodeError:
                 args = {}
             if self._pending_action:
                 logger.info(
-                    "Suppressing tool call while awaiting confirmation: incoming=%s pending=%s",
+                    "Function call outcome: suppressed pending confirmation | incoming=%s pending=%s",
                     function_name,
                     self._pending_action.action.tool_name,
                 )
@@ -2388,7 +2384,7 @@ class RealtimeAPI:
                 return
             if self._is_duplicate_tool_call(function_name, args):
                 logger.info(
-                    "Skipping duplicate tool call within TTL: tool=%s call_id=%s",
+                    "Function call outcome: skipped duplicate | tool=%s call_id=%s",
                     function_name,
                     call_id,
                 )
@@ -2414,7 +2410,7 @@ class RealtimeAPI:
                 return
             if self._is_suppressed_after_confirmation_timeout(function_name, args):
                 logger.info(
-                    "Suppressing tool call after confirmation timeout debounce: tool=%s call_id=%s",
+                    "Function call outcome: suppressed confirmation-timeout debounce | tool=%s call_id=%s",
                     function_name,
                     call_id,
                 )
@@ -2470,6 +2466,11 @@ class RealtimeAPI:
             decision = self._governance.review(action)
             log_info(f"🛡️ Governance decision: {decision.status} ({decision.reason}) {action.summary()}")
             if decision.approved:
+                logger.info(
+                    "Function call outcome: executing tool | tool=%s call_id=%s",
+                    function_name,
+                    call_id,
+                )
                 self.orchestration_state.transition(
                     OrchestrationPhase.ACT,
                     reason=f"function_call {function_name}",
