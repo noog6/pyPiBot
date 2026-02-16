@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 from collections import deque
+from unittest.mock import patch
 
 from ai.orchestration import OrchestrationPhase
 from ai.realtime_api import RealtimeAPI
@@ -348,6 +349,90 @@ def _build_pending_action(*, expiry_ts=None):
         original_intent="test",
         created_at=0.0,
     )
+
+
+def test_handle_event_speech_started_stays_in_awaiting_confirmation() -> None:
+    api = _make_api_stub()
+    transitions: list[tuple[object, str | None]] = []
+
+    api.orchestration_state = type(
+        "S",
+        (),
+        {
+            "phase": OrchestrationPhase.AWAITING_CONFIRMATION,
+            "transition": lambda *args, **kwargs: transitions.append((args[1], kwargs.get("reason"))),
+        },
+    )()
+    state_updates: list[tuple[InteractionState, str]] = []
+    api.state_manager = type(
+        "State",
+        (),
+        {
+            "state": InteractionState.IDLE,
+            "update_state": lambda *args: state_updates.append((args[1], args[2])),
+        },
+    )()
+    api._pending_action = _build_pending_action()
+    api._utterance_counter = 0
+    api._active_utterance = None
+    api._debug_vad = False
+
+    with patch("ai.realtime_api.logger.info") as mock_info:
+        asyncio.run(api.handle_event({"type": "input_audio_buffer.speech_started"}, api.websocket))
+
+    assert transitions == []
+    assert state_updates == [(InteractionState.LISTENING, "speech started")]
+    assert any(
+        "confirmation mode remains active" in str(call.args[0])
+        for call in mock_info.call_args_list
+        if call.args
+    )
+
+
+def test_pending_confirmation_still_accepts_after_speech_started() -> None:
+    api = _make_api_stub()
+    transitions: list[tuple[object, str | None]] = []
+
+    api.orchestration_state = type(
+        "S",
+        (),
+        {
+            "phase": OrchestrationPhase.AWAITING_CONFIRMATION,
+            "transition": lambda *args, **kwargs: transitions.append((args[1], kwargs.get("reason"))),
+        },
+    )()
+    api.state_manager = type(
+        "State",
+        (),
+        {
+            "state": InteractionState.IDLE,
+            "update_state": lambda *args, **kwargs: None,
+        },
+    )()
+    api._pending_action = _build_pending_action()
+    api._awaiting_confirmation_completion = False
+    api._presented_actions = set()
+    api._handle_stop_word = lambda *args, **kwargs: asyncio.sleep(0, result=False)
+    api._tool_execution_cooldown_remaining = lambda: 0.0
+    api._stage_action = lambda action: {"valid": True}
+    api._utterance_counter = 0
+    api._active_utterance = None
+    api._debug_vad = False
+
+    executed: list[str] = []
+
+    async def _execute_action(*args, **kwargs):
+        executed.append("done")
+
+    api._execute_action = _execute_action
+
+    asyncio.run(api.handle_event({"type": "input_audio_buffer.speech_started"}, api.websocket))
+    consumed = asyncio.run(api._maybe_handle_approval_response("yes", api.websocket))
+
+    assert consumed is True
+    assert executed == ["done"]
+    assert api._pending_action is None
+    assert transitions == []
 
 
 def test_maybe_handle_approval_response_accept_transitions_after_execution() -> None:
