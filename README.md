@@ -95,7 +95,8 @@ See [docs/web-research.md](docs/web-research.md) for configuration, behavior, an
 
 See [docs/systemd-setup.md](docs/systemd-setup.md) and the template unit in
 [systemd/pyPiBot.service](systemd/pyPiBot.service) for Raspberry Pi deployment
-instructions.
+instructions, including best-effort pre-start git sync logging and the
+logrotate template at `ops/logrotate/pypibot`.
 
 ## Diagnostics & Tests
 

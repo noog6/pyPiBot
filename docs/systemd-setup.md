@@ -69,6 +69,36 @@ If you prefer manual commands:
   sudo service pyPiBot restart
   ```
 
+## Git sync logging
+
+Service startup uses a best-effort git sync wrapper (`scripts/systemd-git-sync.sh`) before launching the app.
+
+- If `fetch/switch/pull` succeed, the service starts normally.
+- If one or more sync steps fail, failures are logged, `overall_status=warning` is recorded, and the service still starts (non-fatal pre-start behavior).
+
+Useful troubleshooting commands:
+
+```bash
+tail -f /home/pi/workarea/pyPiBot/log/git-sync.log
+journalctl -u pyPiBot.service -f
+journalctl -t pyPiBot-git-sync --since today
+```
+
+## Log rotation
+
+A logrotate template is provided at `ops/logrotate/pypibot` to rotate:
+
+- `/home/pi/workarea/pyPiBot/log/pyPiBot.log`
+- `/home/pi/workarea/pyPiBot/log/pyPiBot-error.log`
+- `/home/pi/workarea/pyPiBot/log/git-sync.log`
+
+Install it on the target host with:
+
+```bash
+sudo cp ops/logrotate/pypibot /etc/logrotate.d/pypibot
+sudo logrotate -f /etc/logrotate.d/pypibot
+```
+
 ## Customization
 
 Update the following fields in `systemd/pyPiBot.service` as needed:
