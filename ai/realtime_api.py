@@ -304,6 +304,10 @@ class RealtimeAPI:
         self._pending_action: PendingAction | None = None
         self._awaiting_confirmation_completion = False
         self._approval_timeout_s = float(config.get("approval_timeout_s", 30.0))
+        self._confirmation_timeout_debounce_window_s = float(
+            config.get("confirmation_timeout_debounce_window_s", 5.0)
+        )
+        self._confirmation_timeout_markers: dict[str, float] = {}
         self._tool_definitions = {tool["name"]: tool for tool in tools}
         self._storage = StorageController.get_instance()
         self._presented_actions: set[str] = set()
@@ -1263,6 +1267,27 @@ class RealtimeAPI:
         payload = json.dumps({"tool": tool_name, "args": args}, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
+    def _record_confirmation_timeout(self, action: ActionPacket) -> None:
+        fingerprint = self._build_tool_call_fingerprint(action.tool_name, action.tool_args)
+        self._confirmation_timeout_markers[fingerprint] = time.monotonic()
+
+    def _is_suppressed_after_confirmation_timeout(
+        self, tool_name: str, args: dict[str, Any]
+    ) -> bool:
+        now = time.monotonic()
+        expired = [
+            marker
+            for marker, ts in self._confirmation_timeout_markers.items()
+            if now - ts > self._confirmation_timeout_debounce_window_s
+        ]
+        for marker in expired:
+            self._confirmation_timeout_markers.pop(marker, None)
+        fingerprint = self._build_tool_call_fingerprint(tool_name, args)
+        ts = self._confirmation_timeout_markers.get(fingerprint)
+        if ts is None:
+            return False
+        return now - ts <= self._confirmation_timeout_debounce_window_s
+
     def _is_duplicate_tool_call(self, tool_name: str, args: dict[str, Any]) -> bool:
         if not self._last_executed_tool_call:
             return False
@@ -1618,6 +1643,7 @@ class RealtimeAPI:
         action = pending.action
         if action.expiry_ts is not None and now > action.expiry_ts:
             logger.info("CONFIRMATION_TIMEOUT tool=%s", action.tool_name)
+            self._record_confirmation_timeout(action)
             await self.send_assistant_message(
                 "Approval window expired. Please ask again if you still want this.",
                 websocket,
@@ -1675,6 +1701,7 @@ class RealtimeAPI:
         pending.retry_count += 1
         if pending.retry_count > pending.max_retries:
             logger.info("CONFIRMATION_TIMEOUT tool=%s", action.tool_name)
+            self._record_confirmation_timeout(action)
             await self.send_assistant_message(
                 "I couldn't confirm this action. Please ask again if you still want it.",
                 websocket,
@@ -2369,6 +2396,32 @@ class RealtimeAPI:
                             {
                                 "status": "redundant",
                                 "message": "Duplicate tool call ignored; use previous tool results.",
+                                "tool": function_name,
+                            }
+                        ),
+                    },
+                }
+                log_ws_event("Outgoing", function_call_output)
+                self._track_outgoing_event(function_call_output)
+                await websocket.send(json.dumps(function_call_output))
+                self.function_call = None
+                self.function_call_args = ""
+                return
+            if self._is_suppressed_after_confirmation_timeout(function_name, args):
+                logger.info(
+                    "Suppressing tool call after confirmation timeout debounce: tool=%s call_id=%s",
+                    function_name,
+                    call_id,
+                )
+                function_call_output = {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": json.dumps(
+                            {
+                                "status": "suppressed_after_confirmation_timeout",
+                                "message": "Tool call suppressed after confirmation timeout; retry shortly.",
                                 "tool": function_name,
                             }
                         ),
