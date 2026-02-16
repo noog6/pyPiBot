@@ -20,6 +20,12 @@ Description=Theo Generative AI Robot Assistant
 After=network.target sound.target
 
 [Service]
+# Startup policy: best-effort sync. Theo should still boot even if git sync fails,
+# so each ExecStartPre command is prefixed with '-' to ignore non-zero exit codes.
+ExecStartPre=-/usr/bin/git -C /home/pi/workarea/pyPiBot fetch --prune origin
+ExecStartPre=-/usr/bin/git -C /home/pi/workarea/pyPiBot switch main
+ExecStartPre=-/usr/bin/git -C /home/pi/workarea/pyPiBot pull --ff-only
+TimeoutStartSec=60s
 ExecStart=/home/pi/workarea/pyPiBot/.venv/bin/python /home/pi/workarea/pyPiBot/main.py \
   --prompts "Say Hello World! or whatever fun salutation you prefer"
 ExecStop=/bin/kill -SIGTERM $MAINPID
