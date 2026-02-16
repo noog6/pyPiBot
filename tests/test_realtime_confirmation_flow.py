@@ -304,6 +304,38 @@ def test_drain_response_create_queue_drops_stale_tool_output_entry() -> None:
     assert len(api._response_create_queue) == 0
 
 
+def test_drain_response_create_queue_drops_stale_assistant_message_after_confirmation() -> None:
+    api = _make_api_stub()
+    api._response_done_serial = 9
+    api._pending_action = None
+    api.orchestration_state = type("S", (), {"phase": OrchestrationPhase.IDLE})()
+    api._response_create_queue.append(
+        {
+            "websocket": api.websocket,
+            "event": {
+                "type": "response.create",
+                "response": {"metadata": {"origin": "assistant_message", "approval_flow": "true"}},
+            },
+            "origin": "assistant_message",
+            "record_ai_call": False,
+            "debug_context": None,
+            "enqueued_done_serial": 7,
+        }
+    )
+    sent: list[str] = []
+
+    async def _send_response_create(*args, **kwargs):
+        sent.append("sent")
+        return True
+
+    api._send_response_create = _send_response_create
+
+    asyncio.run(api._drain_response_create_queue())
+
+    assert sent == []
+    assert len(api._response_create_queue) == 0
+
+
 def test_handle_response_done_keeps_listening_state_without_idle_transition() -> None:
     api = _make_api_stub()
     transitions: list[tuple[InteractionState, str]] = []
