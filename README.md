@@ -61,6 +61,7 @@ python main.py --prompts "Say Hello World!"
 The runtime will:
 - Load configuration from `config/default.yaml`.
 - Initialize the storage layer and log run metadata.
+- Write per-run logs using incrementing numeric run IDs (for example `log/314/run_314.log`, with the current value tracked in `var/current_run`).
 - Attempt to start audio input/output (gracefully degrades if unavailable).
 - Start the motion controller and camera vision loop when hardware is present.
 
