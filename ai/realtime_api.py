@@ -2313,10 +2313,15 @@ class RealtimeAPI:
                 "suppressed": False,
             }
             self._log_utterance_envelope(event_type)
-            self.orchestration_state.transition(
-                OrchestrationPhase.SENSE,
-                reason="speech started",
-            )
+            if self._pending_action is not None or self._is_awaiting_confirmation_phase():
+                logger.info(
+                    "Speech started while awaiting confirmation; confirmation mode remains active."
+                )
+            else:
+                self.orchestration_state.transition(
+                    OrchestrationPhase.SENSE,
+                    reason="speech started",
+                )
             self.state_manager.update_state(InteractionState.LISTENING, "speech started")
         elif event_type == "input_audio_buffer.speech_stopped":
             if self._active_utterance is not None:
