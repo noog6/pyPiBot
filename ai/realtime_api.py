@@ -355,6 +355,7 @@ class RealtimeAPI:
             research_cfg.get("debug_response_create_trace", False)
         )
         self._last_response_create_ts: float | None = None
+        self._response_done_serial = 0
         self._active_response_id: str | None = None
         self._last_executed_tool_call: dict[str, Any] | None = None
 
@@ -1208,6 +1209,7 @@ class RealtimeAPI:
                     "origin": origin,
                     "record_ai_call": record_ai_call,
                     "debug_context": debug_context,
+                    "enqueued_done_serial": self._response_done_serial,
                 }
             )
             return False
@@ -1226,6 +1228,12 @@ class RealtimeAPI:
         queue_len = len(self._response_create_queue)
         for _ in range(queue_len):
             queued = self._response_create_queue.popleft()
+            if self._is_stale_queued_response_create(queued):
+                logger.info(
+                    "Dropping stale queued response.create origin=%s after newer responses completed.",
+                    queued.get("origin"),
+                )
+                continue
             response_metadata = self._extract_response_create_metadata(queued.get("event") or {})
             queued_trigger = self._extract_response_create_trigger(response_metadata)
             if not self._can_release_queued_response_create(queued_trigger, response_metadata):
@@ -1244,6 +1252,17 @@ class RealtimeAPI:
                 debug_context=queued.get("debug_context"),
             )
             return
+
+    def _is_stale_queued_response_create(self, queued: dict[str, Any]) -> bool:
+        origin = str(queued.get("origin") or "").strip().lower()
+        if origin != "tool_output":
+            return False
+        enqueued_serial = queued.get("enqueued_done_serial")
+        if not isinstance(enqueued_serial, int):
+            return False
+        # If two or more responses have already completed since this tool follow-up
+        # was queued, it is stale and tends to replay old tool answers.
+        return (self._response_done_serial - enqueued_serial) >= 2
 
     def _extract_response_create_metadata(self, response_create_event: dict[str, Any]) -> dict[str, Any]:
         response_payload = response_create_event.get("response") if isinstance(response_create_event, dict) else None
@@ -2632,6 +2651,7 @@ class RealtimeAPI:
                 await self._flush_pending_image_stimulus("audio response done")
 
     async def handle_response_done(self, event: dict[str, Any] | None = None) -> None:
+        self._response_done_serial += 1
         self.response_in_progress = False
         self._response_in_flight = False
         self._active_response_id = None
