@@ -1668,6 +1668,14 @@ class RealtimeAPI:
     ) -> bool:
         if not self._pending_action:
             return False
+        if (
+            self._pending_research_request is not None
+            and self._pending_action.action.tool_name == "perform_research"
+        ):
+            logger.info(
+                "[Research] Skipping governance confirmation handling because research intent permission is pending"
+            )
+            return False
         if await self._handle_stop_word(text, websocket, source="approval_response"):
             return True
         cooldown_remaining = self._tool_execution_cooldown_remaining()
@@ -1799,6 +1807,19 @@ class RealtimeAPI:
         if not has_research_intent(text):
             return False
 
+        if self._pending_research_request is not None:
+            logger.info("[Research] Duplicate intent ignored while permission prompt is pending")
+            return True
+
+        if (
+            self._pending_action is not None
+            and self._pending_action.action.tool_name == "perform_research"
+        ):
+            logger.info(
+                "[Research] Duplicate intent ignored while governance confirmation is already pending"
+            )
+            return True
+
         if source == "input_audio_transcription":
             preview = self._clip_text(" ".join(text.split()), limit=80)
             logger.info(
@@ -1811,6 +1832,7 @@ class RealtimeAPI:
         logger.info("[Research] Requested from %s", source)
 
         if self._research_permission_required:
+            logger.info("[Research] research_confirmation_mode=intent_permission")
             self._pending_research_request = request
             logger.info("[Research] Permission asked")
             await self.send_assistant_message(
@@ -1819,6 +1841,7 @@ class RealtimeAPI:
             )
             return True
 
+        logger.info("[Research] research_confirmation_mode=governance")
         await self._dispatch_research_request(request, websocket)
         return True
 
