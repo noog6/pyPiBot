@@ -33,6 +33,7 @@ def _make_api_stub() -> RealtimeAPI:
     api._audio_playback_busy = False
     api._last_response_create_ts = None
     api._response_create_debug_trace = False
+    api._response_done_serial = 0
     return api
 
 
@@ -233,6 +234,33 @@ def test_drain_response_create_queue_waits_for_audio_playback_complete() -> None
 
     assert sent == []
     assert len(api._response_create_queue) == 1
+
+
+def test_drain_response_create_queue_drops_stale_tool_output_entry() -> None:
+    api = _make_api_stub()
+    api._response_done_serial = 7
+    api._response_create_queue.append(
+        {
+            "websocket": api.websocket,
+            "event": {"type": "response.create"},
+            "origin": "tool_output",
+            "record_ai_call": False,
+            "debug_context": None,
+            "enqueued_done_serial": 5,
+        }
+    )
+    sent: list[str] = []
+
+    async def _send_response_create(*args, **kwargs):
+        sent.append("sent")
+        return True
+
+    api._send_response_create = _send_response_create
+
+    asyncio.run(api._drain_response_create_queue())
+
+    assert sent == []
+    assert len(api._response_create_queue) == 0
 
 
 def test_request_tool_confirmation_sends_single_spoken_prompt() -> None:
