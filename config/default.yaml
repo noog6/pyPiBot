@@ -223,8 +223,8 @@ governance:
       cost_hint: "cheap"
       safety_tags: ["audio"]
     remember_memory:
-      tier: 2
-      reversible: false
+      tier: 1
+      reversible: true
       cost_hint: "med"
       safety_tags: ["storage"]
     recall_memories:
