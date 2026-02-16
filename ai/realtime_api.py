@@ -138,6 +138,12 @@ def _resolve_websocket_exceptions(websockets: Any) -> tuple[type[BaseException],
     return connection_closed, connection_closed_error
 
 
+def _format_rate_limit_field(value: Any, *, none_token: str = "n/a") -> str:
+    if value is None:
+        return none_token
+    return str(value)
+
+
 def log_runtime(function_or_name: str, duration: float) -> None:
     jsonl_file = RUN_TIME_TABLE_LOG_JSON
     os.makedirs(os.path.dirname(jsonl_file), exist_ok=True)
@@ -232,6 +238,7 @@ class RealtimeAPI:
         # Tracks whether to start mic receiving on the first audio delta for the current response.
         self._mic_receive_on_first_audio = False
         self.rate_limits: dict[str, Any] | None = None
+        self._warned_missing_rate_limit_buckets: set[str] = set()
         self.response_start_time: float | None = None
         self.websocket = None
         self.profile_manager = ProfileManager.get_instance()
@@ -2337,19 +2344,36 @@ class RealtimeAPI:
             self._refresh_utterance_audio_levels()
             self._log_utterance_envelope(event_type)
         elif event_type == "rate_limits.updated":
-            rl = {r["name"]: r for r in event.get("rate_limits", [])}
+            rl = {
+                str(bucket.get("name")): bucket
+                for bucket in event.get("rate_limits", [])
+                if isinstance(bucket, dict) and bucket.get("name")
+            }
             self.rate_limits = rl
+
+            warned_missing_buckets = getattr(self, "_warned_missing_rate_limit_buckets", set())
+            missing_buckets = [name for name in ("requests", "tokens") if name not in rl]
+            unseen_missing_buckets = [
+                name for name in missing_buckets if name not in warned_missing_buckets
+            ]
+            if unseen_missing_buckets:
+                logger.warning(
+                    "Realtime API rate_limits.updated missing expected bucket(s): %s",
+                    ", ".join(unseen_missing_buckets),
+                )
+                warned_missing_buckets.update(unseen_missing_buckets)
+                self._warned_missing_rate_limit_buckets = warned_missing_buckets
 
             req = rl.get("requests", {})
             tok = rl.get("tokens", {})
             logger.info(
                 "Rate limits: requests %s/%s reset=%ss | tokens %s/%s reset=%ss",
-                req.get("remaining"),
-                req.get("limit"),
-                req.get("reset_seconds"),
-                tok.get("remaining"),
-                tok.get("limit"),
-                tok.get("reset_seconds"),
+                _format_rate_limit_field(req.get("remaining")),
+                _format_rate_limit_field(req.get("limit")),
+                _format_rate_limit_field(req.get("reset_seconds")),
+                _format_rate_limit_field(tok.get("remaining")),
+                _format_rate_limit_field(tok.get("limit")),
+                _format_rate_limit_field(tok.get("reset_seconds")),
             )
         elif event_type == "session.updated":
             log_session_updated(event, full_payload=True)
