@@ -35,6 +35,7 @@ class OpsOrchestrator:
     """Singleton orchestrator with a heartbeat tick loop."""
 
     _instance: "OpsOrchestrator | None" = None
+    _MAX_HEALTH_SUMMARY_CHARS = 220
 
     def __init__(self) -> None:
         if OpsOrchestrator._instance is not None:
@@ -331,12 +332,40 @@ class OpsOrchestrator:
     ) -> str:
         if status == HealthStatus.OK:
             return "All systems nominal"
-        impacted = [result.name for result in results if result.status != HealthStatus.OK]
+        impacted = [result for result in results if result.status != HealthStatus.OK]
         if not impacted:
             return "System health pending"
+        impacted_text = "; ".join(
+            f"{result.name} ({self._concise_reason(result.summary)})" for result in impacted
+        )
         if status == HealthStatus.FAILING:
-            return f"Critical issues: {', '.join(impacted)}"
-        return f"Degraded: {', '.join(impacted)}"
+            return self._truncate_summary(f"Critical issues: {impacted_text}")
+        return self._truncate_summary(f"Degraded: {impacted_text}")
+
+    def _concise_reason(self, summary: str) -> str:
+        normalized = " ".join(summary.strip().split())
+        if not normalized:
+            return "unknown"
+        lowered = normalized.lower()
+        if "warm" in lowered:
+            return "warming up"
+        if "not initialized" in lowered:
+            return "not initialized"
+        if "offline" in lowered:
+            return "offline"
+        if "disconnected" in lowered:
+            return "disconnected"
+        if "unavailable" in lowered:
+            return "unavailable"
+        if "inactive" in lowered:
+            return "inactive"
+        return normalized
+
+    def _truncate_summary(self, summary: str) -> str:
+        max_chars = self._MAX_HEALTH_SUMMARY_CHARS
+        if len(summary) <= max_chars:
+            return summary
+        return f"{summary[: max_chars - 3].rstrip()}..."
 
     def _emit_health_snapshot(self, snapshot: HealthSnapshot) -> None:
         event = OpsEvent(
