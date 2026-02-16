@@ -2396,11 +2396,18 @@ class RealtimeAPI:
         if self.function_call:
             function_name = self.function_call.get("name")
             call_id = self.function_call.get("call_id")
-            logger.info("Function call received")
             try:
                 args = json.loads(self.function_call_args) if self.function_call_args else {}
+                args_parsed = True
             except json.JSONDecodeError:
                 args = {}
+                args_parsed = False
+            logger.info(
+                "Function call received | tool=%s call_id=%s args_parsed=%s",
+                function_name,
+                call_id,
+                args_parsed,
+            )
             if self._pending_action:
                 logger.info(
                     "Function call outcome: suppressed pending confirmation | incoming=%s pending=%s",
