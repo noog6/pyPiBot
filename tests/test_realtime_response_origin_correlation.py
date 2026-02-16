@@ -134,4 +134,31 @@ def test_rate_limits_updated_normalizes_missing_requests_bucket(monkeypatch) -> 
     assert warning_logs == [
         "Realtime API rate_limits.updated missing expected bucket(s): requests"
     ]
-    assert info_logs[-1] == "Rate limits: requests n/a/n/a reset=n/as | tokens 995/1000 reset=n/as"
+    assert info_logs[-1] == "Rate limits: requests n/a/n/a reset=n/a | tokens 995/1000 reset=n/a"
+
+
+def test_rate_limits_updated_missing_requests_does_not_suffix_na_reset(monkeypatch) -> None:
+    api = _build_api()
+    info_logs: list[str] = []
+
+    monkeypatch.setattr(
+        "ai.realtime_api.logger.info",
+        lambda message, *args: info_logs.append(message % args),
+    )
+
+    event = {
+        "type": "rate_limits.updated",
+        "rate_limits": [
+            {
+                "name": "tokens",
+                "remaining": 995,
+                "limit": 1000,
+                "reset_seconds": None,
+            }
+        ],
+    }
+
+    asyncio.run(api.handle_event(event, websocket=None))
+
+    assert "reset=n/a" in info_logs[-1]
+    assert "n/as" not in info_logs[-1]

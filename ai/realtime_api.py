@@ -144,6 +144,13 @@ def _format_rate_limit_field(value: Any, *, none_token: str = "n/a") -> str:
     return str(value)
 
 
+def _format_rate_limit_duration(value: Any, *, none_token: str = "n/a") -> str:
+    formatted = _format_rate_limit_field(value, none_token=none_token)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return f"{formatted}s"
+    return formatted
+
+
 def log_runtime(function_or_name: str, duration: float) -> None:
     jsonl_file = RUN_TIME_TABLE_LOG_JSON
     os.makedirs(os.path.dirname(jsonl_file), exist_ok=True)
@@ -2372,13 +2379,13 @@ class RealtimeAPI:
             req = rl.get("requests", {})
             tok = rl.get("tokens", {})
             logger.info(
-                "Rate limits: requests %s/%s reset=%ss | tokens %s/%s reset=%ss",
+                "Rate limits: requests %s/%s reset=%s | tokens %s/%s reset=%s",
                 _format_rate_limit_field(req.get("remaining")),
                 _format_rate_limit_field(req.get("limit")),
-                _format_rate_limit_field(req.get("reset_seconds")),
+                _format_rate_limit_duration(req.get("reset_seconds")),
                 _format_rate_limit_field(tok.get("remaining")),
                 _format_rate_limit_field(tok.get("limit")),
-                _format_rate_limit_field(tok.get("reset_seconds")),
+                _format_rate_limit_duration(tok.get("reset_seconds")),
             )
         elif event_type == "session.updated":
             log_session_updated(event, full_payload=True)
