@@ -79,17 +79,17 @@ Default keys include:
 - `governance` settings (autonomy level, autonomy windows, budgets, and tool tier specs)
 - `research` settings for web-lookup behavior, user permission gating, provider wiring, budget limits, and cache controls
 
-### Web Research Capability (Scaffold)
+### Web Research Capability
 
-The runtime now includes a research subsystem scaffold that can:
+The runtime includes a web-research subsystem that:
 
-- detect explicit web-research intent in user text,
-- optionally ask for user permission before any web lookup,
-- execute the `perform_research` tool,
-- return a structured `research_packet_v1` summary with extracted facts/sources, and
-- persist per-request research transcripts under the current run directory.
+- detects explicit web-research intent in user text,
+- runs the OpenAI-backed research path when research is enabled,
+- applies user confirmation gating when `research.permission_required` is enabled,
+- keeps Firecrawl scraping optional (`research.firecrawl.enabled`) and disabled by default, and
+- returns a structured `research_packet_v1` summary with extracted facts/sources while persisting per-request transcripts under the current run directory.
 
-See [docs/web-research.md](docs/web-research.md) for configuration, behavior, and operations notes.
+See [docs/web-research.md](docs/web-research.md) and [`config/default.yaml`](config/default.yaml) for configuration, defaults, behavior, and operations notes.
 
 ## Systemd Deployment
 
