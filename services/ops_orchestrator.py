@@ -110,11 +110,21 @@ class OpsOrchestrator:
             first_wait_elapsed = time.monotonic() - first_wait_started
             if self._loop_thread.is_alive():
                 thread = self._loop_thread
-                with self._lock:
-                    last_probe = self._active_probe_name
-                    probe_started_monotonic = self._probe_started_monotonic
-                    tick_started_at = self._tick_started_at
-                    loop_phase = self._loop_phase
+                try:
+                    with self._lock:
+                        last_probe = self._active_probe_name
+                        probe_started_monotonic = self._probe_started_monotonic
+                        tick_started_at = self._tick_started_at
+                        loop_phase = self._loop_phase
+                except BaseException as exc:  # pragma: no cover - signal-time safety net
+                    LOGGER.warning(
+                        "[Ops] Interrupted collecting shutdown metadata (thread=%s ident=%s): %s",
+                        thread.name,
+                        thread.ident,
+                        exc,
+                    )
+                    self._forced_shutdown_continuation = True
+                    return "timed_out"
                 probe_elapsed_s = (
                     max(time.monotonic() - probe_started_monotonic, 0.0)
                     if probe_started_monotonic is not None

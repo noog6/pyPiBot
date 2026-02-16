@@ -111,3 +111,36 @@ def test_main_logs_warning_when_ops_shutdown_not_stopped(monkeypatch) -> None:
         "Ops orchestrator shutdown incomplete "
         "(status=timed_out forced_shutdown_continuation=True)"
     ) in warnings
+
+
+class _FakeInterruptingOpsOrchestrator(_FakeOpsOrchestrator):
+    def stop_loop(self) -> str:
+        raise KeyboardInterrupt
+
+
+def test_main_handles_keyboard_interrupt_while_stopping_ops(monkeypatch) -> None:
+    warnings: list[str] = []
+
+    def capture_warning(message: str, *args) -> None:
+        warnings.append(message % args if args else message)
+
+    monkeypatch.setattr(main.ConfigController, "get_instance", lambda: _FakeConfigController())
+    monkeypatch.setattr(main.StorageController, "get_instance", lambda: _FakeStorageController())
+    monkeypatch.setattr(main.MemoryManager, "get_instance", lambda: _FakeMemoryManager())
+    monkeypatch.setattr(main, "RealtimeAPI", _FakeRealtimeAPI)
+    monkeypatch.setattr(main.MotionController, "get_instance", lambda: _FakeMotionController())
+    monkeypatch.setattr(main.CameraController, "get_instance", lambda: _FakeCameraController())
+    monkeypatch.setattr(main.ImuMonitor, "get_instance", lambda: _FakeMonitor())
+    monkeypatch.setattr(main.BatteryMonitor, "get_instance", lambda: _FakeMonitor())
+    monkeypatch.setattr(main.OpsOrchestrator, "get_instance", lambda: _FakeInterruptingOpsOrchestrator())
+    monkeypatch.setattr(main, "suppress_noisy_stderr", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr(main.logger, "warning", capture_warning)
+
+    exit_code = main.main([])
+
+    assert exit_code == 0
+    assert "Interrupted while stopping ops orchestrator; continuing shutdown." in warnings
+    assert (
+        "Ops orchestrator shutdown incomplete "
+        "(status=interrupted forced_shutdown_continuation=True)"
+    ) in warnings
