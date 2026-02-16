@@ -106,7 +106,7 @@ def test_response_created_from_pending_action_with_server_auto_keeps_awaiting_ph
     assert "response.created consumed by confirmation flow; origin=server_auto" in logs
 
 
-def test_rate_limits_updated_normalizes_missing_requests_bucket(monkeypatch) -> None:
+def test_rate_limits_updated_tokens_only_steady_payload_logs_info_only(monkeypatch) -> None:
     api = _build_api()
     info_logs: list[str] = []
     warning_logs: list[str] = []
@@ -135,9 +135,7 @@ def test_rate_limits_updated_normalizes_missing_requests_bucket(monkeypatch) -> 
     asyncio.run(api.handle_event(event, websocket=None))
     asyncio.run(api.handle_event(event, websocket=None))
 
-    assert warning_logs == [
-        "Realtime API rate_limits.updated missing expected bucket(s): requests"
-    ]
+    assert warning_logs == []
     assert info_logs[-1] == "Rate limits: requests n/a/n/a reset=n/a | tokens 995/1000 reset=n/a"
 
 
@@ -166,3 +164,54 @@ def test_rate_limits_updated_missing_requests_does_not_suffix_na_reset(monkeypat
 
     assert "reset=n/a" in info_logs[-1]
     assert "n/as" not in info_logs[-1]
+
+
+def test_rate_limits_updated_empty_payload_warns_once_for_stable_omission(monkeypatch) -> None:
+    api = _build_api()
+    warning_logs: list[str] = []
+
+    monkeypatch.setattr(
+        "ai.realtime_api.logger.warning",
+        lambda message, *args: warning_logs.append(message % args),
+    )
+
+    event = {"type": "rate_limits.updated", "rate_limits": []}
+
+    asyncio.run(api.handle_event(event, websocket=None))
+    asyncio.run(api.handle_event(event, websocket=None))
+
+    assert warning_logs == [
+        "Realtime API rate_limits.updated missing expected bucket(s): requests, tokens"
+    ]
+
+
+def test_rate_limits_updated_warns_when_bucket_disappears_mid_session(monkeypatch) -> None:
+    api = _build_api()
+    warning_logs: list[str] = []
+
+    monkeypatch.setattr(
+        "ai.realtime_api.logger.warning",
+        lambda message, *args: warning_logs.append(message % args),
+    )
+
+    baseline_event = {
+        "type": "rate_limits.updated",
+        "rate_limits": [
+            {"name": "requests", "remaining": 99, "limit": 100, "reset_seconds": 1},
+            {"name": "tokens", "remaining": 995, "limit": 1000, "reset_seconds": 1},
+        ],
+    }
+    tokens_only_event = {
+        "type": "rate_limits.updated",
+        "rate_limits": [
+            {"name": "tokens", "remaining": 990, "limit": 1000, "reset_seconds": 1}
+        ],
+    }
+
+    asyncio.run(api.handle_event(baseline_event, websocket=None))
+    asyncio.run(api.handle_event(tokens_only_event, websocket=None))
+    asyncio.run(api.handle_event(tokens_only_event, websocket=None))
+
+    assert warning_logs == [
+        "Realtime API rate_limits.updated missing expected bucket(s): requests"
+    ]
