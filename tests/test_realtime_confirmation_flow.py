@@ -304,6 +304,26 @@ def test_drain_response_create_queue_drops_stale_tool_output_entry() -> None:
     assert len(api._response_create_queue) == 0
 
 
+def test_handle_response_done_keeps_listening_state_without_idle_transition() -> None:
+    api = _make_api_stub()
+    transitions: list[tuple[InteractionState, str]] = []
+    api.state_manager = type(
+        "State",
+        (),
+        {
+            "state": InteractionState.LISTENING,
+            "update_state": lambda *args: transitions.append((args[1], args[2])),
+        },
+    )()
+    api._pending_image_stimulus = None
+    api._pending_image_flush_after_playback = False
+
+    asyncio.run(api.handle_response_done({"type": "response.done"}))
+
+    assert api.state_manager.state == InteractionState.LISTENING
+    assert transitions == []
+
+
 def test_request_tool_confirmation_sends_single_spoken_prompt() -> None:
     api = RealtimeAPI.__new__(RealtimeAPI)
     api.orchestration_state = type("S", (), {"phase": OrchestrationPhase.IDLE, "transition": lambda *args, **kwargs: None})()

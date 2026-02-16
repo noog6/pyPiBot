@@ -3005,7 +3005,13 @@ class RealtimeAPI:
         self.response_in_progress = False
         self._response_in_flight = False
         self._active_response_id = None
-        self.state_manager.update_state(InteractionState.IDLE, "response done")
+        current_state = getattr(self.state_manager, "state", InteractionState.IDLE)
+        if current_state != InteractionState.LISTENING:
+            self.state_manager.update_state(InteractionState.IDLE, "response done")
+        else:
+            logger.debug(
+                "Skipping IDLE transition for response.done while still listening; deferring until speech stop."
+            )
         logger.info("Received response.done event.")
         if event:
             self._last_response_metadata = {
@@ -3040,7 +3046,13 @@ class RealtimeAPI:
         self.response_in_progress = False
         self._response_in_flight = False
         self._active_response_id = None
-        self.state_manager.update_state(InteractionState.IDLE, "response completed")
+        current_state = getattr(self.state_manager, "state", InteractionState.IDLE)
+        if current_state != InteractionState.LISTENING:
+            self.state_manager.update_state(InteractionState.IDLE, "response completed")
+        else:
+            logger.debug(
+                "Skipping IDLE transition for response.completed while still listening; deferring until speech stop."
+            )
         logger.info("Received response.completed event.")
         if event:
             self._last_response_metadata = {
