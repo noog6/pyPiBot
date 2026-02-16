@@ -15,6 +15,33 @@ stop_words:
   - "abort"
 stop_word_cooldown_s: 30
 
+# Memory behavior and scope semantics
+memory:
+  # user_global: available across runs for the active user
+  # session_local: isolated to the current runtime session_id
+  default_scope: "user_global"
+  auto_memory_enabled: false
+  require_confirmation_for_auto_memory: false
+  auto_memory_min_confidence: 0.75
+  auto_pin_min_importance: 5
+  auto_pin_requires_review: true
+
+# Two-tier hydration: tiny startup digest + per-turn retrieval
+memory_hydration:
+  startup_digest_enabled: true
+  startup_digest_max_items: 2
+  startup_digest_max_chars: 280
+
+# Turn-time memory retrieval and context injection
+memory_retrieval:
+  enabled: true
+  scope: "user_global"
+  max_memories: 3
+  max_chars: 450
+  cooldown_s: 10.0
+  min_user_chars: 12
+  min_user_tokens: 3
+
 # Logging settings
 logging_level: "INFO"
 file_logging_enabled: true

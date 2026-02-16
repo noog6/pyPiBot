@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from difflib import SequenceMatcher
+from enum import Enum
+import math
+import re
+import time
 
 from config import ConfigController
 from storage.memories import MemoryEntry, MemoryStore
@@ -13,10 +18,95 @@ MAX_TAG_LENGTH = 24
 MAX_RECALL_LIMIT = 10
 MIN_IMPORTANCE = 1
 MAX_IMPORTANCE = 5
+RANK_CANDIDATE_MULTIPLIER = 8
+STALE_MEMORY_MAX_AGE_S = 60.0 * 60.0 * 24.0 * 365.0
+NEAR_DUPLICATE_THRESHOLD = 0.75
+NEAR_DUPLICATE_CHAR_RATIO = 0.9
+WORD_RE = re.compile(r"[a-zA-Z0-9]{2,}")
+
+
+class MemoryScope(str, Enum):
+    """Supported memory scope modes."""
+
+    USER_GLOBAL = "user_global"
+    SESSION_LOCAL = "session_local"
+
+
+MemoryScopeInput = MemoryScope | str
 
 
 def _clamp(value: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(value, maximum))
+
+
+def _normalize_scope(scope: MemoryScopeInput | None, *, fallback: MemoryScope) -> MemoryScope:
+    if isinstance(scope, MemoryScope):
+        return scope
+    if isinstance(scope, str):
+        lowered = scope.strip().lower()
+        if lowered == MemoryScope.SESSION_LOCAL.value:
+            return MemoryScope.SESSION_LOCAL
+        if lowered == MemoryScope.USER_GLOBAL.value:
+            return MemoryScope.USER_GLOBAL
+    return fallback
+
+
+def _tokenize(text: str) -> set[str]:
+    return {token.lower() for token in WORD_RE.findall(text)}
+
+
+def _jaccard_similarity(left: set[str], right: set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    union = left | right
+    if not union:
+        return 0.0
+    return len(left & right) / len(union)
+
+
+def _recency_weight(age_s: float) -> float:
+    if age_s <= 0.0:
+        return 1.0
+    # 30-day half-life keeps recent facts favored without erasing durable memories.
+    return math.exp(-age_s / (60.0 * 60.0 * 24.0 * 30.0))
+
+
+def _score_entry(entry: MemoryEntry, *, utterance_tokens: set[str], now_s: float) -> float:
+    content_tokens = _tokenize(entry.content)
+    tag_tokens = {tag.lower() for tag in entry.tags}
+    lexical_overlap = _jaccard_similarity(utterance_tokens, content_tokens)
+    tag_overlap = _jaccard_similarity(utterance_tokens, tag_tokens)
+
+    importance_weight = max(0.0, (entry.importance - MIN_IMPORTANCE) / (MAX_IMPORTANCE - MIN_IMPORTANCE))
+    entry_ts_s = entry.timestamp / 1000.0
+    age_s = max(0.0, now_s - entry_ts_s)
+    recency = _recency_weight(age_s)
+
+    # Weighted blend: lexical relevance first, then tags/importance/recency.
+    return (lexical_overlap * 0.45) + (tag_overlap * 0.20) + (importance_weight * 0.20) + (recency * 0.15)
+
+
+def _is_near_duplicate(
+    candidate_text: str,
+    existing_text: str,
+    *,
+    token_threshold: float,
+    char_threshold: float,
+) -> bool:
+    candidate_tokens = _tokenize(candidate_text)
+    existing_tokens = _tokenize(existing_text)
+    token_sim = _jaccard_similarity(candidate_tokens, existing_tokens)
+    if token_sim >= token_threshold:
+        return True
+    char_ratio = SequenceMatcher(a=candidate_text.lower(), b=existing_text.lower()).ratio()
+    return char_ratio >= char_threshold
+
+
+def _is_stale(entry: MemoryEntry, *, now_s: float, max_age_s: float) -> bool:
+    if max_age_s <= 0:
+        return False
+    entry_ts_s = entry.timestamp / 1000.0
+    return (now_s - entry_ts_s) > max_age_s
 
 
 def _normalize_content(content: str) -> str:
@@ -53,6 +143,9 @@ class MemorySummary:
     content: str
     tags: list[str]
     importance: int
+    source: str
+    pinned: bool
+    needs_review: bool
 
     @classmethod
     def from_entry(cls, entry: MemoryEntry) -> "MemorySummary":
@@ -61,7 +154,21 @@ class MemorySummary:
             content=entry.content,
             tags=entry.tags,
             importance=entry.importance,
+            source=entry.source,
+            pinned=entry.pinned,
+            needs_review=entry.needs_review,
         )
+
+
+@dataclass(frozen=True)
+class MemoryBrief:
+    """Bounded memory context block for a single user turn."""
+
+    items: list[MemorySummary]
+    total_chars: int
+    max_chars: int
+    truncated: bool
+    scope: MemoryScope
 
 
 class MemoryManager:
@@ -76,7 +183,15 @@ class MemoryManager:
         config = ConfigController.get_instance().get_config()
         self._active_user_id = config.get("active_user_id", "default")
         self._active_session_id = config.get("active_session_id")
+        memory_cfg = config.get("memory") or {}
+        self._default_scope = _normalize_scope(
+            memory_cfg.get("default_scope"),
+            fallback=MemoryScope.USER_GLOBAL,
+        )
+        self._auto_pin_min_importance = int(memory_cfg.get("auto_pin_min_importance", 5))
+        self._auto_pin_requires_review = bool(memory_cfg.get("auto_pin_requires_review", True))
         self._store = MemoryStore()
+        self._last_turn_retrieval_at: dict[tuple[str, MemoryScope], float] = {}
         MemoryManager._instance = self
 
     @classmethod
@@ -104,17 +219,34 @@ class MemoryManager:
         tags: list[str] | None = None,
         importance: int = 3,
         user_id: str | None = None,
+        source: str = "manual_tool",
         session_id: str | None = None,
+        scope: MemoryScopeInput | None = None,
+        pinned: bool = False,
+        needs_review: bool = False,
     ) -> MemoryEntry:
         normalized_content = _normalize_content(content)
         normalized_tags = _normalize_tags(tags)
         bounded_importance = _clamp(importance, MIN_IMPORTANCE, MAX_IMPORTANCE)
+        resolved_scope = _normalize_scope(scope, fallback=self._default_scope)
+        resolved_session_id = self._resolve_session_id_for_scope(
+            scope=resolved_scope,
+            session_id=session_id,
+        )
+
+        auto_pin = source == "auto_reflection" and bounded_importance >= self._auto_pin_min_importance
+        effective_pinned = bool(pinned or auto_pin)
+        effective_review = bool(needs_review or (auto_pin and self._auto_pin_requires_review))
+
         return self._store.append_memory(
             content=normalized_content,
             tags=normalized_tags,
             importance=bounded_importance,
             user_id=user_id if user_id is not None else self._active_user_id,
-            session_id=session_id if session_id is not None else self._active_session_id,
+            session_id=resolved_session_id,
+            source=source,
+            pinned=effective_pinned,
+            needs_review=effective_review,
         )
 
     def recall_memories(
@@ -122,16 +254,214 @@ class MemoryManager:
         *,
         query: str | None = None,
         limit: int = 5,
+        scope: MemoryScopeInput | None = None,
         session_id: str | None = None,
     ) -> list[MemorySummary]:
         bounded_limit = _clamp(limit, 1, MAX_RECALL_LIMIT)
+        resolved_scope = _normalize_scope(scope, fallback=self._default_scope)
+        resolved_session_id = self._resolve_session_id_for_scope(
+            scope=resolved_scope,
+            session_id=session_id,
+            strict=False,
+        )
         entries = self._store.search_memories(
             query=query,
             limit=bounded_limit,
             user_id=self._active_user_id,
-            session_id=session_id,
+            scope=resolved_scope,
+            session_id=resolved_session_id,
         )
         return [MemorySummary.from_entry(entry) for entry in entries]
 
+    def retrieve_startup_digest(
+        self,
+        *,
+        max_items: int = 2,
+        max_chars: int = 280,
+        user_id: str | None = None,
+    ) -> MemoryBrief | None:
+        """Return a tiny pinned-memory digest for session initialization."""
+
+        effective_user_id = user_id if user_id is not None else self._active_user_id
+        bounded_max_items = _clamp(max_items, 1, 4)
+        bounded_max_chars = _clamp(max_chars, 80, 800)
+        entries = self._store.search_memories(
+            query=None,
+            limit=max(bounded_max_items * 5, 5),
+            user_id=effective_user_id,
+            scope=MemoryScope.USER_GLOBAL.value,
+            pinned_only=True,
+            review_state="approved",
+        )
+        if not entries:
+            return None
+
+        selected: list[MemorySummary] = []
+        used_chars = 0
+        truncated = False
+        for entry in entries:
+            if len(selected) >= bounded_max_items:
+                truncated = True
+                break
+            summary = MemorySummary.from_entry(entry)
+            chars = len(summary.content)
+            if used_chars + chars > bounded_max_chars:
+                truncated = True
+                continue
+            selected.append(summary)
+            used_chars += chars
+
+        if not selected:
+            return None
+        return MemoryBrief(
+            items=selected,
+            total_chars=used_chars,
+            max_chars=bounded_max_chars,
+            truncated=truncated,
+            scope=MemoryScope.USER_GLOBAL,
+        )
+
     def forget_memory(self, *, memory_id: int) -> bool:
         return self._store.delete_memory(memory_id=memory_id)
+
+    def retrieve_for_turn(
+        self,
+        *,
+        latest_user_utterance: str,
+        user_id: str | None = None,
+        max_memories: int = 4,
+        max_chars: int = 450,
+        cooldown_s: float = 0.0,
+        now_monotonic: float | None = None,
+        scope: MemoryScopeInput | None = None,
+        session_id: str | None = None,
+    ) -> MemoryBrief | None:
+        """Retrieve a compact, deterministic memory brief for turn-time context."""
+
+        clean_utterance = " ".join(latest_user_utterance.strip().split())
+        if not clean_utterance:
+            return None
+
+        effective_user_id = user_id if user_id is not None else self._active_user_id
+        resolved_scope = _normalize_scope(scope, fallback=self._default_scope)
+        resolved_session_id = self._resolve_session_id_for_scope(
+            scope=resolved_scope,
+            session_id=session_id,
+            strict=False,
+        )
+
+        timestamp = now_monotonic if now_monotonic is not None else time.monotonic()
+        cooldown_key = (effective_user_id, resolved_scope)
+        if cooldown_s > 0.0:
+            last_retrieval = self._last_turn_retrieval_at.get(cooldown_key)
+            if last_retrieval is not None and timestamp - last_retrieval < cooldown_s:
+                return None
+
+        bounded_max_memories = _clamp(max_memories, 1, MAX_RECALL_LIMIT)
+        bounded_max_chars = _clamp(max_chars, 80, 4000)
+        candidate_limit = max(bounded_max_memories * RANK_CANDIDATE_MULTIPLIER, bounded_max_memories)
+        entries = self._store.search_memories(
+            query=None,
+            limit=candidate_limit,
+            user_id=effective_user_id,
+            scope=resolved_scope,
+            session_id=resolved_session_id,
+            review_state="approved",
+        )
+        if not entries:
+            self._last_turn_retrieval_at[cooldown_key] = timestamp
+            return None
+
+        now_s = time.time()
+        utterance_tokens = _tokenize(clean_utterance)
+        scored_entries: list[tuple[float, MemoryEntry]] = []
+        for entry in entries:
+            if _is_stale(entry, now_s=now_s, max_age_s=STALE_MEMORY_MAX_AGE_S):
+                continue
+            score = _score_entry(entry, utterance_tokens=utterance_tokens, now_s=now_s)
+            if score < 0.05:
+                continue
+            scored_entries.append((score, entry))
+
+        if not scored_entries:
+            self._last_turn_retrieval_at[cooldown_key] = timestamp
+            return None
+
+        ordered = [
+            item[1]
+            for item in sorted(
+                scored_entries,
+                key=lambda pair: (-pair[0], -pair[1].importance, -pair[1].timestamp, pair[1].memory_id),
+            )
+        ]
+        selected: list[MemorySummary] = []
+        seen_contents: list[str] = []
+        used_chars = 0
+        truncated = False
+        for entry in ordered:
+            if len(selected) >= bounded_max_memories:
+                truncated = True
+                break
+
+            if any(
+                _is_near_duplicate(
+                    entry.content,
+                    existing_content,
+                    token_threshold=NEAR_DUPLICATE_THRESHOLD,
+                    char_threshold=NEAR_DUPLICATE_CHAR_RATIO,
+                )
+                for existing_content in seen_contents
+            ):
+                truncated = True
+                continue
+
+            candidate_summary = MemorySummary.from_entry(entry)
+            candidate_chars = len(candidate_summary.content)
+            if used_chars + candidate_chars > bounded_max_chars:
+                remaining = bounded_max_chars - used_chars
+                if selected or remaining < 24:
+                    truncated = True
+                    continue
+                clipped = candidate_summary.content[: max(remaining - 1, 1)].rstrip()
+                if clipped != candidate_summary.content:
+                    clipped = f"{clipped}…"
+                candidate_summary = MemorySummary(
+                    memory_id=candidate_summary.memory_id,
+                    content=clipped,
+                    tags=candidate_summary.tags,
+                    importance=candidate_summary.importance,
+                    source=candidate_summary.source,
+                    pinned=candidate_summary.pinned,
+                    needs_review=candidate_summary.needs_review,
+                )
+                candidate_chars = len(candidate_summary.content)
+                truncated = True
+
+            selected.append(candidate_summary)
+            seen_contents.append(candidate_summary.content)
+            used_chars += candidate_chars
+
+        self._last_turn_retrieval_at[cooldown_key] = timestamp
+        if not selected:
+            return None
+        return MemoryBrief(
+            items=selected,
+            total_chars=used_chars,
+            max_chars=bounded_max_chars,
+            truncated=truncated,
+            scope=resolved_scope,
+        )
+
+    def _resolve_session_id_for_scope(
+        self,
+        *,
+        scope: MemoryScope,
+        session_id: str | None,
+        strict: bool = True,
+    ) -> str | None:
+        if scope is MemoryScope.USER_GLOBAL:
+            return None
+        resolved = session_id if session_id is not None else self._active_session_id
+        if strict and not resolved:
+            raise ValueError("session_local memory scope requires an active session id")
+        return resolved
