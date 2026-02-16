@@ -40,6 +40,7 @@ def _make_api_stub() -> RealtimeAPI:
     api._injection_response_triggers = {}
     api._injection_response_trigger_timestamps = {}
     api._injection_response_timestamps = []
+    api._pending_research_request = None
     return api
 
 

@@ -261,6 +261,7 @@ def log_ws_event(direction: str, event: dict[str, Any]) -> None:
         "response.output_audio.delta",
         "response.output_audio_transcript.delta",
         "response.function_call_arguments.delta",
+        "conversation.item.input_audio_transcription.delta",
     }
 
     if event_type in spammy:

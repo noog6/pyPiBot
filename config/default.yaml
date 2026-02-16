@@ -26,6 +26,22 @@ camera_warmup_ms: 1000
 prefix_padding_ms: 500
 silence_threshold: 0.2
 silence_duration_ms: 900
+realtime:
+  debug_vad: false
+  vad_profile: "short_confirmations"
+  minimum_non_confirmation_duration_ms: 120
+  awaiting_confirmation_allowed_sources:
+    - "battery:critical"
+    - "imu:critical"
+  vad_profiles:
+    default:
+      threshold: 0.20
+      prefix_padding_ms: 500
+      silence_duration_ms: 900
+    short_confirmations:
+      threshold: 0.16
+      prefix_padding_ms: 700
+      silence_duration_ms: 900
 
 # Audio devices
 audio:
@@ -194,6 +210,11 @@ governance:
       reversible: false
       cost_hint: "med"
       safety_tags: ["storage"]
+    perform_research:
+      tier: 2
+      reversible: false
+      cost_hint: "expensive"
+      safety_tags: ["network", "research"]
 # Image response injection mode ("respond" or "catalog_only")
 image_response_mode: "catalog_only"
 injection_response_triggers:
@@ -225,3 +246,37 @@ health:
     enabled: false
     host: "api.openai.com"
     timeout_s: 2.0
+
+# Research subsystem (scaffold only; no live web calls)
+research:
+  enabled: true
+  provider: "openai"
+  packet_schema: "research_packet_v1"
+  permission_required: true
+  tool_call_dedupe_ttl_s: 30
+  spoken_response_dedupe_ttl_s: 60
+  debug_response_create_trace: false
+  openai:
+    enabled: true
+    model: "gpt-4.1-mini"
+    timeout_s: 30
+    max_output_chars: 2400
+    max_facts: 8
+    max_sources: 6
+  firecrawl:
+    enabled: false
+    max_pages: 1
+    max_markdown_chars: 20000
+    cache_dir: "./var/research_cache"
+    cache_ttl_hours: 24
+    allowlist_mode: "public"  # off | public | explicit
+    allowlist_domains: []
+  budget:
+    daily_limit: 20
+    state_file: "./var/research_budget.json"
+  cache:
+    dir: "./var/research_cache"
+    ttl_hours: 24
+  escalation:
+    enabled: false
+    max_rounds: 1

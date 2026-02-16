@@ -5,8 +5,11 @@ from __future__ import annotations
 import re
 import subprocess
 import time
+import uuid
+import asyncio
 from typing import Any, Awaitable, Callable
 
+from config import ConfigController
 from hardware import ADS1015Sensor, LPS22HBSensor
 from motion import (
     MotionController,
@@ -26,6 +29,10 @@ from services.imu_monitor import ImuMonitor
 from services.memory_manager import MemoryManager
 from services.output_volume import OutputVolumeController
 from services.profile_manager import ProfileManager
+from services.research import ResearchRequest, build_openai_service_or_null
+from services.research.research_transcript import write_research_transcript
+from services.research.service import ResearchService
+from storage import StorageController
 
 
 ToolFn = Callable[..., Awaitable[Any]]
@@ -33,6 +40,15 @@ ToolFn = Callable[..., Awaitable[Any]]
 function_map: dict[str, ToolFn] = {}
 
 tools: list[dict[str, Any]] = []
+_research_service: ResearchService | None = None
+
+
+def _get_research_service() -> ResearchService:
+    global _research_service
+    if _research_service is None:
+        config = ConfigController.get_instance().get_config()
+        _research_service = build_openai_service_or_null(config)
+    return _research_service
 
 
 async def read_battery_voltage() -> dict[str, Any]:
@@ -313,6 +329,38 @@ async def forget_memory(memory_id: int) -> dict[str, Any]:
     manager = MemoryManager.get_instance()
     removed = manager.forget_memory(memory_id=memory_id)
     return {"removed": removed, "memory_id": memory_id}
+
+
+async def perform_research(query: str, context: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Run a web research request through the ResearchService packet flow."""
+
+    request = ResearchRequest(prompt=query, context=dict(context or {}))
+    service = _get_research_service()
+    packet = await asyncio.to_thread(service.request_research, request)
+    research_id = f"research_{uuid.uuid4().hex}"
+
+    storage = StorageController.get_instance()
+    storage_info = storage.get_storage_info()
+    transcript_path = write_research_transcript(
+        run_dir=storage_info.run_dir,
+        run_id=storage_info.run_id,
+        request=request,
+        packet=packet,
+        research_id=research_id,
+    )
+
+    payload = packet.to_realtime_payload()
+    return {
+        "research_id": research_id,
+        "schema": packet.schema,
+        "status": packet.status,
+        "answer_summary": payload["answer_summary"],
+        "extracted_facts": payload["extracted_facts"],
+        "sources": payload["sources"],
+        "safety_notes": payload["safety_notes"],
+        "metadata": dict(packet.metadata),
+        "transcript_path": str(transcript_path) if transcript_path is not None else None,
+    }
 
 
 tools.append(
@@ -725,3 +773,24 @@ tools.append(
 )
 
 function_map["forget_memory"] = forget_memory
+
+tools.append(
+    {
+        "type": "function",
+        "name": "perform_research",
+        "description": (
+            "Perform a web lookup using Theo's research service and return a structured "
+            "research packet summary with facts and sources."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "context": {"type": "object"},
+            },
+            "required": ["query"],
+        },
+    }
+)
+
+function_map["perform_research"] = perform_research

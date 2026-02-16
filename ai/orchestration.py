@@ -11,6 +11,7 @@ class OrchestrationPhase(Enum):
     SENSE = "sense"
     PLAN = "plan"
     ACT = "act"
+    AWAITING_CONFIRMATION = "awaiting_confirmation"
     REFLECT = "reflect"
     IDLE = "idle"
 
