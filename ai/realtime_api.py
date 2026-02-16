@@ -64,6 +64,7 @@ from motion import (
 from motion.gesture_library import DEFAULT_GESTURES
 from services.profile_manager import ProfileManager
 from services.reflection_manager import ReflectionManager
+from services.memory_manager import MemoryBrief, MemoryManager, MemoryScope
 from services.research import ResearchRequest, build_openai_service_or_null, has_research_intent
 from services.research.research_transcript import write_research_transcript
 from storage import StorageController
@@ -72,9 +73,10 @@ RESPONSE_DONE_REFLECTION_PROMPT = """Summarize what changed. Any anomalies? Shou
 Return ONLY valid JSON with keys: summary, remember_memory.
 Rules:
 - summary: one-line run summary.
-- remember_memory: null OR an object with keys {{content, tags, importance}}.
+- remember_memory: null OR an object with keys {{content, tags, importance, confidence}}.
 - tags: optional list of short strings.
 - importance: integer 1-5.
+- confidence: float 0.0-1.0 for how certain this should be stored as durable memory.
 
 Context:
 User input: {user_input}
@@ -232,6 +234,7 @@ class RealtimeAPI:
         self.response_start_time: float | None = None
         self.websocket = None
         self.profile_manager = ProfileManager.get_instance()
+        self._memory_manager = MemoryManager.get_instance()
         self.state_manager = InteractionStateManager()
         self.state_manager.set_gesture_handler(self._handle_state_gesture)
         self.state_manager.set_earcon_handler(self._handle_state_earcon)
@@ -245,6 +248,7 @@ class RealtimeAPI:
         self._last_user_input_text: str | None = None
         self._last_user_input_time: float | None = None
         self._last_user_input_source: str | None = None
+        self._pending_turn_memory_brief: MemoryBrief | None = None
         self._last_user_battery_query_time: float | None = None
         self._last_outgoing_event_type: str | None = None
         self._last_outgoing_response_origin: str | None = None
@@ -279,6 +283,12 @@ class RealtimeAPI:
         self._image_response_enabled = self._image_response_mode != "catalog_only"
         self._reflection_enabled = bool(config.get("reflection_enabled", False))
         self._reflection_min_interval_s = float(config.get("reflection_min_interval_s", 300.0))
+        memory_cfg = config.get("memory") or {}
+        self._auto_memory_enabled = bool(memory_cfg.get("auto_memory_enabled", False))
+        self._require_confirmation_for_auto_memory = bool(
+            memory_cfg.get("require_confirmation_for_auto_memory", False)
+        )
+        self._auto_memory_min_confidence = float(memory_cfg.get("auto_memory_min_confidence", 0.75))
         ops_cfg = config.get("ops") or {}
         budgets_cfg = ops_cfg.get("budgets") or {}
         self._ai_call_budget = RollingWindowBudget(
@@ -303,6 +313,18 @@ class RealtimeAPI:
             if isinstance(word, str) and word.strip()
         ]
         self._stop_word_cooldown_s = float(config.get("stop_word_cooldown_s", 0.0))
+        memory_retrieval_cfg = config.get("memory_retrieval") or {}
+        self._memory_retrieval_enabled = bool(memory_retrieval_cfg.get("enabled", True))
+        self._memory_retrieval_max_memories = int(memory_retrieval_cfg.get("max_memories", 3))
+        self._memory_retrieval_max_chars = int(memory_retrieval_cfg.get("max_chars", 450))
+        self._memory_retrieval_cooldown_s = float(memory_retrieval_cfg.get("cooldown_s", 10.0))
+        self._memory_retrieval_scope = str(memory_retrieval_cfg.get("scope", MemoryScope.USER_GLOBAL.value))
+        self._memory_retrieval_min_user_chars = int(memory_retrieval_cfg.get("min_user_chars", 12))
+        self._memory_retrieval_min_user_tokens = int(memory_retrieval_cfg.get("min_user_tokens", 3))
+        memory_hydration_cfg = config.get("memory_hydration") or {}
+        self._startup_memory_digest_enabled = bool(memory_hydration_cfg.get("startup_digest_enabled", True))
+        self._startup_memory_digest_max_items = int(memory_hydration_cfg.get("startup_digest_max_items", 2))
+        self._startup_memory_digest_max_chars = int(memory_hydration_cfg.get("startup_digest_max_chars", 280))
         self._tool_execution_disabled_until = 0.0
         self._reflection_coordinator = ReflectionCoordinator(
             api_key=self.api_key,
@@ -863,6 +885,101 @@ class RealtimeAPI:
         self._last_user_input_source = source
         if self._is_battery_status_query(clean_text):
             self._last_user_battery_query_time = self._last_user_input_time
+        self._prepare_turn_memory_brief(clean_text, source=source)
+
+    def _should_skip_turn_memory_retrieval(self, user_text: str) -> bool:
+        text = user_text.strip()
+        if len(text) < int(getattr(self, "_memory_retrieval_min_user_chars", 12)):
+            return True
+        if len(text.split()) < int(getattr(self, "_memory_retrieval_min_user_tokens", 3)):
+            return True
+        noisy = {"ok", "okay", "thanks", "thank you", "yes", "no", "cool", "nice", "got it"}
+        return text.lower() in noisy
+
+    def _prepare_turn_memory_brief(self, user_text: str, *, source: str) -> None:
+        if self._should_skip_turn_memory_retrieval(user_text):
+            self._pending_turn_memory_brief = None
+            return
+        if not getattr(self, "_memory_retrieval_enabled", False):
+            self._pending_turn_memory_brief = None
+            return
+        manager = getattr(self, "_memory_manager", None)
+        if manager is None:
+            self._pending_turn_memory_brief = None
+            return
+        try:
+            self._pending_turn_memory_brief = manager.retrieve_for_turn(
+                latest_user_utterance=user_text,
+                user_id=manager.get_active_user_id(),
+                max_memories=int(getattr(self, "_memory_retrieval_max_memories", 3)),
+                max_chars=int(getattr(self, "_memory_retrieval_max_chars", 450)),
+                cooldown_s=float(getattr(self, "_memory_retrieval_cooldown_s", 10.0)),
+                scope=str(getattr(self, "_memory_retrieval_scope", MemoryScope.USER_GLOBAL.value)),
+                session_id=manager.get_active_session_id(),
+            )
+        except Exception as exc:  # pragma: no cover - defensive fail-open
+            self._pending_turn_memory_brief = None
+            logger.warning(
+                "Turn memory retrieval failed for source=%s: %s",
+                source,
+                exc,
+            )
+
+    def _consume_pending_memory_brief_note(self) -> str | None:
+        brief = getattr(self, "_pending_turn_memory_brief", None)
+        self._pending_turn_memory_brief = None
+        if brief is None or not brief.items:
+            return None
+        lines = [
+            "Turn memory brief (retrieved long-term context; do not quote verbatim unless asked):"
+        ]
+        for index, item in enumerate(brief.items, start=1):
+            tags = f" tags=[{', '.join(item.tags)}]" if item.tags else ""
+            lines.append(
+                f"{index}. (importance={item.importance}{tags}) {item.content}"
+            )
+        if brief.truncated:
+            lines.append("Additional relevant memories were omitted due to retrieval limits.")
+        return "\n".join(lines)
+
+    def _build_startup_memory_digest_note(self) -> str | None:
+        if not getattr(self, "_startup_memory_digest_enabled", True):
+            return None
+        manager = getattr(self, "_memory_manager", None)
+        if manager is None:
+            return None
+        try:
+            digest = manager.retrieve_startup_digest(
+                max_items=int(getattr(self, "_startup_memory_digest_max_items", 2)),
+                max_chars=int(getattr(self, "_startup_memory_digest_max_chars", 280)),
+                user_id=manager.get_active_user_id(),
+            )
+        except Exception as exc:  # pragma: no cover - defensive fail-open
+            logger.warning("Startup memory digest retrieval failed: %s", exc)
+            return None
+        if digest is None or not digest.items:
+            return None
+        lines = ["Startup memory digest (stable user context):"]
+        for index, item in enumerate(digest.items, start=1):
+            tags = f" tags=[{', '.join(item.tags)}]" if item.tags else ""
+            pin_state = " pinned" if item.pinned else ""
+            lines.append(f"{index}. (importance={item.importance}{pin_state}{tags}) {item.content}")
+        if digest.truncated:
+            lines.append("Additional pinned memories were omitted due to startup digest limits.")
+        return "\n".join(lines)
+
+    async def _send_memory_brief_note(self, websocket: Any, note_text: str) -> None:
+        note_event = {
+            "type": "conversation.item.create",
+            "item": {
+                "type": "message",
+                "role": "system",
+                "content": [{"type": "input_text", "text": note_text}],
+            },
+        }
+        log_ws_event("Outgoing", note_event)
+        self._track_outgoing_event(note_event, origin="memory_brief")
+        await websocket.send(json.dumps(note_event))
 
     def _find_stop_word(self, text: str) -> str | None:
         if not text or not self._stop_words:
@@ -1181,6 +1298,7 @@ class RealtimeAPI:
         origin: str,
         record_ai_call: bool = False,
         debug_context: dict[str, Any] | None = None,
+        memory_brief_note: str | None = None,
     ) -> bool:
         now = time.monotonic()
         delta_ms = None
@@ -1209,10 +1327,16 @@ class RealtimeAPI:
                     "origin": origin,
                     "record_ai_call": record_ai_call,
                     "debug_context": debug_context,
+                    "memory_brief_note": memory_brief_note,
                     "enqueued_done_serial": self._response_done_serial,
                 }
             )
             return False
+        if memory_brief_note:
+            try:
+                await self._send_memory_brief_note(websocket, memory_brief_note)
+            except Exception as exc:  # pragma: no cover - defensive fail-open
+                logger.warning("Memory brief injection skipped due to error: %s", exc)
         log_ws_event("Outgoing", response_create_event)
         self._track_outgoing_event(response_create_event, origin=origin)
         await websocket.send(json.dumps(response_create_event))
@@ -1250,6 +1374,7 @@ class RealtimeAPI:
                 origin=queued["origin"],
                 record_ai_call=bool(queued.get("record_ai_call", False)),
                 debug_context=queued.get("debug_context"),
+                memory_brief_note=queued.get("memory_brief_note"),
             )
             return
 
@@ -1702,6 +1827,48 @@ class RealtimeAPI:
             return None
         return payload
 
+    def _is_low_signal_auto_memory_input(self) -> bool:
+        text = (self._last_user_input_text or "").strip().lower()
+        if len(text) < 12:
+            return True
+        if len(text.split()) < 3:
+            return True
+        low_signal_patterns = (
+            "ok",
+            "okay",
+            "thanks",
+            "thank you",
+            "yes",
+            "no",
+            "cool",
+            "nice",
+            "got it",
+        )
+        return text in low_signal_patterns
+
+    def _should_store_auto_memory(self, *, confidence: float, content: str) -> bool:
+        if not getattr(self, "_auto_memory_enabled", False):
+            logger.debug("Skipping auto-memory: disabled by config.")
+            return False
+        if getattr(self, "_require_confirmation_for_auto_memory", False):
+            logger.info("Skipping auto-memory: require_confirmation_for_auto_memory is enabled.")
+            return False
+        if self._is_low_signal_auto_memory_input():
+            logger.debug("Skipping auto-memory: low-signal user input.")
+            return False
+        if len(content.strip()) < 16:
+            logger.debug("Skipping auto-memory: candidate memory content too short.")
+            return False
+        threshold = float(getattr(self, "_auto_memory_min_confidence", 0.75))
+        if confidence < threshold:
+            logger.debug(
+                "Skipping auto-memory: confidence %.2f below threshold %.2f.",
+                confidence,
+                threshold,
+            )
+            return False
+        return True
+
     async def _run_response_done_reflection(self, trigger: str) -> None:
         if not self.api_key:
             logger.debug("Skipping response.done reflection: missing API key.")
@@ -1734,6 +1901,12 @@ class RealtimeAPI:
         importance = remember_payload.get("importance", 3)
         if not isinstance(importance, int):
             importance = 3
+        confidence = remember_payload.get("confidence", 0.0)
+        if not isinstance(confidence, (int, float)):
+            confidence = 0.0
+        confidence = max(0.0, min(float(confidence), 1.0))
+        if not self._should_store_auto_memory(confidence=confidence, content=content):
+            return
         remember_func = function_map.get("remember_memory")
         if remember_func is None:
             logger.warning("response.done reflection skipped: remember_memory unavailable.")
@@ -1742,8 +1915,13 @@ class RealtimeAPI:
             content=content.strip(),
             tags=tags,
             importance=importance,
+            source="auto_reflection",
         )
-        logger.info("response.done remember_memory stored: %s", result.get("memory_id"))
+        logger.info(
+            "response.done remember_memory stored: memory_id=%s source=auto_reflection confidence=%.2f",
+            result.get("memory_id"),
+            confidence,
+        )
 
     def _enqueue_response_done_reflection(self, trigger: str) -> None:
         if self._response_done_reflection_task and not self._response_done_reflection_task.done():
@@ -1928,6 +2106,9 @@ class RealtimeAPI:
         }
         log_ws_event("Outgoing", session_update)
         await websocket.send(json.dumps(session_update))
+        startup_digest_note = self._build_startup_memory_digest_note()
+        if startup_digest_note:
+            await self._send_memory_brief_note(websocket, startup_digest_note)
 
     async def process_ws_messages(self, websocket: Any) -> None:
         websockets = _require_websockets()
@@ -2768,12 +2949,14 @@ class RealtimeAPI:
         if not self._allow_ai_call("startup_prompt"):
             logger.info("Skipping startup response: AI call budget exhausted.")
             return
+        memory_brief_note = self._consume_pending_memory_brief_note()
         response_create_event = {"type": "response.create"}
         await self._send_response_create(
             websocket,
             response_create_event,
             origin="prompt",
             record_ai_call=True,
+            memory_brief_note=memory_brief_note,
         )
 
     async def send_text_message_to_conversation(
@@ -2945,6 +3128,7 @@ class RealtimeAPI:
         }
         if self._pending_action is not None or self._is_awaiting_confirmation_phase():
             response_metadata["approval_flow"] = "true"
+        memory_brief_note = self._consume_pending_memory_brief_note()
         response_create_event = {
             "type": "response.create",
             "response": {"metadata": response_metadata},
@@ -2957,6 +3141,7 @@ class RealtimeAPI:
             response_create_event,
             origin="injection",
             record_ai_call=True,
+            memory_brief_note=memory_brief_note,
         )
         if sent_now:
             now = time.monotonic()

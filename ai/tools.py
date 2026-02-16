@@ -26,7 +26,7 @@ from motion import (
     gesture_nod,
 )
 from services.imu_monitor import ImuMonitor
-from services.memory_manager import MemoryManager
+from services.memory_manager import MemoryManager, MemoryScope
 from services.output_volume import OutputVolumeController
 from services.profile_manager import ProfileManager
 from services.research import ResearchRequest, build_openai_service_or_null
@@ -302,24 +302,41 @@ async def remember_memory(
     content: str,
     tags: list[str] | None = None,
     importance: int = 3,
+    scope: str = MemoryScope.USER_GLOBAL.value,
+    source: str = "manual_tool",
+    pinned: bool = False,
 ) -> dict[str, Any]:
     """Store a memory entry for later recall."""
 
     manager = MemoryManager.get_instance()
-    entry = manager.remember_memory(content=content, tags=tags, importance=importance)
+    entry = manager.remember_memory(
+        content=content,
+        tags=tags,
+        importance=importance,
+        scope=scope,
+        source=source,
+        pinned=bool(pinned),
+    )
     return {
         "memory_id": entry.memory_id,
         "content": entry.content,
         "tags": entry.tags,
         "importance": entry.importance,
+        "source": entry.source,
+        "pinned": entry.pinned,
+        "needs_review": entry.needs_review,
     }
 
 
-async def recall_memories(query: str | None = None, limit: int = 5) -> dict[str, Any]:
+async def recall_memories(
+    query: str | None = None,
+    limit: int = 5,
+    scope: str = MemoryScope.USER_GLOBAL.value,
+) -> dict[str, Any]:
     """Recall stored memories based on a query."""
 
     manager = MemoryManager.get_instance()
-    memories = manager.recall_memories(query=query, limit=limit)
+    memories = manager.recall_memories(query=query, limit=limit, scope=scope)
     return {"memories": [memory.__dict__ for memory in memories]}
 
 
@@ -728,6 +745,12 @@ tools.append(
                 "content": {"type": "string"},
                 "tags": {"type": "array", "items": {"type": "string"}},
                 "importance": {"type": "integer", "minimum": 1, "maximum": 5, "default": 3},
+                "scope": {
+                    "type": "string",
+                    "enum": [MemoryScope.USER_GLOBAL.value, MemoryScope.SESSION_LOCAL.value],
+                    "default": MemoryScope.USER_GLOBAL.value,
+                },
+                "pinned": {"type": "boolean", "default": False},
             },
             "required": ["content"],
         },
@@ -749,6 +772,11 @@ tools.append(
             "properties": {
                 "query": {"type": "string"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5},
+                "scope": {
+                    "type": "string",
+                    "enum": [MemoryScope.USER_GLOBAL.value, MemoryScope.SESSION_LOCAL.value],
+                    "default": MemoryScope.USER_GLOBAL.value,
+                },
             },
             "required": [],
         },

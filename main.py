@@ -16,6 +16,7 @@ from motion import MotionController
 from storage.controller import StorageController
 from services.battery_monitor import BatteryMonitor
 from services.imu_monitor import ImuMonitor
+from services.memory_manager import MemoryManager
 from services.ops_orchestrator import OpsOrchestrator
 from services.profile_manager import ProfileManager
 
@@ -108,6 +109,9 @@ def main(argv: list[str] | None = None) -> int:
 
     prompts = args.prompts.split("|") if args.prompts else None
     storage_controller = StorageController.get_instance()
+    runtime_session_id = f"run-{storage_controller.get_current_run_number()}"
+    MemoryManager.get_instance().set_active_session_id(runtime_session_id)
+    logger.info("Assigned runtime memory session_id=%s", runtime_session_id)
     if config.get("file_logging_enabled", True):
         log_file_path = storage_controller.get_log_file_path()
         enable_file_logging(log_file_path)

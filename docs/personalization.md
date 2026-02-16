@@ -2,84 +2,100 @@
 
 ## Overview
 
-Theo’s “personality” is driven by two layers:
+Theo’s personalization is layered from:
 
-1. **Base session instructions** that define Theo’s default voice and response style.
-2. **User profile context** that is appended to the session instructions to personalize replies.
+1. Base assistant/session instructions.
+2. Active user profile context.
+3. Memory hydration (tiny startup digest + turn-time retrieval).
 
-When a session starts, the realtime API builds the session instructions by concatenating
-the base personality text with the active user’s profile context (if available). This
-means personalization is always layered on top of the default personality rather than
-replacing it.
+## Default population
 
-## What is populated by default
+- Assistant name defaults to `Theo`.
+- Active user defaults to `default`.
+- Empty profiles are created lazily with unknown/missing fields.
 
-These values are present even before any user data is stored:
+## User-controlled profile fields
 
-- **Assistant name**: `assistant_name` defaults to `"Theo"`.
-- **Active user id**: `active_user_id` defaults to `"default"`.
-- **Profile fields**: If there is no stored profile, a new profile is created with:
-  - `name`: `None`
-  - `preferences`: `{}` (empty object)
-  - `favorites`: `[]` (empty list)
-  - `last_seen`: `None`
+Via `update_user_profile`:
+- `name`
+- `preferences`
+- `favorites`
 
-The system will still include a profile context block with “Unknown” or “None” values
-and will prompt politely for missing info.
+Stored in `var/user_profiles.db`.
 
-## What users can change
+## Memory system
 
-Users (or integrators) can change these values via configuration or tools:
+Durable memory is stored in `var/memories.db`.
 
-- **Active user id**: Configure `active_user_id` in `config/default.yaml` or override files
-  to switch the active profile.
-- **Profile data**: The `update_user_profile` tool can update:
-  - `name` (string)
-  - `preferences` (object)
-  - `favorites` (array of strings)
+### Ingestion paths
 
-These updates are persisted to the SQLite profile database in `var/user_profiles.db`.
+Theo ingests memories via two explicit paths:
 
-## What changes over time through interactions
+1. **Manual tool call** (`remember_memory`)
+   - `source=manual_tool`
+   - optional manual pinning (`pinned=true`)
+2. **Response-done auto-memory** (reflection)
+   - `source=auto_reflection`
+   - config-gated by:
+     - `memory.auto_memory_enabled`
+     - `memory.require_confirmation_for_auto_memory`
+     - `memory.auto_memory_min_confidence`
 
-Some fields are updated automatically as the assistant is used:
+### Scope contract
 
-- **`last_seen`**: Updated whenever the active profile is loaded and whenever
-  `update_user_profile` is called.
+Memory scope is explicit:
 
-Over time, this enables more natural continuity because the assistant can keep track of
-recent activity and use stored preferences or favorites when responding.
+- `user_global`: available across runs for active user.
+- `session_local`: isolated to active runtime `session_id`.
 
-## How memories work
+Theo assigns runtime `session_id=run-<run_id>` at startup, so session-local behavior is stable.
 
-Theo has a separate, durable memory system that stores long-lived facts independently
-from the profile fields above. Memories are only added or queried when Theo calls the
-memory tools (there is no automatic background capture), and the base session
-instructions explicitly guide Theo to use them only for stable, reusable facts the
-user confirms.
+### Two-tier hydration policy (balanced context)
 
-### Capturing memories
+Theo uses a two-tier hydration model to avoid empty context *and* avoid full preload:
 
-Theo captures memories through the `remember_memory` tool. Each memory stores:
+#### Tier 1: startup digest (tiny preload)
 
-- **Content**: A short normalized text snippet. Content is trimmed and capped at
-  400 characters to keep prompts concise.
-- **Tags**: Optional, normalized tags (lowercased, deduped, max 6 tags, 24 characters
-  each).
-- **Importance**: A 1–5 score that gets clamped to safe bounds.
-- **Scope**: The active `user_id` and `session_id` are stored with each entry so that
-  recall can filter to the current user/session when needed.
+At session initialization, Theo injects a small pinned digest:
+- sourced from pinned, review-approved user-global memories,
+- capped by `memory_hydration.startup_digest_max_items` and `startup_digest_max_chars`.
 
-Memories are persisted to SQLite in `var/memories.db` using the memory store.
+Typical preload examples:
+- core identity/favorite name pronunciation,
+- persistent preference like "prefers concise answers",
+- stable safety preference.
 
-### Recalling memories
+#### Tier 2: per-turn retrieval (query-aware)
 
-Theo recalls memories via the `recall_memories` tool. The query is a lightweight
-SQL `LIKE` match over content and tags, and results are filtered by the active
-`user_id`/`session_id`. Results are ordered by **importance** (descending) and then
-by **recency**, and the recall limit is capped at 10.
+On each user turn, Theo retrieves only highly relevant memories:
+- lexical/tag relevance + importance + recency ranking,
+- stale suppression and near-duplicate suppression,
+- strict caps (`memory_retrieval.max_memories`, `memory_retrieval.max_chars`),
+- anti-bloat skip for short/noisy user inputs,
+- cooldown between retrieval injections.
 
-### Forgetting memories
+Typical turn retrieval examples:
+- user asks about coffee setup → recall brewing preference,
+- user asks project status → recall project-specific memory,
+- short/noisy input (“ok”, “thanks”) → skip retrieval.
 
-When a user asks Theo to delete a memory, the `forget_memory` tool removes the row by
-its `memory_id`.
+### Pinning and review
+
+Memories support pinning metadata:
+- `pinned` marks items eligible for startup digest.
+- `needs_review` keeps auto-pinned items out of startup preload until reviewed.
+
+Auto-reflection memories can be auto-pinned at high importance using:
+- `memory.auto_pin_min_importance`
+- `memory.auto_pin_requires_review`
+
+### Auditing metadata
+
+Each memory row stores:
+- scope identifiers (`user_id`, optional `session_id`),
+- `source` (`manual_tool` / `auto_reflection`),
+- pin/review flags (`pinned`, `needs_review`).
+
+### Forgetting
+
+`forget_memory(memory_id=...)` deletes a memory row by id.

@@ -12,6 +12,9 @@ from typing import Iterable
 
 from config import ConfigController
 
+USER_GLOBAL_SCOPE = "user_global"
+SESSION_LOCAL_SCOPE = "session_local"
+
 
 def _now_millis() -> int:
     return int(time.time() * 1000)
@@ -26,6 +29,9 @@ class MemoryEntry:
     content: str
     tags: list[str]
     importance: int
+    source: str
+    pinned: bool
+    needs_review: bool
 
 
 class MemoryStore:
@@ -58,10 +64,29 @@ class MemoryStore:
                 session_id TEXT,
                 content TEXT,
                 tags JSON,
-                importance INTEGER
+                importance INTEGER,
+                source TEXT DEFAULT 'manual_tool',
+                pinned INTEGER DEFAULT 0,
+                needs_review INTEGER DEFAULT 0
             )
             """
         )
+        columns = {
+            row[1]
+            for row in cursor.execute("PRAGMA table_info(memories)").fetchall()
+        }
+        if "source" not in columns:
+            cursor.execute(
+                "ALTER TABLE memories ADD COLUMN source TEXT DEFAULT 'manual_tool'"
+            )
+        if "pinned" not in columns:
+            cursor.execute(
+                "ALTER TABLE memories ADD COLUMN pinned INTEGER DEFAULT 0"
+            )
+        if "needs_review" not in columns:
+            cursor.execute(
+                "ALTER TABLE memories ADD COLUMN needs_review INTEGER DEFAULT 0"
+            )
         self._conn.commit()
 
     def append_memory(
@@ -73,14 +98,20 @@ class MemoryStore:
         user_id: str | None = None,
         session_id: str | None = None,
         timestamp: int | None = None,
+        source: str = "manual_tool",
+        pinned: bool = False,
+        needs_review: bool = False,
     ) -> MemoryEntry:
         entry_timestamp = timestamp if timestamp is not None else _now_millis()
         entry_tags = list(tags)
+        entry_source = source.strip() if isinstance(source, str) and source.strip() else "manual_tool"
         with self._lock:
             cursor = self._conn.execute(
                 """
-                INSERT INTO memories (timestamp, user_id, session_id, content, tags, importance)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO memories (
+                    timestamp, user_id, session_id, content, tags, importance, source, pinned, needs_review
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     entry_timestamp,
@@ -89,6 +120,9 @@ class MemoryStore:
                     content,
                     json.dumps(entry_tags),
                     importance,
+                    entry_source,
+                    int(bool(pinned)),
+                    int(bool(needs_review)),
                 ),
             )
             self._conn.commit()
@@ -101,6 +135,9 @@ class MemoryStore:
             content=content,
             tags=entry_tags,
             importance=importance,
+            source=entry_source,
+            pinned=bool(pinned),
+            needs_review=bool(needs_review),
         )
 
     def search_memories(
@@ -109,10 +146,16 @@ class MemoryStore:
         query: str | None = None,
         limit: int = 5,
         user_id: str | None = None,
+        scope: str = USER_GLOBAL_SCOPE,
         session_id: str | None = None,
+        pinned_only: bool = False,
+        review_state: str | None = None,
     ) -> list[MemoryEntry]:
         query_parts = [
-            "SELECT memory_id, timestamp, user_id, session_id, content, tags, importance",
+            (
+                "SELECT memory_id, timestamp, user_id, session_id, content, tags, "
+                "importance, source, pinned, needs_review"
+            ),
             "FROM memories",
             "WHERE 1 = 1",
         ]
@@ -120,9 +163,24 @@ class MemoryStore:
         if user_id is not None:
             query_parts.append("AND user_id = ?")
             params.append(user_id)
-        if session_id is not None:
+
+        scope_value = (scope or USER_GLOBAL_SCOPE).strip().lower()
+        if scope_value == SESSION_LOCAL_SCOPE:
+            if not session_id:
+                return []
             query_parts.append("AND session_id = ?")
             params.append(session_id)
+        else:
+            # User-global reads must explicitly exclude session-local rows.
+            query_parts.append("AND session_id IS NULL")
+
+        if pinned_only:
+            query_parts.append("AND pinned = 1")
+        if review_state == "approved":
+            query_parts.append("AND needs_review = 0")
+        elif review_state == "needs_review":
+            query_parts.append("AND needs_review = 1")
+
         if query:
             query_parts.append("AND (content LIKE ? OR tags LIKE ?)")
             like_term = f"%{query}%"
@@ -135,7 +193,18 @@ class MemoryStore:
         cursor.execute(" ".join(query_parts), params)
         results: list[MemoryEntry] = []
         for row in cursor.fetchall():
-            memory_id, timestamp, user_id_value, session_id_value, content, tags_json, importance = row
+            (
+                memory_id,
+                timestamp,
+                user_id_value,
+                session_id_value,
+                content,
+                tags_json,
+                importance,
+                source,
+                pinned,
+                needs_review,
+            ) = row
             tags = json.loads(tags_json) if tags_json else []
             results.append(
                 MemoryEntry(
@@ -146,6 +215,9 @@ class MemoryStore:
                     content=content,
                     tags=tags,
                     importance=int(importance),
+                    source=(source or "manual_tool"),
+                    pinned=bool(pinned),
+                    needs_review=bool(needs_review),
                 )
             )
         return results
