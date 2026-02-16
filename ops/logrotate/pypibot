@@ -1,0 +1,11 @@
+/home/pi/workarea/pyPiBot/log/pyPiBot.log \
+/home/pi/workarea/pyPiBot/log/pyPiBot-error.log \
+/home/pi/workarea/pyPiBot/log/git-sync.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

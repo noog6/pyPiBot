@@ -71,3 +71,7 @@ fi
 
 echo "Done. Check service status with:"
 echo "  sudo systemctl status pyPiBot.service"
+echo "Follow runtime logs with:"
+echo "  journalctl -t pyPiBot -f"
+echo "Follow git sync summaries with:"
+echo "  journalctl -t pyPiBot-git-sync -f"

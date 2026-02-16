@@ -21,10 +21,8 @@ After=network.target sound.target
 
 [Service]
 # Startup policy: best-effort sync. Theo should still boot even if git sync fails,
-# so each ExecStartPre command is prefixed with '-' to ignore non-zero exit codes.
-ExecStartPre=-/usr/bin/git -C /home/pi/workarea/pyPiBot fetch --prune origin
-ExecStartPre=-/usr/bin/git -C /home/pi/workarea/pyPiBot switch main
-ExecStartPre=-/usr/bin/git -C /home/pi/workarea/pyPiBot pull --ff-only
+# so ExecStartPre is prefixed with '-' to ignore non-zero exit codes.
+ExecStartPre=-/home/pi/workarea/pyPiBot/scripts/systemd-git-sync.sh
 TimeoutStartSec=60s
 ExecStart=/home/pi/workarea/pyPiBot/.venv/bin/python /home/pi/workarea/pyPiBot/main.py \
   --prompts "Say Hello World! or whatever fun salutation you prefer"
@@ -32,6 +30,7 @@ ExecStop=/bin/kill -SIGTERM $MAINPID
 WorkingDirectory=/home/pi/workarea/pyPiBot/
 EnvironmentFile=-/etc/environment
 Environment="XDG_RUNTIME_DIR=/run/user/1000"
+SyslogIdentifier=pyPiBot
 StandardOutput=append:/home/pi/workarea/pyPiBot/log/pyPiBot.log
 StandardError=append:/home/pi/workarea/pyPiBot/log/pyPiBot-error.log
 User=pi
