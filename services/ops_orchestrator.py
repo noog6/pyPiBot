@@ -110,12 +110,27 @@ class OpsOrchestrator:
             first_wait_elapsed = time.monotonic() - first_wait_started
             if self._loop_thread.is_alive():
                 thread = self._loop_thread
+                last_probe = "n/a"
+                probe_started_monotonic = None
+                tick_started_at = None
+                loop_phase = "n/a"
+                metadata_lock_timeout_s = max(min(grace_period_s, 0.05), 0.0)
+                metadata_acquired = False
                 try:
-                    with self._lock:
+                    metadata_acquired = self._lock.acquire(timeout=metadata_lock_timeout_s)
+                    if metadata_acquired:
                         last_probe = self._active_probe_name
                         probe_started_monotonic = self._probe_started_monotonic
                         tick_started_at = self._tick_started_at
                         loop_phase = self._loop_phase
+                    else:
+                        LOGGER.warning(
+                            "[Ops] Loop thread shutdown metadata unavailable due to lock contention "
+                            "(thread=%s ident=%s lock_timeout=%.3fs).",
+                            thread.name,
+                            thread.ident,
+                            metadata_lock_timeout_s,
+                        )
                 except BaseException as exc:  # pragma: no cover - signal-time safety net
                     LOGGER.warning(
                         "[Ops] Interrupted collecting shutdown metadata (thread=%s ident=%s): %s",
@@ -125,6 +140,9 @@ class OpsOrchestrator:
                     )
                     self._forced_shutdown_continuation = True
                     return "timed_out"
+                finally:
+                    if metadata_acquired:
+                        self._lock.release()
                 probe_elapsed_s = (
                     max(time.monotonic() - probe_started_monotonic, 0.0)
                     if probe_started_monotonic is not None

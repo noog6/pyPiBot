@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 
 from core.ops_models import HealthStatus
 from services.health_probes import HealthProbeResult
@@ -140,11 +141,11 @@ def test_stop_loop_handles_interrupt_while_collecting_timeout_metadata() -> None
             return True
 
     class InterruptingLock:
-        def __enter__(self):
+        def acquire(self, timeout=None) -> bool:
             raise KeyboardInterrupt
 
-        def __exit__(self, exc_type, exc, tb):
-            return False
+        def release(self) -> None:
+            return None
 
     orchestrator._loop_thread = FakeThread()  # type: ignore[assignment]
     orchestrator._lock = InterruptingLock()  # type: ignore[assignment]
@@ -153,3 +154,47 @@ def test_stop_loop_handles_interrupt_while_collecting_timeout_metadata() -> None
 
     assert status == "timed_out"
     assert orchestrator.forced_shutdown_continuation() is True
+
+
+def test_stop_loop_lock_contention_does_not_block_timeout_path(monkeypatch) -> None:
+    orchestrator = _new_orchestrator()
+
+    class FakeThread:
+        name = "fake-ops"
+        ident = 9
+
+        def join(self, timeout=None) -> None:
+            return None
+
+        def is_alive(self) -> bool:
+            return True
+
+    class ContendedLock:
+        def acquire(self, timeout=None) -> bool:
+            if timeout:
+                time.sleep(timeout)
+            return False
+
+        def release(self) -> None:
+            return None
+
+    warning_messages: list[str] = []
+
+    def capture_warning(message: str, *args) -> None:
+        warning_messages.append(message % args if args else message)
+
+    orchestrator._loop_thread = FakeThread()  # type: ignore[assignment]
+    orchestrator._lock = ContendedLock()  # type: ignore[assignment]
+    monkeypatch.setattr("services.ops_orchestrator.LOGGER.warning", capture_warning)
+
+    timeout_s = 0.01
+    grace_period_s = 0.02
+    started = time.monotonic()
+    status = orchestrator.stop_loop(timeout_s=timeout_s, grace_period_s=grace_period_s)
+    elapsed = time.monotonic() - started
+
+    assert status == "timed_out"
+    assert elapsed < 0.08
+    assert orchestrator.forced_shutdown_continuation() is True
+    assert warning_messages
+    assert any("metadata unavailable due to lock contention" in msg for msg in warning_messages)
