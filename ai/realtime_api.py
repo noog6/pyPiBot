@@ -2340,10 +2340,6 @@ class RealtimeAPI:
                 function_name,
                 self.function_call_args,
             )
-            self.orchestration_state.transition(
-                OrchestrationPhase.ACT,
-                reason=f"function_call {function_name}",
-            )
             try:
                 args = json.loads(self.function_call_args) if self.function_call_args else {}
             except json.JSONDecodeError:
@@ -2416,6 +2412,10 @@ class RealtimeAPI:
             decision = self._governance.review(action)
             log_info(f"🛡️ Governance decision: {decision.status} ({decision.reason}) {action.summary()}")
             if decision.approved:
+                self.orchestration_state.transition(
+                    OrchestrationPhase.ACT,
+                    reason=f"function_call {function_name}",
+                )
                 await self._execute_action(action, staging, websocket)
             elif decision.needs_confirmation:
                 action.requires_confirmation = True

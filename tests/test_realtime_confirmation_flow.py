@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 from collections import deque
 
 from ai.orchestration import OrchestrationPhase
@@ -442,3 +444,95 @@ def test_maybe_handle_approval_response_timeout_transitions_to_idle() -> None:
     assert sent_messages
     assert api._pending_action is None
     assert transitions == [(OrchestrationPhase.IDLE, "confirmation timeout")]
+
+
+def test_handle_function_call_suppresses_during_pending_confirmation_without_act_transition(
+    caplog,
+) -> None:
+    api = _make_api_stub()
+    api._pending_action = _build_pending_action()
+    api.function_call = {"name": "perform_research", "call_id": "call_suppress"}
+    api.function_call_args = '{"query":"status"}'
+    transitions: list[tuple[object, str | None]] = []
+    api.orchestration_state = type(
+        "S",
+        (),
+        {
+            "phase": OrchestrationPhase.AWAITING_CONFIRMATION,
+            "transition": lambda *args, **kwargs: transitions.append((args[1], kwargs.get("reason"))),
+        },
+    )()
+
+    sent_payloads: list[dict[str, object]] = []
+
+    class _SendWs:
+        async def send(self, payload: str) -> None:
+            sent_payloads.append(json.loads(payload))
+
+    caplog.set_level(logging.INFO)
+    asyncio.run(api.handle_function_call({}, _SendWs()))
+
+    assert "Suppressing tool call while awaiting confirmation" in caplog.text
+    assert transitions == []
+    assert len(sent_payloads) == 1
+    output_payload = json.loads(sent_payloads[0]["item"]["output"])
+    assert output_payload["status"] == "awaiting_confirmation"
+    assert api.function_call is None
+    assert api.function_call_args == ""
+
+
+def test_handle_function_call_transitions_to_act_when_execution_approved() -> None:
+    api = _make_api_stub()
+    api._pending_action = None
+    api.function_call = {"name": "perform_research", "call_id": "call_exec"}
+    api.function_call_args = '{"query":"status"}'
+    transitions: list[tuple[object, str | None]] = []
+    api.orchestration_state = type(
+        "S",
+        (),
+        {
+            "phase": OrchestrationPhase.THINK,
+            "transition": lambda *args, **kwargs: transitions.append((args[1], kwargs.get("reason"))),
+        },
+    )()
+    api._extract_dry_run_flag = lambda args: False
+    api._is_duplicate_tool_call = lambda *args, **kwargs: False
+    api._tool_execution_cooldown_remaining = lambda: 0.0
+    api._stage_action = lambda action: {"valid": True}
+    api._governance = type(
+        "Gov",
+        (),
+        {
+            "build_action_packet": lambda *args, **kwargs: type(
+                "Action",
+                (),
+                {
+                    "id": "call_exec",
+                    "tool_name": "perform_research",
+                    "summary": lambda self: "summary",
+                },
+            )(),
+            "review": lambda *args, **kwargs: type(
+                "Decision",
+                (),
+                {
+                    "approved": True,
+                    "needs_confirmation": False,
+                    "status": "approved",
+                    "reason": "ok",
+                },
+            )(),
+        },
+    )()
+
+    executed: list[str] = []
+
+    async def _execute_action(*args, **kwargs):
+        executed.append("done")
+
+    api._execute_action = _execute_action
+
+    asyncio.run(api.handle_function_call({}, _Ws()))
+
+    assert executed == ["done"]
+    assert transitions == [(OrchestrationPhase.ACT, "function_call perform_research")]
