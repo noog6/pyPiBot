@@ -224,6 +224,7 @@ class RealtimeAPI:
         self.response_in_progress = False
         self._response_in_flight = False
         self._response_create_queue: deque[dict[str, Any]] = deque()
+        self._pending_response_create_origins: deque[str] = deque(maxlen=64)
         self._audio_playback_busy = False
         self.function_call: dict[str, Any] | None = None
         self.function_call_args = ""
@@ -251,7 +252,6 @@ class RealtimeAPI:
         self._pending_turn_memory_brief: MemoryBrief | None = None
         self._last_user_battery_query_time: float | None = None
         self._last_outgoing_event_type: str | None = None
-        self._last_outgoing_response_origin: str | None = None
         self._tool_call_records: list[dict[str, Any]] = []
         self._last_tool_call_results: list[dict[str, Any]] = []
         self._last_response_metadata: dict[str, Any] = {}
@@ -599,7 +599,16 @@ class RealtimeAPI:
             return
         self._last_outgoing_event_type = str(event_type)
         if event_type == "response.create":
-            self._last_outgoing_response_origin = origin
+            self._queue_response_origin(origin)
+
+    def _queue_response_origin(self, origin: str | None) -> None:
+        normalized_origin = str(origin).strip() if origin else "unknown"
+        self._pending_response_create_origins.append(normalized_origin)
+
+    def _consume_response_origin(self) -> str:
+        if self._pending_response_create_origins:
+            return self._pending_response_create_origins.popleft()
+        return "server_auto"
 
     def inject_event(self, event: Event) -> None:
         allowed, reason = self._can_accept_external_stimulus(
@@ -2131,9 +2140,7 @@ class RealtimeAPI:
     async def handle_event(self, event: dict[str, Any], websocket: Any) -> None:
         event_type = event.get("type")
         if event_type == "response.created":
-            origin = "unknown"
-            if self._last_outgoing_event_type == "response.create":
-                origin = self._last_outgoing_response_origin or "unknown"
+            origin = self._consume_response_origin()
             log_info(f"response.created: origin={origin}")
             response = event.get("response") or {}
             response_id = response.get("id")
