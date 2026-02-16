@@ -160,7 +160,7 @@ class CameraController:
                     continue
 
                 if self.motion and self.motion.is_moving():
-                    logger.info("[CAMERA] skipped (motion active)")
+                    logger.debug("[CAMERA] skipped (motion active)")
                     time.sleep(0.01)
                     continue
 

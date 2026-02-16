@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from hardware.servo_registry import ServoRegistry
 from motion.action import Action
 from motion.keyframe import Keyframe
-from motion.logging import log_error, log_info, log_warning
+from motion.logging import log_debug, log_error, log_info, log_warning
 
 
 def millis() -> int:
@@ -304,14 +304,14 @@ class MotionController:
             self.servo_registry.servos["tilt"].write_value(desired_tilt)
 
             elapsed_ms = now_ms - new_frame.start_time_ms
-            log_info(
+            log_debug(
                 "[MOTION] 'pan' servo move completed (Cmd: %.3f) "
                 "(Position: %.2f) (Elapsed ms: %s)",
                 desired_pan,
                 desired_pan,
                 elapsed_ms,
             )
-            log_info(
+            log_debug(
                 "[MOTION] 'tilt' servo move completed (Cmd: %.3f) "
                 "(Position: %.2f) (Elapsed ms: %s)",
                 desired_tilt,
