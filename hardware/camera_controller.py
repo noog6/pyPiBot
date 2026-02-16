@@ -202,23 +202,45 @@ class CameraController:
         self.realtime_instance = realtime_instance
 
     def _can_send_realtime(self) -> bool:
+        ready, _ = self._get_realtime_readiness()
+        return ready
+
+    def _get_realtime_readiness(self) -> tuple[bool, str]:
         if not self.realtime_instance:
-            return False
+            return False, "realtime_instance_unavailable"
+
         is_ready = getattr(self.realtime_instance, "is_ready_for_injections", None)
         if callable(is_ready):
-            return is_ready()
+            readiness: Any
+            try:
+                readiness = is_ready(with_reason=True)
+            except TypeError:
+                readiness = is_ready()
+
+            if isinstance(readiness, tuple) and len(readiness) == 2:
+                ready, reason = readiness
+                return bool(ready), str(reason)
+
+            ready = bool(readiness)
+            return ready, "ready" if ready else "not_ready"
+
         loop = getattr(self.realtime_instance, "loop", None)
-        return loop is not None and loop.is_running()
+        if loop is None:
+            return False, "loop_unavailable"
+        if not loop.is_running():
+            return False, "loop_not_running"
+        return True, "ready"
 
     def _queue_pending_image(self, image: Any) -> None:
         if not self.realtime_instance:
             logger.warning("[CAMERA] Unable to take image - realtime instance not available")
             return
+        _, reason = self._get_realtime_readiness()
         with self._pending_lock:
             if len(self._pending_images) == self._pending_images.maxlen:
                 self._pending_images.popleft()
             self._pending_images.append(image)
-        logger.info("[CAMERA] Queued image until realtime loop is ready.")
+        logger.info("[CAMERA] Queued image until realtime loop is ready (%s).", reason)
 
     def _drain_pending_images(self) -> bool:
         if not self._can_send_realtime():

@@ -446,15 +446,31 @@ class RealtimeAPI:
     def _emit_alert(self, alert: Alert) -> None:
         self._alert_policy.emit(self.event_bus, alert)
 
-    def is_ready_for_injections(self) -> bool:
-        injector_ready, _ = self._can_accept_external_stimulus("event_injector", "probe")
-        return (
-            self.ready_event.is_set()
-            and self.websocket is not None
-            and self.loop is not None
-            and self.loop.is_running()
-            and injector_ready
+    def is_ready_for_injections(self, with_reason: bool = False) -> bool | tuple[bool, str]:
+        injector_ready, injector_reason = self._can_accept_external_stimulus(
+            "event_injector",
+            "probe",
         )
+
+        ready = False
+        reason = "not_ready"
+        if not self.ready_event.is_set():
+            reason = "ready_event_not_set"
+        elif self.websocket is None:
+            reason = "websocket_unavailable"
+        elif self.loop is None:
+            reason = "loop_unavailable"
+        elif not self.loop.is_running():
+            reason = "loop_not_running"
+        elif not injector_ready:
+            reason = injector_reason
+        else:
+            ready = True
+            reason = "ready"
+
+        if with_reason:
+            return ready, reason
+        return ready
 
     def _load_awaiting_confirmation_source_policy(
         self,
