@@ -2161,10 +2161,19 @@ class RealtimeAPI:
             response = event.get("response") or {}
             response_id = response.get("id")
             self._active_response_id = str(response_id) if response_id else None
-            self.orchestration_state.transition(
-                OrchestrationPhase.PLAN,
-                reason="response created",
+            confirmation_prompt_origin = origin == "assistant_message"
+            pending_confirmation_active = (
+                getattr(self, "_pending_action", None) is not None and confirmation_prompt_origin
             )
+            if pending_confirmation_active:
+                log_info(
+                    "response.created consumed by confirmation flow; phase remains AWAITING_CONFIRMATION"
+                )
+            else:
+                self.orchestration_state.transition(
+                    OrchestrationPhase.PLAN,
+                    reason="response created",
+                )
             if self.audio_player:
                 self.audio_player.start_response()
             self._audio_accum.clear()
