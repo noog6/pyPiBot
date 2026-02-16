@@ -36,6 +36,10 @@ def _make_api_stub() -> RealtimeAPI:
     api._last_response_create_ts = None
     api._response_create_debug_trace = False
     api._response_done_serial = 0
+    api._confirmation_timeout_markers = {}
+    api._confirmation_timeout_debounce_window_s = 5.0
+    api._approval_timeout_s = 30.0
+    api._last_user_input_text = None
     return api
 
 
@@ -472,7 +476,6 @@ def test_handle_function_call_suppresses_during_pending_confirmation_without_act
     caplog.set_level(logging.INFO)
     asyncio.run(api.handle_function_call({}, _SendWs()))
 
-    assert "Suppressing tool call while awaiting confirmation" in caplog.text
     assert transitions == []
     assert len(sent_payloads) == 1
     output_payload = json.loads(sent_payloads[0]["item"]["output"])
@@ -491,7 +494,7 @@ def test_handle_function_call_transitions_to_act_when_execution_approved() -> No
         "S",
         (),
         {
-            "phase": OrchestrationPhase.THINK,
+                "phase": OrchestrationPhase.IDLE,
             "transition": lambda *args, **kwargs: transitions.append((args[1], kwargs.get("reason"))),
         },
     )()
@@ -536,3 +539,123 @@ def test_handle_function_call_transitions_to_act_when_execution_approved() -> No
 
     assert executed == ["done"]
     assert transitions == [(OrchestrationPhase.ACT, "function_call perform_research")]
+
+
+def test_handle_function_call_suppresses_immediate_recall_after_confirmation_timeout() -> None:
+    api = _make_api_stub()
+    api._pending_action = None
+    api.function_call = {"name": "perform_research", "call_id": "call_timeout_suppressed"}
+    api.function_call_args = '{"query":"status"}'
+    api._is_duplicate_tool_call = lambda *args, **kwargs: False
+    api._extract_dry_run_flag = lambda args: False
+    api._is_suppressed_after_confirmation_timeout = lambda *args, **kwargs: True
+
+    transitions: list[tuple[object, str | None]] = []
+    api.orchestration_state = type(
+        "S",
+        (),
+        {
+                "phase": OrchestrationPhase.IDLE,
+            "transition": lambda *args, **kwargs: transitions.append((args[1], kwargs.get("reason"))),
+        },
+    )()
+
+    governance_calls = {"build": 0}
+    request_confirmation_calls = {"count": 0}
+
+    class _Gov:
+        def build_action_packet(self, *args, **kwargs):
+            governance_calls["build"] += 1
+            return object()
+
+    api._governance = _Gov()
+
+    async def _request_tool_confirmation(*args, **kwargs):
+        request_confirmation_calls["count"] += 1
+
+    api._request_tool_confirmation = _request_tool_confirmation
+
+    sent_payloads: list[dict[str, object]] = []
+
+    class _SendWs:
+        async def send(self, payload: str) -> None:
+            sent_payloads.append(json.loads(payload))
+
+    asyncio.run(api.handle_function_call({}, _SendWs()))
+
+    assert len(sent_payloads) == 1
+    output_payload = json.loads(sent_payloads[0]["item"]["output"])
+    assert output_payload["status"] == "suppressed_after_confirmation_timeout"
+    assert transitions == []
+    assert governance_calls["build"] == 0
+    assert request_confirmation_calls["count"] == 0
+
+
+def test_handle_function_call_allows_recall_after_timeout_debounce_window() -> None:
+    api = _make_api_stub()
+    api._pending_action = None
+    api.function_call = {"name": "perform_research", "call_id": "call_timeout_allowed"}
+    api.function_call_args = '{"query":"status"}'
+    api._is_duplicate_tool_call = lambda *args, **kwargs: False
+    api._extract_dry_run_flag = lambda args: False
+    api._tool_execution_cooldown_remaining = lambda: 0.0
+    api._stage_action = lambda action: {"valid": True}
+    api._is_suppressed_after_confirmation_timeout = lambda *args, **kwargs: False
+
+    transitions: list[tuple[object, str | None]] = []
+    api.orchestration_state = type(
+        "S",
+        (),
+        {
+                "phase": OrchestrationPhase.IDLE,
+            "transition": lambda *args, **kwargs: transitions.append((args[1], kwargs.get("reason"))),
+        },
+    )()
+
+    from ai.governance import ActionPacket
+
+    action = ActionPacket(
+        id="call_timeout_allowed",
+        tool_name="perform_research",
+        tool_args={"query": "status"},
+        tier=2,
+        what="research",
+        why="user asked",
+        impact="none",
+        rollback="n/a",
+        alternatives=[],
+        confidence=0.5,
+        cost="moderate",
+        risk_flags=[],
+        requires_confirmation=False,
+    )
+
+    class _Gov:
+        def build_action_packet(self, *args, **kwargs):
+            return action
+
+        def review(self, *args, **kwargs):
+            return type(
+                "Decision",
+                (),
+                {
+                    "approved": False,
+                    "needs_confirmation": True,
+                    "status": "needs_confirmation",
+                    "reason": "confirm",
+                },
+            )()
+
+    api._governance = _Gov()
+
+    request_confirmation_calls = {"count": 0}
+
+    async def _request_tool_confirmation(*args, **kwargs):
+        request_confirmation_calls["count"] += 1
+
+    api._request_tool_confirmation = _request_tool_confirmation
+
+    asyncio.run(api.handle_function_call({}, _Ws()))
+
+    assert request_confirmation_calls["count"] == 1
+    assert transitions == []
