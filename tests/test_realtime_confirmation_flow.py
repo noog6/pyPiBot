@@ -336,6 +336,52 @@ def test_drain_response_create_queue_drops_stale_assistant_message_after_confirm
     assert len(api._response_create_queue) == 0
 
 
+def test_drain_response_create_queue_drops_non_approval_assistant_message_after_one_completion() -> None:
+    api = _make_api_stub()
+    api._response_done_serial = 10
+    api._pending_action = None
+    api.orchestration_state = type("S", (), {"phase": OrchestrationPhase.IDLE})()
+    api._response_create_queue.append(
+        {
+            "websocket": api.websocket,
+            "event": {
+                "type": "response.create",
+                "response": {
+                    "metadata": {
+                        "origin": "assistant_message",
+                        "trigger": "research_summary",
+                    }
+                },
+            },
+            "origin": "assistant_message",
+            "record_ai_call": False,
+            "debug_context": None,
+            "enqueued_done_serial": 9,
+        }
+    )
+
+    info_logs = ["research summary window=alpha"]
+
+    async def _send_response_create(*args, **kwargs):
+        info_logs.append("origin=assistant_message replay window=alpha")
+        return True
+
+    api._send_response_create = _send_response_create
+
+    with patch("ai.realtime_api.logger.info") as mock_info:
+        asyncio.run(api._drain_response_create_queue())
+
+    info_logs.extend(call.args[0] % call.args[1:] for call in mock_info.call_args_list if call.args)
+
+    assert info_logs.count("research summary window=alpha") == 1
+    assert "origin=assistant_message replay window=alpha" not in info_logs
+    assert any(
+        "Dropping stale queued response.create origin=assistant_message" in log
+        for log in info_logs
+    )
+    assert len(api._response_create_queue) == 0
+
+
 def test_handle_response_done_keeps_listening_state_without_idle_transition() -> None:
     api = _make_api_stub()
     transitions: list[tuple[InteractionState, str]] = []

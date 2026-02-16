@@ -1460,9 +1460,9 @@ class RealtimeAPI:
         if not isinstance(enqueued_serial, int):
             return False
         completed_distance = self._response_done_serial - enqueued_serial
-        if completed_distance < 2:
-            return False
         if origin == "assistant_message":
+            if completed_distance < 1:
+                return False
             response_metadata = self._extract_response_create_metadata(queued.get("event") or {})
             approval_flow = str(response_metadata.get("approval_flow", "")).strip().lower()
             if approval_flow in {"true", "1", "yes"} and (
@@ -1470,6 +1470,8 @@ class RealtimeAPI:
             ):
                 return False
             return True
+        if completed_distance < 2:
+            return False
         # If two or more responses have already completed since this tool follow-up
         # was queued, it is stale and tends to replay old tool answers.
         return True
