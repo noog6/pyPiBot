@@ -1414,7 +1414,13 @@ class RealtimeAPI:
         return True
 
     async def _drain_response_create_queue(self) -> None:
-        if self._response_in_flight or self._audio_playback_busy or not self._response_create_queue:
+        current_state = getattr(self.state_manager, "state", InteractionState.IDLE)
+        if (
+            self._response_in_flight
+            or self._audio_playback_busy
+            or current_state == InteractionState.LISTENING
+            or not self._response_create_queue
+        ):
             return
         queue_len = len(self._response_create_queue)
         for _ in range(queue_len):
@@ -1487,6 +1493,17 @@ class RealtimeAPI:
             return True
         approval_flow = str(metadata.get("approval_flow", "")).strip().lower()
         return approval_flow in {"true", "1", "yes"}
+
+    def _is_user_approved_interrupt_response(self, response_payload: dict[str, Any]) -> bool:
+        metadata = response_payload.get("metadata") if isinstance(response_payload, dict) else None
+        if not isinstance(metadata, dict):
+            return False
+        value = metadata.get("user_approved_interrupt")
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"true", "1", "yes"}
+        return False
 
     async def _add_no_tools_follow_up_instruction(self, websocket: Any) -> None:
         instruction_event = {
@@ -2232,7 +2249,15 @@ class RealtimeAPI:
             self._last_tool_call_results = []
             self._last_response_metadata = {}
             self._reflection_enqueued = False
-            self.state_manager.update_state(InteractionState.THINKING, "response created")
+            if (
+                self.state_manager.state != InteractionState.LISTENING
+                or self._is_user_approved_interrupt_response(response)
+            ):
+                self.state_manager.update_state(InteractionState.THINKING, "response created")
+            else:
+                logger.info(
+                    "Skipping THINKING transition for response.created while still listening."
+                )
         elif event_type == "response.output_item.added":
             await self.handle_output_item_added(event)
         elif event_type == "response.function_call_arguments.delta":

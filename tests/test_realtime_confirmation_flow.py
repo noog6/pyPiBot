@@ -243,6 +243,40 @@ def test_drain_response_create_queue_waits_for_audio_playback_complete() -> None
     assert len(api._response_create_queue) == 1
 
 
+def test_drain_response_create_queue_waits_until_not_listening() -> None:
+    api = _make_api_stub()
+    api.state_manager.state = InteractionState.LISTENING
+    api._response_create_queue.append(
+        {
+            "websocket": api.websocket,
+            "event": {"type": "response.create"},
+            "origin": "tool_output",
+            "record_ai_call": False,
+            "debug_context": None,
+        }
+    )
+    sent: list[str] = []
+
+    async def _send_response_create(*args, **kwargs):
+        sent.append("sent")
+        return True
+
+    api._send_response_create = _send_response_create
+
+    asyncio.run(api._drain_response_create_queue())
+
+    assert sent == []
+    assert len(api._response_create_queue) == 1
+
+    # Simulate speech-stopped/idle transition before draining again.
+    api.state_manager.state = InteractionState.IDLE
+
+    asyncio.run(api._drain_response_create_queue())
+
+    assert sent == ["sent"]
+    assert len(api._response_create_queue) == 0
+
+
 def test_drain_response_create_queue_drops_stale_tool_output_entry() -> None:
     api = _make_api_stub()
     api._response_done_serial = 7
