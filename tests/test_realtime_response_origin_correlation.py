@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 
+from ai.orchestration import OrchestrationPhase
 from ai.realtime_api import RealtimeAPI
 
 
 class _OrchestrationState:
     def __init__(self) -> None:
+        self.phase = OrchestrationPhase.IDLE
         self.transitions: list[tuple[object, str | None]] = []
 
     def transition(self, *args, **kwargs) -> None:
@@ -19,6 +21,9 @@ class _OrchestrationState:
 
 
 class _StateManager:
+    def __init__(self) -> None:
+        self.state = None
+
     def update_state(self, *args, **kwargs) -> None:
         return None
 
@@ -80,13 +85,14 @@ def test_response_created_origin_correlation_distinguishes_tool_and_server_auto(
     assert list(api._pending_response_create_origins) == []
 
 
-def test_response_created_from_confirmation_prompt_keeps_awaiting_phase(monkeypatch) -> None:
+def test_response_created_from_pending_action_with_server_auto_keeps_awaiting_phase(
+    monkeypatch,
+) -> None:
     api = _build_api()
     logs: list[str] = []
     monkeypatch.setattr("ai.realtime_api.log_info", logs.append)
     api._pending_action = object()
-
-    api._track_outgoing_event({"type": "response.create"}, origin="assistant_message")
+    api.orchestration_state.phase = OrchestrationPhase.AWAITING_CONFIRMATION
 
     asyncio.run(
         api.handle_event(
@@ -96,10 +102,8 @@ def test_response_created_from_confirmation_prompt_keeps_awaiting_phase(monkeypa
     )
 
     assert api.orchestration_state.transitions == []
-    assert (
-        "response.created consumed by confirmation flow; phase remains AWAITING_CONFIRMATION"
-        in logs
-    )
+    assert api.orchestration_state.phase == OrchestrationPhase.AWAITING_CONFIRMATION
+    assert "response.created consumed by confirmation flow; origin=server_auto" in logs
 
 
 def test_rate_limits_updated_normalizes_missing_requests_bucket(monkeypatch) -> None:
