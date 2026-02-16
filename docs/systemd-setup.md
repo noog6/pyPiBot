@@ -10,7 +10,30 @@ This guide describes how to run the Theo runtime as a systemd service.
 - `OPENAI_API_KEY` set in `/etc/environment` (or another file referenced by `EnvironmentFile` in the unit).
 - `FIRECRAWL_API_KEY` set as well if you enable `research.firecrawl.enabled: true`.
 
-## Install the Service
+## Install the Service (preferred: helper script)
+
+Use the helper script for reproducible install/update flow:
+
+```bash
+./scripts/install-systemd-service.sh --enable --restart
+```
+
+Useful variants:
+
+- Install/update unit without changing enable/start state:
+  ```bash
+  ./scripts/install-systemd-service.sh
+  ```
+- Install/update and restart now, but do not enable at boot:
+  ```bash
+  ./scripts/install-systemd-service.sh --restart
+  ```
+
+The script validates repo/service paths, copies `systemd/pyPiBot.service`, reloads systemd, and prints the status command.
+
+### Manual fallback
+
+If you prefer manual commands:
 
 1. Copy the service unit file:
    ```bash
@@ -24,9 +47,11 @@ This guide describes how to run the Theo runtime as a systemd service.
    ```bash
    sudo systemctl enable pyPiBot.service
    ```
-4. Start the service:
+4. Start or restart the service:
    ```bash
    sudo service pyPiBot start
+   # or, for updates:
+   sudo service pyPiBot restart
    ```
 
 ## Service Management
@@ -53,3 +78,30 @@ Update the following fields in `systemd/pyPiBot.service` as needed:
 - Log file paths in `StandardOutput` and `StandardError`.
 - `User` to the appropriate runtime user.
 - `EnvironmentFile` if you store API keys (`OPENAI_API_KEY`, optional `FIRECRAWL_API_KEY`) somewhere else.
+
+## Auto-sync security considerations
+
+If you enable `ExecStartPre` git sync commands (for example `fetch/switch/pull`) so service startup auto-updates code, be aware of the supply-chain and operational risks:
+
+- **Unreviewed code deployment:** a restart can deploy new commits immediately, even if they were not manually validated on the device.
+- **Compromised remote risk:** if `origin` is hijacked or credentials are leaked, malicious code can be pulled at service start.
+- **Restart-loop amplification:** repeated crashes/restarts can repeatedly pull and redeploy changing upstream state.
+
+Recommended guardrails:
+
+- Use `git pull --ff-only` only (avoid implicit merge commits during startup automation).
+- Pin `origin` to SSH and use a restricted deploy key with least privilege.
+- Protect `main` with required reviews and passing CI before merge.
+- Optionally require commit-signature verification in your release/deployment workflow before service restarts are allowed.
+
+### Rollback procedure
+
+If a bad update is pulled, roll back to a known-good commit:
+
+```bash
+git -C /home/pi/workarea/pyPiBot switch main
+git -C /home/pi/workarea/pyPiBot reset --hard <known-good-sha>
+sudo service pyPiBot restart
+```
+
+Replace `<known-good-sha>` with the commit hash you want to restore.
