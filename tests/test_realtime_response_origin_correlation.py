@@ -100,3 +100,38 @@ def test_response_created_from_confirmation_prompt_keeps_awaiting_phase(monkeypa
         "response.created consumed by confirmation flow; phase remains AWAITING_CONFIRMATION"
         in logs
     )
+
+
+def test_rate_limits_updated_normalizes_missing_requests_bucket(monkeypatch) -> None:
+    api = _build_api()
+    info_logs: list[str] = []
+    warning_logs: list[str] = []
+
+    monkeypatch.setattr(
+        "ai.realtime_api.logger.info",
+        lambda message, *args: info_logs.append(message % args),
+    )
+    monkeypatch.setattr(
+        "ai.realtime_api.logger.warning",
+        lambda message, *args: warning_logs.append(message % args),
+    )
+
+    event = {
+        "type": "rate_limits.updated",
+        "rate_limits": [
+            {
+                "name": "tokens",
+                "remaining": 995,
+                "limit": 1000,
+                "reset_seconds": None,
+            }
+        ],
+    }
+
+    asyncio.run(api.handle_event(event, websocket=None))
+    asyncio.run(api.handle_event(event, websocket=None))
+
+    assert warning_logs == [
+        "Realtime API rate_limits.updated missing expected bucket(s): requests"
+    ]
+    assert info_logs[-1] == "Rate limits: requests n/a/n/a reset=n/as | tokens 995/1000 reset=n/as"
