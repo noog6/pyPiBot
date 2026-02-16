@@ -1454,14 +1454,25 @@ class RealtimeAPI:
 
     def _is_stale_queued_response_create(self, queued: dict[str, Any]) -> bool:
         origin = str(queued.get("origin") or "").strip().lower()
-        if origin != "tool_output":
+        if origin not in {"tool_output", "assistant_message"}:
             return False
         enqueued_serial = queued.get("enqueued_done_serial")
         if not isinstance(enqueued_serial, int):
             return False
+        completed_distance = self._response_done_serial - enqueued_serial
+        if completed_distance < 2:
+            return False
+        if origin == "assistant_message":
+            response_metadata = self._extract_response_create_metadata(queued.get("event") or {})
+            approval_flow = str(response_metadata.get("approval_flow", "")).strip().lower()
+            if approval_flow in {"true", "1", "yes"} and (
+                self._pending_action is not None or self._is_awaiting_confirmation_phase()
+            ):
+                return False
+            return True
         # If two or more responses have already completed since this tool follow-up
         # was queued, it is stale and tends to replay old tool answers.
-        return (self._response_done_serial - enqueued_serial) >= 2
+        return True
 
     def _extract_response_create_metadata(self, response_create_event: dict[str, Any]) -> dict[str, Any]:
         response_payload = response_create_event.get("response") if isinstance(response_create_event, dict) else None
