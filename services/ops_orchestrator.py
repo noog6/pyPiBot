@@ -115,8 +115,9 @@ class OpsOrchestrator:
                 probe_started_monotonic = None
                 tick_started_at = None
                 loop_phase = "n/a"
-                metadata_lock_timeout_s = max(min(grace_period_s, 0.05), 0.0)
+                metadata_lock_timeout_s = max(min(grace_period_s, 0.2), 0.0)
                 metadata_acquired = False
+                metadata_source = "locked"
                 try:
                     metadata_acquired = self._lock.acquire(timeout=metadata_lock_timeout_s)
                     if metadata_acquired:
@@ -125,12 +126,18 @@ class OpsOrchestrator:
                         tick_started_at = self._tick_started_at
                         loop_phase = self._loop_phase
                     else:
+                        metadata_source = "best_effort_unlocked"
+                        last_probe = self._active_probe_name
+                        probe_started_monotonic = self._probe_started_monotonic
+                        tick_started_at = self._tick_started_at
+                        loop_phase = self._loop_phase
                         LOGGER.warning(
                             "[Ops] Loop thread shutdown metadata unavailable due to lock contention "
-                            "(thread=%s ident=%s lock_timeout=%.3fs).",
+                            "(thread=%s ident=%s lock_timeout=%.3fs fallback=%s).",
                             thread.name,
                             thread.ident,
                             metadata_lock_timeout_s,
+                            metadata_source,
                         )
                 except BaseException as exc:  # pragma: no cover - signal-time safety net
                     LOGGER.warning(
@@ -150,7 +157,7 @@ class OpsOrchestrator:
                     else None
                 )
                 LOGGER.warning(
-                    "[Ops] Loop thread join timed out (thread=%s ident=%s elapsed=%.3fs timeout=%.3fs stop_event_set=%s phase=%s last_probe=%s probe_elapsed_s=%s tick_started_at=%s).",
+                    "[Ops] Loop thread join timed out (thread=%s ident=%s elapsed=%.3fs timeout=%.3fs stop_event_set=%s phase=%s last_probe=%s probe_elapsed_s=%s tick_started_at=%s metadata_source=%s).",
                     thread.name,
                     thread.ident,
                     first_wait_elapsed,
@@ -160,6 +167,7 @@ class OpsOrchestrator:
                     last_probe,
                     f"{probe_elapsed_s:.3f}" if probe_elapsed_s is not None else "n/a",
                     f"{tick_started_at:.3f}" if tick_started_at is not None else "n/a",
+                    metadata_source,
                 )
 
                 if grace_period_s > 0.0:
@@ -222,7 +230,7 @@ class OpsOrchestrator:
 
     def _loop(self) -> None:
         while not self._stop_event.is_set():
-            tick_started_at = time.time()
+            tick_started_at = time.monotonic()
             with self._lock:
                 self._loop_phase = "tick"
                 self._tick_started_at = tick_started_at
