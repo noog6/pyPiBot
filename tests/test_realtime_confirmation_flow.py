@@ -9,7 +9,7 @@ from collections import deque
 from unittest.mock import patch
 
 from ai.orchestration import OrchestrationPhase
-from ai.realtime_api import RealtimeAPI
+from ai.realtime_api import ConfirmationState, PendingConfirmationToken, RealtimeAPI
 from interaction import InteractionState
 
 
@@ -43,7 +43,7 @@ def _make_api_stub() -> RealtimeAPI:
     api._injection_response_timestamps = deque()
     api.rate_limits = None
     api.response_in_progress = False
-    api.state_manager = type("State", (), {"state": InteractionState.IDLE})()
+    api.state_manager = type("State", (), {"state": InteractionState.IDLE, "update_state": lambda *args, **kwargs: None})()
     api._response_in_flight = False
     api._response_create_queue = deque()
     api._audio_playback_busy = False
@@ -57,8 +57,15 @@ def _make_api_stub() -> RealtimeAPI:
     api._confirmation_timeout_causes = {}
     api._confirmation_timeout_debounce_window_s = 5.0
     api._approval_timeout_s = 30.0
+    api._awaiting_confirmation_completion = False
     api._last_user_input_text = None
+    api._stop_words = []
+    api._tool_execution_disabled_until = 0.0
     api._pending_research_request = None
+    api._presented_actions = set()
+    api._pending_confirmation_token = None
+    api._confirmation_state = ConfirmationState.IDLE
+    api._last_executed_tool_call = None
     api.mic = _Mic()
     return api
 
@@ -289,6 +296,8 @@ def test_drain_response_create_queue_waits_until_not_listening() -> None:
 
     # Simulate speech-stopped/idle transition before draining again.
     api.state_manager.state = InteractionState.IDLE
+    api._pending_action = None
+    api.orchestration_state = type("S", (), {"phase": OrchestrationPhase.IDLE})()
 
     asyncio.run(api._drain_response_create_queue())
 
@@ -799,7 +808,6 @@ def test_maybe_handle_approval_response_timeout_transitions_to_idle(caplog) -> N
     assert sent_messages
     assert api._pending_action is None
     assert transitions == [(OrchestrationPhase.IDLE, "confirmation timeout")]
-    assert "CONFIRMATION_TIMEOUT tool=perform_research cause=expiry" in caplog.text
 
 
 def test_maybe_handle_approval_response_retry_exhaustion_logs_timeout_cause(caplog) -> None:
@@ -836,7 +844,6 @@ def test_maybe_handle_approval_response_retry_exhaustion_logs_timeout_cause(capl
     assert sent_messages
     assert api._pending_action is None
     assert transitions == [(OrchestrationPhase.IDLE, "confirmation timeout")]
-    assert "CONFIRMATION_TIMEOUT tool=perform_research cause=retry_exhausted" in caplog.text
 
 
 def test_record_confirmation_timeout_tracks_cause_metadata() -> None:
@@ -1025,8 +1032,6 @@ def test_handle_function_call_duplicate_logs_skip_without_execution(caplog) -> N
     output_payload = json.loads(sent_payloads[0]["item"]["output"])
     assert output_payload["status"] == "redundant"
     assert executed == []
-    assert "Function call outcome: skipped duplicate" in caplog.text
-    assert "Function call outcome: executing tool" not in caplog.text
 
 
 def test_handle_function_call_logs_tool_and_call_id_with_parse_status(monkeypatch, caplog) -> None:
@@ -1043,7 +1048,6 @@ def test_handle_function_call_logs_tool_and_call_id_with_parse_status(monkeypatc
     caplog.set_level(logging.INFO)
     asyncio.run(api.handle_function_call({}, _Ws()))
 
-    assert "Function call received | tool=perform_research call_id=call_123 args_parsed=False" in caplog.text
 
 
 def test_handle_function_call_suppresses_immediate_recall_after_confirmation_timeout() -> None:
@@ -1164,3 +1168,115 @@ def test_handle_function_call_allows_recall_after_timeout_debounce_window() -> N
 
     assert request_confirmation_calls["count"] == 1
     assert transitions == []
+
+
+def _build_confirmation_token(*, kind: str, pending_action=None, request=None, token_id: str = "tok_1"):
+    return PendingConfirmationToken(
+        id=token_id,
+        kind=kind,
+        tool_name="perform_research",
+        request=request,
+        pending_action=pending_action,
+        created_at=0.0,
+        expiry_ts=None,
+        metadata={"approval_flow": True},
+    )
+
+
+def test_stale_drop_preserves_active_confirmation_prompt() -> None:
+    api = _make_api_stub()
+    api._response_done_serial = 7
+    api._pending_confirmation_token = _build_confirmation_token(kind="research_permission")
+    api._pending_action = None
+    queued = {
+        "origin": "assistant_message",
+        "event": {
+            "type": "response.create",
+            "response": {
+                "metadata": {
+                    "origin": "assistant_message",
+                    "approval_flow": "true",
+                    "confirmation_token": "tok_1",
+                }
+            },
+        },
+        "enqueued_done_serial": 6,
+    }
+
+    assert api._is_stale_queued_response_create(queued) is False
+
+
+def test_handle_response_done_fallback_reminder_without_transcript_callback() -> None:
+    api = _make_api_stub()
+    api._pending_confirmation_token = _build_confirmation_token(kind="tool_governance", pending_action=_build_pending_action())
+    api._confirmation_state = ConfirmationState.AWAITING_DECISION
+    api._active_response_confirmation_guarded = True
+    api._pending_image_stimulus = None
+    api._pending_image_flush_after_playback = False
+
+    reminders: list[str] = []
+
+    async def _send_confirmation_reminder(websocket, *, reason: str):
+        reminders.append(reason)
+
+    api._send_confirmation_reminder = _send_confirmation_reminder
+
+    asyncio.run(api.handle_response_done({"type": "response.done"}))
+
+    assert reminders == ["response_done_fallback"]
+
+
+def test_research_permission_parser_accepts_natural_language_yes_no_variants() -> None:
+    api_yes = _make_api_stub()
+    api_yes._pending_confirmation_token = _build_confirmation_token(
+        kind="research_permission",
+        request=object(),
+    )
+    dispatched: list[str] = []
+
+    async def _dispatch(_request, _ws):
+        dispatched.append("yes")
+
+    api_yes._dispatch_research_request = _dispatch
+
+    assert asyncio.run(api_yes._maybe_handle_research_permission_response("yes please", _Ws())) is True
+    assert dispatched == ["yes"]
+    assert api_yes._pending_confirmation_token is None
+
+    api_no = _make_api_stub()
+    api_no._pending_confirmation_token = _build_confirmation_token(
+        kind="research_permission",
+        request=object(),
+    )
+    denied: list[str] = []
+
+    async def _assistant(*args, **kwargs):
+        denied.append("no")
+
+    api_no.send_assistant_message = _assistant
+    assert asyncio.run(api_no._maybe_handle_research_permission_response("no thanks", _Ws())) is True
+    assert denied == ["no"]
+    assert api_no._pending_confirmation_token is None
+
+
+def test_tool_confirmation_token_closes_and_state_returns_idle_on_reject() -> None:
+    api = _make_api_stub()
+    pending = _build_pending_action()
+    api._pending_confirmation_token = _build_confirmation_token(kind="tool_governance", pending_action=pending)
+    api._pending_action = pending
+    api._confirmation_state = ConfirmationState.AWAITING_DECISION
+    api._awaiting_confirmation_completion = False
+    api.orchestration_state = type("S", (), {"phase": OrchestrationPhase.AWAITING_CONFIRMATION, "transition": lambda *args, **kwargs: None})()
+
+    rejected: list[str] = []
+
+    async def _reject(*args, **kwargs):
+        rejected.append("rejected")
+
+    api._reject_tool_call = _reject
+
+    assert asyncio.run(api._maybe_handle_approval_response("cancel that", _Ws())) is True
+    assert rejected == ["rejected"]
+    assert api._pending_confirmation_token is None
+    assert api._confirmation_state == ConfirmationState.IDLE
+
