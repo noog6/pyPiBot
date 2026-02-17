@@ -1771,7 +1771,7 @@ class RealtimeAPI:
             return True
 
         await self.send_assistant_message(
-            "Please reply with: yes / no / modify.",
+            "Please reply with: yes or no.",
             websocket,
         )
         return True
