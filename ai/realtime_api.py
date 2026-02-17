@@ -1559,6 +1559,22 @@ class RealtimeAPI:
         normalized_origin = str(origin).strip().lower()
         return normalized_origin in {"", "unknown", "server_auto", "assistant_message", "tool_output"}
 
+    def _recover_confirmation_guard_microphone(self, trigger: str) -> None:
+        pending_confirmation_active = self._pending_action is not None or self._is_awaiting_confirmation_phase()
+        if not pending_confirmation_active or self._audio_playback_busy:
+            return
+        mic = getattr(self, "mic", None)
+        if mic is None or getattr(mic, "is_recording", False):
+            return
+        pending_tool = getattr(getattr(self._pending_action, "action", None), "tool_name", "none")
+        logger.info(
+            "CONFIRMATION_GUARD_RECOVERY_MIC_RESTART phase=%s pending_tool=%s trigger=%s",
+            getattr(self.orchestration_state, "phase", None),
+            pending_tool,
+            trigger,
+        )
+        mic.start_recording()
+
     async def _add_no_tools_follow_up_instruction(self, websocket: Any) -> None:
         instruction_event = {
             "type": "conversation.item.create",
@@ -3083,6 +3099,7 @@ class RealtimeAPI:
                 )
             self._active_response_confirmation_guarded = False
             self.response_in_progress = False
+            self._recover_confirmation_guard_microphone("transcribe_response_done")
             self._maybe_enqueue_reflection("response transcript done")
             if self._pending_image_stimulus and not self._pending_image_flush_after_playback:
                 await self._flush_pending_image_stimulus("response transcript done")
@@ -3124,6 +3141,7 @@ class RealtimeAPI:
         self._response_done_serial += 1
         self.response_in_progress = False
         self._response_in_flight = False
+        was_confirmation_guarded = self._active_response_confirmation_guarded
         self._active_response_id = None
         self._active_response_confirmation_guarded = False
         self._active_response_origin = "unknown"
@@ -3160,6 +3178,8 @@ class RealtimeAPI:
                 OrchestrationPhase.IDLE,
                 reason="response done reflection",
             )
+        if was_confirmation_guarded:
+            self._recover_confirmation_guard_microphone("response_done")
         await self._drain_response_create_queue()
         if self._pending_image_stimulus and not self._pending_image_flush_after_playback:
             await self._flush_pending_image_stimulus("response done")
