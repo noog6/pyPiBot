@@ -198,3 +198,28 @@ def test_stop_loop_lock_contention_does_not_block_timeout_path(monkeypatch) -> N
     assert orchestrator.forced_shutdown_continuation() is True
     assert warning_messages
     assert any("metadata unavailable due to lock contention" in msg for msg in warning_messages)
+
+
+def test_stop_loop_normal_shutdown_emits_info_without_warning(monkeypatch) -> None:
+    orchestrator = _new_orchestrator()
+    warning_messages: list[str] = []
+    info_messages: list[str] = []
+
+    def capture_warning(message: str, *args) -> None:
+        warning_messages.append(message % args if args else message)
+
+    def capture_info(message: str, *args) -> None:
+        info_messages.append(message % args if args else message)
+
+    monkeypatch.setattr("services.ops_orchestrator.LOGGER.warning", capture_warning)
+    monkeypatch.setattr("services.ops_orchestrator.LOGGER.info", capture_info)
+
+    orchestrator._tick = lambda: None  # type: ignore[method-assign]
+    orchestrator.start_loop(loop_period_s=0.05)
+    time.sleep(0.06)
+    status = orchestrator.stop_loop(timeout_s=0.2, grace_period_s=0.05)
+
+    assert status == "stopped"
+    assert orchestrator.forced_shutdown_continuation() is False
+    assert warning_messages == []
+    assert any("Loop thread stopped cleanly" in message for message in info_messages)

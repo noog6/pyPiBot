@@ -70,6 +70,9 @@ realtime:
       prefix_padding_ms: 700
       silence_duration_ms: 900
 
+# Realtime websocket shutdown behavior
+websocket_close_timeout_s: 5.0
+
 # Audio devices
 audio:
   input:

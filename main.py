@@ -200,6 +200,20 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         logger.exception("An unexpected error occurred: %s", exc)
     finally:
+        if ops_orchestrator:
+            try:
+                ops_status = ops_orchestrator.stop_loop()
+            except KeyboardInterrupt:
+                logger.warning(
+                    "Interrupted while stopping ops orchestrator; continuing shutdown."
+                )
+                ops_status = "interrupted"
+            if ops_status != "stopped":
+                logger.warning(
+                    "Ops orchestrator shutdown incomplete (status=%s forced_shutdown_continuation=%s)",
+                    ops_status,
+                    ops_orchestrator.forced_shutdown_continuation(),
+                )
         if camera_instance:
             with suppress_noisy_stderr(
                 "camera shutdown",
@@ -217,20 +231,6 @@ def main(argv: list[str] | None = None) -> int:
             if battery_event_handler:
                 battery_monitor.unregister_event_handler(battery_event_handler)
             battery_monitor.stop_loop()
-        if ops_orchestrator:
-            try:
-                ops_status = ops_orchestrator.stop_loop()
-            except KeyboardInterrupt:
-                logger.warning(
-                    "Interrupted while stopping ops orchestrator; continuing shutdown."
-                )
-                ops_status = "interrupted"
-            if ops_status != "stopped":
-                logger.warning(
-                    "Ops orchestrator shutdown incomplete (status=%s forced_shutdown_continuation=%s)",
-                    ops_status,
-                    ops_orchestrator.forced_shutdown_continuation(),
-                )
 
     return 0
 

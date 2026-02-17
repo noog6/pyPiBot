@@ -96,7 +96,9 @@ class OpsOrchestrator:
 
     def stop_loop(self, timeout_s: float = 2.0, grace_period_s: float = 0.2) -> str:
         status = "stopped"
+        shutdown_started = time.monotonic()
         if self._loop_thread is not None:
+            thread = self._loop_thread
             self._stop_event.set()
             self._forced_shutdown_continuation = False
             first_wait_started = time.monotonic()
@@ -109,7 +111,6 @@ class OpsOrchestrator:
 
             first_wait_elapsed = time.monotonic() - first_wait_started
             if self._loop_thread.is_alive():
-                thread = self._loop_thread
                 last_probe = "n/a"
                 probe_started_monotonic = None
                 tick_started_at = None
@@ -179,6 +180,16 @@ class OpsOrchestrator:
                     return "timed_out"
 
             self._loop_thread = None
+            LOGGER.info(
+                "[Ops] Loop thread stopped cleanly status=%s elapsed=%.3fs stop_event_set=%s forced_shutdown_continuation=%s final_phase=%s thread=%s ident=%s",
+                status,
+                time.monotonic() - shutdown_started,
+                self._stop_event.is_set(),
+                self._forced_shutdown_continuation,
+                self._loop_phase,
+                thread.name,
+                thread.ident,
+            )
         return status
 
     def forced_shutdown_continuation(self) -> bool:
