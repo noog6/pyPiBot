@@ -95,3 +95,27 @@ def test_playback_complete_skips_mic_restart_during_shutdown(monkeypatch) -> Non
     assert api.mic.stop_receiving_calls == 0
     assert api.mic.start_recording_calls == 0
     assert "Playback complete during shutdown -> skipping mic restart" in info_logs
+
+
+def test_close_websocket_uses_configured_timeout_by_default(monkeypatch) -> None:
+    warnings: list[str] = []
+
+    monkeypatch.setattr(
+        "ai.realtime_api.logger.warning",
+        lambda message, *args: warnings.append(message % args),
+    )
+
+    async def _run_test() -> None:
+        api = RealtimeAPI.__new__(RealtimeAPI)
+        api.websocket = _BlockingWebSocket()
+        api._websocket_close_timeout_s = 0.02
+        api._ws_close_lock = asyncio.Lock()
+        api._ws_close_started = False
+        api._ws_close_done = False
+
+        await api._close_websocket("configured-timeout", websocket=api.websocket)
+
+        assert api.websocket.close_attempts == 1
+        assert any("Timed out closing WebSocket (configured-timeout)." in message for message in warnings)
+
+    asyncio.run(_run_test())

@@ -354,6 +354,7 @@ class RealtimeAPI:
         )
         self._confirmation_timeout_markers: dict[str, float] = {}
         self._confirmation_timeout_causes: dict[str, str] = {}
+        self._websocket_close_timeout_s = float(config.get("websocket_close_timeout_s", 5.0))
         self._tool_definitions = {tool["name"]: tool for tool in tools}
         self._storage = StorageController.get_instance()
         self._presented_actions: set[str] = set()
@@ -3944,17 +3945,22 @@ class RealtimeAPI:
         reason: str,
         *,
         websocket: Any | None = None,
-        timeout_s: float = 2.0,
+        timeout_s: float | None = None,
     ) -> None:
         ws = websocket or self.websocket
         if not ws:
             return
+        close_timeout_s = (
+            getattr(self, "_websocket_close_timeout_s", 5.0)
+            if timeout_s is None
+            else timeout_s
+        )
         async with self._ws_close_lock:
             if self._ws_close_started or self._ws_close_done:
                 return
             self._ws_close_started = True
         try:
-            await asyncio.wait_for(ws.close(), timeout=timeout_s)
+            await asyncio.wait_for(ws.close(), timeout=close_timeout_s)
             logger.info("WebSocket closed (%s).", reason)
         except asyncio.TimeoutError:
             logger.warning("Timed out closing WebSocket (%s).", reason)

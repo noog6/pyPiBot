@@ -144,3 +144,44 @@ def test_main_handles_keyboard_interrupt_while_stopping_ops(monkeypatch) -> None
         "Ops orchestrator shutdown incomplete "
         "(status=interrupted forced_shutdown_continuation=True)"
     ) in warnings
+
+
+def test_main_stops_ops_orchestrator_before_other_teardown(monkeypatch) -> None:
+    stop_order: list[str] = []
+
+    class OrderedMotion(_FakeMotionController):
+        def stop_control_loop(self) -> None:
+            stop_order.append("motion")
+
+    class OrderedCamera(_FakeCameraController):
+        def stop_vision_loop(self) -> None:
+            stop_order.append("camera")
+
+    class OrderedMonitor(_FakeMonitor):
+        def __init__(self, name: str) -> None:
+            self._name = name
+
+        def stop_loop(self) -> None:
+            stop_order.append(self._name)
+
+    class OrderedOps(_FakeOpsOrchestrator):
+        def stop_loop(self) -> str:
+            stop_order.append("ops")
+            return "stopped"
+
+    monkeypatch.setattr(main.ConfigController, "get_instance", lambda: _FakeConfigController())
+    monkeypatch.setattr(main.StorageController, "get_instance", lambda: _FakeStorageController())
+    monkeypatch.setattr(main.MemoryManager, "get_instance", lambda: _FakeMemoryManager())
+    monkeypatch.setattr(main, "RealtimeAPI", _FakeRealtimeAPI)
+    monkeypatch.setattr(main.MotionController, "get_instance", lambda: OrderedMotion())
+    monkeypatch.setattr(main.CameraController, "get_instance", lambda: OrderedCamera())
+    monkeypatch.setattr(main.ImuMonitor, "get_instance", lambda: OrderedMonitor("imu"))
+    monkeypatch.setattr(main.BatteryMonitor, "get_instance", lambda: OrderedMonitor("battery"))
+    monkeypatch.setattr(main.OpsOrchestrator, "get_instance", lambda: OrderedOps())
+    monkeypatch.setattr(main, "suppress_noisy_stderr", lambda *args, **kwargs: nullcontext())
+
+    exit_code = main.main([])
+
+    assert exit_code == 0
+    assert stop_order[0] == "ops"
+    assert set(stop_order[1:]) == {"camera", "motion", "imu", "battery"}
