@@ -18,6 +18,19 @@ class _Ws:
         return None
 
 
+class _Mic:
+    def __init__(self) -> None:
+        self.is_recording = True
+        self.start_recording_calls = 0
+
+    def start_recording(self) -> None:
+        self.start_recording_calls += 1
+        self.is_recording = True
+
+    def stop_recording(self) -> None:
+        self.is_recording = False
+
+
 def _make_api_stub() -> RealtimeAPI:
     api = RealtimeAPI.__new__(RealtimeAPI)
     api.websocket = _Ws()
@@ -46,6 +59,7 @@ def _make_api_stub() -> RealtimeAPI:
     api._approval_timeout_s = 30.0
     api._last_user_input_text = None
     api._pending_research_request = None
+    api.mic = _Mic()
     return api
 
 
@@ -607,6 +621,37 @@ def test_handle_transcribe_response_done_suppresses_confirmation_guarded_respons
     assert sent_prompts == ["Please reply with: yes or no."]
     assert api.assistant_reply == ""
     assert api._assistant_reply_accum == ""
+
+
+def test_confirmation_guarded_transcribe_done_restarts_mic_once_when_recording_stopped() -> None:
+    api = _make_api_stub()
+    api.websocket = _Ws()
+    api.assistant_reply = "Thanks for confirming."
+    api._assistant_reply_accum = "Thanks for confirming."
+    api._active_response_confirmation_guarded = True
+    api._active_response_origin = "server_auto"
+    api._active_response_id = "resp_2"
+    api._pending_image_stimulus = None
+    api._pending_image_flush_after_playback = False
+    api._maybe_enqueue_reflection = lambda *_args, **_kwargs: None
+    api._audio_playback_busy = False
+
+    sent_prompts: list[str] = []
+
+    async def _send_assistant_message(message, *_args, **_kwargs):
+        sent_prompts.append(message)
+
+    api.send_assistant_message = _send_assistant_message
+    api.mic = _Mic()
+    api.mic.is_recording = False
+
+    asyncio.run(api.handle_speech_stopped(api.websocket))
+    assert api.mic.is_recording is False
+    asyncio.run(api.handle_transcribe_response_done())
+
+    assert sent_prompts == ["Please reply with: yes or no."]
+    assert api.mic.start_recording_calls == 1
+    assert api.orchestration_state.phase == OrchestrationPhase.AWAITING_CONFIRMATION
 
 
 def test_pending_confirmation_still_accepts_after_speech_started() -> None:
