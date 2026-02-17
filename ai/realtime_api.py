@@ -8,6 +8,7 @@ import base64
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 import hashlib
 from io import BytesIO
 import json
@@ -97,6 +98,30 @@ class PendingAction:
     created_at: float
     retry_count: int = 0
     max_retries: int = 2
+
+
+class ConfirmationState(str, Enum):
+    IDLE = "idle"
+    PENDING_PROMPT = "pending_prompt"
+    AWAITING_DECISION = "awaiting_decision"
+    RESOLVING = "resolving"
+    COMPLETED = "completed"
+
+
+@dataclass
+class PendingConfirmationToken:
+    id: str
+    kind: str
+    tool_name: str | None
+    request: ResearchRequest | None
+    pending_action: PendingAction | None
+    created_at: float
+    expiry_ts: float | None
+    retry_count: int = 0
+    max_retries: int = 2
+    prompt_sent: bool = False
+    reminder_sent: bool = False
+    metadata: dict[str, Any] | None = None
 
 
 def _validate_outbound_endpoint(url: str) -> None:
@@ -320,6 +345,8 @@ class RealtimeAPI:
         tool_specs = build_tool_specs(governance_cfg.get("tool_specs") or {})
         self._governance = GovernanceLayer(tool_specs, config)
         self._pending_action: PendingAction | None = None
+        self._confirmation_state = ConfirmationState.IDLE
+        self._pending_confirmation_token: PendingConfirmationToken | None = None
         self._awaiting_confirmation_completion = False
         self._approval_timeout_s = float(config.get("approval_timeout_s", 30.0))
         self._confirmation_timeout_debounce_window_s = float(
@@ -535,12 +562,12 @@ class RealtimeAPI:
         normalized_kind = self._normalize_external_stimulus_kind(kind, metadata)
         normalized_priority = (priority or "").lower()
 
-        pending_action = getattr(self, "_pending_action", None)
+        pending_action = getattr(self, "_pending_confirmation_token", None)
         response_in_progress = bool(getattr(self, "response_in_progress", False))
 
         if (
             pending_action is not None
-            and phase == OrchestrationPhase.AWAITING_CONFIRMATION
+            and self._is_awaiting_confirmation_phase()
             and not self._is_allowed_awaiting_confirmation_stimulus(
                 normalized_source,
                 normalized_kind,
@@ -1470,9 +1497,9 @@ class RealtimeAPI:
                 return False
             response_metadata = self._extract_response_create_metadata(queued.get("event") or {})
             approval_flow = str(response_metadata.get("approval_flow", "")).strip().lower()
-            if approval_flow in {"true", "1", "yes"} and (
-                self._pending_action is not None or self._is_awaiting_confirmation_phase()
-            ):
+            if approval_flow in {"true", "1", "yes"} and self._has_active_confirmation_token():
+                return False
+            if self._has_active_confirmation_token() and self._is_token_approval_flow_metadata(response_metadata):
                 return False
             return True
         if completed_distance < 2:
@@ -1495,6 +1522,8 @@ class RealtimeAPI:
         return "unknown"
 
     def _is_awaiting_confirmation_phase(self) -> bool:
+        if getattr(self, "_pending_confirmation_token", None) is not None:
+            return True
         phase = getattr(self.orchestration_state, "phase", None)
         return phase == OrchestrationPhase.AWAITING_CONFIRMATION
 
@@ -1506,7 +1535,7 @@ class RealtimeAPI:
         return source in {"user_audio", "user_text", "voice_confirmation", "text_confirmation"}
 
     def _can_release_queued_response_create(self, trigger: str, metadata: dict[str, Any]) -> bool:
-        if self._pending_action is None and not self._is_awaiting_confirmation_phase():
+        if not self._has_active_confirmation_token() and not self._is_awaiting_confirmation_phase():
             return True
         if self._is_user_confirmation_trigger(trigger, metadata):
             return True
@@ -1546,7 +1575,7 @@ class RealtimeAPI:
         return decision in {"yes", "no"}
 
     def _should_guard_confirmation_response(self, origin: str, response_payload: dict[str, Any]) -> bool:
-        if self._pending_action is None and not self._is_awaiting_confirmation_phase():
+        if not self._has_active_confirmation_token() and not self._is_awaiting_confirmation_phase():
             return False
         metadata = response_payload.get("metadata") if isinstance(response_payload, dict) else None
         if not isinstance(metadata, dict):
@@ -1560,13 +1589,15 @@ class RealtimeAPI:
         return normalized_origin in {"", "unknown", "server_auto", "assistant_message", "tool_output"}
 
     def _recover_confirmation_guard_microphone(self, trigger: str) -> None:
-        pending_confirmation_active = self._pending_action is not None or self._is_awaiting_confirmation_phase()
+        pending_confirmation_active = self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase()
         if not pending_confirmation_active or self._audio_playback_busy:
             return
         mic = getattr(self, "mic", None)
         if mic is None or getattr(mic, "is_recording", False):
             return
-        pending_tool = getattr(getattr(self._pending_action, "action", None), "tool_name", "none")
+        token = getattr(self, "_pending_confirmation_token", None)
+        pending_tool = getattr(getattr(token, "pending_action", None), "action", None)
+        pending_tool = getattr(pending_tool, "tool_name", "none")
         logger.info(
             "CONFIRMATION_GUARD_RECOVERY_MIC_RESTART phase=%s pending_tool=%s trigger=%s",
             getattr(self.orchestration_state, "phase", None),
@@ -1593,10 +1624,137 @@ class RealtimeAPI:
         self._track_outgoing_event(instruction_event)
         await websocket.send(json.dumps(instruction_event))
 
+    def _log_confirmation_transition(
+        self,
+        from_state: ConfirmationState,
+        to_state: ConfirmationState,
+        *,
+        reason: str,
+        token: PendingConfirmationToken | None = None,
+    ) -> None:
+        logger.info(
+            "CONFIRMATION_FSM transition=%s->%s token=%s kind=%s reason=%s",
+            from_state.value,
+            to_state.value,
+            token.id if token else "none",
+            token.kind if token else "none",
+            reason,
+        )
+
+    def _set_confirmation_state(self, state: ConfirmationState, *, reason: str) -> None:
+        previous = getattr(self, "_confirmation_state", ConfirmationState.IDLE)
+        token = getattr(self, "_pending_confirmation_token", None)
+        if previous != state:
+            self._log_confirmation_transition(previous, state, reason=reason, token=token)
+        self._confirmation_state = state
+
+    def _create_confirmation_token(
+        self,
+        *,
+        kind: str,
+        tool_name: str | None,
+        request: ResearchRequest | None = None,
+        pending_action: PendingAction | None = None,
+        expiry_ts: float | None = None,
+        max_retries: int = 2,
+        metadata: dict[str, Any] | None = None,
+    ) -> PendingConfirmationToken:
+        now = time.monotonic()
+        token = PendingConfirmationToken(
+            id=f"confirm_{uuid.uuid4().hex}",
+            kind=kind,
+            tool_name=tool_name,
+            request=request,
+            pending_action=pending_action,
+            created_at=now,
+            expiry_ts=expiry_ts,
+            max_retries=max_retries,
+            metadata=metadata or {},
+        )
+        self._pending_confirmation_token = token
+        self._set_confirmation_state(ConfirmationState.PENDING_PROMPT, reason=f"token_created:{kind}")
+        logger.info(
+            "CONFIRMATION_TOKEN_CREATED token=%s kind=%s tool=%s",
+            token.id,
+            kind,
+            tool_name or "none",
+        )
+        return token
+
+    def _sync_confirmation_legacy_fields(self) -> None:
+        token = getattr(self, "_pending_confirmation_token", None)
+        if token is None:
+            self._pending_action = None
+            self._pending_research_request = None
+            if getattr(self, "_confirmation_state", ConfirmationState.IDLE) != ConfirmationState.IDLE:
+                self._set_confirmation_state(ConfirmationState.IDLE, reason="token_cleared")
+            return
+        self._pending_action = token.pending_action
+        self._pending_research_request = token.request if token.kind == "research_permission" else None
+
+    def _close_confirmation_token(self, *, outcome: str) -> None:
+        token = getattr(self, "_pending_confirmation_token", None)
+        if token is None:
+            self._sync_confirmation_legacy_fields()
+            return
+        self._set_confirmation_state(ConfirmationState.COMPLETED, reason=f"outcome:{outcome}")
+        logger.info(
+            "CONFIRMATION_TOKEN_CLOSED token=%s kind=%s outcome=%s",
+            token.id,
+            token.kind,
+            outcome,
+        )
+        if token.pending_action:
+            self._presented_actions.discard(token.pending_action.action.id)
+        self._pending_confirmation_token = None
+        self._sync_confirmation_legacy_fields()
+
     def _clear_pending_action(self) -> None:
+        token = getattr(self, "_pending_confirmation_token", None)
+        if token and token.pending_action is not None:
+            token.pending_action = None
+            if token.kind == "tool_governance":
+                self._close_confirmation_token(outcome="cleared_pending_action")
+                return
         if self._pending_action:
             self._presented_actions.discard(self._pending_action.action.id)
         self._pending_action = None
+
+    def _has_active_confirmation_token(self) -> bool:
+        return getattr(self, "_pending_confirmation_token", None) is not None
+
+    def _is_token_approval_flow_metadata(self, metadata: dict[str, Any]) -> bool:
+        approval_flow = str(metadata.get("approval_flow", "")).strip().lower()
+        if approval_flow in {"true", "1", "yes"}:
+            return True
+        token = getattr(self, "_pending_confirmation_token", None)
+        if token is None:
+            return False
+        token_id = str(metadata.get("confirmation_token", "")).strip()
+        return token_id != "" and token_id == token.id
+
+    async def _send_confirmation_reminder(self, websocket: Any, *, reason: str) -> None:
+        token = getattr(self, "_pending_confirmation_token", None)
+        if token is None or token.reminder_sent:
+            return
+        token.reminder_sent = True
+        if self._confirmation_state == ConfirmationState.PENDING_PROMPT:
+            self._set_confirmation_state(ConfirmationState.AWAITING_DECISION, reason="reminder_sent")
+        logger.info(
+            "CONFIRMATION_NON_DECISION_RESPONSE_SUPPRESSED origin=%s response_id=%s reason=%s",
+            self._active_response_origin,
+            self._active_response_id or "unknown",
+            reason,
+        )
+        await self.send_assistant_message(
+            "Please reply with: yes or no.",
+            websocket,
+            response_metadata={
+                "trigger": "confirmation_reminder",
+                "approval_flow": "true",
+                "confirmation_token": token.id if token is not None else "",
+            },
+        )
 
     def _parse_confirmation_decision(self, text: str) -> str:
         normalized = " ".join(re.sub(r"[^\w\s]", " ", text.lower()).split())
@@ -1722,45 +1880,52 @@ class RealtimeAPI:
     async def _maybe_handle_approval_response(
         self, text: str, websocket: Any
     ) -> bool:
-        if not self._pending_action:
+        token = getattr(self, "_pending_confirmation_token", None)
+        if token is not None and (token.kind != "tool_governance" or token.pending_action is None):
             return False
-        if (
-            self._pending_research_request is not None
-            and self._pending_action.action.tool_name == "perform_research"
-        ):
-            logger.info(
-                "[Research] Skipping governance confirmation handling because research intent permission is pending"
-            )
+        pending = token.pending_action if token is not None else self._pending_action
+        if pending is None:
             return False
+
+        action = pending.action
         if await self._handle_stop_word(text, websocket, source="approval_response"):
             return True
         cooldown_remaining = self._tool_execution_cooldown_remaining()
         if cooldown_remaining > 0:
+            if token is not None:
+                self._set_confirmation_state(ConfirmationState.RESOLVING, reason="stop_word_cooldown")
             await self._reject_tool_call(
-                self._pending_action.action,
+                action,
                 f"Tool execution paused for {cooldown_remaining:.0f}s due to stop word.",
                 websocket,
-                staging=self._pending_action.staging,
+                staging=pending.staging,
                 status="cancelled",
             )
-            self._clear_pending_action()
+            if token is not None:
+                self._close_confirmation_token(outcome="cancelled_by_stop_word")
+            else:
+                self._clear_pending_action()
             self._awaiting_confirmation_completion = False
             self.orchestration_state.transition(
                 OrchestrationPhase.IDLE,
                 reason="confirmation cancelled by stop word",
             )
             return True
+
         now = time.monotonic()
-        pending = self._pending_action
-        action = pending.action
         if action.expiry_ts is not None and now > action.expiry_ts:
+            if token is not None:
+                self._set_confirmation_state(ConfirmationState.RESOLVING, reason="approval_expired")
             logger.info("CONFIRMATION_TIMEOUT tool=%s cause=expiry", action.tool_name)
             self._record_confirmation_timeout(action, cause="expiry")
             await self.send_assistant_message(
                 "Approval window expired. Please ask again if you still want this.",
                 websocket,
             )
-            self._clear_pending_action()
+            if token is not None:
+                self._close_confirmation_token(outcome="expired")
+            else:
+                self._clear_pending_action()
             self._awaiting_confirmation_completion = False
             self.orchestration_state.transition(
                 OrchestrationPhase.IDLE,
@@ -1781,6 +1946,8 @@ class RealtimeAPI:
         )
 
         if decision == "yes":
+            if token is not None:
+                self._set_confirmation_state(ConfirmationState.RESOLVING, reason="tool_confirmation_accepted")
             logger.info("CONFIRMATION_ACCEPTED tool=%s", action.tool_name)
             staging = pending.staging or self._stage_action(action)
             self._awaiting_confirmation_completion = True
@@ -1791,10 +1958,15 @@ class RealtimeAPI:
                 force_no_tools_followup=True,
                 inject_no_tools_instruction=True,
             )
-            self._clear_pending_action()
+            if token is not None:
+                self._close_confirmation_token(outcome="accepted")
+            else:
+                self._clear_pending_action()
             return True
 
         if decision == "no":
+            if token is not None:
+                self._set_confirmation_state(ConfirmationState.RESOLVING, reason="tool_confirmation_rejected")
             logger.info("CONFIRMATION_REJECTED tool=%s", action.tool_name)
             await self._reject_tool_call(
                 action,
@@ -1802,7 +1974,10 @@ class RealtimeAPI:
                 websocket,
                 status="cancelled",
             )
-            self._clear_pending_action()
+            if token is not None:
+                self._close_confirmation_token(outcome="rejected")
+            else:
+                self._clear_pending_action()
             self._awaiting_confirmation_completion = False
             self.orchestration_state.transition(
                 OrchestrationPhase.IDLE,
@@ -1810,15 +1985,28 @@ class RealtimeAPI:
             )
             return True
 
-        pending.retry_count += 1
-        if pending.retry_count > pending.max_retries:
+        if token is not None:
+            token.retry_count += 1
+            retry_count = token.retry_count
+            max_retries = token.max_retries
+        else:
+            pending.retry_count += 1
+            retry_count = pending.retry_count
+            max_retries = pending.max_retries
+
+        if retry_count > max_retries:
+            if token is not None:
+                self._set_confirmation_state(ConfirmationState.RESOLVING, reason="tool_confirmation_retry_exhausted")
             logger.info("CONFIRMATION_TIMEOUT tool=%s cause=retry_exhausted", action.tool_name)
             self._record_confirmation_timeout(action, cause="retry_exhausted")
             await self.send_assistant_message(
                 "I couldn't confirm this action. Please ask again if you still want it.",
                 websocket,
             )
-            self._clear_pending_action()
+            if token is not None:
+                self._close_confirmation_token(outcome="retry_exhausted")
+            else:
+                self._clear_pending_action()
             self._awaiting_confirmation_completion = False
             self.orchestration_state.transition(
                 OrchestrationPhase.IDLE,
@@ -1826,36 +2014,83 @@ class RealtimeAPI:
             )
             return True
 
-        await self.send_assistant_message(
-            "Please reply with: yes or no.",
-            websocket,
-        )
+        if token is not None:
+            await self._send_confirmation_reminder(websocket, reason="non_decision_input")
+        else:
+            await self.send_assistant_message("Please reply with: yes or no.", websocket)
         return True
 
     async def _maybe_handle_research_permission_response(self, text: str, websocket: Any) -> bool:
-        if self._pending_research_request is None:
+        token = getattr(self, "_pending_confirmation_token", None)
+        if token is not None and token.kind != "research_permission":
+            return False
+        request = token.request if token is not None else self._pending_research_request
+        if request is None:
             return False
 
-        normalized = text.strip().lower()
-        if normalized in {"yes", "y", "okay", "ok", "approve"}:
-            request = self._pending_research_request
-            self._pending_research_request = None
+        decision = self._parse_confirmation_decision(text)
+        logger.info(
+            "CONFIRMATION_DECISION token=%s kind=%s decision=%s",
+            token.id if token is not None else "legacy",
+            "research_permission",
+            decision,
+        )
+
+        if decision == "yes":
+            if token is not None:
+                self._set_confirmation_state(ConfirmationState.RESOLVING, reason="research_permission_accepted")
             logger.info("[Research] Permission granted by user")
+            if token is not None:
+                self._close_confirmation_token(outcome="accepted")
+            else:
+                self._pending_research_request = None
             await self._dispatch_research_request(request, websocket)
             return True
 
-        if normalized in {"no", "n", "deny", "cancel"}:
-            self._pending_research_request = None
+        if decision == "no":
+            if token is not None:
+                self._set_confirmation_state(ConfirmationState.RESOLVING, reason="research_permission_rejected")
             logger.info("[Research] Permission denied by user")
+            if token is not None:
+                self._close_confirmation_token(outcome="rejected")
+            else:
+                self._pending_research_request = None
             await self.send_assistant_message(
                 "Understood — I won't perform web research right now.",
                 websocket,
             )
             return True
 
+        if token is not None:
+            token.retry_count += 1
+            retry_count = token.retry_count
+            max_retries = token.max_retries
+        else:
+            retry_count = 1
+            max_retries = 0
+
+        if retry_count > max_retries:
+            if token is not None:
+                self._set_confirmation_state(ConfirmationState.RESOLVING, reason="research_permission_timeout")
+            logger.info("[Research] Permission timed out after retries")
+            if token is not None:
+                self._close_confirmation_token(outcome="retry_exhausted")
+            else:
+                self._pending_research_request = None
+            await self.send_assistant_message(
+                "I couldn't confirm research permission. Please ask again if you still want web lookup.",
+                websocket,
+            )
+            return True
+
         await self.send_assistant_message(
-            "For research permission, please reply yes or no.",
+            "Please reply with: yes or no.",
             websocket,
+            response_metadata={
+                "trigger": "confirmation_reminder",
+                "approval_flow": "true",
+                "confirmation_token": token.id if token is not None else "",
+            },
         )
         return True
 
@@ -1863,14 +2098,12 @@ class RealtimeAPI:
         if not has_research_intent(text):
             return False
 
-        if self._pending_research_request is not None:
+        token = getattr(self, "_pending_confirmation_token", None)
+        if token is not None and token.kind == "research_permission":
             logger.info("[Research] Duplicate intent ignored while permission prompt is pending")
             return True
 
-        if (
-            self._pending_action is not None
-            and self._pending_action.action.tool_name == "perform_research"
-        ):
+        if token is not None and token.kind == "tool_governance" and token.tool_name == "perform_research":
             logger.info(
                 "[Research] Duplicate intent ignored while governance confirmation is already pending"
             )
@@ -1889,12 +2122,26 @@ class RealtimeAPI:
 
         if self._research_permission_required:
             logger.info("[Research] research_confirmation_mode=intent_permission")
-            self._pending_research_request = request
+            token = self._create_confirmation_token(
+                kind="research_permission",
+                tool_name="perform_research",
+                request=request,
+                max_retries=2,
+                metadata={"approval_flow": True},
+            )
+            self._sync_confirmation_legacy_fields()
             logger.info("[Research] Permission asked")
             await self.send_assistant_message(
                 "I can do a web lookup for that. Do I have your permission to proceed? (yes/no)",
                 websocket,
+                response_metadata={
+                    "trigger": "confirmation_prompt",
+                    "approval_flow": "true",
+                    "confirmation_token": token.id,
+                },
             )
+            token.prompt_sent = True
+            self._set_confirmation_state(ConfirmationState.AWAITING_DECISION, reason="research_prompt_sent")
             return True
 
         logger.info("[Research] research_confirmation_mode=governance")
@@ -2321,9 +2568,7 @@ class RealtimeAPI:
             response_id = response.get("id")
             self._active_response_id = str(response_id) if response_id else None
             self._active_response_origin = str(origin)
-            pending_confirmation_active = getattr(self, "_pending_action", None) is not None or (
-                self.orchestration_state.phase == OrchestrationPhase.AWAITING_CONFIRMATION
-            )
+            pending_confirmation_active = self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase()
             if pending_confirmation_active:
                 log_info(f"response.created consumed by confirmation flow; origin={origin}")
                 self._active_response_confirmation_guarded = self._should_guard_confirmation_response(
@@ -2468,7 +2713,7 @@ class RealtimeAPI:
                 "suppressed": False,
             }
             self._log_utterance_envelope(event_type)
-            if self._pending_action is not None or self._is_awaiting_confirmation_phase():
+            if self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase():
                 logger.info(
                     "Speech started while awaiting confirmation; confirmation mode remains active."
                 )
@@ -2560,9 +2805,10 @@ class RealtimeAPI:
                 call_id,
                 args_parsed,
             )
+            token = getattr(self, "_pending_confirmation_token", None)
             if (
                 function_name == "perform_research"
-                and self._pending_research_request is not None
+                and ((token is not None and token.kind == "research_permission") or self._pending_research_request is not None)
             ):
                 logger.info(
                     "Function call outcome: suppressed pending intent permission | tool=%s call_id=%s",
@@ -2589,11 +2835,12 @@ class RealtimeAPI:
                 self.function_call = None
                 self.function_call_args = ""
                 return
-            if self._pending_action:
+            pending_action = token.pending_action if token is not None else self._pending_action
+            if pending_action is not None:
                 logger.info(
                     "Function call outcome: suppressed pending confirmation | incoming=%s pending=%s",
                     function_name,
-                    self._pending_action.action.tool_name,
+                    pending_action.action.tool_name,
                 )
                 await self._send_awaiting_confirmation_output(call_id, websocket)
                 self.function_call = None
@@ -2696,13 +2943,25 @@ class RealtimeAPI:
             elif decision.needs_confirmation:
                 action.requires_confirmation = True
                 action.expiry_ts = time.monotonic() + self._approval_timeout_s
-                self._pending_action = PendingAction(
+                pending_action = PendingAction(
                     action=action,
                     staging=staging,
                     original_intent=self._last_user_input_text or "",
                     created_at=time.monotonic(),
                 )
+                token = self._create_confirmation_token(
+                    kind="tool_governance",
+                    tool_name=action.tool_name,
+                    pending_action=pending_action,
+                    expiry_ts=action.expiry_ts,
+                    max_retries=pending_action.max_retries,
+                    metadata={"approval_flow": True},
+                )
+                self._pending_action = pending_action
+                self._sync_confirmation_legacy_fields()
                 await self._request_tool_confirmation(action, decision.reason, websocket, staging)
+                token.prompt_sent = True
+                self._set_confirmation_state(ConfirmationState.AWAITING_DECISION, reason="tool_prompt_sent")
             else:
                 await self._reject_tool_call(
                     action,
@@ -2854,10 +3113,14 @@ class RealtimeAPI:
         )
         self._awaiting_confirmation_completion = False
         message = self._build_approval_prompt(action)
+        token = getattr(self, "_pending_confirmation_token", None)
+        response_metadata = {"trigger": "confirmation_prompt", "approval_flow": "true"}
+        if token is not None:
+            response_metadata["confirmation_token"] = token.id
         await self.send_assistant_message(
             message,
             websocket,
-            response_metadata={"trigger": "confirmation_prompt", "approval_flow": "true"},
+            response_metadata=response_metadata,
         )
         function_call_output = {
             "type": "conversation.item.create",
@@ -3087,8 +3350,11 @@ class RealtimeAPI:
         metadata = {"origin": "assistant_message"}
         if response_metadata:
             metadata.update(response_metadata)
-        if self._pending_action is not None or self._is_awaiting_confirmation_phase():
+        token = getattr(self, "_pending_confirmation_token", None)
+        if token is not None or self._is_awaiting_confirmation_phase():
             metadata.setdefault("approval_flow", "true")
+            if token is not None:
+                metadata.setdefault("confirmation_token", token.id)
         await self._send_response_create(
             websocket,
             {"type": "response.create", "response": {"metadata": metadata}},
@@ -3110,22 +3376,23 @@ class RealtimeAPI:
     async def handle_transcribe_response_done(self) -> None:
         if (
             self._active_response_confirmation_guarded
-            and self._pending_action is not None
+            and (self._has_active_confirmation_token() or self._pending_action is not None)
             and self._is_awaiting_confirmation_phase()
         ):
-            logger.info(
-                "CONFIRMATION_NON_DECISION_RESPONSE_SUPPRESSED origin=%s response_id=%s",
-                self._active_response_origin,
-                self._active_response_id or "unknown",
-            )
             self.assistant_reply = ""
             self._assistant_reply_accum = ""
             if self.websocket is not None:
-                await self.send_assistant_message(
-                    "Please reply with: yes or no.",
-                    self.websocket,
-                    response_metadata={"trigger": "confirmation_reminder", "approval_flow": "true"},
-                )
+                if self._has_active_confirmation_token():
+                    await self._send_confirmation_reminder(
+                        self.websocket,
+                        reason="transcribe_response_done",
+                    )
+                else:
+                    await self.send_assistant_message(
+                        "Please reply with: yes or no.",
+                        self.websocket,
+                        response_metadata={"trigger": "confirmation_reminder", "approval_flow": "true"},
+                    )
             self._active_response_confirmation_guarded = False
             self.response_in_progress = False
             self._recover_confirmation_guard_microphone("transcribe_response_done")
@@ -3189,7 +3456,7 @@ class RealtimeAPI:
                 "rate_limits": self.rate_limits,
             }
         if self.orchestration_state.phase == OrchestrationPhase.AWAITING_CONFIRMATION:
-            if self._pending_action:
+            if self._has_active_confirmation_token():
                 logger.info("Staying in AWAITING_CONFIRMATION until user accepts/rejects.")
             elif self._awaiting_confirmation_completion:
                 self._awaiting_confirmation_completion = False
@@ -3208,6 +3475,8 @@ class RealtimeAPI:
                 reason="response done reflection",
             )
         if was_confirmation_guarded:
+            if self.websocket is not None and self._has_active_confirmation_token() and self._is_awaiting_confirmation_phase():
+                await self._send_confirmation_reminder(self.websocket, reason="response_done_fallback")
             self._recover_confirmation_guard_microphone("response_done")
         await self._drain_response_create_queue()
         if self._pending_image_stimulus and not self._pending_image_flush_after_playback:
@@ -3234,7 +3503,7 @@ class RealtimeAPI:
                 "rate_limits": self.rate_limits,
             }
         if self.orchestration_state.phase == OrchestrationPhase.AWAITING_CONFIRMATION:
-            if self._pending_action:
+            if self._has_active_confirmation_token():
                 logger.info("Staying in AWAITING_CONFIRMATION until user accepts/rejects.")
             elif self._awaiting_confirmation_completion:
                 self._awaiting_confirmation_completion = False
@@ -3363,7 +3632,7 @@ class RealtimeAPI:
             log_warning("Skipping injected response (%s): websocket unavailable.", trigger)
             return
 
-        if self._pending_action is not None or self._is_awaiting_confirmation_phase():
+        if self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase():
             if not self._is_user_confirmation_trigger(trigger, metadata):
                 logger.info(
                     "Suppressing duplicate non-user response request trigger=%s phase=%s pending_action=%s",
@@ -3480,7 +3749,7 @@ class RealtimeAPI:
             "stimulus": json.dumps(metadata, sort_keys=True),
             "origin": "injection",
         }
-        if self._pending_action is not None or self._is_awaiting_confirmation_phase():
+        if self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase():
             response_metadata["approval_flow"] = "true"
         memory_brief_note = self._consume_pending_memory_brief_note()
         response_create_event = {
@@ -3525,7 +3794,7 @@ class RealtimeAPI:
     async def _flush_pending_image_stimulus(self, reason: str) -> None:
         if not self._pending_image_stimulus:
             return
-        if self._pending_action is not None or self._is_awaiting_confirmation_phase():
+        if self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase():
             logger.info(
                 "Deferring pending image stimulus flush after %s: awaiting confirmation unresolved.",
                 reason,
