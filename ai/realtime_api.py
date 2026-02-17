@@ -344,6 +344,7 @@ class RealtimeAPI:
         _validate_tool_specs(governance_cfg.get("tool_specs") or {}, tools)
         tool_specs = build_tool_specs(governance_cfg.get("tool_specs") or {})
         self._governance = GovernanceLayer(tool_specs, config)
+        self._debug_governance_decisions = bool(governance_cfg.get("debug_decisions", False))
         self._pending_action: PendingAction | None = None
         self._confirmation_state = ConfirmationState.IDLE
         self._pending_confirmation_token: PendingConfirmationToken | None = None
@@ -2956,34 +2957,45 @@ class RealtimeAPI:
                 )
                 return
             decision = self._governance.review(action)
-            log_info(f"🛡️ Governance decision: {decision.status} ({decision.reason}) {action.summary()}")
             approved_via_prior_permission = (
                 decision.needs_confirmation
                 and self._consume_prior_research_permission_marker_if_fresh(action)
             )
-            if decision.approved or approved_via_prior_permission:
+            should_execute = decision.approved or approved_via_prior_permission
+            if should_execute:
                 decision_reason = (
                     "approved_via_prior_research_permission"
                     if approved_via_prior_permission
                     else decision.reason
                 )
-                if approved_via_prior_permission:
+                final_execution_decision = "execute"
+                if self._debug_governance_decisions:
+                    log_info(
+                        f"🛡️ Governance decision: {decision.status} ({decision.reason}) {action.summary()}"
+                    )
+                if approved_via_prior_permission and self._debug_governance_decisions:
                     log_info(
                         "🛡️ Governance decision: approved "
                         f"(approved_via_prior_research_permission) {action.summary()}"
                     )
-                logger.info(
-                    "Function call outcome: executing tool | tool=%s call_id=%s decision_reason=%s",
-                    function_name,
-                    call_id,
-                    decision_reason,
-                )
+                if self._debug_governance_decisions:
+                    logger.info(
+                        "Function call outcome: executing tool | tool=%s call_id=%s decision_reason=%s",
+                        function_name,
+                        call_id,
+                        decision_reason,
+                    )
                 self.orchestration_state.transition(
                     OrchestrationPhase.ACT,
                     reason=f"function_call {function_name}",
                 )
                 await self._execute_action(action, staging, websocket)
             elif decision.needs_confirmation:
+                final_execution_decision = "request_confirmation"
+                if self._debug_governance_decisions:
+                    log_info(
+                        f"🛡️ Governance decision: {decision.status} ({decision.reason}) {action.summary()}"
+                    )
                 action.requires_confirmation = True
                 action.expiry_ts = time.monotonic() + self._approval_timeout_s
                 pending_action = PendingAction(
@@ -3006,6 +3018,11 @@ class RealtimeAPI:
                 token.prompt_sent = True
                 self._set_confirmation_state(ConfirmationState.AWAITING_DECISION, reason="tool_prompt_sent")
             else:
+                final_execution_decision = "reject"
+                if self._debug_governance_decisions:
+                    log_info(
+                        f"🛡️ Governance decision: {decision.status} ({decision.reason}) {action.summary()}"
+                    )
                 await self._reject_tool_call(
                     action,
                     decision.reason,
@@ -3013,6 +3030,17 @@ class RealtimeAPI:
                     staging=staging,
                     status="denied",
                 )
+            logger.info(
+                "Governance review summary | call_id=%s tool=%s initial_status=%s "
+                "initial_reason=%s prior_permission_override=%s "
+                "final_execution_decision=%s",
+                call_id,
+                function_name,
+                decision.status,
+                decision.reason,
+                approved_via_prior_permission,
+                final_execution_decision,
+            )
 
     async def execute_function_call(
         self,

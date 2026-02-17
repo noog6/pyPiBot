@@ -68,6 +68,7 @@ def _make_api_stub() -> RealtimeAPI:
     api._pending_confirmation_token = None
     api._confirmation_state = ConfirmationState.IDLE
     api._last_executed_tool_call = None
+    api._debug_governance_decisions = False
     api.mic = _Mic()
     return api
 
@@ -1095,6 +1096,63 @@ def test_handle_function_call_logs_tool_and_call_id_with_parse_status(monkeypatc
 
     caplog.set_level(logging.INFO)
     asyncio.run(api.handle_function_call({}, _Ws()))
+
+    assert (
+        "Function call payload parsed | tool=perform_research "
+        "call_id=call_123 parse=invalid_json"
+    ) in caplog.text
+
+
+def test_handle_function_call_logs_consolidated_governance_review_summary(caplog) -> None:
+    api = _make_api_stub()
+    api._pending_action = None
+    api.function_call = {"name": "perform_research", "call_id": "call_gov_1"}
+    api.function_call_args = '{"query":"status"}'
+    api._extract_dry_run_flag = lambda args: False
+    api._is_duplicate_tool_call = lambda *args, **kwargs: False
+    api._is_suppressed_after_confirmation_timeout = lambda *args, **kwargs: False
+    api._tool_execution_cooldown_remaining = lambda: 0.0
+    api._stage_action = lambda action: {"valid": True}
+    api._governance = type(
+        "Gov",
+        (),
+        {
+            "build_action_packet": lambda *args, **kwargs: type(
+                "Action",
+                (),
+                {
+                    "id": "call_gov_1",
+                    "tool_name": "perform_research",
+                    "tool_args": {"query": "status"},
+                    "summary": lambda self: "summary",
+                },
+            )(),
+            "review": lambda *args, **kwargs: type(
+                "Decision",
+                (),
+                {
+                    "approved": False,
+                    "needs_confirmation": True,
+                    "status": "needs_confirmation",
+                    "reason": "expensive_read",
+                },
+            )(),
+        },
+    )()
+
+    async def _request_tool_confirmation(*args, **kwargs):
+        return None
+
+    api._request_tool_confirmation = _request_tool_confirmation
+
+    caplog.set_level(logging.INFO)
+    asyncio.run(api.handle_function_call({}, _Ws()))
+
+    assert (
+        "Governance review summary | call_id=call_gov_1 tool=perform_research "
+        "initial_status=needs_confirmation initial_reason=expensive_read "
+        "prior_permission_override=False final_execution_decision=request_confirmation"
+    ) in caplog.text
 
 
 
