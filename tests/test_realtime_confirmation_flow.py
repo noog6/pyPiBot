@@ -432,6 +432,52 @@ def test_handle_response_done_keeps_listening_state_without_idle_transition() ->
     assert transitions == []
 
 
+def test_handle_response_done_token_active_with_idle_phase_skips_reflect_transition() -> None:
+    api = _make_api_stub()
+    transitions: list[tuple[object, str | None]] = []
+    api.orchestration_state = type(
+        "S",
+        (),
+        {
+            "phase": OrchestrationPhase.IDLE,
+            "transition": lambda *args, **kwargs: transitions.append((args[1], kwargs.get("reason"))),
+        },
+    )()
+    api._pending_confirmation_token = _build_confirmation_token(
+        kind="tool_governance",
+        pending_action=_build_pending_action(),
+    )
+    api._pending_image_stimulus = None
+    api._pending_image_flush_after_playback = False
+
+    asyncio.run(api.handle_response_done({"type": "response.done"}))
+
+    assert transitions == []
+
+
+def test_handle_response_completed_token_active_with_idle_phase_skips_reflect_transition() -> None:
+    api = _make_api_stub()
+    transitions: list[tuple[object, str | None]] = []
+    api.orchestration_state = type(
+        "S",
+        (),
+        {
+            "phase": OrchestrationPhase.IDLE,
+            "transition": lambda *args, **kwargs: transitions.append((args[1], kwargs.get("reason"))),
+        },
+    )()
+    api._pending_confirmation_token = _build_confirmation_token(
+        kind="tool_governance",
+        pending_action=_build_pending_action(),
+    )
+    api._pending_image_stimulus = None
+    api._pending_image_flush_after_playback = False
+
+    asyncio.run(api.handle_response_completed({"type": "response.completed"}))
+
+    assert transitions == []
+
+
 
 def test_maybe_process_research_intent_emits_single_permission_prompt_for_duplicate_request() -> None:
     api = RealtimeAPI.__new__(RealtimeAPI)
@@ -1363,4 +1409,3 @@ def test_tool_confirmation_token_closes_and_state_returns_idle_on_reject() -> No
     assert rejected == ["rejected"]
     assert api._pending_confirmation_token is None
     assert api._confirmation_state == ConfirmationState.IDLE
-

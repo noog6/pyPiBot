@@ -3497,10 +3497,27 @@ class RealtimeAPI:
                 "response": event.get("response"),
                 "rate_limits": self.rate_limits,
             }
-        if self.orchestration_state.phase == OrchestrationPhase.AWAITING_CONFIRMATION:
-            if self._has_active_confirmation_token():
+        phase_is_awaiting_confirmation = (
+            self.orchestration_state.phase == OrchestrationPhase.AWAITING_CONFIRMATION
+        )
+        has_active_confirmation_token = self._has_active_confirmation_token()
+        is_awaiting_confirmation_phase = self._is_awaiting_confirmation_phase()
+        confirmation_hold_active = (
+            phase_is_awaiting_confirmation
+            or has_active_confirmation_token
+            or is_awaiting_confirmation_phase
+        )
+        if confirmation_hold_active:
+            logger.info(
+                "Confirmation state is holding phase progression; skipping REFLECT transition "
+                "(phase=%s token_active=%s awaiting_phase=%s).",
+                self.orchestration_state.phase,
+                has_active_confirmation_token,
+                is_awaiting_confirmation_phase,
+            )
+            if phase_is_awaiting_confirmation and has_active_confirmation_token:
                 logger.info("Staying in AWAITING_CONFIRMATION until user accepts/rejects.")
-            elif self._awaiting_confirmation_completion:
+            elif phase_is_awaiting_confirmation and self._awaiting_confirmation_completion:
                 self._awaiting_confirmation_completion = False
                 self.orchestration_state.transition(
                     OrchestrationPhase.IDLE,
@@ -3544,10 +3561,27 @@ class RealtimeAPI:
                 "response": event.get("response"),
                 "rate_limits": self.rate_limits,
             }
-        if self.orchestration_state.phase == OrchestrationPhase.AWAITING_CONFIRMATION:
-            if self._has_active_confirmation_token():
+        phase_is_awaiting_confirmation = (
+            self.orchestration_state.phase == OrchestrationPhase.AWAITING_CONFIRMATION
+        )
+        has_active_confirmation_token = self._has_active_confirmation_token()
+        is_awaiting_confirmation_phase = self._is_awaiting_confirmation_phase()
+        confirmation_hold_active = (
+            phase_is_awaiting_confirmation
+            or has_active_confirmation_token
+            or is_awaiting_confirmation_phase
+        )
+        if confirmation_hold_active:
+            logger.info(
+                "Confirmation state is holding phase progression; skipping REFLECT transition "
+                "(phase=%s token_active=%s awaiting_phase=%s).",
+                self.orchestration_state.phase,
+                has_active_confirmation_token,
+                is_awaiting_confirmation_phase,
+            )
+            if phase_is_awaiting_confirmation and has_active_confirmation_token:
                 logger.info("Staying in AWAITING_CONFIRMATION until user accepts/rejects.")
-            elif self._awaiting_confirmation_completion:
+            elif phase_is_awaiting_confirmation and self._awaiting_confirmation_completion:
                 self._awaiting_confirmation_completion = False
                 self.orchestration_state.transition(
                     OrchestrationPhase.IDLE,
