@@ -326,6 +326,7 @@ class RealtimeAPI:
             config.get("confirmation_timeout_debounce_window_s", 5.0)
         )
         self._confirmation_timeout_markers: dict[str, float] = {}
+        self._confirmation_timeout_causes: dict[str, str] = {}
         self._tool_definitions = {tool["name"]: tool for tool in tools}
         self._storage = StorageController.get_instance()
         self._presented_actions: set[str] = set()
@@ -1285,9 +1286,10 @@ class RealtimeAPI:
         payload = json.dumps({"tool": tool_name, "args": args}, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
-    def _record_confirmation_timeout(self, action: ActionPacket) -> None:
+    def _record_confirmation_timeout(self, action: ActionPacket, cause: str) -> None:
         fingerprint = self._build_tool_call_fingerprint(action.tool_name, action.tool_args)
         self._confirmation_timeout_markers[fingerprint] = time.monotonic()
+        self._confirmation_timeout_causes[fingerprint] = cause
 
     def _is_suppressed_after_confirmation_timeout(
         self, tool_name: str, args: dict[str, Any]
@@ -1300,6 +1302,7 @@ class RealtimeAPI:
         ]
         for marker in expired:
             self._confirmation_timeout_markers.pop(marker, None)
+            self._confirmation_timeout_causes.pop(marker, None)
         fingerprint = self._build_tool_call_fingerprint(tool_name, args)
         ts = self._confirmation_timeout_markers.get(fingerprint)
         if ts is None:
@@ -1698,8 +1701,8 @@ class RealtimeAPI:
         pending = self._pending_action
         action = pending.action
         if action.expiry_ts is not None and now > action.expiry_ts:
-            logger.info("CONFIRMATION_TIMEOUT tool=%s", action.tool_name)
-            self._record_confirmation_timeout(action)
+            logger.info("CONFIRMATION_TIMEOUT tool=%s cause=expiry", action.tool_name)
+            self._record_confirmation_timeout(action, cause="expiry")
             await self.send_assistant_message(
                 "Approval window expired. Please ask again if you still want this.",
                 websocket,
@@ -1756,8 +1759,8 @@ class RealtimeAPI:
 
         pending.retry_count += 1
         if pending.retry_count > pending.max_retries:
-            logger.info("CONFIRMATION_TIMEOUT tool=%s", action.tool_name)
-            self._record_confirmation_timeout(action)
+            logger.info("CONFIRMATION_TIMEOUT tool=%s cause=retry_exhausted", action.tool_name)
+            self._record_confirmation_timeout(action, cause="retry_exhausted")
             await self.send_assistant_message(
                 "I couldn't confirm this action. Please ask again if you still want it.",
                 websocket,
