@@ -38,6 +38,7 @@ def _make_api_stub() -> RealtimeAPI:
     api._response_create_debug_trace = False
     api._response_done_serial = 0
     api._confirmation_timeout_markers = {}
+    api._confirmation_timeout_causes = {}
     api._confirmation_timeout_debounce_window_s = 5.0
     api._approval_timeout_s = 30.0
     api._last_user_input_text = None
@@ -670,7 +671,7 @@ def test_maybe_handle_approval_response_reject_transitions_to_idle() -> None:
     assert transitions == [(OrchestrationPhase.IDLE, "confirmation rejected")]
 
 
-def test_maybe_handle_approval_response_timeout_transitions_to_idle() -> None:
+def test_maybe_handle_approval_response_timeout_transitions_to_idle(caplog) -> None:
     api = _make_api_stub()
     transitions: list[tuple[object, str | None]] = []
 
@@ -695,12 +696,64 @@ def test_maybe_handle_approval_response_timeout_transitions_to_idle() -> None:
 
     api.send_assistant_message = _send_assistant_message
 
+    caplog.set_level(logging.INFO)
     consumed = asyncio.run(api._maybe_handle_approval_response("anything", api.websocket))
 
     assert consumed is True
     assert sent_messages
     assert api._pending_action is None
     assert transitions == [(OrchestrationPhase.IDLE, "confirmation timeout")]
+    assert "CONFIRMATION_TIMEOUT tool=perform_research cause=expiry" in caplog.text
+
+
+def test_maybe_handle_approval_response_retry_exhaustion_logs_timeout_cause(caplog) -> None:
+    api = _make_api_stub()
+    transitions: list[tuple[object, str | None]] = []
+
+    api.orchestration_state = type(
+        "S",
+        (),
+        {
+            "phase": OrchestrationPhase.AWAITING_CONFIRMATION,
+            "transition": lambda *args, **kwargs: transitions.append((args[1], kwargs.get("reason"))),
+        },
+    )()
+    pending = _build_pending_action(expiry_ts=None)
+    pending.retry_count = pending.max_retries
+    api._pending_action = pending
+    api._awaiting_confirmation_completion = False
+    api._presented_actions = set()
+    api._handle_stop_word = lambda *args, **kwargs: asyncio.sleep(0, result=False)
+    api._tool_execution_cooldown_remaining = lambda: 0.0
+
+    sent_messages: list[str] = []
+
+    async def _send_assistant_message(message, *args, **kwargs):
+        sent_messages.append(message)
+
+    api.send_assistant_message = _send_assistant_message
+
+    caplog.set_level(logging.INFO)
+    consumed = asyncio.run(api._maybe_handle_approval_response("maybe", api.websocket))
+
+    assert consumed is True
+    assert sent_messages
+    assert api._pending_action is None
+    assert transitions == [(OrchestrationPhase.IDLE, "confirmation timeout")]
+    assert "CONFIRMATION_TIMEOUT tool=perform_research cause=retry_exhausted" in caplog.text
+
+
+def test_record_confirmation_timeout_tracks_cause_metadata() -> None:
+    api = _make_api_stub()
+    pending = _build_pending_action()
+
+    api._record_confirmation_timeout(pending.action, cause="retry_exhausted")
+
+    fingerprint = api._build_tool_call_fingerprint(
+        pending.action.tool_name,
+        pending.action.tool_args,
+    )
+    assert api._confirmation_timeout_causes[fingerprint] == "retry_exhausted"
 
 
 def test_handle_function_call_suppresses_during_pending_confirmation_without_act_transition(
