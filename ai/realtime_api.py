@@ -2560,6 +2560,35 @@ class RealtimeAPI:
                 call_id,
                 args_parsed,
             )
+            if (
+                function_name == "perform_research"
+                and self._pending_research_request is not None
+            ):
+                logger.info(
+                    "Function call outcome: suppressed pending intent permission | tool=%s call_id=%s",
+                    function_name,
+                    call_id,
+                )
+                function_call_output = {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": json.dumps(
+                            {
+                                "status": "awaiting_intent_permission",
+                                "message": "Research request is awaiting user intent permission.",
+                                "tool": function_name,
+                            }
+                        ),
+                    },
+                }
+                log_ws_event("Outgoing", function_call_output)
+                self._track_outgoing_event(function_call_output)
+                await websocket.send(json.dumps(function_call_output))
+                self.function_call = None
+                self.function_call_args = ""
+                return
             if self._pending_action:
                 logger.info(
                     "Function call outcome: suppressed pending confirmation | incoming=%s pending=%s",
