@@ -37,6 +37,9 @@ def _make_api_stub() -> RealtimeAPI:
     api._last_response_create_ts = None
     api._response_create_debug_trace = False
     api._response_done_serial = 0
+    api._active_response_confirmation_guarded = False
+    api._active_response_origin = "unknown"
+    api._active_response_id = None
     api._confirmation_timeout_markers = {}
     api._confirmation_timeout_causes = {}
     api._confirmation_timeout_debounce_window_s = 5.0
@@ -556,6 +559,54 @@ def test_handle_event_speech_started_stays_in_awaiting_confirmation() -> None:
         for call in mock_info.call_args_list
         if call.args
     )
+
+
+def test_handle_event_response_created_marks_server_auto_as_confirmation_guarded() -> None:
+    api = _make_api_stub()
+    api._pending_response_create_origins = deque(["server_auto"])
+    api._audio_accum = bytearray()
+    api._audio_accum_bytes_target = 9600
+    api._mic_receive_on_first_audio = False
+    api._speaking_started = False
+    api._assistant_reply_accum = ""
+    api._tool_call_records = []
+    api._last_tool_call_results = []
+    api._last_response_metadata = {}
+    api._reflection_enqueued = False
+    api.audio_player = None
+    api._is_user_approved_interrupt_response = lambda *_args, **_kwargs: False
+    api.state_manager = type("State", (), {"state": InteractionState.IDLE, "update_state": lambda *args: None})()
+
+    asyncio.run(api.handle_event({"type": "response.created", "response": {"id": "resp_1"}}, api.websocket))
+
+    assert api._active_response_confirmation_guarded is True
+    assert api._active_response_origin == "server_auto"
+
+
+def test_handle_transcribe_response_done_suppresses_confirmation_guarded_response() -> None:
+    api = _make_api_stub()
+    api.websocket = _Ws()
+    api.assistant_reply = "Thanks for confirming."
+    api._assistant_reply_accum = "Thanks for confirming."
+    api._active_response_confirmation_guarded = True
+    api._active_response_origin = "server_auto"
+    api._active_response_id = "resp_2"
+    api._pending_image_stimulus = None
+    api._pending_image_flush_after_playback = False
+    api._maybe_enqueue_reflection = lambda *_args, **_kwargs: None
+
+    sent_prompts: list[str] = []
+
+    async def _send_assistant_message(message, *_args, **_kwargs):
+        sent_prompts.append(message)
+
+    api.send_assistant_message = _send_assistant_message
+
+    asyncio.run(api.handle_transcribe_response_done())
+
+    assert sent_prompts == ["Please reply with: yes or no."]
+    assert api.assistant_reply == ""
+    assert api._assistant_reply_accum == ""
 
 
 def test_pending_confirmation_still_accepts_after_speech_started() -> None:
