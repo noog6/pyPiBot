@@ -402,6 +402,8 @@ class RealtimeAPI:
         self._last_response_create_ts: float | None = None
         self._response_done_serial = 0
         self._active_response_id: str | None = None
+        self._active_response_confirmation_guarded = False
+        self._active_response_origin = "unknown"
         self._last_executed_tool_call: dict[str, Any] | None = None
 
         realtime_cfg = config.get("realtime") or {}
@@ -1522,6 +1524,41 @@ class RealtimeAPI:
             return value.strip().lower() in {"true", "1", "yes"}
         return False
 
+    def _is_truthy_metadata_value(self, value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"true", "1", "yes"}
+        return False
+
+    def _has_explicit_confirmation_decision(self, metadata: dict[str, Any]) -> bool:
+        decision_keys = ("confirmation_decision", "user_confirmation_decision", "decision")
+        for key in decision_keys:
+            decision_value = metadata.get(key)
+            if isinstance(decision_value, str):
+                if self._parse_confirmation_decision(decision_value) in {"yes", "no"}:
+                    return True
+        if self._is_truthy_metadata_value(metadata.get("confirmation_accepted")):
+            return True
+        if self._is_truthy_metadata_value(metadata.get("confirmation_rejected")):
+            return True
+        decision = self._parse_confirmation_decision(self._last_user_input_text or "")
+        return decision in {"yes", "no"}
+
+    def _should_guard_confirmation_response(self, origin: str, response_payload: dict[str, Any]) -> bool:
+        if self._pending_action is None and not self._is_awaiting_confirmation_phase():
+            return False
+        metadata = response_payload.get("metadata") if isinstance(response_payload, dict) else None
+        if not isinstance(metadata, dict):
+            metadata = {}
+        approval_flow = str(metadata.get("approval_flow", "")).strip().lower()
+        if approval_flow in {"true", "1", "yes"}:
+            return False
+        if self._has_explicit_confirmation_decision(metadata):
+            return False
+        normalized_origin = str(origin).strip().lower()
+        return normalized_origin in {"", "unknown", "server_auto", "assistant_message", "tool_output"}
+
     async def _add_no_tools_follow_up_instruction(self, websocket: Any) -> None:
         instruction_event = {
             "type": "conversation.item.create",
@@ -2267,12 +2304,24 @@ class RealtimeAPI:
             response = event.get("response") or {}
             response_id = response.get("id")
             self._active_response_id = str(response_id) if response_id else None
+            self._active_response_origin = str(origin)
             pending_confirmation_active = getattr(self, "_pending_action", None) is not None or (
                 self.orchestration_state.phase == OrchestrationPhase.AWAITING_CONFIRMATION
             )
             if pending_confirmation_active:
                 log_info(f"response.created consumed by confirmation flow; origin={origin}")
+                self._active_response_confirmation_guarded = self._should_guard_confirmation_response(
+                    origin,
+                    response,
+                )
+                if self._active_response_confirmation_guarded:
+                    logger.info(
+                        "CONFIRMATION_NON_DECISION_RESPONSE_GUARDED origin=%s response_id=%s",
+                        self._active_response_origin,
+                        self._active_response_id or "unknown",
+                    )
             else:
+                self._active_response_confirmation_guarded = False
                 self.orchestration_state.transition(
                     OrchestrationPhase.PLAN,
                     reason="response created",
@@ -2305,11 +2354,15 @@ class RealtimeAPI:
         elif event_type == "response.function_call_arguments.done":
             await self.handle_function_call(event, websocket)
         elif event_type == "response.text.delta":
+            if self._active_response_confirmation_guarded:
+                return
             delta = event.get("delta", "")
             self.assistant_reply += delta
             self._assistant_reply_accum += delta
             self.state_manager.update_state(InteractionState.SPEAKING, "text output")
         elif event_type == "response.output_audio.delta":
+            if self._active_response_confirmation_guarded:
+                return
             self._audio_playback_busy = True
             audio_data = base64.b64decode(event["delta"])
             self._audio_accum.extend(audio_data)
@@ -2331,6 +2384,8 @@ class RealtimeAPI:
             await self.handle_audio_response_done()
             self.state_manager.update_state(InteractionState.IDLE, "audio output done")
         elif event_type == "response.output_audio_transcript.delta":
+            if self._active_response_confirmation_guarded:
+                return
             delta = event.get("delta", "")
             self.assistant_reply += delta
             self._assistant_reply_accum += delta
@@ -3008,6 +3063,32 @@ class RealtimeAPI:
         await websocket.send(json.dumps(error_item))
 
     async def handle_transcribe_response_done(self) -> None:
+        if (
+            self._active_response_confirmation_guarded
+            and self._pending_action is not None
+            and self._is_awaiting_confirmation_phase()
+        ):
+            logger.info(
+                "CONFIRMATION_NON_DECISION_RESPONSE_SUPPRESSED origin=%s response_id=%s",
+                self._active_response_origin,
+                self._active_response_id or "unknown",
+            )
+            self.assistant_reply = ""
+            self._assistant_reply_accum = ""
+            if self.websocket is not None:
+                await self.send_assistant_message(
+                    "Please reply with: yes or no.",
+                    self.websocket,
+                    response_metadata={"trigger": "confirmation_reminder", "approval_flow": "true"},
+                )
+            self._active_response_confirmation_guarded = False
+            self.response_in_progress = False
+            self._maybe_enqueue_reflection("response transcript done")
+            if self._pending_image_stimulus and not self._pending_image_flush_after_playback:
+                await self._flush_pending_image_stimulus("response transcript done")
+            logger.info("Finished handle_transcribe_response_done()")
+            return
+
         if self.assistant_reply:
             log_info(f"Assistant Response: {self.assistant_reply}", style="bold blue")
             self.assistant_reply = ""
@@ -3044,6 +3125,8 @@ class RealtimeAPI:
         self.response_in_progress = False
         self._response_in_flight = False
         self._active_response_id = None
+        self._active_response_confirmation_guarded = False
+        self._active_response_origin = "unknown"
         current_state = getattr(self.state_manager, "state", InteractionState.IDLE)
         if current_state != InteractionState.LISTENING:
             self.state_manager.update_state(InteractionState.IDLE, "response done")
@@ -3085,6 +3168,8 @@ class RealtimeAPI:
         self.response_in_progress = False
         self._response_in_flight = False
         self._active_response_id = None
+        self._active_response_confirmation_guarded = False
+        self._active_response_origin = "unknown"
         current_state = getattr(self.state_manager, "state", InteractionState.IDLE)
         if current_state != InteractionState.LISTENING:
             self.state_manager.update_state(InteractionState.IDLE, "response completed")
