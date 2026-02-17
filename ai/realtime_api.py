@@ -418,6 +418,10 @@ class RealtimeAPI:
         self._research_permission_required = bool(research_cfg.get("permission_required", True))
         self._research_service = build_openai_service_or_null(config)
         self._pending_research_request: ResearchRequest | None = None
+        self._prior_research_permission_marker: dict[str, Any] | None = None
+        self._prior_research_permission_grace_s = float(
+            research_cfg.get("prior_permission_grace_s", 8.0)
+        )
         self._tool_call_dedupe_ttl_s = float(research_cfg.get("tool_call_dedupe_ttl_s", 30.0))
         self._research_spoken_response_dedupe_ttl_s = float(
             research_cfg.get("spoken_response_dedupe_ttl_s", 60.0)
@@ -1355,6 +1359,28 @@ class RealtimeAPI:
             "timestamp": time.monotonic(),
         }
 
+    def _mark_prior_research_permission_granted(self, request: ResearchRequest) -> None:
+        self._prior_research_permission_marker = {
+            "granted_at": time.monotonic(),
+            "prompt": request.prompt,
+        }
+
+    def _consume_prior_research_permission_marker_if_fresh(self, action: ActionPacket) -> bool:
+        if action.tool_name != "perform_research":
+            return False
+        marker = getattr(self, "_prior_research_permission_marker", None)
+        if marker is None:
+            return False
+        granted_at = marker.get("granted_at")
+        if not isinstance(granted_at, (int, float)):
+            self._prior_research_permission_marker = None
+            return False
+        if time.monotonic() - float(granted_at) > self._prior_research_permission_grace_s:
+            self._prior_research_permission_marker = None
+            return False
+        self._prior_research_permission_marker = None
+        return True
+
     def _prune_spoken_research_response_ids(self, now: float) -> None:
         if not self._spoken_research_response_ids:
             return
@@ -2040,6 +2066,7 @@ class RealtimeAPI:
             if token is not None:
                 self._set_confirmation_state(ConfirmationState.RESOLVING, reason="research_permission_accepted")
             logger.info("[Research] Permission granted by user")
+            self._mark_prior_research_permission_granted(request)
             if token is not None:
                 self._close_confirmation_token(outcome="accepted")
             else:
@@ -2929,11 +2956,26 @@ class RealtimeAPI:
                 return
             decision = self._governance.review(action)
             log_info(f"🛡️ Governance decision: {decision.status} ({decision.reason}) {action.summary()}")
-            if decision.approved:
+            approved_via_prior_permission = (
+                decision.needs_confirmation
+                and self._consume_prior_research_permission_marker_if_fresh(action)
+            )
+            if decision.approved or approved_via_prior_permission:
+                decision_reason = (
+                    "approved_via_prior_research_permission"
+                    if approved_via_prior_permission
+                    else decision.reason
+                )
+                if approved_via_prior_permission:
+                    log_info(
+                        "🛡️ Governance decision: approved "
+                        f"(approved_via_prior_research_permission) {action.summary()}"
+                    )
                 logger.info(
-                    "Function call outcome: executing tool | tool=%s call_id=%s",
+                    "Function call outcome: executing tool | tool=%s call_id=%s decision_reason=%s",
                     function_name,
                     call_id,
+                    decision_reason,
                 )
                 self.orchestration_state.transition(
                     OrchestrationPhase.ACT,

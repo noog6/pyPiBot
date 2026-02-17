@@ -62,6 +62,8 @@ def _make_api_stub() -> RealtimeAPI:
     api._stop_words = []
     api._tool_execution_disabled_until = 0.0
     api._pending_research_request = None
+    api._prior_research_permission_marker = None
+    api._prior_research_permission_grace_s = 8.0
     api._presented_actions = set()
     api._pending_confirmation_token = None
     api._confirmation_state = ConfirmationState.IDLE
@@ -1230,7 +1232,7 @@ def test_research_permission_parser_accepts_natural_language_yes_no_variants() -
     api_yes = _make_api_stub()
     api_yes._pending_confirmation_token = _build_confirmation_token(
         kind="research_permission",
-        request=object(),
+        request=type("Req", (), {"prompt": "status"})(),
     )
     dispatched: list[str] = []
 
@@ -1246,7 +1248,7 @@ def test_research_permission_parser_accepts_natural_language_yes_no_variants() -
     api_no = _make_api_stub()
     api_no._pending_confirmation_token = _build_confirmation_token(
         kind="research_permission",
-        request=object(),
+        request=type("Req", (), {"prompt": "status"})(),
     )
     denied: list[str] = []
 
@@ -1257,6 +1259,88 @@ def test_research_permission_parser_accepts_natural_language_yes_no_variants() -
     assert asyncio.run(api_no._maybe_handle_research_permission_response("no thanks", _Ws())) is True
     assert denied == ["no"]
     assert api_no._pending_confirmation_token is None
+
+
+def test_research_permission_yes_executes_without_second_governance_confirmation() -> None:
+    api = _make_api_stub()
+    api.function_call = {"name": "perform_research", "call_id": "call_research_once"}
+    api.function_call_args = '{"query":"status"}'
+    api._extract_dry_run_flag = lambda args: False
+    api._is_duplicate_tool_call = lambda *args, **kwargs: False
+    api._is_suppressed_after_confirmation_timeout = lambda *args, **kwargs: False
+    api._tool_execution_cooldown_remaining = lambda: 0.0
+    api._stage_action = lambda action: {"valid": True}
+
+    created_tokens: list[str] = []
+
+    def _create_confirmation_token(*args, **kwargs):
+        created_tokens.append(kwargs["kind"])
+        raise AssertionError("unexpected second confirmation token")
+
+    api._create_confirmation_token = _create_confirmation_token
+
+    transitions: list[tuple[object, str | None]] = []
+    api.orchestration_state = type(
+        "S",
+        (),
+        {
+            "phase": OrchestrationPhase.IDLE,
+            "transition": lambda *args, **kwargs: transitions.append((args[1], kwargs.get("reason"))),
+        },
+    )()
+
+    action = type(
+        "Action",
+        (),
+        {
+            "id": "call_research_once",
+            "tool_name": "perform_research",
+            "tool_args": {"query": "status"},
+            "summary": lambda self: "summary",
+        },
+    )()
+    api._governance = type(
+        "Gov",
+        (),
+        {
+            "build_action_packet": lambda *args, **kwargs: action,
+            "review": lambda *args, **kwargs: type(
+                "Decision",
+                (),
+                {
+                    "approved": False,
+                    "needs_confirmation": True,
+                    "status": "needs_confirmation",
+                    "reason": "expensive read",
+                },
+            )(),
+        },
+    )()
+
+    executed: list[str] = []
+
+    async def _execute_action(*args, **kwargs):
+        executed.append("done")
+
+    api._execute_action = _execute_action
+
+    api._pending_confirmation_token = _build_confirmation_token(
+        kind="research_permission",
+        request=type("Req", (), {"prompt": "status"})(),
+    )
+
+    async def _dispatch(_request, _ws):
+        return None
+
+    api._dispatch_research_request = _dispatch
+
+    assert asyncio.run(api._maybe_handle_research_permission_response("yes", _Ws())) is True
+
+    asyncio.run(api.handle_function_call({}, _Ws()))
+
+    assert executed == ["done"]
+    assert created_tokens == []
+    assert transitions == [(OrchestrationPhase.ACT, "function_call perform_research")]
 
 
 def test_tool_confirmation_token_closes_and_state_returns_idle_on_reject() -> None:
