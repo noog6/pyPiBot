@@ -886,6 +886,60 @@ def test_handle_function_call_suppresses_during_pending_confirmation_without_act
     assert api.function_call_args == ""
 
 
+def test_handle_function_call_suppresses_research_while_intent_permission_pending() -> None:
+    api = _make_api_stub()
+    api._pending_action = None
+    api._pending_research_request = object()
+    api.function_call = {"name": "perform_research", "call_id": "call_intent_permission"}
+    api.function_call_args = '{"query":"status"}'
+    transitions: list[tuple[object, str | None]] = []
+    api.orchestration_state = type(
+        "S",
+        (),
+        {
+            "phase": OrchestrationPhase.IDLE,
+            "transition": lambda *args, **kwargs: transitions.append((args[1], kwargs.get("reason"))),
+        },
+    )()
+
+    governance_calls = {"build": 0, "review": 0}
+
+    class _Gov:
+        def build_action_packet(self, *args, **kwargs):
+            governance_calls["build"] += 1
+            return object()
+
+        def review(self, *args, **kwargs):
+            governance_calls["review"] += 1
+            return object()
+
+    api._governance = _Gov()
+
+    confirmation_prompts = {"count": 0}
+
+    async def _request_tool_confirmation(*args, **kwargs):
+        confirmation_prompts["count"] += 1
+
+    api._request_tool_confirmation = _request_tool_confirmation
+
+    sent_payloads: list[dict[str, object]] = []
+
+    class _SendWs:
+        async def send(self, payload: str) -> None:
+            sent_payloads.append(json.loads(payload))
+
+    asyncio.run(api.handle_function_call({}, _SendWs()))
+
+    assert transitions == []
+    assert confirmation_prompts["count"] == 0
+    assert governance_calls == {"build": 0, "review": 0}
+    assert len(sent_payloads) == 1
+    output_payload = json.loads(sent_payloads[0]["item"]["output"])
+    assert output_payload["status"] == "awaiting_intent_permission"
+    assert api.function_call is None
+    assert api.function_call_args == ""
+
+
 def test_handle_function_call_transitions_to_act_when_execution_approved() -> None:
     api = _make_api_stub()
     api._pending_action = None
