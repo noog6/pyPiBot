@@ -28,6 +28,8 @@ def test_config_controller_sets_memory_semantic_defaults(tmp_path: Path, monkeyp
     assert semantic_cfg["rerank_influence_min_cosine"] == 0.25
     assert semantic_cfg["dedupe_strong_match_cosine"] is None
     assert semantic_cfg["background_embedding_enabled"] is True
+    assert semantic_cfg["rolling_backfill_batch_size"] == 4
+    assert semantic_cfg["rolling_backfill_interval_idle_cycles"] == 15
     assert semantic_cfg["write_timeout_ms"] == 75
     assert semantic_cfg["query_timeout_ms"] == 40
     assert semantic_cfg["max_writes_per_minute"] == 120

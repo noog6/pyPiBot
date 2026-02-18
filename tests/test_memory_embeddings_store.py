@@ -373,3 +373,7 @@ def test_get_embedding_coverage_counts_applies_scope_predicates(tmp_path: Path, 
     assert store.get_embedding_coverage_counts(user_id="u1", scope="session_local", session_id="s1") == (1, 1)
     assert store.get_embedding_coverage_counts(user_id="u1", scope="session_local", session_id="s2") == (1, 0)
     assert store.get_embedding_coverage_counts(user_id="u1", scope="session_local", session_id=None) == (0, 0)
+    assert store.get_embedding_backlog_counts(user_id="u1", scope="user_global") == (1, 0)
+    assert store.get_embedding_backlog_counts(user_id="u1", scope="session_local", session_id="s1") == (0, 0)
+    assert store.get_embedding_backlog_counts(user_id="u1", scope="session_local", session_id="s2") == (1, 0)
+    assert store.get_embedding_backlog_counts(user_id="u1", scope="session_local", session_id=None) == (0, 0)

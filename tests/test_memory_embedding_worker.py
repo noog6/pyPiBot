@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from pathlib import Path
 
 from config.controller import ConfigController
@@ -115,3 +116,44 @@ def test_remember_memory_enqueues_pending_embedding_when_enabled(tmp_path: Path,
 
     embedding = manager._store.fetch_embeddings_for_memories(memory_ids=[entry.memory_id])[entry.memory_id]
     assert embedding.status == "pending"
+
+
+def test_worker_run_loop_periodically_backfills_missing_rows(tmp_path: Path) -> None:
+    _reset_singletons()
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    entry = store.append_memory(content="old row", tags=[], importance=2, user_id="default")
+
+    provider = _SequenceProvider(
+        results=[
+            EmbeddingResult(
+                vector=(0.5).hex().encode("utf-8"),
+                dimension=1,
+                model="test-model",
+                model_version="v1",
+                vector_norm=0.5,
+                provider="test",
+                status="ready",
+            )
+        ]
+    )
+    worker = MemoryEmbeddingWorker(
+        store=store,
+        provider=provider,
+        idle_sleep_s=0.01,
+        rolling_backfill_interval_idle_cycles=1,
+        rolling_backfill_batch_size=1,
+    )
+
+    worker.start()
+    try:
+        deadline = time.monotonic() + 1.5
+        status = None
+        while time.monotonic() < deadline:
+            embedding = store.fetch_embeddings_for_memories(memory_ids=[entry.memory_id]).get(entry.memory_id)
+            status = None if embedding is None else embedding.status
+            if status == "ready":
+                break
+            time.sleep(0.02)
+        assert status == "ready"
+    finally:
+        worker.stop(timeout_s=0.5)

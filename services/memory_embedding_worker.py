@@ -32,6 +32,8 @@ class MemoryEmbeddingWorker:
         idle_sleep_s: float = 2.0,
         base_backoff_s: float = 2.0,
         max_backoff_s: float = 60.0,
+        rolling_backfill_batch_size: int | None = None,
+        rolling_backfill_interval_idle_cycles: int | None = None,
     ) -> None:
         config = ConfigController.get_instance().get_config()
         self._store = store if store is not None else MemoryStore()
@@ -40,6 +42,30 @@ class MemoryEmbeddingWorker:
         self._idle_sleep_s = max(0.1, float(idle_sleep_s))
         self._base_backoff_s = max(0.1, float(base_backoff_s))
         self._max_backoff_s = max(self._base_backoff_s, float(max_backoff_s))
+        semantic_cfg = config.get("memory_semantic", {})
+        configured_backfill_batch_size = int(
+            semantic_cfg.get("rolling_backfill_batch_size", 4)
+        )
+        configured_backfill_interval = int(
+            semantic_cfg.get("rolling_backfill_interval_idle_cycles", 15)
+        )
+        self._rolling_backfill_batch_size = max(
+            1,
+            int(
+                rolling_backfill_batch_size
+                if rolling_backfill_batch_size is not None
+                else configured_backfill_batch_size
+            ),
+        )
+        self._rolling_backfill_interval_idle_cycles = max(
+            1,
+            int(
+                rolling_backfill_interval_idle_cycles
+                if rolling_backfill_interval_idle_cycles is not None
+                else configured_backfill_interval
+            ),
+        )
+        self._idle_cycles_since_backfill = 0
 
         self._failures: dict[int, _FailureState] = {}
         self._stop_event = threading.Event()
@@ -108,7 +134,18 @@ class MemoryEmbeddingWorker:
     def _run_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
-                self.run_once()
+                processed = self.run_once()
+                if processed > 0:
+                    self._idle_cycles_since_backfill = 0
+                else:
+                    self._idle_cycles_since_backfill += 1
+                    if self._idle_cycles_since_backfill >= self._rolling_backfill_interval_idle_cycles:
+                        self._idle_cycles_since_backfill = 0
+                        queued = self.backfill_recent_missing_embeddings(
+                            limit=self._rolling_backfill_batch_size
+                        )
+                        if queued > 0:
+                            logger.debug("memory embedding rolling backfill queued=%s", queued)
             except Exception as exc:  # noqa: BLE001
                 logger.debug("memory embedding worker pass failed open: %s", exc)
             self._stop_event.wait(self._idle_sleep_s)
