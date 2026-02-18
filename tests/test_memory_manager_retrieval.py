@@ -138,6 +138,39 @@ def test_retrieve_for_turn_prefers_lexical_relevance_then_recency(tmp_path) -> N
     ]
 
 
+def test_retrieve_for_turn_recovers_low_importance_like_match_from_query_slice(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    now_ms = _now_ms()
+
+    for idx in range(20):
+        store.append_memory(
+            content=f"General system note {idx}.",
+            tags=["ops"],
+            importance=5,
+            user_id="default",
+            timestamp=now_ms - idx,
+        )
+
+    store.append_memory(
+        content="Remember to buy saffron for paella night.",
+        tags=["cooking"],
+        importance=1,
+        user_id="default",
+        timestamp=now_ms - 50_000,
+    )
+
+    brief = manager.retrieve_for_turn(
+        latest_user_utterance="saffron for paella",
+        user_id="default",
+        max_memories=2,
+        max_chars=300,
+    )
+
+    assert brief is not None
+    assert any("saffron" in item.content.lower() for item in brief.items)
+
+
 def test_retrieve_for_turn_dedupes_near_identical_content(tmp_path) -> None:
     store = MemoryStore(db_path=tmp_path / "memories.db")
     manager = _make_memory_manager(store)
