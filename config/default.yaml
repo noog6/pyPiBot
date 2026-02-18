@@ -70,7 +70,7 @@ memory_retrieval:
 # Semantic memory retrieval and embedding sidecar behavior
 memory_semantic:
   enabled: true
-  provider: "local_light"
+  provider: "openai"
   rerank_enabled: true
   max_candidates_for_semantic: 64
   min_similarity: 0.25

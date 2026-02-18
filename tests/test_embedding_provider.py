@@ -98,7 +98,35 @@ def test_build_embedding_provider_uses_openai_when_configured() -> None:
     assert isinstance(provider, OpenAIEmbeddingProvider)
 
 
-def test_build_embedding_provider_defaults_to_noop() -> None:
-    provider = build_embedding_provider({"memory_semantic": {"provider": "local_light"}})
+def test_build_embedding_provider_requires_explicit_openai_enable() -> None:
+    provider = build_embedding_provider(
+        {
+            "memory_semantic": {
+                "enabled": True,
+                "provider": "openai",
+                "openai": {
+                    "enabled": False,
+                    "api_key": "test",
+                },
+            }
+        }
+    )
+
+    result = provider.embed_text("hello")
+
+    assert isinstance(provider, OpenAIEmbeddingProvider)
+    assert result.status == "error"
+    assert result.error_code == "provider_disabled"
+
+
+def test_build_embedding_provider_surfaces_unsupported_provider() -> None:
+    provider = build_embedding_provider(
+        {"memory_semantic": {"provider": "local_light", "enabled": True}}
+    )
+
+    result = provider.embed_text("hello")
 
     assert isinstance(provider, NoopEmbeddingProvider)
+    assert result.status == "unavailable"
+    assert result.error_code == "unsupported_provider"
+    assert "local_light" in (result.error_message or "")
