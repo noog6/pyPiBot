@@ -278,12 +278,7 @@ class MemoryManager:
         self._retrieval_semantic_attempt_count = 0
         self._retrieval_semantic_error_count = 0
         self._embedding_coverage_cache_ttl_s = 60.0
-        self._embedding_coverage_cache_at = 0.0
-        self._embedding_coverage_cache: dict[str, float | int] = {
-            "total_memories": 0,
-            "ready_embeddings": 0,
-            "coverage_pct": 0.0,
-        }
+        self._embedding_coverage_cache: dict[tuple[str, MemoryScope, str | None], dict[str, float | int]] = {}
         MemoryManager._instance = self
 
     @classmethod
@@ -320,7 +315,12 @@ class MemoryManager:
 
         return dict(self._last_semantic_dedupe_debug)
 
-    def get_retrieval_health_metrics(self) -> dict[str, float | int]:
+    def get_retrieval_health_metrics(
+        self,
+        *,
+        scope: MemoryScopeInput | None = None,
+        session_id: str | None = None,
+    ) -> dict[str, float | int]:
         """Return retrieval counters for diagnostics and health summaries."""
 
         total = max(0, int(self._retrieval_total_count))
@@ -337,20 +337,32 @@ class MemoryManager:
             else 0.0
         )
 
+        normalized_scope = _normalize_scope(scope, fallback=self._default_scope)
+        resolved_session_id = self._active_session_id if session_id is None else session_id
+        cache_key = (self._active_user_id, normalized_scope, resolved_session_id)
+
         now = time.monotonic()
-        if now - self._embedding_coverage_cache_at >= self._embedding_coverage_cache_ttl_s:
+        cached_coverage = self._embedding_coverage_cache.get(cache_key)
+        cache_stale = (
+            cached_coverage is None
+            or (now - float(cached_coverage.get("cached_at", 0.0))) >= self._embedding_coverage_cache_ttl_s
+        )
+        if cache_stale:
             total_memories, ready_embeddings = self._store.get_embedding_coverage_counts(
                 user_id=self._active_user_id,
-                scope=self._default_scope.value,
-                session_id=self._active_session_id,
+                scope=normalized_scope.value,
+                session_id=resolved_session_id,
             )
             coverage_pct = (float(ready_embeddings) / float(total_memories) * 100.0) if total_memories else 0.0
-            self._embedding_coverage_cache = {
+            cached_coverage = {
                 "total_memories": total_memories,
                 "ready_embeddings": ready_embeddings,
                 "coverage_pct": round(coverage_pct, 2),
+                "cached_at": now,
             }
-            self._embedding_coverage_cache_at = now
+            self._embedding_coverage_cache[cache_key] = cached_coverage
+
+        assert cached_coverage is not None
 
         return {
             "retrieval_count": total,
@@ -358,9 +370,9 @@ class MemoryManager:
             "semantic_provider_attempts": semantic_attempts,
             "semantic_provider_errors": semantic_errors,
             "semantic_provider_error_rate_pct": round(semantic_error_rate_pct, 2),
-            "embedding_total_memories": int(self._embedding_coverage_cache["total_memories"]),
-            "embedding_ready_memories": int(self._embedding_coverage_cache["ready_embeddings"]),
-            "embedding_coverage_pct": float(self._embedding_coverage_cache["coverage_pct"]),
+            "embedding_total_memories": int(cached_coverage["total_memories"]),
+            "embedding_ready_memories": int(cached_coverage["ready_embeddings"]),
+            "embedding_coverage_pct": float(cached_coverage["coverage_pct"]),
         }
 
     def remember_memory(

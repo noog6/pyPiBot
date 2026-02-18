@@ -28,3 +28,5 @@ def test_probe_realtime_session_includes_memory_retrieval_details() -> None:
     assert result.details["memory_semantic_provider_error_rate_pct"] == 2.0
     assert result.details["memory_average_retrieval_latency_ms"] == 14.2
     assert result.details["memory_retrieval_count"] == 10
+    assert result.details["memory_semantic_provider_attempts"] == 8
+    assert result.details["memory_semantic_provider_errors"] == 1

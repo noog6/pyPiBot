@@ -633,7 +633,10 @@ class RealtimeAPI:
         )
 
     def get_session_health(self) -> dict[str, Any]:
-        retrieval_metrics = self._memory_manager.get_retrieval_health_metrics()
+        retrieval_metrics = self._memory_manager.get_retrieval_health_metrics(
+            scope=self._memory_retrieval_scope,
+            session_id=self._memory_manager.get_active_session_id(),
+        )
         return {
             "connected": self._session_connected,
             "ready": self.ready_event.is_set(),
