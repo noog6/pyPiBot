@@ -115,11 +115,20 @@ memory_semantic:
 - Existing `memories` and `memory_embeddings` rows can remain in place; the runtime
   will continue using lexical retrieval paths.
 
-## Semantic embedding write mode when background worker is disabled
+## Semantic embedding write modes
 
-By default, `memory_semantic.background_embedding_enabled: false` keeps writes purely lexical and does not attempt embedding generation.
+By default, `memory_semantic.background_embedding_enabled: true` enables the background queue worker mode from `config/default.yaml`.
 
-To opt into synchronous write-time embeddings in this mode, set:
+- **Background queue worker mode (default):** writes stay on the lexical path and enqueue embedding work for background processing.
+- **Inline write-time embedding mode (opt-in):** set `background_embedding_enabled: false` and `inline_embedding_on_write_when_background_disabled: true` to synchronously attempt embeddings during writes.
+
+| `background_embedding_enabled` | `inline_embedding_on_write_when_background_disabled` | Effective behavior |
+| --- | --- | --- |
+| `true` (default) | `false` (default) | Background queue worker generates embeddings asynchronously. |
+| `false` | `true` | Inline write-time embedding attempts run synchronously. |
+| `false` | `false` | Lexical-only writes; embeddings are not attempted at write time. |
+
+To opt into synchronous write-time embeddings, set:
 
 ```yaml
 memory_semantic:
