@@ -1019,6 +1019,19 @@ class RealtimeAPI:
                 scope=str(getattr(self, "_memory_retrieval_scope", MemoryScope.USER_GLOBAL.value)),
                 session_id=manager.get_active_session_id(),
             )
+            retrieval_debug = manager.get_last_turn_retrieval_debug_metadata()
+            if retrieval_debug:
+                logger.info(
+                    "Turn memory retrieval audit source=%s mode=%s semantic_enabled=%s semantic_attempted=%s semantic_applied=%s candidates=%s selected=%s truncated=%s",
+                    source,
+                    retrieval_debug.get("mode"),
+                    retrieval_debug.get("semantic_enabled"),
+                    retrieval_debug.get("semantic_attempted"),
+                    retrieval_debug.get("semantic_applied"),
+                    retrieval_debug.get("candidate_count"),
+                    retrieval_debug.get("selected_count"),
+                    retrieval_debug.get("truncated"),
+                )
         except Exception as exc:  # pragma: no cover - defensive fail-open
             self._pending_turn_memory_brief = None
             logger.warning(
@@ -1618,7 +1631,8 @@ class RealtimeAPI:
             return True
         if self._is_truthy_metadata_value(metadata.get("confirmation_rejected")):
             return True
-        decision = self._parse_confirmation_decision(self._last_user_input_text or "")
+        last_user_input_text = getattr(self, "_last_user_input_text", "") or ""
+        decision = self._parse_confirmation_decision(last_user_input_text)
         return decision in {"yes", "no"}
 
     def _should_guard_confirmation_response(self, origin: str, response_payload: dict[str, Any]) -> bool:
