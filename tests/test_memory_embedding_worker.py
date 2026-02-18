@@ -85,6 +85,59 @@ def test_worker_keeps_pending_with_backoff_on_failures(tmp_path: Path) -> None:
     assert pending.status == "pending"
     assert pending.error == "boom"
 
+    metrics = worker.get_metrics()
+    assert metrics["pending_count"] == 1
+    assert metrics["retry_blocked_count"] == 1
+    assert metrics["consecutive_failures"] == 1
+    assert metrics["oldest_pending_age_ms"] >= 0
+
+
+def test_worker_metrics_reset_consecutive_failures_after_success(tmp_path: Path) -> None:
+    _reset_singletons()
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    first = store.append_memory(content="first", tags=[], importance=3, user_id="default")
+    second = store.append_memory(content="second", tags=[], importance=3, user_id="default")
+    store.enqueue_memory_embedding(memory_id=first.memory_id)
+    store.enqueue_memory_embedding(memory_id=second.memory_id)
+
+    provider = _SequenceProvider(
+        results=[
+            EmbeddingResult(
+                vector=b"",
+                dimension=0,
+                model="test-model",
+                model_version=None,
+                vector_norm=None,
+                provider="test",
+                status="error",
+                error_code="boom",
+                error_message="boom",
+            ),
+            EmbeddingResult(
+                vector=(1.0).hex().encode("utf-8"),
+                dimension=1,
+                model="test-model",
+                model_version="v1",
+                vector_norm=1.0,
+                provider="test",
+                status="ready",
+            ),
+        ]
+    )
+    worker = MemoryEmbeddingWorker(
+        store=store,
+        provider=provider,
+        batch_size=1,
+        base_backoff_s=30.0,
+    )
+
+    assert worker.run_once() == 0
+    assert worker.get_metrics()["consecutive_failures"] == 1
+    assert worker.run_once() == 1
+
+    metrics = worker.get_metrics()
+    assert metrics["consecutive_failures"] == 0
+
 
 def test_remember_memory_enqueues_pending_embedding_when_enabled(tmp_path: Path, monkeypatch) -> None:
     config_dir = tmp_path / "config"

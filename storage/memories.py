@@ -596,6 +596,24 @@ class MemoryStore:
             return (0, 0)
         return (int(row[0] or 0), int(row[1] or 0))
 
+    def get_pending_embedding_queue_stats(self) -> tuple[int, int | None]:
+        """Return `(pending_count, oldest_pending_updated_at_ms)` across all memories."""
+
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS pending_count,
+                    MIN(updated_at) AS oldest_pending_updated_at
+                FROM memory_embeddings
+                WHERE status = 'pending'
+                """
+            ).fetchone()
+        if row is None:
+            return (0, None)
+        oldest = row[1]
+        return (int(row[0] or 0), None if oldest is None else int(oldest))
+
     def delete_memory_embedding(self, *, memory_id: int) -> bool:
         with self._lock:
             cursor = self._conn.execute(

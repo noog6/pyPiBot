@@ -989,6 +989,56 @@ def test_retrieve_for_turn_semantic_query_rate_limit_respected(tmp_path) -> None
     assert metadata["semantic_error_code"] == "rate_limited"
 
 
+def test_retrieve_for_turn_semantic_query_non_ready_status_sets_error_code(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._semantic_config = SimpleNamespace(
+        enabled=True,
+        rerank_enabled=True,
+        max_candidates_for_semantic=8,
+        min_similarity=0.0,
+        rerank_influence_min_cosine=0.0,
+        dedupe_strong_match_cosine=None,
+        background_embedding_enabled=False,
+        write_timeout_ms=75,
+        query_timeout_ms=40,
+        max_writes_per_minute=120,
+        max_queries_per_minute=240,
+    )
+    now_ms = _now_ms()
+    store.append_memory(
+        content="Remember project alpha milestones.",
+        tags=["work"],
+        importance=4,
+        user_id="default",
+        timestamp=now_ms - 1000,
+    )
+
+    class _UnavailableProvider:
+        def embed_text(self, text: str):
+            return SimpleNamespace(
+                status="unavailable",
+                dimension=0,
+                vector=b"",
+                vector_norm=None,
+            )
+
+    manager._embedding_provider = _UnavailableProvider()
+
+    brief = manager.retrieve_for_turn(
+        latest_user_utterance="project alpha",
+        user_id="default",
+        max_memories=2,
+        max_chars=300,
+        cooldown_s=0.0,
+    )
+
+    assert brief is not None
+    metadata = manager.get_last_turn_retrieval_debug_metadata()
+    assert metadata["fallback_reason"] == "query_embedding_not_ready"
+    assert metadata["semantic_error_code"] == "unavailable"
+
+
 def test_find_semantic_duplicate_respects_write_timeout(tmp_path) -> None:
     store = MemoryStore(db_path=tmp_path / "memories.db")
     manager = _make_memory_manager(store)
