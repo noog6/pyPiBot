@@ -54,6 +54,10 @@ memory_semantic:
   query_timeout_ms: 40
   max_writes_per_minute: 120
   max_queries_per_minute: 240
+  openai:
+    enabled: false
+    model: "text-embedding-3-small"
+    timeout_s: 10.0
 
 # Logging settings
 logging_level: "INFO"

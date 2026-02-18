@@ -30,3 +30,6 @@ def test_config_controller_sets_memory_semantic_defaults(tmp_path: Path, monkeyp
     assert semantic_cfg["query_timeout_ms"] == 40
     assert semantic_cfg["max_writes_per_minute"] == 120
     assert semantic_cfg["max_queries_per_minute"] == 240
+    assert semantic_cfg["openai"]["enabled"] is False
+    assert semantic_cfg["openai"]["model"] == "text-embedding-3-small"
+    assert semantic_cfg["openai"]["timeout_s"] == 10.0
