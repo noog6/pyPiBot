@@ -189,6 +189,19 @@ class MemorySummary:
         )
 
 
+def render_realtime_memory_brief_item(*, index: int, item: MemorySummary) -> str:
+    """Render a single turn-memory line exactly as RealtimeAPI injects it."""
+
+    tags = f" tags=[{', '.join(item.tags)}]" if item.tags else ""
+    return f"{index}. (importance={item.importance}{tags}) {item.content}"
+
+
+def estimate_realtime_memory_brief_item_chars(*, index: int, item: MemorySummary) -> int:
+    """Estimate injected chars for one memory item in the turn-memory brief."""
+
+    return len(render_realtime_memory_brief_item(index=index, item=item))
+
+
 @dataclass(frozen=True)
 class MemoryBrief:
     """Bounded memory context block for a single user turn."""
@@ -849,7 +862,7 @@ class MemoryManager:
                 truncated = True
                 break
             summary = MemorySummary.from_entry(entry)
-            chars = len(summary.content)
+            chars = estimate_realtime_memory_brief_item_chars(index=len(selected) + 1, item=summary)
             if used_chars + chars > bounded_max_chars:
                 truncated = True
                 continue
@@ -1104,14 +1117,28 @@ class MemoryManager:
                 continue
 
             candidate_summary = MemorySummary.from_entry(entry)
-            candidate_chars = len(candidate_summary.content)
+            candidate_index = len(selected) + 1
+            candidate_chars = estimate_realtime_memory_brief_item_chars(index=candidate_index, item=candidate_summary)
             if used_chars + candidate_chars > bounded_max_chars:
                 remaining = bounded_max_chars - used_chars
-                if selected or remaining < 24:
+                overhead_chars = estimate_realtime_memory_brief_item_chars(
+                    index=candidate_index,
+                    item=MemorySummary(
+                        memory_id=candidate_summary.memory_id,
+                        content="",
+                        tags=candidate_summary.tags,
+                        importance=candidate_summary.importance,
+                        source=candidate_summary.source,
+                        pinned=candidate_summary.pinned,
+                        needs_review=candidate_summary.needs_review,
+                    ),
+                )
+                remaining_content_budget = remaining - overhead_chars
+                if selected or remaining_content_budget < 24:
                     truncated = True
                     truncation_count += 1
                     continue
-                clipped = candidate_summary.content[: max(remaining - 1, 1)].rstrip()
+                clipped = candidate_summary.content[: max(remaining_content_budget - 1, 1)].rstrip()
                 if clipped != candidate_summary.content:
                     clipped = f"{clipped}…"
                 candidate_summary = MemorySummary(
@@ -1123,7 +1150,7 @@ class MemoryManager:
                     pinned=candidate_summary.pinned,
                     needs_review=candidate_summary.needs_review,
                 )
-                candidate_chars = len(candidate_summary.content)
+                candidate_chars = estimate_realtime_memory_brief_item_chars(index=candidate_index, item=candidate_summary)
                 truncated = True
                 truncation_count += 1
 
