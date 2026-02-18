@@ -25,6 +25,15 @@ memory:
   auto_memory_min_confidence: 0.75
   auto_pin_min_importance: 5
   auto_pin_requires_review: true
+  auto_reflection_semantic_dedupe:
+    enabled: false
+    recent_approved_limit: 24
+    high_risk_cosine: 0.90
+    on_high_risk: "skip_write"
+    downgrade_importance_to: 2
+    downgrade_clear_pin: true
+    downgrade_mark_needs_review: true
+    apply_to_manual_tool: false
 
 # Two-tier hydration: tiny startup digest + per-turn retrieval
 memory_hydration:
@@ -49,6 +58,8 @@ memory_semantic:
   rerank_enabled: true
   max_candidates_for_semantic: 64
   min_similarity: 0.25
+  rerank_influence_min_cosine: 0.25
+  dedupe_strong_match_cosine: null
   background_embedding_enabled: true
   write_timeout_ms: 75
   query_timeout_ms: 40

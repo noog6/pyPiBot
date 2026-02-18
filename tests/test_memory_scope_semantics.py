@@ -19,6 +19,14 @@ def _make_manager(store: MemoryStore, *, session_id: str | None = None) -> Memor
     manager._last_turn_retrieval_at = {}
     manager._auto_pin_min_importance = 5
     manager._auto_pin_requires_review = True
+    manager._auto_reflection_semantic_dedupe_enabled = False
+    manager._auto_reflection_dedupe_recent_limit = 24
+    manager._auto_reflection_dedupe_high_risk_cosine = 0.9
+    manager._auto_reflection_dedupe_policy = "skip_write"
+    manager._auto_reflection_dedupe_importance = 2
+    manager._auto_reflection_dedupe_clear_pin = True
+    manager._auto_reflection_dedupe_needs_review = True
+    manager._auto_reflection_dedupe_apply_to_manual_tool = False
     return manager
 
 
