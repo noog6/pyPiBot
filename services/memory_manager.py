@@ -171,6 +171,22 @@ class MemoryBrief:
     scope: MemoryScope
 
 
+@dataclass(frozen=True)
+class MemorySemanticConfig:
+    """Semantic memory retrieval and embedding options."""
+
+    enabled: bool
+    provider: str
+    rerank_enabled: bool
+    max_candidates_for_semantic: int
+    min_similarity: float
+    background_embedding_enabled: bool
+    write_timeout_ms: int
+    query_timeout_ms: int
+    max_writes_per_minute: int
+    max_queries_per_minute: int
+
+
 class MemoryManager:
     """Singleton manager for memory storage access."""
 
@@ -190,6 +206,19 @@ class MemoryManager:
         )
         self._auto_pin_min_importance = int(memory_cfg.get("auto_pin_min_importance", 5))
         self._auto_pin_requires_review = bool(memory_cfg.get("auto_pin_requires_review", True))
+        semantic_cfg = config.get("memory_semantic") or {}
+        self._semantic_config = MemorySemanticConfig(
+            enabled=bool(semantic_cfg.get("enabled", False)),
+            provider=str(semantic_cfg.get("provider", "none")),
+            rerank_enabled=bool(semantic_cfg.get("rerank_enabled", False)),
+            max_candidates_for_semantic=int(semantic_cfg.get("max_candidates_for_semantic", 64)),
+            min_similarity=float(semantic_cfg.get("min_similarity", 0.25)),
+            background_embedding_enabled=bool(semantic_cfg.get("background_embedding_enabled", True)),
+            write_timeout_ms=int(semantic_cfg.get("write_timeout_ms", 75)),
+            query_timeout_ms=int(semantic_cfg.get("query_timeout_ms", 40)),
+            max_writes_per_minute=int(semantic_cfg.get("max_writes_per_minute", 120)),
+            max_queries_per_minute=int(semantic_cfg.get("max_queries_per_minute", 240)),
+        )
         self._store = MemoryStore()
         self._last_turn_retrieval_at: dict[tuple[str, MemoryScope], float] = {}
         MemoryManager._instance = self
@@ -211,6 +240,9 @@ class MemoryManager:
 
     def get_active_session_id(self) -> str | None:
         return self._active_session_id
+
+    def get_semantic_config(self) -> MemorySemanticConfig:
+        return self._semantic_config
 
     def remember_memory(
         self,

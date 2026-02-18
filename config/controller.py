@@ -209,4 +209,33 @@ class ConfigController:
 
         normalized["research"] = research_cfg
 
+        memory_semantic_cfg = dict(normalized.get("memory_semantic") or {})
+        memory_semantic_cfg["enabled"] = bool(memory_semantic_cfg.get("enabled", False))
+        memory_semantic_cfg["provider"] = str(memory_semantic_cfg.get("provider", "none"))
+        memory_semantic_cfg["rerank_enabled"] = bool(
+            memory_semantic_cfg.get("rerank_enabled", False)
+        )
+        memory_semantic_cfg["max_candidates_for_semantic"] = int(
+            memory_semantic_cfg.get("max_candidates_for_semantic", 64)
+        )
+        memory_semantic_cfg["min_similarity"] = float(
+            memory_semantic_cfg.get("min_similarity", 0.25)
+        )
+        memory_semantic_cfg["background_embedding_enabled"] = bool(
+            memory_semantic_cfg.get("background_embedding_enabled", True)
+        )
+        memory_semantic_cfg["write_timeout_ms"] = int(
+            memory_semantic_cfg.get("write_timeout_ms", 75)
+        )
+        memory_semantic_cfg["query_timeout_ms"] = int(
+            memory_semantic_cfg.get("query_timeout_ms", 40)
+        )
+        memory_semantic_cfg["max_writes_per_minute"] = int(
+            memory_semantic_cfg.get("max_writes_per_minute", 120)
+        )
+        memory_semantic_cfg["max_queries_per_minute"] = int(
+            memory_semantic_cfg.get("max_queries_per_minute", 240)
+        )
+        normalized["memory_semantic"] = memory_semantic_cfg
+
         return normalized

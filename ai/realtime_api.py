@@ -377,6 +377,25 @@ class RealtimeAPI:
         self._startup_memory_digest_enabled = bool(memory_hydration_cfg.get("startup_digest_enabled", True))
         self._startup_memory_digest_max_items = int(memory_hydration_cfg.get("startup_digest_max_items", 2))
         self._startup_memory_digest_max_chars = int(memory_hydration_cfg.get("startup_digest_max_chars", 280))
+        memory_semantic_cfg = config.get("memory_semantic") or {}
+        self._memory_semantic_enabled = bool(memory_semantic_cfg.get("enabled", False))
+        self._memory_semantic_provider = str(memory_semantic_cfg.get("provider", "none"))
+        self._memory_semantic_rerank_enabled = bool(memory_semantic_cfg.get("rerank_enabled", False))
+        self._memory_semantic_max_candidates = int(
+            memory_semantic_cfg.get("max_candidates_for_semantic", 64)
+        )
+        self._memory_semantic_min_similarity = float(memory_semantic_cfg.get("min_similarity", 0.25))
+        self._memory_semantic_background_embedding_enabled = bool(
+            memory_semantic_cfg.get("background_embedding_enabled", True)
+        )
+        self._memory_semantic_write_timeout_ms = int(memory_semantic_cfg.get("write_timeout_ms", 75))
+        self._memory_semantic_query_timeout_ms = int(memory_semantic_cfg.get("query_timeout_ms", 40))
+        self._memory_semantic_max_writes_per_minute = int(
+            memory_semantic_cfg.get("max_writes_per_minute", 120)
+        )
+        self._memory_semantic_max_queries_per_minute = int(
+            memory_semantic_cfg.get("max_queries_per_minute", 240)
+        )
         self._tool_execution_disabled_until = 0.0
         self._reflection_coordinator = ReflectionCoordinator(
             api_key=self.api_key,

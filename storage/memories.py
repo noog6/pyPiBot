@@ -34,6 +34,18 @@ class MemoryEntry:
     needs_review: bool
 
 
+@dataclass(frozen=True)
+class MemoryEmbedding:
+    memory_id: int
+    model_id: str
+    dim: int
+    vector: bytes
+    vector_norm: float | None
+    updated_at: int | None
+    status: str
+    error: str | None
+
+
 class MemoryStore:
     """Manage persisted memory entries."""
 
@@ -71,23 +83,53 @@ class MemoryStore:
             )
             """
         )
-        columns = {
-            row[1]
-            for row in cursor.execute("PRAGMA table_info(memories)").fetchall()
-        }
-        if "source" not in columns:
-            cursor.execute(
-                "ALTER TABLE memories ADD COLUMN source TEXT DEFAULT 'manual_tool'"
+        self._ensure_table_columns(
+            table_name="memories",
+            columns={
+                "source": "TEXT DEFAULT 'manual_tool'",
+                "pinned": "INTEGER DEFAULT 0",
+                "needs_review": "INTEGER DEFAULT 0",
+            },
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memory_embeddings (
+                memory_id INTEGER PRIMARY KEY,
+                model_id TEXT NOT NULL,
+                dim INTEGER NOT NULL,
+                vector BLOB NOT NULL,
+                vector_norm REAL,
+                updated_at INTEGER,
+                status TEXT DEFAULT 'ready',
+                error TEXT
             )
-        if "pinned" not in columns:
-            cursor.execute(
-                "ALTER TABLE memories ADD COLUMN pinned INTEGER DEFAULT 0"
-            )
-        if "needs_review" not in columns:
-            cursor.execute(
-                "ALTER TABLE memories ADD COLUMN needs_review INTEGER DEFAULT 0"
-            )
+            """
+        )
+        self._ensure_table_columns(
+            table_name="memory_embeddings",
+            columns={
+                "model_id": "TEXT NOT NULL DEFAULT ''",
+                "dim": "INTEGER NOT NULL DEFAULT 0",
+                "vector": "BLOB NOT NULL DEFAULT X''",
+                "vector_norm": "REAL",
+                "updated_at": "INTEGER",
+                "status": "TEXT DEFAULT 'ready'",
+                "error": "TEXT",
+            },
+        )
         self._conn.commit()
+
+    def _ensure_table_columns(self, *, table_name: str, columns: dict[str, str]) -> None:
+        cursor = self._conn.cursor()
+        existing = {
+            row[1]
+            for row in cursor.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+        for name, sql_type in columns.items():
+            if name in existing:
+                continue
+            cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {name} {sql_type}")
 
     def append_memory(
         self,
@@ -222,8 +264,100 @@ class MemoryStore:
             )
         return results
 
+    def upsert_memory_embedding(
+        self,
+        *,
+        memory_id: int,
+        model_id: str,
+        dim: int,
+        vector: bytes,
+        vector_norm: float | None = None,
+        updated_at: int | None = None,
+        status: str = "ready",
+        error: str | None = None,
+    ) -> None:
+        entry_updated_at = updated_at if updated_at is not None else _now_millis()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO memory_embeddings (
+                    memory_id, model_id, dim, vector, vector_norm, updated_at, status, error
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(memory_id) DO UPDATE SET
+                    model_id = excluded.model_id,
+                    dim = excluded.dim,
+                    vector = excluded.vector,
+                    vector_norm = excluded.vector_norm,
+                    updated_at = excluded.updated_at,
+                    status = excluded.status,
+                    error = excluded.error
+                """,
+                (
+                    memory_id,
+                    model_id,
+                    dim,
+                    sqlite3.Binary(vector),
+                    vector_norm,
+                    entry_updated_at,
+                    status,
+                    error,
+                ),
+            )
+            self._conn.commit()
+
+    def fetch_embeddings_for_memories(self, *, memory_ids: Iterable[int]) -> dict[int, MemoryEmbedding]:
+        requested_ids = [int(memory_id) for memory_id in memory_ids]
+        if not requested_ids:
+            return {}
+        placeholders = ", ".join("?" for _ in requested_ids)
+        cursor = self._conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT memory_id, model_id, dim, vector, vector_norm, updated_at, status, error
+            FROM memory_embeddings
+            WHERE memory_id IN ({placeholders})
+            """,
+            requested_ids,
+        )
+        return {
+            int(memory_id): MemoryEmbedding(
+                memory_id=int(memory_id),
+                model_id=model_id,
+                dim=int(dim),
+                vector=bytes(vector),
+                vector_norm=float(vector_norm) if vector_norm is not None else None,
+                updated_at=int(updated_at) if updated_at is not None else None,
+                status=(status or "ready"),
+                error=error,
+            )
+            for (
+                memory_id,
+                model_id,
+                dim,
+                vector,
+                vector_norm,
+                updated_at,
+                status,
+                error,
+            ) in cursor.fetchall()
+        }
+
+    def delete_memory_embedding(self, *, memory_id: int) -> bool:
+        with self._lock:
+            cursor = self._conn.execute(
+                "DELETE FROM memory_embeddings WHERE memory_id = ?",
+                (memory_id,),
+            )
+            self._conn.commit()
+        return cursor.rowcount > 0
+
     def delete_memory(self, *, memory_id: int) -> bool:
         with self._lock:
+            self._conn.execute(
+                "DELETE FROM memory_embeddings WHERE memory_id = ?",
+                (memory_id,),
+            )
             cursor = self._conn.execute(
                 "DELETE FROM memories WHERE memory_id = ?",
                 (memory_id,),

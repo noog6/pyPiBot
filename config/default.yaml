@@ -42,6 +42,19 @@ memory_retrieval:
   min_user_chars: 12
   min_user_tokens: 3
 
+# Semantic memory retrieval and embedding sidecar behavior
+memory_semantic:
+  enabled: false
+  provider: "local_light"
+  rerank_enabled: false
+  max_candidates_for_semantic: 64
+  min_similarity: 0.25
+  background_embedding_enabled: true
+  write_timeout_ms: 75
+  query_timeout_ms: 40
+  max_writes_per_minute: 120
+  max_queries_per_minute: 240
+
 # Logging settings
 logging_level: "INFO"
 file_logging_enabled: true
