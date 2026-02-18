@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import sqlite3
+import threading
 
 from config.controller import ConfigController
 from storage.memories import MemoryStore
@@ -174,3 +175,59 @@ def test_memory_embedding_migration_adds_required_columns_with_defaults(tmp_path
     assert fetched.dim == 2
     assert fetched.status == "ready"
     assert fetched.error is None
+
+
+def test_memory_store_shared_connection_handles_interleaved_read_write_threads(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _configure(tmp_path, monkeypatch)
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+
+    start_gate = threading.Barrier(3)
+    errors: list[Exception] = []
+
+    def writer_worker() -> None:
+        try:
+            start_gate.wait()
+            for index in range(120):
+                entry = store.append_memory(
+                    content=f"note-{index}",
+                    tags=["race"],
+                    importance=3,
+                    user_id="u",
+                )
+                store.enqueue_memory_embedding(memory_id=entry.memory_id)
+                if index % 2 == 0:
+                    store.upsert_memory_embedding(
+                        memory_id=entry.memory_id,
+                        model_id="local_light-v1",
+                        dim=2,
+                        vector=b"ok",
+                        status="ready",
+                    )
+        except Exception as exc:  # pragma: no cover - fails test via assertion below
+            errors.append(exc)
+
+    def reader_worker() -> None:
+        try:
+            start_gate.wait()
+            for _ in range(120):
+                store.search_memories(limit=10, user_id="u")
+                pending = store.fetch_pending_memories_for_embedding(limit=10)
+                store.fetch_embeddings_for_memories(memory_ids=[entry.memory_id for entry in pending])
+                store.list_recent_memories_missing_embeddings(limit=10)
+        except Exception as exc:  # pragma: no cover - fails test via assertion below
+            errors.append(exc)
+
+    writer = threading.Thread(target=writer_worker)
+    reader = threading.Thread(target=reader_worker)
+    writer.start()
+    reader.start()
+    start_gate.wait()
+    writer.join(timeout=10)
+    reader.join(timeout=10)
+
+    assert writer.is_alive() is False
+    assert reader.is_alive() is False
+    assert errors == []

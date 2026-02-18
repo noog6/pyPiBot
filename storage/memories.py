@@ -59,6 +59,7 @@ class MemoryStore:
         self._db_path = db_path
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
+        self._conn.execute("PRAGMA busy_timeout = 5000")
         self._retention_policy = self._load_retention_policy(config.get("memory") or {})
         self._initialize_db()
 
@@ -298,38 +299,39 @@ class MemoryStore:
         query_parts.append("LIMIT ?")
         params.append(limit)
 
-        cursor = self._conn.cursor()
-        cursor.execute(" ".join(query_parts), params)
-        results: list[MemoryEntry] = []
-        for row in cursor.fetchall():
-            (
-                memory_id,
-                timestamp,
-                user_id_value,
-                session_id_value,
-                content,
-                tags_json,
-                importance,
-                source,
-                pinned,
-                needs_review,
-            ) = row
-            tags = json.loads(tags_json) if tags_json else []
-            results.append(
-                MemoryEntry(
-                    memory_id=int(memory_id),
-                    timestamp=int(timestamp),
-                    user_id=user_id_value,
-                    session_id=session_id_value,
-                    content=content,
-                    tags=tags,
-                    importance=int(importance),
-                    source=(source or "manual_tool"),
-                    pinned=bool(pinned),
-                    needs_review=bool(needs_review),
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(" ".join(query_parts), params)
+            results: list[MemoryEntry] = []
+            for row in cursor.fetchall():
+                (
+                    memory_id,
+                    timestamp,
+                    user_id_value,
+                    session_id_value,
+                    content,
+                    tags_json,
+                    importance,
+                    source,
+                    pinned,
+                    needs_review,
+                ) = row
+                tags = json.loads(tags_json) if tags_json else []
+                results.append(
+                    MemoryEntry(
+                        memory_id=int(memory_id),
+                        timestamp=int(timestamp),
+                        user_id=user_id_value,
+                        session_id=session_id_value,
+                        content=content,
+                        tags=tags,
+                        importance=int(importance),
+                        source=(source or "manual_tool"),
+                        pinned=bool(pinned),
+                        needs_review=bool(needs_review),
+                    )
                 )
-            )
-        return results
+            return results
 
     def upsert_memory_embedding(
         self,
@@ -378,37 +380,38 @@ class MemoryStore:
         if not requested_ids:
             return {}
         placeholders = ", ".join("?" for _ in requested_ids)
-        cursor = self._conn.cursor()
-        cursor.execute(
-            f"""
-            SELECT memory_id, model_id, dim, vector, vector_norm, updated_at, status, error
-            FROM memory_embeddings
-            WHERE memory_id IN ({placeholders})
-            """,
-            requested_ids,
-        )
-        return {
-            int(memory_id): MemoryEmbedding(
-                memory_id=int(memory_id),
-                model_id=model_id,
-                dim=int(dim),
-                vector=bytes(vector),
-                vector_norm=float(vector_norm) if vector_norm is not None else None,
-                updated_at=int(updated_at) if updated_at is not None else None,
-                status=(status or "ready"),
-                error=error,
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT memory_id, model_id, dim, vector, vector_norm, updated_at, status, error
+                FROM memory_embeddings
+                WHERE memory_id IN ({placeholders})
+                """,
+                requested_ids,
             )
-            for (
-                memory_id,
-                model_id,
-                dim,
-                vector,
-                vector_norm,
-                updated_at,
-                status,
-                error,
-            ) in cursor.fetchall()
-        }
+            return {
+                int(memory_id): MemoryEmbedding(
+                    memory_id=int(memory_id),
+                    model_id=model_id,
+                    dim=int(dim),
+                    vector=bytes(vector),
+                    vector_norm=float(vector_norm) if vector_norm is not None else None,
+                    updated_at=int(updated_at) if updated_at is not None else None,
+                    status=(status or "ready"),
+                    error=error,
+                )
+                for (
+                    memory_id,
+                    model_id,
+                    dim,
+                    vector,
+                    vector_norm,
+                    updated_at,
+                    status,
+                    error,
+                ) in cursor.fetchall()
+            }
 
     def enqueue_memory_embedding(self, *, memory_id: int, updated_at: int | None = None) -> None:
         """Mark a memory embedding row as pending without blocking memory writes."""
@@ -426,77 +429,79 @@ class MemoryStore:
 
     def list_recent_memories_missing_embeddings(self, *, limit: int) -> list[int]:
         bounded_limit = max(1, int(limit))
-        cursor = self._conn.cursor()
-        cursor.execute(
-            """
-            SELECT m.memory_id
-            FROM memories AS m
-            LEFT JOIN memory_embeddings AS e ON e.memory_id = m.memory_id
-            WHERE e.memory_id IS NULL
-            ORDER BY m.timestamp DESC, m.memory_id DESC
-            LIMIT ?
-            """,
-            (bounded_limit,),
-        )
-        return [int(memory_id) for (memory_id,) in cursor.fetchall()]
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                """
+                SELECT m.memory_id
+                FROM memories AS m
+                LEFT JOIN memory_embeddings AS e ON e.memory_id = m.memory_id
+                WHERE e.memory_id IS NULL
+                ORDER BY m.timestamp DESC, m.memory_id DESC
+                LIMIT ?
+                """,
+                (bounded_limit,),
+            )
+            return [int(memory_id) for (memory_id,) in cursor.fetchall()]
 
     def fetch_pending_memories_for_embedding(self, *, limit: int) -> list[MemoryEntry]:
         """Return pending memory rows that still need embeddings."""
 
         bounded_limit = max(1, int(limit))
-        cursor = self._conn.cursor()
-        cursor.execute(
-            """
-            SELECT
-                m.memory_id,
-                m.timestamp,
-                m.user_id,
-                m.session_id,
-                m.content,
-                m.tags,
-                m.importance,
-                m.source,
-                m.pinned,
-                m.needs_review
-            FROM memories AS m
-            INNER JOIN memory_embeddings AS e ON e.memory_id = m.memory_id
-            WHERE e.status = 'pending'
-            ORDER BY COALESCE(e.updated_at, m.timestamp) ASC, m.memory_id ASC
-            LIMIT ?
-            """,
-            (bounded_limit,),
-        )
-
-        entries: list[MemoryEntry] = []
-        for row in cursor.fetchall():
-            (
-                memory_id,
-                timestamp,
-                user_id_value,
-                session_id_value,
-                content,
-                tags_json,
-                importance,
-                source,
-                pinned,
-                needs_review,
-            ) = row
-            tags = json.loads(tags_json) if tags_json else []
-            entries.append(
-                MemoryEntry(
-                    memory_id=int(memory_id),
-                    timestamp=int(timestamp),
-                    user_id=user_id_value,
-                    session_id=session_id_value,
-                    content=content,
-                    tags=tags,
-                    importance=int(importance),
-                    source=(source or "manual_tool"),
-                    pinned=bool(pinned),
-                    needs_review=bool(needs_review),
-                )
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    m.memory_id,
+                    m.timestamp,
+                    m.user_id,
+                    m.session_id,
+                    m.content,
+                    m.tags,
+                    m.importance,
+                    m.source,
+                    m.pinned,
+                    m.needs_review
+                FROM memories AS m
+                INNER JOIN memory_embeddings AS e ON e.memory_id = m.memory_id
+                WHERE e.status = 'pending'
+                ORDER BY COALESCE(e.updated_at, m.timestamp) ASC, m.memory_id ASC
+                LIMIT ?
+                """,
+                (bounded_limit,),
             )
-        return entries
+
+            entries: list[MemoryEntry] = []
+            for row in cursor.fetchall():
+                (
+                    memory_id,
+                    timestamp,
+                    user_id_value,
+                    session_id_value,
+                    content,
+                    tags_json,
+                    importance,
+                    source,
+                    pinned,
+                    needs_review,
+                ) = row
+                tags = json.loads(tags_json) if tags_json else []
+                entries.append(
+                    MemoryEntry(
+                        memory_id=int(memory_id),
+                        timestamp=int(timestamp),
+                        user_id=user_id_value,
+                        session_id=session_id_value,
+                        content=content,
+                        tags=tags,
+                        importance=int(importance),
+                        source=(source or "manual_tool"),
+                        pinned=bool(pinned),
+                        needs_review=bool(needs_review),
+                    )
+                )
+            return entries
 
     def get_embedding_coverage_counts(
         self,
