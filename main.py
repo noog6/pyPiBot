@@ -14,6 +14,7 @@ from hardware import CameraController
 from interaction.stderr_suppression import suppress_noisy_stderr
 from motion import MotionController
 from storage.controller import StorageController
+from storage.diagnostics import inspect_memory_embeddings
 from services.battery_monitor import BatteryMonitor
 from services.imu_monitor import ImuMonitor
 from services.memory_manager import MemoryManager
@@ -109,6 +110,15 @@ def main(argv: list[str] | None = None) -> int:
 
     prompts = args.prompts.split("|") if args.prompts else None
     storage_controller = StorageController.get_instance()
+    semantic_state = inspect_memory_embeddings(config)
+    logger.info(
+        "Semantic memory enabled=%s",
+        semantic_state["enabled"],
+    )
+    logger.info(
+        "Semantic embeddings table available=%s",
+        semantic_state["table_exists"],
+    )
     runtime_session_id = f"run-{storage_controller.get_current_run_number()}"
     MemoryManager.get_instance().set_active_session_id(runtime_session_id)
     logger.info("Assigned runtime memory session_id=%s", runtime_session_id)
