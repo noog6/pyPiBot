@@ -236,6 +236,13 @@ class ConfigController:
         memory_semantic_cfg["max_queries_per_minute"] = int(
             memory_semantic_cfg.get("max_queries_per_minute", 240)
         )
+        memory_openai_cfg = dict(memory_semantic_cfg.get("openai") or {})
+        memory_openai_cfg["enabled"] = bool(memory_openai_cfg.get("enabled", False))
+        memory_openai_cfg["model"] = str(
+            memory_openai_cfg.get("model", "text-embedding-3-small")
+        )
+        memory_openai_cfg["timeout_s"] = float(memory_openai_cfg.get("timeout_s", 10.0))
+        memory_semantic_cfg["openai"] = memory_openai_cfg
         normalized["memory_semantic"] = memory_semantic_cfg
 
         return normalized
