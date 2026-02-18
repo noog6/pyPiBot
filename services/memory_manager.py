@@ -25,6 +25,7 @@ MAX_RECALL_LIMIT = 10
 MIN_IMPORTANCE = 1
 MAX_IMPORTANCE = 5
 RANK_CANDIDATE_MULTIPLIER = 8
+MAX_RETRIEVAL_CANDIDATE_CAP = MAX_RECALL_LIMIT * RANK_CANDIDATE_MULTIPLIER
 STALE_MEMORY_MAX_AGE_S = 60.0 * 60.0 * 24.0 * 365.0
 NEAR_DUPLICATE_THRESHOLD = 0.75
 NEAR_DUPLICATE_CHAR_RATIO = 0.9
@@ -866,8 +867,12 @@ class MemoryManager:
 
         bounded_max_memories = _clamp(max_memories, 1, MAX_RECALL_LIMIT)
         bounded_max_chars = _clamp(max_chars, 80, 4000)
-        candidate_limit = max(bounded_max_memories * RANK_CANDIDATE_MULTIPLIER, bounded_max_memories)
-        entries = self._store.search_memories(
+        candidate_limit = _clamp(
+            max(bounded_max_memories * RANK_CANDIDATE_MULTIPLIER, bounded_max_memories),
+            bounded_max_memories,
+            MAX_RETRIEVAL_CANDIDATE_CAP,
+        )
+        recency_importance_entries = self._store.search_memories(
             query=None,
             limit=candidate_limit,
             user_id=effective_user_id,
@@ -875,6 +880,25 @@ class MemoryManager:
             session_id=resolved_session_id,
             review_state="approved",
         )
+        query_entries = self._store.search_memories(
+            query=clean_utterance,
+            limit=candidate_limit,
+            user_id=effective_user_id,
+            scope=resolved_scope,
+            session_id=resolved_session_id,
+            review_state="approved",
+        )
+
+        entries: list[MemoryEntry] = []
+        seen_memory_ids: set[int] = set()
+        for entry in [*query_entries, *recency_importance_entries]:
+            if entry.memory_id in seen_memory_ids:
+                continue
+            seen_memory_ids.add(entry.memory_id)
+            entries.append(entry)
+            if len(entries) >= candidate_limit:
+                break
+
         if not entries:
             self._last_turn_retrieval_at[cooldown_key] = timestamp
             self._last_turn_retrieval_debug["mode"] = "empty"
