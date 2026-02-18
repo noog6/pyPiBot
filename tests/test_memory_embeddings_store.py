@@ -177,6 +177,81 @@ def test_memory_embedding_migration_adds_required_columns_with_defaults(tmp_path
     assert fetched.error is None
 
 
+def test_memory_store_initialization_adds_expected_indexes_to_legacy_db(tmp_path: Path, monkeypatch) -> None:
+    _configure(tmp_path, monkeypatch)
+    db_path = tmp_path / "memories.db"
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE memories (
+            memory_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp INTEGER,
+            user_id TEXT,
+            session_id TEXT,
+            content TEXT,
+            tags JSON,
+            importance INTEGER,
+            source TEXT DEFAULT 'manual_tool',
+            pinned INTEGER DEFAULT 0,
+            needs_review INTEGER DEFAULT 0
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE memory_embeddings (
+            memory_id INTEGER PRIMARY KEY,
+            model_id TEXT NOT NULL,
+            dim INTEGER NOT NULL,
+            vector BLOB NOT NULL,
+            vector_norm REAL,
+            updated_at INTEGER,
+            status TEXT DEFAULT 'ready',
+            error TEXT
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    MemoryStore(db_path=db_path)
+
+    conn = sqlite3.connect(db_path)
+    indexes = {
+        row[1]
+        for row in conn.execute(
+            "SELECT type, name FROM sqlite_master WHERE type='index'"
+        ).fetchall()
+    }
+    conn.close()
+
+    assert "idx_memories_scope_review_priority" in indexes
+    assert "idx_memories_scope_pinned_review_priority" in indexes
+    assert "idx_memory_embeddings_status_updated_memory" in indexes
+
+
+def test_memory_store_index_migration_is_idempotent_and_non_breaking(tmp_path: Path, monkeypatch) -> None:
+    _configure(tmp_path, monkeypatch)
+    db_path = tmp_path / "memories.db"
+    store = MemoryStore(db_path=db_path)
+
+    entry = store.append_memory(
+        content="uses startup digest",
+        tags=["digest"],
+        importance=5,
+        user_id="u",
+        pinned=True,
+    )
+    store.enqueue_memory_embedding(memory_id=entry.memory_id, updated_at=123)
+
+    # Re-running initialization should preserve behavior and not fail on pre-existing indexes.
+    MemoryStore(db_path=db_path)
+
+    pending = store.fetch_pending_memories_for_embedding(limit=10)
+    assert [item.memory_id for item in pending] == [entry.memory_id]
+
+
 def test_memory_store_shared_connection_handles_interleaved_read_write_threads(
     tmp_path: Path,
     monkeypatch,

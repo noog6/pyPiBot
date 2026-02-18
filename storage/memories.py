@@ -186,6 +186,25 @@ class MemoryStore:
                 "error": "TEXT",
             },
         )
+
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_memories_scope_review_priority
+            ON memories (user_id, session_id, needs_review, importance, timestamp)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_memories_scope_pinned_review_priority
+            ON memories (user_id, session_id, pinned, needs_review, importance, timestamp)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_memory_embeddings_status_updated_memory
+            ON memory_embeddings (status, updated_at, memory_id)
+            """
+        )
         self._conn.commit()
 
     def _ensure_table_columns(self, *, table_name: str, columns: dict[str, str]) -> None:
