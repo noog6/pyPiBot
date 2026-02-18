@@ -20,6 +20,7 @@ def _make_memory_manager(store: MemoryStore) -> MemoryManager:
     manager._store = store
     manager._embedding_worker = None
     manager._last_turn_retrieval_at = {}
+    manager._last_semantic_dedupe_debug = {}
     manager._semantic_config = SimpleNamespace(enabled=False, dedupe_strong_match_cosine=None)
     manager._auto_pin_min_importance = 5
     manager._auto_pin_requires_review = True
@@ -176,3 +177,34 @@ def test_manual_tool_write_remains_authoritative_under_default_policy(tmp_path) 
 
     assert result.memory_id != existing.memory_id
     assert len(store.search_memories(user_id="default", scope=MemoryScope.USER_GLOBAL, limit=10, review_state="all")) == 2
+
+
+def test_auto_reflection_write_survives_semantic_dedupe_embedding_exception(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._semantic_config = SimpleNamespace(enabled=True, dedupe_strong_match_cosine=0.85)
+    manager._auto_reflection_semantic_dedupe_enabled = True
+
+    store.append_memory(
+        content="User likes jazz while coding.",
+        tags=["music"],
+        importance=4,
+        user_id="default",
+        needs_review=False,
+    )
+
+    class _FailingProvider:
+        def embed_text(self, text: str):
+            raise RuntimeError("provider unavailable")
+
+    manager._embedding_provider = _FailingProvider()
+
+    result = manager.remember_memory(
+        content="User prefers jazz while coding sessions.",
+        source="auto_reflection",
+        importance=4,
+    )
+
+    assert result.content == "User prefers jazz while coding sessions."
+    assert len(store.search_memories(user_id="default", scope=MemoryScope.USER_GLOBAL, limit=10, review_state="all")) == 2
+    assert manager.get_last_semantic_dedupe_debug_metadata()["error_code"] == "embedding_provider_exception"
