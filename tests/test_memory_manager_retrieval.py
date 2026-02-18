@@ -517,3 +517,280 @@ def test_retrieval_health_metrics_include_coverage_error_rate_and_latency(tmp_pa
     assert metrics["semantic_provider_error_rate_pct"] == 100.0
     assert metrics["average_retrieval_latency_ms"] >= 0.0
     assert metrics["retrieval_count"] == 1
+
+
+def test_retrieve_for_turn_semantic_disabled_keeps_lexical_path(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    now_ms = _now_ms()
+
+    store.append_memory(
+        content="Remember project alpha milestones.",
+        tags=["work"],
+        importance=4,
+        user_id="default",
+        timestamp=now_ms - 2000,
+    )
+    store.append_memory(
+        content="Remember project alpha budget.",
+        tags=["work"],
+        importance=4,
+        user_id="default",
+        timestamp=now_ms - 1000,
+    )
+
+    class _ShouldNotBeCalledProvider:
+        def embed_text(self, text: str):
+            raise AssertionError("semantic provider should not be called when disabled")
+
+    manager._embedding_provider = _ShouldNotBeCalledProvider()
+
+    brief = manager.retrieve_for_turn(
+        latest_user_utterance="project alpha",
+        user_id="default",
+        max_memories=2,
+        max_chars=300,
+    )
+
+    assert brief is not None
+    assert [item.content for item in brief.items] == [
+        "Remember project alpha budget.",
+        "Remember project alpha milestones.",
+    ]
+    metadata = manager.get_last_turn_retrieval_debug_metadata()
+    assert metadata["mode"] == "lexical"
+    assert metadata["semantic_attempted"] is False
+
+
+def test_retrieve_for_turn_semantic_fallback_when_query_embedding_not_ready(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._semantic_config = SimpleNamespace(
+        enabled=True,
+        rerank_enabled=True,
+        max_candidates_for_semantic=8,
+        min_similarity=0.0,
+        rerank_influence_min_cosine=0.0,
+        dedupe_strong_match_cosine=None,
+        background_embedding_enabled=False,
+    )
+    now_ms = _now_ms()
+
+    first = store.append_memory(
+        content="Remember project alpha milestones.",
+        tags=["work"],
+        importance=4,
+        user_id="default",
+        timestamp=now_ms - 2000,
+    )
+    second = store.append_memory(
+        content="Remember project alpha budget.",
+        tags=["work"],
+        importance=4,
+        user_id="default",
+        timestamp=now_ms - 1000,
+    )
+    store.upsert_memory_embedding(
+        memory_id=first.memory_id,
+        model_id="unit",
+        dim=2,
+        vector=_encode_vector([1.0, 0.0]),
+        vector_norm=1.0,
+    )
+    store.upsert_memory_embedding(
+        memory_id=second.memory_id,
+        model_id="unit",
+        dim=2,
+        vector=_encode_vector([1.0, 0.0]),
+        vector_norm=1.0,
+    )
+
+    class _NotReadyProvider:
+        def embed_text(self, text: str):
+            return SimpleNamespace(status="pending", dimension=2, vector=None, vector_norm=None)
+
+    manager._embedding_provider = _NotReadyProvider()
+
+    brief = manager.retrieve_for_turn(
+        latest_user_utterance="project alpha",
+        user_id="default",
+        max_memories=2,
+        max_chars=300,
+    )
+
+    assert brief is not None
+    assert [item.content for item in brief.items] == [
+        "Remember project alpha budget.",
+        "Remember project alpha milestones.",
+    ]
+    metadata = manager.get_last_turn_retrieval_debug_metadata()
+    assert metadata["mode"] == "lexical"
+    assert metadata["fallback_reason"] == "query_embedding_not_ready"
+
+
+def test_retrieve_for_turn_session_local_cooldown_is_keyed_by_session_id(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    now_ms = _now_ms()
+
+    store.append_memory(
+        content="Session local memory for alpha project.",
+        tags=["work"],
+        importance=4,
+        user_id="default",
+        session_id="session-a",
+        timestamp=now_ms,
+    )
+    store.append_memory(
+        content="Session local memory for beta project.",
+        tags=["work"],
+        importance=4,
+        user_id="default",
+        session_id="session-b",
+        timestamp=now_ms,
+    )
+
+    first = manager.retrieve_for_turn(
+        latest_user_utterance="project",
+        user_id="default",
+        scope=MemoryScope.SESSION_LOCAL,
+        session_id="session-a",
+        max_memories=2,
+        max_chars=300,
+        cooldown_s=20.0,
+        now_monotonic=100.0,
+    )
+    second = manager.retrieve_for_turn(
+        latest_user_utterance="project",
+        user_id="default",
+        scope=MemoryScope.SESSION_LOCAL,
+        session_id="session-b",
+        max_memories=2,
+        max_chars=300,
+        cooldown_s=20.0,
+        now_monotonic=105.0,
+    )
+
+    assert first is not None
+    assert second is not None
+    assert [item.content for item in first.items] == ["Session local memory for alpha project."]
+    assert [item.content for item in second.items] == ["Session local memory for beta project."]
+
+
+def test_retrieve_for_turn_semantic_enabled_applies_hybrid_reranking(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._semantic_config = SimpleNamespace(
+        enabled=True,
+        rerank_enabled=True,
+        max_candidates_for_semantic=2,
+        min_similarity=0.0,
+        rerank_influence_min_cosine=0.0,
+        dedupe_strong_match_cosine=None,
+        background_embedding_enabled=False,
+    )
+    now_ms = _now_ms()
+
+    alpha = store.append_memory(
+        content="Project alpha budget notes.",
+        tags=["work"],
+        importance=3,
+        user_id="default",
+        timestamp=now_ms,
+    )
+    beta = store.append_memory(
+        content="Project alpha milestones checklist.",
+        tags=["work"],
+        importance=3,
+        user_id="default",
+        timestamp=now_ms - 1000,
+    )
+
+    store.upsert_memory_embedding(
+        memory_id=alpha.memory_id,
+        model_id="unit",
+        dim=2,
+        vector=_encode_vector([0.8, 0.2]),
+        vector_norm=0.824,
+    )
+    store.upsert_memory_embedding(
+        memory_id=beta.memory_id,
+        model_id="unit",
+        dim=2,
+        vector=_encode_vector([1.0, 0.0]),
+        vector_norm=1.0,
+    )
+
+    class _ReadyProvider:
+        def embed_text(self, text: str):
+            return SimpleNamespace(status="ready", dimension=2, vector=_encode_vector([1.0, 0.0]), vector_norm=1.0)
+
+    manager._embedding_provider = _ReadyProvider()
+
+    brief = manager.retrieve_for_turn(
+        latest_user_utterance="project alpha",
+        user_id="default",
+        max_memories=2,
+        max_chars=300,
+    )
+
+    assert brief is not None
+    assert [item.content for item in brief.items] == [
+        "Project alpha milestones checklist.",
+        "Project alpha budget notes.",
+    ]
+    metadata = manager.get_last_turn_retrieval_debug_metadata()
+    assert metadata["mode"] == "hybrid"
+    assert metadata["semantic_applied"] is True
+
+
+def test_retrieve_for_turn_semantic_provider_exception_falls_back_to_lexical(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._semantic_config = SimpleNamespace(
+        enabled=True,
+        rerank_enabled=True,
+        max_candidates_for_semantic=8,
+        min_similarity=0.0,
+        rerank_influence_min_cosine=0.0,
+        dedupe_strong_match_cosine=None,
+        background_embedding_enabled=False,
+    )
+    now_ms = _now_ms()
+
+    store.append_memory(
+        content="Remember project alpha milestones.",
+        tags=["work"],
+        importance=4,
+        user_id="default",
+        timestamp=now_ms - 2000,
+    )
+    store.append_memory(
+        content="Remember project alpha budget.",
+        tags=["work"],
+        importance=4,
+        user_id="default",
+        timestamp=now_ms - 1000,
+    )
+
+    class _FailingProvider:
+        def embed_text(self, text: str):
+            raise RuntimeError("provider unavailable")
+
+    manager._embedding_provider = _FailingProvider()
+
+    brief = manager.retrieve_for_turn(
+        latest_user_utterance="project alpha",
+        user_id="default",
+        max_memories=2,
+        max_chars=300,
+    )
+
+    assert brief is not None
+    assert [item.content for item in brief.items] == [
+        "Remember project alpha budget.",
+        "Remember project alpha milestones.",
+    ]
+    metadata = manager.get_last_turn_retrieval_debug_metadata()
+    assert metadata["mode"] == "hybrid_fallback_lexical"
+    assert metadata["semantic_error"] == "exception"

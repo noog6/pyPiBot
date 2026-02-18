@@ -77,3 +77,32 @@ def test_realtime_skips_turn_retrieval_for_short_or_noisy_input() -> None:
     assert api._should_skip_turn_memory_retrieval("thanks") is True
     assert api._should_skip_turn_memory_retrieval("battery?") is True
     assert api._should_skip_turn_memory_retrieval("Please remember my favorite tea is jasmine") is False
+
+
+def test_startup_digest_excludes_unpinned_and_review_pending_entries(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_manager(store)
+
+    manager.remember_memory(
+        content="Pinned and approved memory should appear.",
+        importance=5,
+        pinned=True,
+        needs_review=False,
+    )
+    manager.remember_memory(
+        content="Approved but unpinned memory should stay out of startup digest.",
+        importance=5,
+        pinned=False,
+        needs_review=False,
+    )
+    manager.remember_memory(
+        content="Pinned but pending review should stay out of startup digest.",
+        importance=5,
+        pinned=True,
+        needs_review=True,
+    )
+
+    digest = manager.retrieve_startup_digest(max_items=4, max_chars=400)
+
+    assert digest is not None
+    assert [item.content for item in digest.items] == ["Pinned and approved memory should appear."]
