@@ -248,6 +248,7 @@ class MemoryManager:
         if self._semantic_config.enabled and self._semantic_config.background_embedding_enabled:
             self._embedding_worker = MemoryEmbeddingWorker(store=self._store)
         self._last_turn_retrieval_at: dict[tuple[str, MemoryScope], float] = {}
+        self._last_turn_retrieval_debug: dict[str, object] = {}
         MemoryManager._instance = self
 
     @classmethod
@@ -273,6 +274,11 @@ class MemoryManager:
 
     def get_embedding_worker(self) -> MemoryEmbeddingWorker | None:
         return self._embedding_worker
+
+    def get_last_turn_retrieval_debug_metadata(self) -> dict[str, object]:
+        """Return internal retrieval metadata for debugging and audit logs."""
+
+        return dict(self._last_turn_retrieval_debug)
 
     def remember_memory(
         self,
@@ -407,6 +413,18 @@ class MemoryManager:
     ) -> MemoryBrief | None:
         """Retrieve a compact, deterministic memory brief for turn-time context."""
 
+        self._last_turn_retrieval_debug = {
+            "mode": "none",
+            "semantic_enabled": False,
+            "semantic_attempted": False,
+            "semantic_applied": False,
+            "semantic_error": None,
+            "candidate_count": 0,
+            "selected_count": 0,
+            "scope": None,
+            "cooldown_skipped": False,
+        }
+
         clean_utterance = " ".join(latest_user_utterance.strip().split())
         if not clean_utterance:
             return None
@@ -421,9 +439,11 @@ class MemoryManager:
 
         timestamp = now_monotonic if now_monotonic is not None else time.monotonic()
         cooldown_key = (effective_user_id, resolved_scope)
+        self._last_turn_retrieval_debug["scope"] = resolved_scope.value
         if cooldown_s > 0.0:
             last_retrieval = self._last_turn_retrieval_at.get(cooldown_key)
             if last_retrieval is not None and timestamp - last_retrieval < cooldown_s:
+                self._last_turn_retrieval_debug.update({"mode": "cooldown", "cooldown_skipped": True})
                 return None
 
         bounded_max_memories = _clamp(max_memories, 1, MAX_RECALL_LIMIT)
@@ -439,6 +459,7 @@ class MemoryManager:
         )
         if not entries:
             self._last_turn_retrieval_at[cooldown_key] = timestamp
+            self._last_turn_retrieval_debug["mode"] = "empty"
             return None
 
         now_s = time.time()
@@ -454,7 +475,10 @@ class MemoryManager:
 
         if not scored_entries:
             self._last_turn_retrieval_at[cooldown_key] = timestamp
+            self._last_turn_retrieval_debug["mode"] = "filtered_empty"
             return None
+
+        self._last_turn_retrieval_debug["candidate_count"] = len(scored_entries)
 
         lexical_ordered = sorted(
             scored_entries,
@@ -463,7 +487,9 @@ class MemoryManager:
         ordered = [item[1] for item in lexical_ordered]
 
         semantic_enabled = self._semantic_config.enabled and self._semantic_config.rerank_enabled
+        self._last_turn_retrieval_debug["semantic_enabled"] = semantic_enabled
         if semantic_enabled and lexical_ordered:
+            self._last_turn_retrieval_debug["semantic_attempted"] = True
             semantic_limit = _clamp(
                 self._semantic_config.max_candidates_for_semantic,
                 1,
@@ -500,9 +526,24 @@ class MemoryManager:
                             key=lambda pair: (-pair[0], -pair[1].importance, -pair[1].timestamp, pair[1].memory_id),
                         )
                         ordered = [entry for _, entry in reranked_pool] + [entry for _, entry in lexical_ordered[semantic_limit:]]
+                        self._last_turn_retrieval_debug.update(
+                            {
+                                "mode": "hybrid",
+                                "semantic_applied": True,
+                                "semantic_pool_size": semantic_limit,
+                            }
+                        )
             except Exception:  # noqa: BLE001
                 # Semantic reranking is best-effort and must never degrade lexical retrieval.
                 ordered = [item[1] for item in lexical_ordered]
+                self._last_turn_retrieval_debug.update(
+                    {
+                        "mode": "hybrid_fallback_lexical",
+                        "semantic_error": "exception",
+                    }
+                )
+        if self._last_turn_retrieval_debug.get("mode") == "none":
+            self._last_turn_retrieval_debug["mode"] = "lexical"
         selected: list[MemorySummary] = []
         seen_contents: list[str] = []
         used_chars = 0
@@ -551,6 +592,8 @@ class MemoryManager:
             used_chars += candidate_chars
 
         self._last_turn_retrieval_at[cooldown_key] = timestamp
+        self._last_turn_retrieval_debug["selected_count"] = len(selected)
+        self._last_turn_retrieval_debug["truncated"] = truncated
         if not selected:
             return None
         return MemoryBrief(

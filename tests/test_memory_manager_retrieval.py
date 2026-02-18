@@ -25,6 +25,7 @@ def _make_memory_manager(store: MemoryStore) -> MemoryManager:
         background_embedding_enabled=False,
     )
     manager._last_turn_retrieval_at = {}
+    manager._last_turn_retrieval_debug = {}
     manager._auto_pin_min_importance = 5
     manager._auto_pin_requires_review = True
     manager._embedding_provider = None
@@ -281,6 +282,7 @@ def test_retrieve_for_turn_semantic_reranks_within_lexical_pool(tmp_path) -> Non
         "Project alpha budget notes.",
         "Project alpha release plan.",
     ]
+    assert manager.get_last_turn_retrieval_debug_metadata()["mode"] == "hybrid"
 
 
 def test_retrieve_for_turn_semantic_unavailable_falls_back_to_lexical(tmp_path) -> None:
@@ -328,3 +330,6 @@ def test_retrieve_for_turn_semantic_unavailable_falls_back_to_lexical(tmp_path) 
         "Remember project alpha budget.",
         "Remember project alpha milestones.",
     ]
+    metadata = manager.get_last_turn_retrieval_debug_metadata()
+    assert metadata["mode"] == "hybrid_fallback_lexical"
+    assert metadata["semantic_error"] == "exception"
