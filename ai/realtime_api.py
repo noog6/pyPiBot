@@ -65,7 +65,12 @@ from motion import (
 from motion.gesture_library import DEFAULT_GESTURES
 from services.profile_manager import ProfileManager
 from services.reflection_manager import ReflectionManager
-from services.memory_manager import MemoryBrief, MemoryManager, MemoryScope
+from services.memory_manager import (
+    MemoryBrief,
+    MemoryManager,
+    MemoryScope,
+    render_realtime_memory_brief_item,
+)
 from services.research import ResearchRequest, build_openai_service_or_null, has_research_intent
 from services.research.research_transcript import write_research_transcript
 from storage import StorageController
@@ -1054,10 +1059,7 @@ class RealtimeAPI:
             "Turn memory brief (retrieved long-term context; do not quote verbatim unless asked):"
         ]
         for index, item in enumerate(brief.items, start=1):
-            tags = f" tags=[{', '.join(item.tags)}]" if item.tags else ""
-            lines.append(
-                f"{index}. (importance={item.importance}{tags}) {item.content}"
-            )
+            lines.append(render_realtime_memory_brief_item(index=index, item=item))
         if brief.truncated:
             lines.append("Additional relevant memories were omitted due to retrieval limits.")
         return "\n".join(lines)

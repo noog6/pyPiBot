@@ -6,7 +6,12 @@ import struct
 import time
 from types import SimpleNamespace
 
-from services.memory_manager import MemoryManager, MemoryScope
+from services.memory_manager import (
+    MemoryManager,
+    MemoryScope,
+    estimate_realtime_memory_brief_item_chars,
+    render_realtime_memory_brief_item,
+)
 from storage.memories import MemoryStore
 
 
@@ -96,6 +101,73 @@ def test_retrieve_for_turn_enforces_item_and_char_budget(tmp_path) -> None:
     assert brief.total_chars <= 80
     assert brief.items[0].content.endswith("…")
 
+
+def test_retrieve_for_turn_uses_injected_item_budget_with_tags_and_numbering(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    now_ms = _now_ms()
+
+    store.append_memory(
+        content="Daily standup before coffee.",
+        tags=["productivity", "habits", "daily-ritual"],
+        importance=5,
+        user_id="default",
+        timestamp=now_ms,
+    )
+
+    brief = manager.retrieve_for_turn(
+        latest_user_utterance="daily summary",
+        user_id="default",
+        max_memories=1,
+        max_chars=90,
+    )
+
+    assert brief is not None
+    assert len(brief.items) == 1
+    assert brief.total_chars <= 90
+
+    injected_line = render_realtime_memory_brief_item(index=1, item=brief.items[0])
+    estimated_chars = estimate_realtime_memory_brief_item_chars(index=1, item=brief.items[0])
+
+    assert len(injected_line) == estimated_chars == brief.total_chars
+
+
+def test_retrieve_for_turn_budget_matches_rendered_injected_note_chars(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    now_ms = _now_ms()
+
+    store.append_memory(
+        content="Prefers early morning planning blocks and clean TODO lists.",
+        tags=["workflow", "planning"],
+        importance=4,
+        user_id="default",
+        timestamp=now_ms,
+    )
+    store.append_memory(
+        content="Keeps a shortlist of priority bugs for end-of-day review.",
+        tags=["engineering", "triage"],
+        importance=4,
+        user_id="default",
+        timestamp=now_ms - 1000,
+    )
+
+    brief = manager.retrieve_for_turn(
+        latest_user_utterance="planning and priority bugs",
+        user_id="default",
+        max_memories=2,
+        max_chars=140,
+    )
+
+    assert brief is not None
+
+    rendered_item_chars = sum(
+        estimate_realtime_memory_brief_item_chars(index=index, item=item)
+        for index, item in enumerate(brief.items, start=1)
+    )
+
+    assert rendered_item_chars == brief.total_chars
+    assert brief.total_chars <= 140
 
 def test_retrieve_for_turn_prefers_lexical_relevance_then_recency(tmp_path) -> None:
     store = MemoryStore(db_path=tmp_path / "memories.db")
