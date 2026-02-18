@@ -338,6 +338,79 @@ def test_retrieve_for_turn_respects_cooldown(tmp_path) -> None:
 
     assert first is not None
     assert second is None
+    assert manager.get_last_turn_retrieval_debug_metadata()["cooldown_consumed"] is False
+
+
+def test_retrieve_for_turn_empty_result_does_not_consume_cooldown(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+
+    first = manager.retrieve_for_turn(
+        latest_user_utterance="project alpha",
+        user_id="default",
+        max_memories=4,
+        max_chars=300,
+        cooldown_s=20.0,
+        now_monotonic=50.0,
+    )
+    first_metadata = manager.get_last_turn_retrieval_debug_metadata()
+    second = manager.retrieve_for_turn(
+        latest_user_utterance="project alpha",
+        user_id="default",
+        max_memories=4,
+        max_chars=300,
+        cooldown_s=20.0,
+        now_monotonic=60.0,
+    )
+    second_metadata = manager.get_last_turn_retrieval_debug_metadata()
+
+    assert first is None
+    assert second is None
+    assert first_metadata["mode"] == "empty"
+    assert first_metadata["cooldown_consumed"] is False
+    assert second_metadata["mode"] == "empty"
+    assert second_metadata["cooldown_skipped"] is False
+    assert second_metadata["cooldown_consumed"] is False
+
+
+def test_retrieve_for_turn_success_consumes_cooldown(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    now_ms = _now_ms()
+
+    store.append_memory(
+        content="Remember project alpha budget.",
+        tags=["work"],
+        importance=4,
+        user_id="default",
+        timestamp=now_ms,
+    )
+
+    first = manager.retrieve_for_turn(
+        latest_user_utterance="project alpha",
+        user_id="default",
+        max_memories=4,
+        max_chars=300,
+        cooldown_s=20.0,
+        now_monotonic=50.0,
+    )
+    first_metadata = manager.get_last_turn_retrieval_debug_metadata()
+    second = manager.retrieve_for_turn(
+        latest_user_utterance="project alpha",
+        user_id="default",
+        max_memories=4,
+        max_chars=300,
+        cooldown_s=20.0,
+        now_monotonic=60.0,
+    )
+    second_metadata = manager.get_last_turn_retrieval_debug_metadata()
+
+    assert first is not None
+    assert second is None
+    assert first_metadata["cooldown_consumed"] is True
+    assert second_metadata["mode"] == "cooldown"
+    assert second_metadata["cooldown_skipped"] is True
+    assert second_metadata["cooldown_consumed"] is False
 
 
 def test_retrieve_for_turn_empty_result_does_not_consume_cooldown(tmp_path) -> None:
