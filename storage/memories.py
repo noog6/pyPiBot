@@ -46,6 +46,13 @@ class MemoryEmbedding:
     error: str | None
 
 
+@dataclass(frozen=True)
+class MemoryOwnership:
+    memory_id: int
+    user_id: str | None
+    session_id: str | None
+
+
 class MemoryStore:
     """Manage persisted memory entries."""
 
@@ -622,6 +629,21 @@ class MemoryStore:
             )
             self._conn.commit()
         return cursor.rowcount > 0
+
+    def fetch_memory_ownership(self, *, memory_id: int) -> MemoryOwnership | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT memory_id, user_id, session_id FROM memories WHERE memory_id = ?",
+                (memory_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        raw_memory_id, user_id, session_id = row
+        return MemoryOwnership(
+            memory_id=int(raw_memory_id),
+            user_id=user_id,
+            session_id=session_id,
+        )
 
     def delete_memory(self, *, memory_id: int) -> bool:
         with self._lock:
