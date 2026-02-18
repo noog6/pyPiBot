@@ -59,7 +59,74 @@ class MemoryStore:
         self._db_path = db_path
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
+        self._retention_policy = self._load_retention_policy(config.get("memory") or {})
         self._initialize_db()
+
+    def _load_retention_policy(self, memory_cfg: dict[str, object]) -> dict[str, object]:
+        retention_cfg = memory_cfg.get("retention")
+        if not isinstance(retention_cfg, dict):
+            retention_cfg = {}
+
+        tiers_cfg = retention_cfg.get("importance_tiers")
+        if not isinstance(tiers_cfg, dict):
+            tiers_cfg = {"low": [1, 2], "medium": [3, 4], "high": [5]}
+
+        normalized_tiers: dict[str, tuple[int, ...]] = {}
+        for tier_name, tier_values in tiers_cfg.items():
+            if not isinstance(tier_name, str) or not isinstance(tier_values, list):
+                continue
+            bounded_values = sorted(
+                {
+                    int(value)
+                    for value in tier_values
+                    if isinstance(value, int) and 1 <= int(value) <= 5
+                }
+            )
+            if bounded_values:
+                normalized_tiers[tier_name.strip().lower()] = tuple(bounded_values)
+
+        if not normalized_tiers:
+            normalized_tiers = {"low": (1, 2), "medium": (3, 4), "high": (5,)}
+
+        by_source_cfg = retention_cfg.get("max_age_days_by_source")
+        if not isinstance(by_source_cfg, dict):
+            by_source_cfg = {
+                "manual_tool": {"low": 365, "medium": None, "high": None},
+                "auto_reflection": {"low": 60, "medium": 180, "high": None},
+            }
+
+        normalized_by_source: dict[str, dict[str, int]] = {}
+        for source, source_cfg in by_source_cfg.items():
+            if not isinstance(source, str) or not isinstance(source_cfg, dict):
+                continue
+            normalized_source = source.strip().lower()
+            if not normalized_source:
+                continue
+            tier_days: dict[str, int] = {}
+            for tier_name, days in source_cfg.items():
+                normalized_tier = str(tier_name).strip().lower()
+                if normalized_tier not in normalized_tiers:
+                    continue
+                if days is None:
+                    continue
+                if isinstance(days, bool):
+                    continue
+                if isinstance(days, (int, float)) and int(days) >= 0:
+                    tier_days[normalized_tier] = int(days)
+            if tier_days:
+                normalized_by_source[normalized_source] = tier_days
+
+        return {
+            "importance_tiers": normalized_tiers,
+            "max_age_days_by_source": normalized_by_source,
+            "protect_review_approved_strategic": bool(
+                retention_cfg.get("protect_review_approved_strategic", True)
+            ),
+            "optimize_min_deleted_rows": max(
+                0,
+                int(retention_cfg.get("optimize_min_deleted_rows", 200)),
+            ),
+        }
 
     @property
     def db_path(self) -> Path:
@@ -452,3 +519,93 @@ class MemoryStore:
             )
             self._conn.commit()
         return cursor.rowcount > 0
+
+    def prune_memories_by_retention_policy(
+        self,
+        *,
+        now_ms: int | None = None,
+        force: bool = False,
+    ) -> int:
+        """Delete memories that exceed source/tier retention policy."""
+
+        policy = self._retention_policy
+        source_policies = policy.get("max_age_days_by_source")
+        importance_tiers = policy.get("importance_tiers")
+        if not isinstance(source_policies, dict) or not isinstance(importance_tiers, dict):
+            return 0
+
+        now_value = now_ms if now_ms is not None else _now_millis()
+        deleted_rows = 0
+
+        with self._lock:
+            for source_name, tier_policies in source_policies.items():
+                if not isinstance(source_name, str) or not isinstance(tier_policies, dict):
+                    continue
+
+                normalized_source = source_name.strip()
+                if not normalized_source:
+                    continue
+
+                for tier_name, max_days in tier_policies.items():
+                    if not isinstance(tier_name, str) or not isinstance(max_days, int):
+                        continue
+
+                    importance_values = importance_tiers.get(tier_name)
+                    if not isinstance(importance_values, tuple) or not importance_values:
+                        continue
+
+                    cutoff_ms = now_value - (max_days * 86_400_000)
+                    placeholders = ", ".join("?" for _ in importance_values)
+                    query_parts = [
+                        "DELETE FROM memories",
+                        "WHERE source = ?",
+                        f"AND importance IN ({placeholders})",
+                        "AND timestamp < ?",
+                    ]
+
+                    params: list[object] = [normalized_source, *importance_values, cutoff_ms]
+
+                    if not force:
+                        query_parts.append("AND pinned = 0")
+                        if bool(policy.get("protect_review_approved_strategic", True)):
+                            query_parts.append(
+                                "AND NOT (needs_review = 0 AND tags LIKE ?)"
+                            )
+                            params.append('%"strategic"%')
+
+                    cursor = self._conn.execute(" ".join(query_parts), params)
+                    deleted_rows += cursor.rowcount
+
+            if deleted_rows:
+                self._conn.commit()
+
+        return deleted_rows
+
+    def purge_orphan_embeddings(self) -> int:
+        """Delete embedding rows whose source memory no longer exists."""
+
+        with self._lock:
+            cursor = self._conn.execute(
+                """
+                DELETE FROM memory_embeddings
+                WHERE memory_id NOT IN (SELECT memory_id FROM memories)
+                """
+            )
+            deleted_rows = int(cursor.rowcount)
+            if deleted_rows:
+                self._conn.commit()
+        return deleted_rows
+
+    def maybe_optimize_storage(self, *, deleted_rows: int, force: bool = False) -> bool:
+        """Run SQLite optimize/vacuum only when enough rows were deleted."""
+
+        threshold = int(self._retention_policy.get("optimize_min_deleted_rows", 200))
+        should_run = force or deleted_rows >= threshold
+        if not should_run:
+            return False
+
+        with self._lock:
+            self._conn.execute("PRAGMA optimize")
+            self._conn.execute("VACUUM")
+            self._conn.commit()
+        return True
