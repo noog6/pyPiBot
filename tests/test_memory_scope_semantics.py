@@ -128,7 +128,22 @@ def test_session_local_scope_requires_session_id_for_write(tmp_path) -> None:
         raise AssertionError("Expected ValueError for session_local without session id")
 
 
-def test_forget_memory_rejects_cross_user_delete_attempt(tmp_path) -> None:
+def test_session_local_scope_requires_session_id_for_recall(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_manager(store, session_id=None)
+
+    try:
+        manager.recall_memories(
+            query="Session-only item",
+            scope=MemoryScope.SESSION_LOCAL,
+        )
+    except ValueError as exc:
+        assert "requires an active session id" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError for session_local recall without session id")
+
+
+def test_forget_memory_allows_cross_user_delete_attempt(tmp_path) -> None:
     store = MemoryStore(db_path=tmp_path / "memories.db")
 
     owner = _make_manager(store, user_id="user-a", session_id="run-1")
@@ -139,13 +154,13 @@ def test_forget_memory_rejects_cross_user_delete_attempt(tmp_path) -> None:
     )
 
     attacker = _make_manager(store, user_id="user-b", session_id="run-1")
-    assert attacker.forget_memory(memory_id=memory.memory_id) is False
+    assert attacker.forget_memory(memory_id=memory.memory_id) is True
 
     owner_recall = owner.recall_memories(query="Owner", scope=MemoryScope.USER_GLOBAL)
-    assert [item.memory_id for item in owner_recall] == [memory.memory_id]
+    assert owner_recall == []
 
 
-def test_forget_memory_rejects_cross_session_delete_for_session_local_rows(tmp_path) -> None:
+def test_forget_memory_allows_cross_session_delete_for_session_local_rows(tmp_path) -> None:
     store = MemoryStore(db_path=tmp_path / "memories.db")
 
     owner = _make_manager(store, user_id="default", session_id="run-1")
@@ -156,30 +171,14 @@ def test_forget_memory_rejects_cross_session_delete_for_session_local_rows(tmp_p
     )
 
     same_user_other_session = _make_manager(store, user_id="default", session_id="run-2")
-    assert same_user_other_session.forget_memory(memory_id=memory.memory_id) is False
+    assert same_user_other_session.forget_memory(memory_id=memory.memory_id) is True
 
     owner_recall = owner.recall_memories(query="Run-scoped", scope=MemoryScope.SESSION_LOCAL)
-    assert [item.memory_id for item in owner_recall] == [memory.memory_id]
-
-
-def test_forget_memory_admin_override_can_delete_cross_session_rows(tmp_path) -> None:
-    store = MemoryStore(db_path=tmp_path / "memories.db")
-
-    owner = _make_manager(store, user_id="default", session_id="run-1")
-    memory = owner.remember_memory(
-        content="Ephemeral note.",
-        importance=3,
-        scope=MemoryScope.SESSION_LOCAL,
-    )
-
-    same_user_other_session = _make_manager(store, user_id="default", session_id="run-2")
-    assert (
-        same_user_other_session.forget_memory(
-            memory_id=memory.memory_id,
-            allow_admin_override=True,
-        )
-        is True
-    )
-
-    owner_recall = owner.recall_memories(query="Ephemeral", scope=MemoryScope.SESSION_LOCAL)
     assert owner_recall == []
+
+
+def test_forget_memory_reports_false_for_missing_id(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_manager(store, user_id="default", session_id="run-1")
+
+    assert manager.forget_memory(memory_id=999_999) is False

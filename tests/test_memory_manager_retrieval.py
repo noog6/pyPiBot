@@ -340,6 +340,41 @@ def test_retrieve_for_turn_respects_cooldown(tmp_path) -> None:
     assert second is None
 
 
+def test_retrieve_for_turn_empty_result_does_not_consume_cooldown(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+
+    first = manager.retrieve_for_turn(
+        latest_user_utterance="project alpha",
+        user_id="default",
+        max_memories=4,
+        max_chars=300,
+        cooldown_s=20.0,
+        now_monotonic=50.0,
+    )
+
+    now_ms = _now_ms()
+    store.append_memory(
+        content="Remember project alpha budget.",
+        tags=["work"],
+        importance=4,
+        user_id="default",
+        timestamp=now_ms,
+    )
+
+    second = manager.retrieve_for_turn(
+        latest_user_utterance="project alpha",
+        user_id="default",
+        max_memories=4,
+        max_chars=300,
+        cooldown_s=20.0,
+        now_monotonic=60.0,
+    )
+
+    assert first is None
+    assert second is not None
+
+
 def test_retrieve_for_turn_semantic_reranks_within_lexical_pool(tmp_path) -> None:
     store = MemoryStore(db_path=tmp_path / "memories.db")
     manager = _make_memory_manager(store)

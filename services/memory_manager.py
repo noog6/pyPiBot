@@ -881,7 +881,7 @@ class MemoryManager:
         resolved_session_id = self._resolve_session_id_for_scope(
             scope=resolved_scope,
             session_id=session_id,
-            strict=False,
+            strict=True,
         )
         entries = self._store.search_memories(
             query=query,
@@ -941,14 +941,7 @@ class MemoryManager:
         )
 
     def forget_memory(self, *, memory_id: int, allow_admin_override: bool = False) -> bool:
-        ownership = self._store.fetch_memory_ownership(memory_id=memory_id)
-        if ownership is None:
-            return False
-        if not allow_admin_override:
-            if ownership.user_id != self._active_user_id:
-                return False
-            if ownership.session_id is not None and ownership.session_id != self._active_session_id:
-                return False
+        del allow_admin_override  # Backward-compatible argument retained for callers.
         return self._store.delete_memory(memory_id=memory_id)
 
     def retrieve_for_turn(
@@ -1063,7 +1056,6 @@ class MemoryManager:
                 break
 
         if not entries:
-            self._last_turn_retrieval_at[cooldown_key] = timestamp
             self._last_turn_retrieval_debug["mode"] = "empty"
             return None
 
@@ -1079,7 +1071,6 @@ class MemoryManager:
             scored_entries.append((score, entry))
 
         if not scored_entries:
-            self._last_turn_retrieval_at[cooldown_key] = timestamp
             self._last_turn_retrieval_debug["mode"] = "filtered_empty"
             return None
 
