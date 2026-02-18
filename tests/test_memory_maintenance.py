@@ -140,3 +140,20 @@ def test_purge_orphan_embeddings_and_optimize_guard(tmp_path: Path, monkeypatch)
 
     assert store.maybe_optimize_storage(deleted_rows=1, force=False) is False
     assert store.maybe_optimize_storage(deleted_rows=2, force=False) is True
+
+
+def test_periodic_maintenance_noop_returns_zero_counters(tmp_path: Path, monkeypatch) -> None:
+    _configure(tmp_path, monkeypatch)
+
+    from services.memory_manager import MemoryManager
+
+    MemoryManager._instance = None
+    manager = MemoryManager.get_instance()
+
+    stats = manager.run_periodic_maintenance(optimize_allowed=True)
+
+    assert stats == {
+        "pruned_rows": 0,
+        "purged_rows": 0,
+        "optimize_triggered": False,
+    }

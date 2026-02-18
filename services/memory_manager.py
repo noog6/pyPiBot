@@ -305,6 +305,23 @@ class MemoryManager:
     def get_embedding_worker(self) -> MemoryEmbeddingWorker | None:
         return self._embedding_worker
 
+    def run_periodic_maintenance(self, *, optimize_allowed: bool = True) -> dict[str, int | bool]:
+        """Run best-effort memory retention maintenance and return telemetry counters."""
+
+        pruned = self._store.prune_memories_by_retention_policy()
+        purged = self._store.purge_orphan_embeddings()
+        optimize_triggered = False
+        if optimize_allowed:
+            optimize_triggered = self._store.maybe_optimize_storage(
+                deleted_rows=pruned + purged,
+                force=False,
+            )
+        return {
+            "pruned_rows": int(pruned),
+            "purged_rows": int(purged),
+            "optimize_triggered": bool(optimize_triggered),
+        }
+
     def get_last_turn_retrieval_debug_metadata(self) -> dict[str, object]:
         """Return internal retrieval metadata for debugging and audit logs."""
 

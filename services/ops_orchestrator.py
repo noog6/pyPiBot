@@ -30,6 +30,7 @@ from services.health_probes import (
 )
 from motion.gestures import gesture_idle
 from motion.motion_controller import MotionController
+from services.memory_manager import MemoryManager
 
 
 class OpsOrchestrator:
@@ -76,6 +77,11 @@ class OpsOrchestrator:
         self._tick_started_at: float | None = None
         self._active_probe_name: str | None = None
         self._probe_started_monotonic: float | None = None
+        self._memory_maintenance_enabled = True
+        self._memory_maintenance_interval_s = 6 * 3600.0
+        self._memory_maintenance_optimize_every_runs = 4
+        self._memory_maintenance_next_ts = time.monotonic()
+        self._memory_maintenance_run_count = 0
         OpsOrchestrator._instance = self
 
     @classmethod
@@ -271,6 +277,7 @@ class OpsOrchestrator:
             self._mode = ModeState.ACTIVE
 
         self._maybe_run_micro_presence(now)
+        self._maybe_run_memory_maintenance(now)
 
         if now >= self._next_heartbeat:
             self._next_heartbeat = now + self._heartbeat_period_s
@@ -354,6 +361,26 @@ class OpsOrchestrator:
         if resolved:
             self._micro_presence_health_allowed = resolved
         self._schedule_next_micro_presence(time.monotonic())
+        memory_retention_cfg = (config.get("memory") or {}).get("retention") or {}
+        self._memory_maintenance_enabled = bool(
+            memory_retention_cfg.get("maintenance_enabled", self._memory_maintenance_enabled)
+        )
+        self._memory_maintenance_interval_s = max(
+            float(memory_retention_cfg.get("maintenance_interval_s", self._memory_maintenance_interval_s)),
+            self._loop_period_s,
+        )
+        self._memory_maintenance_optimize_every_runs = max(
+            int(
+                memory_retention_cfg.get(
+                    "maintenance_optimize_every_runs",
+                    self._memory_maintenance_optimize_every_runs,
+                )
+            ),
+            1,
+        )
+        now = time.monotonic()
+        self._memory_maintenance_next_ts = now + self._memory_maintenance_interval_s
+        self._memory_maintenance_run_count = 0
 
     def _run_health_probes(self) -> list[HealthProbeResult]:
         now = time.monotonic()
@@ -556,6 +583,29 @@ class OpsOrchestrator:
         min_s = max(0.1, self._micro_presence_min_s)
         max_s = max(min_s, self._micro_presence_max_s)
         self._micro_presence_next_ts = now + random.uniform(min_s, max_s)
+
+
+    def _maybe_run_memory_maintenance(self, now: float) -> None:
+        if not self._memory_maintenance_enabled or now < self._memory_maintenance_next_ts:
+            return
+
+        self._memory_maintenance_next_ts = now + self._memory_maintenance_interval_s
+        self._memory_maintenance_run_count += 1
+        optimize_allowed = (
+            self._memory_maintenance_run_count % self._memory_maintenance_optimize_every_runs == 0
+        )
+        try:
+            stats = MemoryManager.get_instance().run_periodic_maintenance(
+                optimize_allowed=optimize_allowed
+            )
+            LOGGER.info(
+                "[Ops] Memory maintenance completed: pruned_rows=%s purged_rows=%s optimize_triggered=%s",
+                int(stats.get("pruned_rows", 0)),
+                int(stats.get("purged_rows", 0)),
+                bool(stats.get("optimize_triggered", False)),
+            )
+        except Exception as exc:
+            LOGGER.exception("[Ops] Memory maintenance failed (continuing): %s", exc)
 
     def _maybe_run_micro_presence(self, now: float) -> None:
         if not self._micro_presence_enabled:
