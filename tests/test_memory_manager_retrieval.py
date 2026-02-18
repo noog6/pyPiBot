@@ -37,12 +37,7 @@ def _make_memory_manager(store: MemoryStore) -> MemoryManager:
     manager._retrieval_semantic_attempt_count = 0
     manager._retrieval_semantic_error_count = 0
     manager._embedding_coverage_cache_ttl_s = 60.0
-    manager._embedding_coverage_cache_at = 0.0
-    manager._embedding_coverage_cache = {
-        "total_memories": 0,
-        "ready_embeddings": 0,
-        "coverage_pct": 0.0,
-    }
+    manager._embedding_coverage_cache = {}
     manager._auto_pin_min_importance = 5
     manager._auto_pin_requires_review = True
     manager._auto_reflection_semantic_dedupe_enabled = False
@@ -1016,3 +1011,50 @@ def test_find_semantic_duplicate_respects_write_rate_limit(tmp_path) -> None:
     assert first is not None
     assert second is None
     assert provider.calls == 1
+
+
+def test_retrieval_health_metrics_accept_scope_and_session_overrides(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+
+    global_entry = store.append_memory(
+        content="Global memory.",
+        tags=["global"],
+        importance=3,
+        user_id="default",
+    )
+    session_entry = store.append_memory(
+        content="Session memory.",
+        tags=["session"],
+        importance=3,
+        user_id="default",
+        session_id="session-1",
+    )
+    store.upsert_memory_embedding(
+        memory_id=global_entry.memory_id,
+        model_id="unit",
+        dim=2,
+        vector=_encode_vector([1.0, 0.0]),
+        vector_norm=1.0,
+        status="ready",
+    )
+    store.upsert_memory_embedding(
+        memory_id=session_entry.memory_id,
+        model_id="unit",
+        dim=2,
+        vector=_encode_vector([0.0, 1.0]),
+        vector_norm=1.0,
+        status="pending",
+    )
+
+    default_metrics = manager.get_retrieval_health_metrics()
+    assert default_metrics["embedding_total_memories"] == 1
+    assert default_metrics["embedding_coverage_pct"] == 100.0
+
+    session_metrics = manager.get_retrieval_health_metrics(
+        scope=MemoryScope.SESSION_LOCAL,
+        session_id="session-1",
+    )
+    assert session_metrics["embedding_total_memories"] == 1
+    assert session_metrics["embedding_ready_memories"] == 0
+    assert session_metrics["embedding_coverage_pct"] == 0.0
