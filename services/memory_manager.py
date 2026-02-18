@@ -210,6 +210,7 @@ class MemorySemanticConfig:
     rerank_influence_min_cosine: float
     dedupe_strong_match_cosine: float | None
     background_embedding_enabled: bool
+    inline_embedding_on_write_when_background_disabled: bool
     rolling_backfill_batch_size: int
     rolling_backfill_interval_idle_cycles: int
     write_timeout_ms: int
@@ -260,6 +261,9 @@ class MemoryManager:
                 else None
             ),
             background_embedding_enabled=bool(semantic_cfg.get("background_embedding_enabled", True)),
+            inline_embedding_on_write_when_background_disabled=bool(
+                semantic_cfg.get("inline_embedding_on_write_when_background_disabled", False)
+            ),
             rolling_backfill_batch_size=max(1, int(semantic_cfg.get("rolling_backfill_batch_size", 4))),
             rolling_backfill_interval_idle_cycles=max(1, int(semantic_cfg.get("rolling_backfill_interval_idle_cycles", 15))),
             write_timeout_ms=int(semantic_cfg.get("write_timeout_ms", 75)),
@@ -512,6 +516,58 @@ class MemoryManager:
             except Exception:  # noqa: BLE001
                 # Embedding scheduling is best-effort and must never block writes.
                 pass
+            return entry
+
+        should_try_inline_embedding = (
+            self._semantic_config.enabled
+            and not self._semantic_config.background_embedding_enabled
+            and self._semantic_config.inline_embedding_on_write_when_background_disabled
+        )
+        if not should_try_inline_embedding:
+            return entry
+
+        try:
+            embedding_result = self._embed_text_with_semantic_policy(text=normalized_content, operation="write")
+        except Exception as exc:  # noqa: BLE001
+            self._store.upsert_memory_embedding(
+                memory_id=entry.memory_id,
+                model_id="",
+                dim=0,
+                vector=b"",
+                vector_norm=None,
+                status="error",
+                error=f"inline_embedding_exception:{exc.__class__.__name__}",
+            )
+            return entry
+
+        if (
+            embedding_result.status == "ready"
+            and embedding_result.dimension > 0
+            and bool(embedding_result.vector)
+        ):
+            self._store.upsert_memory_embedding(
+                memory_id=entry.memory_id,
+                model_id=str(getattr(embedding_result, "model", "")),
+                dim=int(embedding_result.dimension),
+                vector=bytes(embedding_result.vector),
+                vector_norm=float(embedding_result.vector_norm) if embedding_result.vector_norm is not None else None,
+                status="ready",
+                error=None,
+            )
+            return entry
+
+        error_code = str(getattr(embedding_result, "error_code", "") or "unknown")
+        pending_codes = {"timeout", "rate_limited"}
+        failure_status = "pending" if error_code in pending_codes else "error"
+        self._store.upsert_memory_embedding(
+            memory_id=entry.memory_id,
+            model_id=str(getattr(embedding_result, "model", "")),
+            dim=0,
+            vector=b"",
+            vector_norm=None,
+            status=failure_status,
+            error=f"inline_embedding_{error_code}",
+        )
         return entry
 
     def _reserve_semantic_budget(self, *, operation: str, now_monotonic: float | None = None) -> bool:

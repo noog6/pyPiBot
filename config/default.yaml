@@ -82,6 +82,9 @@ memory_semantic:
   rerank_influence_min_cosine: 0.25
   dedupe_strong_match_cosine: null
   background_embedding_enabled: true
+  # When true, writes synchronously attempt embeddings if background worker is disabled.
+  # This can increase CPU and turn latency on constrained hardware.
+  inline_embedding_on_write_when_background_disabled: false
   rolling_backfill_batch_size: 4
   rolling_backfill_interval_idle_cycles: 15
   write_timeout_ms: 75

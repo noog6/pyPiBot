@@ -233,6 +233,9 @@ class ConfigController:
         memory_semantic_cfg["background_embedding_enabled"] = bool(
             memory_semantic_cfg.get("background_embedding_enabled", True)
         )
+        memory_semantic_cfg["inline_embedding_on_write_when_background_disabled"] = bool(
+            memory_semantic_cfg.get("inline_embedding_on_write_when_background_disabled", False)
+        )
         memory_semantic_cfg["rolling_backfill_batch_size"] = max(
             1,
             int(memory_semantic_cfg.get("rolling_backfill_batch_size", 4)),

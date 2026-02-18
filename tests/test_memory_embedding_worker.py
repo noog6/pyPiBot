@@ -157,3 +157,130 @@ def test_worker_run_loop_periodically_backfills_missing_rows(tmp_path: Path) -> 
         assert status == "ready"
     finally:
         worker.stop(timeout_s=0.5)
+
+
+def test_remember_memory_inline_embedding_ready_when_background_disabled(tmp_path: Path, monkeypatch) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "default.yaml").write_text(
+        "\n".join(
+            [
+                "assistant_name: Theo",
+                f"var_dir: {tmp_path / 'var'}",
+                "memory_semantic:",
+                "  enabled: true",
+                "  provider: openai",
+                "  background_embedding_enabled: false",
+                "  inline_embedding_on_write_when_background_disabled: true",
+                "  openai:",
+                "    enabled: false",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    _reset_singletons()
+
+    manager = MemoryManager.get_instance()
+    manager._store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager._default_scope = MemoryScope.USER_GLOBAL
+    manager._embedding_provider = _SequenceProvider(
+        results=[
+            EmbeddingResult(
+                vector=(0.75).hex().encode("utf-8"),
+                dimension=1,
+                model="inline-model",
+                model_version="v1",
+                vector_norm=0.75,
+                provider="test",
+                status="ready",
+            )
+        ]
+    )
+
+    entry = manager.remember_memory(content="inline this memory", importance=3)
+
+    embedding = manager._store.fetch_embeddings_for_memories(memory_ids=[entry.memory_id])[entry.memory_id]
+    assert embedding.status == "ready"
+    assert embedding.model_id == "inline-model"
+
+
+def test_remember_memory_inline_embedding_records_failure_when_background_disabled(tmp_path: Path, monkeypatch) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "default.yaml").write_text(
+        "\n".join(
+            [
+                "assistant_name: Theo",
+                f"var_dir: {tmp_path / 'var'}",
+                "memory_semantic:",
+                "  enabled: true",
+                "  provider: openai",
+                "  background_embedding_enabled: false",
+                "  inline_embedding_on_write_when_background_disabled: true",
+                "  openai:",
+                "    enabled: false",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    _reset_singletons()
+
+    manager = MemoryManager.get_instance()
+    manager._store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager._default_scope = MemoryScope.USER_GLOBAL
+    manager._embedding_provider = _SequenceProvider(
+        results=[
+            EmbeddingResult(
+                vector=b"",
+                dimension=0,
+                model="inline-model",
+                model_version=None,
+                vector_norm=None,
+                provider="test",
+                status="error",
+                error_code="provider_request_failed",
+                error_message="boom",
+            )
+        ]
+    )
+
+    entry = manager.remember_memory(content="still remember this", importance=3)
+
+    stored_entry = manager._store.search_memories(limit=1)[0]
+    assert stored_entry.memory_id == entry.memory_id
+    embedding = manager._store.fetch_embeddings_for_memories(memory_ids=[entry.memory_id])[entry.memory_id]
+    assert embedding.status == "error"
+    assert embedding.error == "inline_embedding_provider_request_failed"
+
+
+def test_remember_memory_inline_embedding_remains_disabled_by_default(tmp_path: Path, monkeypatch) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "default.yaml").write_text(
+        "\n".join(
+            [
+                "assistant_name: Theo",
+                f"var_dir: {tmp_path / 'var'}",
+                "memory_semantic:",
+                "  enabled: true",
+                "  provider: openai",
+                "  background_embedding_enabled: false",
+                "  openai:",
+                "    enabled: false",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    _reset_singletons()
+
+    manager = MemoryManager.get_instance()
+    manager._store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager._default_scope = MemoryScope.USER_GLOBAL
+
+    entry = manager.remember_memory(content="no inline embedding", importance=3)
+
+    embedding = manager._store.fetch_embeddings_for_memories(memory_ids=[entry.memory_id])
+    assert embedding == {}
