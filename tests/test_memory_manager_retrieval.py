@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import struct
 import time
 from types import SimpleNamespace
 
@@ -16,15 +17,26 @@ def _make_memory_manager(store: MemoryStore) -> MemoryManager:
     manager._default_scope = MemoryScope.USER_GLOBAL
     manager._store = store
     manager._embedding_worker = None
-    manager._semantic_config = SimpleNamespace(enabled=False, background_embedding_enabled=False)
+    manager._semantic_config = SimpleNamespace(
+        enabled=False,
+        rerank_enabled=False,
+        max_candidates_for_semantic=64,
+        min_similarity=0.25,
+        background_embedding_enabled=False,
+    )
     manager._last_turn_retrieval_at = {}
     manager._auto_pin_min_importance = 5
     manager._auto_pin_requires_review = True
+    manager._embedding_provider = None
     return manager
 
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _encode_vector(values: list[float]) -> bytes:
+    return b"".join(struct.pack("<f", value) for value in values)
 
 
 def test_retrieve_for_turn_enforces_item_and_char_budget(tmp_path) -> None:
@@ -191,3 +203,128 @@ def test_retrieve_for_turn_respects_cooldown(tmp_path) -> None:
 
     assert first is not None
     assert second is None
+
+
+def test_retrieve_for_turn_semantic_reranks_within_lexical_pool(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._semantic_config = SimpleNamespace(
+        enabled=True,
+        rerank_enabled=True,
+        max_candidates_for_semantic=2,
+        min_similarity=0.0,
+        background_embedding_enabled=False,
+    )
+    now_ms = _now_ms()
+
+    alpha = store.append_memory(
+        content="Project alpha budget notes.",
+        tags=["work"],
+        importance=3,
+        user_id="default",
+        timestamp=now_ms,
+    )
+    beta = store.append_memory(
+        content="Project alpha milestones checklist.",
+        tags=["work"],
+        importance=3,
+        user_id="default",
+        timestamp=now_ms - 1000,
+    )
+    gamma = store.append_memory(
+        content="Project alpha release plan.",
+        tags=["work"],
+        importance=3,
+        user_id="default",
+        timestamp=now_ms - 2000,
+    )
+
+    # Keep gamma strongly semantic but outside the bounded semantic pool.
+    store.upsert_memory_embedding(
+        memory_id=alpha.memory_id,
+        model_id="unit",
+        dim=2,
+        vector=_encode_vector([0.9, 0.1]),
+        vector_norm=0.9055,
+    )
+    store.upsert_memory_embedding(
+        memory_id=beta.memory_id,
+        model_id="unit",
+        dim=2,
+        vector=_encode_vector([1.0, 0.0]),
+        vector_norm=1.0,
+    )
+    store.upsert_memory_embedding(
+        memory_id=gamma.memory_id,
+        model_id="unit",
+        dim=2,
+        vector=_encode_vector([1.0, 0.0]),
+        vector_norm=1.0,
+    )
+
+    class _ReadyProvider:
+        def embed_text(self, text: str):
+            return SimpleNamespace(status="ready", dimension=2, vector=_encode_vector([1.0, 0.0]), vector_norm=1.0)
+
+    manager._embedding_provider = _ReadyProvider()
+
+    brief = manager.retrieve_for_turn(
+        latest_user_utterance="project alpha",
+        user_id="default",
+        max_memories=3,
+        max_chars=400,
+    )
+
+    assert brief is not None
+    assert [item.content for item in brief.items] == [
+        "Project alpha milestones checklist.",
+        "Project alpha budget notes.",
+        "Project alpha release plan.",
+    ]
+
+
+def test_retrieve_for_turn_semantic_unavailable_falls_back_to_lexical(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._semantic_config = SimpleNamespace(
+        enabled=True,
+        rerank_enabled=True,
+        max_candidates_for_semantic=8,
+        min_similarity=0.0,
+        background_embedding_enabled=False,
+    )
+    now_ms = _now_ms()
+
+    store.append_memory(
+        content="Remember project alpha milestones.",
+        tags=["work"],
+        importance=4,
+        user_id="default",
+        timestamp=now_ms - 2000,
+    )
+    store.append_memory(
+        content="Remember project alpha budget.",
+        tags=["work"],
+        importance=4,
+        user_id="default",
+        timestamp=now_ms - 1000,
+    )
+
+    class _FailingProvider:
+        def embed_text(self, text: str):
+            raise RuntimeError("no provider")
+
+    manager._embedding_provider = _FailingProvider()
+
+    brief = manager.retrieve_for_turn(
+        latest_user_utterance="project alpha",
+        user_id="default",
+        max_memories=2,
+        max_chars=300,
+    )
+
+    assert brief is not None
+    assert [item.content for item in brief.items] == [
+        "Remember project alpha budget.",
+        "Remember project alpha milestones.",
+    ]
