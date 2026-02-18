@@ -25,6 +25,8 @@ def test_config_controller_sets_memory_semantic_defaults(tmp_path: Path, monkeyp
     assert semantic_cfg["rerank_enabled"] is False
     assert semantic_cfg["max_candidates_for_semantic"] == 64
     assert semantic_cfg["min_similarity"] == 0.25
+    assert semantic_cfg["rerank_influence_min_cosine"] == 0.25
+    assert semantic_cfg["dedupe_strong_match_cosine"] is None
     assert semantic_cfg["background_embedding_enabled"] is True
     assert semantic_cfg["write_timeout_ms"] == 75
     assert semantic_cfg["query_timeout_ms"] == 40

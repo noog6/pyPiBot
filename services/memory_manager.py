@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from enum import Enum
@@ -9,6 +10,7 @@ import math
 import re
 import struct
 import time
+from types import SimpleNamespace
 
 from config import ConfigController
 from services.embedding_provider import EmbeddingProvider, build_embedding_provider
@@ -259,6 +261,8 @@ class MemoryManager:
             max_writes_per_minute=int(semantic_cfg.get("max_writes_per_minute", 120)),
             max_queries_per_minute=int(semantic_cfg.get("max_queries_per_minute", 240)),
         )
+        self._semantic_write_call_timestamps: list[float] = []
+        self._semantic_query_call_timestamps: list[float] = []
         self._store = MemoryStore()
         self._embedding_worker: MemoryEmbeddingWorker | None = None
         self._embedding_provider: EmbeddingProvider = build_embedding_provider(config)
@@ -416,6 +420,67 @@ class MemoryManager:
                 pass
         return entry
 
+    def _reserve_semantic_budget(self, *, operation: str, now_monotonic: float | None = None) -> bool:
+        now = time.monotonic() if now_monotonic is None else float(now_monotonic)
+        if operation == "write":
+            limit = int(getattr(self._semantic_config, "max_writes_per_minute", 120))
+            timestamps = getattr(self, "_semantic_write_call_timestamps", None)
+            if timestamps is None:
+                timestamps = []
+                self._semantic_write_call_timestamps = timestamps
+        else:
+            limit = int(getattr(self._semantic_config, "max_queries_per_minute", 240))
+            timestamps = getattr(self, "_semantic_query_call_timestamps", None)
+            if timestamps is None:
+                timestamps = []
+                self._semantic_query_call_timestamps = timestamps
+
+        if limit <= 0:
+            return False
+
+        cutoff = now - 60.0
+        timestamps[:] = [ts for ts in timestamps if ts >= cutoff]
+        if len(timestamps) >= limit:
+            return False
+        timestamps.append(now)
+        return True
+
+    def _embed_text_with_semantic_policy(self, *, text: str, operation: str):
+        provider = getattr(self, "_embedding_provider", None)
+        if provider is None:
+            provider = build_embedding_provider(ConfigController.get_instance().get_config())
+
+        if not self._reserve_semantic_budget(operation=operation):
+            return SimpleNamespace(
+                status="unavailable",
+                dimension=0,
+                vector=b"",
+                vector_norm=None,
+                error_code="rate_limited",
+            )
+
+        timeout_ms = int(
+            getattr(
+                self._semantic_config,
+                "write_timeout_ms" if operation == "write" else "query_timeout_ms",
+                75 if operation == "write" else 40,
+            )
+        )
+        timeout_s = max(0.001, timeout_ms / 1000.0)
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(provider.embed_text, text)
+            try:
+                return future.result(timeout=timeout_s)
+            except FutureTimeoutError:
+                return SimpleNamespace(
+                    status="error",
+                    dimension=0,
+                    vector=b"",
+                    vector_norm=None,
+                    error_code="timeout",
+                )
+
     def _find_semantic_duplicate(
         self,
         *,
@@ -452,10 +517,7 @@ class MemoryManager:
         if not recent_entries:
             return None
 
-        provider = getattr(self, "_embedding_provider", None)
-        if provider is None:
-            provider = build_embedding_provider(ConfigController.get_instance().get_config())
-        candidate_embedding = provider.embed_text(content)
+        candidate_embedding = self._embed_text_with_semantic_policy(text=content, operation="write")
         if (
             candidate_embedding.status != "ready"
             or candidate_embedding.dimension <= 0
@@ -672,10 +734,10 @@ class MemoryManager:
             self._last_turn_retrieval_debug["semantic_candidate_count"] = semantic_limit
             semantic_memory_ids = [entry.memory_id for _, entry in semantic_pool]
             try:
-                provider = getattr(self, "_embedding_provider", None)
-                if provider is None:
-                    provider = build_embedding_provider(ConfigController.get_instance().get_config())
-                query_embedding = provider.embed_text(clean_utterance)
+                query_embedding = self._embed_text_with_semantic_policy(
+                    text=clean_utterance,
+                    operation="query",
+                )
                 if query_embedding.status == "ready" and query_embedding.dimension > 0 and query_embedding.vector:
                     query_norm = float(query_embedding.vector_norm or 0.0)
                     if query_norm > 0.0:
@@ -716,6 +778,9 @@ class MemoryManager:
                         )
                 else:
                     self._last_turn_retrieval_debug["fallback_reason"] = "query_embedding_not_ready"
+                    error_code = getattr(query_embedding, "error_code", None)
+                    if error_code:
+                        self._last_turn_retrieval_debug["semantic_error_code"] = str(error_code)
             except Exception:  # noqa: BLE001
                 # Semantic reranking is best-effort and must never degrade lexical retrieval.
                 ordered = [item[1] for item in lexical_ordered]
