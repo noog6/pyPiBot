@@ -42,17 +42,30 @@ class EmbeddingProvider(ABC):
 class NoopEmbeddingProvider(EmbeddingProvider):
     """Provider that always returns a structured unavailable state."""
 
+    def __init__(
+        self,
+        *,
+        model: str = "noop",
+        provider: str = "noop",
+        error_code: str = "provider_unavailable",
+        error_message: str = "Embedding provider is disabled or not configured.",
+    ) -> None:
+        self._model = model
+        self._provider = provider
+        self._error_code = error_code
+        self._error_message = error_message
+
     def embed_text(self, text: str) -> EmbeddingResult:
         return EmbeddingResult(
             vector=b"",
             dimension=0,
-            model="noop",
+            model=self._model,
             model_version="v1",
             vector_norm=None,
-            provider="noop",
+            provider=self._provider,
             status="unavailable",
-            error_code="provider_unavailable",
-            error_message="Embedding provider is disabled or not configured.",
+            error_code=self._error_code,
+            error_message=self._error_message,
         )
 
     def embed_batch(self, texts: list[str]) -> list[EmbeddingResult]:
@@ -165,8 +178,18 @@ def build_embedding_provider(config: dict[str, Any] | None = None) -> EmbeddingP
 
     semantic_cfg = dict((config or {}).get("memory_semantic") or {})
     provider_name = str(semantic_cfg.get("provider", "none")).strip().lower()
-    if provider_name not in {"openai"}:
+    if provider_name in {"", "none", "noop"}:
         return NoopEmbeddingProvider()
+
+    if provider_name != "openai":
+        return NoopEmbeddingProvider(
+            provider=provider_name,
+            error_code="unsupported_provider",
+            error_message=(
+                f"Embedding provider '{provider_name}' is not implemented. "
+                "Supported providers: openai."
+            ),
+        )
 
     openai_cfg = dict(semantic_cfg.get("openai") or {})
     enabled = bool(openai_cfg.get("enabled", False)) and bool(semantic_cfg.get("enabled", False))

@@ -33,3 +33,10 @@ def test_config_controller_sets_memory_semantic_defaults(tmp_path: Path, monkeyp
     assert semantic_cfg["openai"]["enabled"] is False
     assert semantic_cfg["openai"]["model"] == "text-embedding-3-small"
     assert semantic_cfg["openai"]["timeout_s"] == 10.0
+
+
+
+def test_repo_default_config_uses_supported_semantic_provider() -> None:
+    config_text = Path("config/default.yaml").read_text(encoding="utf-8")
+
+    assert 'provider: "openai"' in config_text
