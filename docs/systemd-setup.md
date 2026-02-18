@@ -138,6 +138,33 @@ After deploying the updated logrotate config:
    ```
    Expect debug output showing consideration/rotation checks for `pyPiBot.log`, `pyPiBot-error.log`, and `git-sync.log` only (not `run_*.log`).
 
+## Operator checklist: Raspberry Pi Zero 2 W
+
+Use this checklist when running on Pi Zero 2 W class hardware where CPU headroom is limited.
+
+1. **Set conservative CPU budgets** in `config/default.yaml` (or your deployed override):
+   - `ops.budgets.ai_calls_per_minute`
+   - `ops.budgets.sensor_reads_per_minute`
+   - `ops.budgets.logs_per_minute`
+   - `ops.budgets.micro_presence_per_hour`
+
+   Start with lower values than desktop/dev defaults, then increase gradually while observing stability.
+
+2. **Tune semantic retrieval batch pressure** to reduce per-turn work:
+   - If semantic retrieval is still enabled, lower `memory_semantic.max_candidates_for_semantic` so fewer candidates are reranked each turn.
+   - If semantic retrieval is disabled for the rollout profile, set:
+
+   ```yaml
+   memory_semantic:
+     enabled: false
+     rerank_enabled: false
+   ```
+
+3. **Keep logs informative but lightweight**:
+   - Use `logging_level: "INFO"` for normal operation.
+   - Temporarily switch to `DEBUG` only during active troubleshooting windows.
+   - If log volume impacts responsiveness, reduce `ops.budgets.logs_per_minute` and re-check service behavior with `journalctl -u pyPiBot.service -f`.
+
 ## Customization
 
 Update the following fields in `systemd/pyPiBot.service` as needed:
