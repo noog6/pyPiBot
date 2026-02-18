@@ -7,9 +7,11 @@ from difflib import SequenceMatcher
 from enum import Enum
 import math
 import re
+import struct
 import time
 
 from config import ConfigController
+from services.embedding_provider import EmbeddingProvider, build_embedding_provider
 from services.memory_embedding_worker import MemoryEmbeddingWorker
 from storage.memories import MemoryEntry, MemoryStore
 
@@ -85,6 +87,26 @@ def _score_entry(entry: MemoryEntry, *, utterance_tokens: set[str], now_s: float
 
     # Weighted blend: lexical relevance first, then tags/importance/recency.
     return (lexical_overlap * 0.45) + (tag_overlap * 0.20) + (importance_weight * 0.20) + (recency * 0.15)
+
+
+def _cosine_similarity_bytes(
+    *,
+    query_vector: bytes,
+    query_norm: float,
+    entry_vector: bytes,
+    entry_norm: float,
+) -> float | None:
+    if query_norm <= 0.0 or entry_norm <= 0.0:
+        return None
+    if not query_vector or not entry_vector or len(query_vector) != len(entry_vector):
+        return None
+    if len(query_vector) % 4 != 0:
+        return None
+
+    dot = 0.0
+    for (qv,), (ev,) in zip(struct.iter_unpack("<f", query_vector), struct.iter_unpack("<f", entry_vector)):
+        dot += float(qv) * float(ev)
+    return dot / (query_norm * entry_norm)
 
 
 def _is_near_duplicate(
@@ -222,6 +244,7 @@ class MemoryManager:
         )
         self._store = MemoryStore()
         self._embedding_worker: MemoryEmbeddingWorker | None = None
+        self._embedding_provider: EmbeddingProvider = build_embedding_provider(config)
         if self._semantic_config.enabled and self._semantic_config.background_embedding_enabled:
             self._embedding_worker = MemoryEmbeddingWorker(store=self._store)
         self._last_turn_retrieval_at: dict[tuple[str, MemoryScope], float] = {}
@@ -433,13 +456,53 @@ class MemoryManager:
             self._last_turn_retrieval_at[cooldown_key] = timestamp
             return None
 
-        ordered = [
-            item[1]
-            for item in sorted(
-                scored_entries,
-                key=lambda pair: (-pair[0], -pair[1].importance, -pair[1].timestamp, pair[1].memory_id),
+        lexical_ordered = sorted(
+            scored_entries,
+            key=lambda pair: (-pair[0], -pair[1].importance, -pair[1].timestamp, pair[1].memory_id),
+        )
+        ordered = [item[1] for item in lexical_ordered]
+
+        semantic_enabled = self._semantic_config.enabled and self._semantic_config.rerank_enabled
+        if semantic_enabled and lexical_ordered:
+            semantic_limit = _clamp(
+                self._semantic_config.max_candidates_for_semantic,
+                1,
+                len(lexical_ordered),
             )
-        ]
+            semantic_pool = lexical_ordered[:semantic_limit]
+            semantic_memory_ids = [entry.memory_id for _, entry in semantic_pool]
+            try:
+                provider = getattr(self, "_embedding_provider", None)
+                if provider is None:
+                    provider = build_embedding_provider(ConfigController.get_instance().get_config())
+                query_embedding = provider.embed_text(clean_utterance)
+                if query_embedding.status == "ready" and query_embedding.dimension > 0 and query_embedding.vector:
+                    query_norm = float(query_embedding.vector_norm or 0.0)
+                    if query_norm > 0.0:
+                        embeddings = self._store.fetch_embeddings_for_memories(memory_ids=semantic_memory_ids)
+                        hybrid_pool: list[tuple[float, MemoryEntry]] = []
+                        for lexical_score, entry in semantic_pool:
+                            embedding = embeddings.get(entry.memory_id)
+                            semantic_score = 0.0
+                            if embedding is not None and embedding.status == "ready":
+                                cosine = _cosine_similarity_bytes(
+                                    query_vector=query_embedding.vector,
+                                    query_norm=query_norm,
+                                    entry_vector=embedding.vector,
+                                    entry_norm=float(embedding.vector_norm or 0.0),
+                                )
+                                if cosine is not None and cosine >= self._semantic_config.min_similarity:
+                                    semantic_score = cosine
+                            hybrid_pool.append((lexical_score + semantic_score, entry))
+
+                        reranked_pool = sorted(
+                            hybrid_pool,
+                            key=lambda pair: (-pair[0], -pair[1].importance, -pair[1].timestamp, pair[1].memory_id),
+                        )
+                        ordered = [entry for _, entry in reranked_pool] + [entry for _, entry in lexical_ordered[semantic_limit:]]
+            except Exception:  # noqa: BLE001
+                # Semantic reranking is best-effort and must never degrade lexical retrieval.
+                ordered = [item[1] for item in lexical_ordered]
         selected: list[MemorySummary] = []
         seen_contents: list[str] = []
         used_chars = 0
