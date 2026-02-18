@@ -17,6 +17,8 @@ def _make_memory_manager(store: MemoryStore) -> MemoryManager:
     manager._default_scope = MemoryScope.USER_GLOBAL
     manager._store = store
     manager._embedding_worker = None
+    manager._embedding_executor = None
+    manager._embedding_executor_lock = None
     manager._semantic_config = SimpleNamespace(
         enabled=False,
         rerank_enabled=False,
@@ -1089,6 +1091,42 @@ def test_find_semantic_duplicate_respects_write_timeout(tmp_path) -> None:
     )
 
     assert duplicate is None
+
+
+def test_embed_text_timeout_resets_executor_for_next_call(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._semantic_config = SimpleNamespace(
+        enabled=True,
+        rerank_enabled=False,
+        max_candidates_for_semantic=8,
+        min_similarity=0.0,
+        rerank_influence_min_cosine=0.0,
+        dedupe_strong_match_cosine=0.9,
+        background_embedding_enabled=False,
+        write_timeout_ms=1,
+        query_timeout_ms=40,
+        max_writes_per_minute=120,
+        max_queries_per_minute=240,
+    )
+
+    class _SlowThenFastProvider:
+        def __init__(self) -> None:
+            self._calls = 0
+
+        def embed_text(self, text: str):
+            self._calls += 1
+            if self._calls == 1:
+                time.sleep(0.02)
+            return SimpleNamespace(status="ready", dimension=2, vector=_encode_vector([1.0, 0.0]), vector_norm=1.0)
+
+    manager._embedding_provider = _SlowThenFastProvider()
+
+    timeout_result = manager._embed_text_with_semantic_policy(text="first", operation="write")
+    followup_result = manager._embed_text_with_semantic_policy(text="second", operation="write")
+
+    assert timeout_result.error_code == "timeout"
+    assert followup_result.status == "ready"
 
 
 def test_find_semantic_duplicate_respects_write_rate_limit(tmp_path) -> None:

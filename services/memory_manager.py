@@ -10,6 +10,7 @@ import logging
 import math
 import re
 import struct
+import threading
 import time
 from types import SimpleNamespace
 
@@ -276,6 +277,8 @@ class MemoryManager:
         self._semantic_query_call_timestamps: list[float] = []
         self._store = MemoryStore()
         self._embedding_worker: MemoryEmbeddingWorker | None = None
+        self._embedding_executor: ThreadPoolExecutor | None = None
+        self._embedding_executor_lock = threading.Lock()
         self._embedding_provider: EmbeddingProvider = build_embedding_provider(config)
         openai_cfg = semantic_cfg.get("openai") or {}
         self._semantic_provider_enabled = {
@@ -300,6 +303,41 @@ class MemoryManager:
         semantic_active, semantic_reason = self._semantic_rerank_readiness()
         logger.info("semantic_rerank_active=%s reason=%s", semantic_active, semantic_reason)
         MemoryManager._instance = self
+
+    def _get_embedding_executor(self) -> ThreadPoolExecutor:
+        executor = getattr(self, "_embedding_executor", None)
+        if executor is not None:
+            return executor
+
+        lock = getattr(self, "_embedding_executor_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._embedding_executor_lock = lock
+
+        with lock:
+            executor = getattr(self, "_embedding_executor", None)
+            if executor is None:
+                executor = ThreadPoolExecutor(max_workers=1)
+                self._embedding_executor = executor
+        return executor
+
+    def _shutdown_embedding_executor(self) -> None:
+        executor = getattr(self, "_embedding_executor", None)
+        if executor is None:
+            return
+        self._embedding_executor = None
+        executor.shutdown(wait=False, cancel_futures=True)
+
+    def close(self) -> None:
+        """Release background resources owned by the manager."""
+
+        self._shutdown_embedding_executor()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:  # noqa: BLE001
+            pass
 
     def _is_semantic_provider_ready(self) -> tuple[bool, str]:
         raw_provider = getattr(self._semantic_config, "provider", None)
@@ -640,18 +678,20 @@ class MemoryManager:
         )
         timeout_s = max(0.001, timeout_ms / 1000.0)
 
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(provider.embed_text, text)
-            try:
-                return future.result(timeout=timeout_s)
-            except FutureTimeoutError:
-                return SimpleNamespace(
-                    status="error",
-                    dimension=0,
-                    vector=b"",
-                    vector_norm=None,
-                    error_code="timeout",
-                )
+        executor = self._get_embedding_executor()
+        future = executor.submit(provider.embed_text, text)
+        try:
+            return future.result(timeout=timeout_s)
+        except FutureTimeoutError:
+            future.cancel()
+            self._shutdown_embedding_executor()
+            return SimpleNamespace(
+                status="error",
+                dimension=0,
+                vector=b"",
+                vector_norm=None,
+                error_code="timeout",
+            )
 
     def _find_semantic_duplicate(
         self,
