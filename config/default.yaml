@@ -50,6 +50,11 @@ memory:
     protect_review_approved_strategic: true
     # Minimum rows deleted before VACUUM/optimize is triggered.
     optimize_min_deleted_rows: 200
+    # Background retention cadence in ops loop (seconds).
+    maintenance_enabled: true
+    maintenance_interval_s: 21600
+    # Allow optimize checks only every N maintenance runs.
+    maintenance_optimize_every_runs: 4
 
 # Two-tier hydration: tiny startup digest + per-turn retrieval
 memory_hydration:
