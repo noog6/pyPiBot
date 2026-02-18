@@ -38,6 +38,7 @@ def _make_memory_manager(store: MemoryStore) -> MemoryManager:
     manager._retrieval_semantic_error_count = 0
     manager._embedding_coverage_cache_ttl_s = 60.0
     manager._embedding_coverage_cache = {}
+    manager._embedding_backlog_last = {}
     manager._auto_pin_min_importance = 5
     manager._auto_pin_requires_review = True
     manager._auto_reflection_semantic_dedupe_enabled = False
@@ -1109,6 +1110,10 @@ def test_retrieval_health_metrics_accept_scope_and_session_overrides(tmp_path) -
     default_metrics = manager.get_retrieval_health_metrics()
     assert default_metrics["embedding_total_memories"] == 1
     assert default_metrics["embedding_coverage_pct"] == 100.0
+    assert default_metrics["embedding_pending_memories"] == 0
+    assert default_metrics["embedding_missing_memories"] == 0
+    assert default_metrics["embedding_backlog_memories"] == 0
+    assert default_metrics["embedding_backlog_delta_since_last"] == 0
 
     session_metrics = manager.get_retrieval_health_metrics(
         scope=MemoryScope.SESSION_LOCAL,
@@ -1117,3 +1122,22 @@ def test_retrieval_health_metrics_accept_scope_and_session_overrides(tmp_path) -
     assert session_metrics["embedding_total_memories"] == 1
     assert session_metrics["embedding_ready_memories"] == 0
     assert session_metrics["embedding_coverage_pct"] == 0.0
+    assert session_metrics["embedding_pending_memories"] == 1
+    assert session_metrics["embedding_missing_memories"] == 0
+    assert session_metrics["embedding_backlog_memories"] == 1
+    assert session_metrics["embedding_backlog_delta_since_last"] == 0
+
+    store.upsert_memory_embedding(
+        memory_id=session_entry.memory_id,
+        model_id="unit",
+        dim=2,
+        vector=_encode_vector([0.0, 1.0]),
+        vector_norm=1.0,
+        status="ready",
+    )
+    updated_session_metrics = manager.get_retrieval_health_metrics(
+        scope=MemoryScope.SESSION_LOCAL,
+        session_id="session-1",
+    )
+    assert updated_session_metrics["embedding_backlog_memories"] == 0
+    assert updated_session_metrics["embedding_backlog_delta_since_last"] == -1

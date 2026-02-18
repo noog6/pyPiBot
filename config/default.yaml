@@ -82,6 +82,8 @@ memory_semantic:
   rerank_influence_min_cosine: 0.25
   dedupe_strong_match_cosine: null
   background_embedding_enabled: true
+  rolling_backfill_batch_size: 4
+  rolling_backfill_interval_idle_cycles: 15
   write_timeout_ms: 75
   query_timeout_ms: 40
   max_writes_per_minute: 120

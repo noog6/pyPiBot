@@ -559,6 +559,43 @@ class MemoryStore:
             return (0, 0)
         return (int(row[0] or 0), int(row[1] or 0))
 
+    def get_embedding_backlog_counts(
+        self,
+        *,
+        user_id: str | None,
+        scope: str = USER_GLOBAL_SCOPE,
+        session_id: str | None = None,
+    ) -> tuple[int, int]:
+        """Return `(pending_embeddings, missing_embeddings)` for approved memories in scope."""
+
+        normalized_scope = (scope or USER_GLOBAL_SCOPE).strip().lower()
+        if normalized_scope == SESSION_LOCAL_SCOPE:
+            if session_id is None:
+                return (0, 0)
+            scope_predicate = "m.session_id = ?"
+            scope_params: tuple[object, ...] = (session_id,)
+        else:
+            scope_predicate = "m.session_id IS NULL"
+            scope_params = ()
+
+        with self._lock:
+            row = self._conn.execute(
+                f"""
+                SELECT
+                    COALESCE(SUM(CASE WHEN e.status = 'pending' THEN 1 ELSE 0 END), 0) AS pending_embeddings,
+                    COALESCE(SUM(CASE WHEN e.memory_id IS NULL THEN 1 ELSE 0 END), 0) AS missing_embeddings
+                FROM memories AS m
+                LEFT JOIN memory_embeddings AS e ON e.memory_id = m.memory_id
+                WHERE m.user_id IS ?
+                  AND m.needs_review = 0
+                  AND {scope_predicate}
+                """,
+                (user_id, *scope_params),
+            ).fetchone()
+        if row is None:
+            return (0, 0)
+        return (int(row[0] or 0), int(row[1] or 0))
+
     def delete_memory_embedding(self, *, memory_id: int) -> bool:
         with self._lock:
             cursor = self._conn.execute(

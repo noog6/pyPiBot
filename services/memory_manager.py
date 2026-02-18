@@ -210,6 +210,8 @@ class MemorySemanticConfig:
     rerank_influence_min_cosine: float
     dedupe_strong_match_cosine: float | None
     background_embedding_enabled: bool
+    rolling_backfill_batch_size: int
+    rolling_backfill_interval_idle_cycles: int
     write_timeout_ms: int
     query_timeout_ms: int
     max_writes_per_minute: int
@@ -258,6 +260,8 @@ class MemoryManager:
                 else None
             ),
             background_embedding_enabled=bool(semantic_cfg.get("background_embedding_enabled", True)),
+            rolling_backfill_batch_size=max(1, int(semantic_cfg.get("rolling_backfill_batch_size", 4))),
+            rolling_backfill_interval_idle_cycles=max(1, int(semantic_cfg.get("rolling_backfill_interval_idle_cycles", 15))),
             write_timeout_ms=int(semantic_cfg.get("write_timeout_ms", 75)),
             query_timeout_ms=int(semantic_cfg.get("query_timeout_ms", 40)),
             max_writes_per_minute=int(semantic_cfg.get("max_writes_per_minute", 120)),
@@ -273,7 +277,11 @@ class MemoryManager:
             "openai": bool(openai_cfg.get("enabled", False)),
         }
         if self._semantic_config.enabled and self._semantic_config.background_embedding_enabled:
-            self._embedding_worker = MemoryEmbeddingWorker(store=self._store)
+            self._embedding_worker = MemoryEmbeddingWorker(
+                store=self._store,
+                rolling_backfill_batch_size=self._semantic_config.rolling_backfill_batch_size,
+                rolling_backfill_interval_idle_cycles=self._semantic_config.rolling_backfill_interval_idle_cycles,
+            )
         self._last_turn_retrieval_at: dict[tuple[str, MemoryScope, str | None], float] = {}
         self._last_turn_retrieval_debug: dict[str, object] = {}
         self._last_semantic_dedupe_debug: dict[str, object] = {}
@@ -283,6 +291,7 @@ class MemoryManager:
         self._retrieval_semantic_error_count = 0
         self._embedding_coverage_cache_ttl_s = 60.0
         self._embedding_coverage_cache: dict[tuple[str, MemoryScope, str | None], dict[str, float | int]] = {}
+        self._embedding_backlog_last: dict[tuple[str, MemoryScope, str | None], int] = {}
         semantic_active, semantic_reason = self._semantic_rerank_readiness()
         logger.info("semantic_rerank_active=%s reason=%s", semantic_active, semantic_reason)
         MemoryManager._instance = self
@@ -415,6 +424,16 @@ class MemoryManager:
 
         assert cached_coverage is not None
 
+        pending_embeddings, missing_embeddings = self._store.get_embedding_backlog_counts(
+            user_id=self._active_user_id,
+            scope=normalized_scope.value,
+            session_id=resolved_session_id,
+        )
+        backlog_total = int(pending_embeddings + missing_embeddings)
+        prior_backlog_total = self._embedding_backlog_last.get(cache_key)
+        backlog_delta = 0 if prior_backlog_total is None else int(backlog_total - prior_backlog_total)
+        self._embedding_backlog_last[cache_key] = backlog_total
+
         return {
             "retrieval_count": total,
             "average_retrieval_latency_ms": round(avg_latency_ms, 2),
@@ -424,6 +443,10 @@ class MemoryManager:
             "embedding_total_memories": int(cached_coverage["total_memories"]),
             "embedding_ready_memories": int(cached_coverage["ready_embeddings"]),
             "embedding_coverage_pct": float(cached_coverage["coverage_pct"]),
+            "embedding_pending_memories": int(pending_embeddings),
+            "embedding_missing_memories": int(missing_embeddings),
+            "embedding_backlog_memories": backlog_total,
+            "embedding_backlog_delta_since_last": backlog_delta,
         }
 
     def remember_memory(
