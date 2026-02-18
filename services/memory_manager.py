@@ -893,7 +893,15 @@ class MemoryManager:
             scope=MemoryScope.USER_GLOBAL,
         )
 
-    def forget_memory(self, *, memory_id: int) -> bool:
+    def forget_memory(self, *, memory_id: int, allow_admin_override: bool = False) -> bool:
+        ownership = self._store.fetch_memory_ownership(memory_id=memory_id)
+        if ownership is None:
+            return False
+        if not allow_admin_override:
+            if ownership.user_id != self._active_user_id:
+                return False
+            if ownership.session_id is not None and ownership.session_id != self._active_session_id:
+                return False
         return self._store.delete_memory(memory_id=memory_id)
 
     def retrieve_for_turn(
