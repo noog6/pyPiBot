@@ -10,6 +10,7 @@ import re
 import time
 
 from config import ConfigController
+from services.memory_embedding_worker import MemoryEmbeddingWorker
 from storage.memories import MemoryEntry, MemoryStore
 
 MAX_CONTENT_LENGTH = 400
@@ -220,6 +221,9 @@ class MemoryManager:
             max_queries_per_minute=int(semantic_cfg.get("max_queries_per_minute", 240)),
         )
         self._store = MemoryStore()
+        self._embedding_worker: MemoryEmbeddingWorker | None = None
+        if self._semantic_config.enabled and self._semantic_config.background_embedding_enabled:
+            self._embedding_worker = MemoryEmbeddingWorker(store=self._store)
         self._last_turn_retrieval_at: dict[tuple[str, MemoryScope], float] = {}
         MemoryManager._instance = self
 
@@ -243,6 +247,9 @@ class MemoryManager:
 
     def get_semantic_config(self) -> MemorySemanticConfig:
         return self._semantic_config
+
+    def get_embedding_worker(self) -> MemoryEmbeddingWorker | None:
+        return self._embedding_worker
 
     def remember_memory(
         self,
@@ -270,7 +277,7 @@ class MemoryManager:
         effective_pinned = bool(pinned or auto_pin)
         effective_review = bool(needs_review or (auto_pin and self._auto_pin_requires_review))
 
-        return self._store.append_memory(
+        entry = self._store.append_memory(
             content=normalized_content,
             tags=normalized_tags,
             importance=bounded_importance,
@@ -280,6 +287,13 @@ class MemoryManager:
             pinned=effective_pinned,
             needs_review=effective_review,
         )
+        if self._embedding_worker is not None:
+            try:
+                self._embedding_worker.enqueue_memory(memory_id=entry.memory_id)
+            except Exception:  # noqa: BLE001
+                # Embedding scheduling is best-effort and must never block writes.
+                pass
+        return entry
 
     def recall_memories(
         self,

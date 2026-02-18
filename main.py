@@ -120,8 +120,18 @@ def main(argv: list[str] | None = None) -> int:
         semantic_state["table_exists"],
     )
     runtime_session_id = f"run-{storage_controller.get_current_run_number()}"
-    MemoryManager.get_instance().set_active_session_id(runtime_session_id)
+    memory_manager = MemoryManager.get_instance()
+    memory_manager.set_active_session_id(runtime_session_id)
     logger.info("Assigned runtime memory session_id=%s", runtime_session_id)
+
+    embedding_worker = memory_manager.get_embedding_worker()
+    if embedding_worker is not None:
+        try:
+            queued = embedding_worker.backfill_recent_missing_embeddings(limit=6)
+            logger.info("Queued startup memory embedding backfill count=%s", queued)
+            embedding_worker.start()
+        except Exception as exc:
+            logger.warning("Background memory embedding worker unavailable: %s", exc)
     if config.get("file_logging_enabled", True):
         log_file_path = storage_controller.get_log_file_path()
         enable_file_logging(log_file_path)
@@ -210,6 +220,11 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         logger.exception("An unexpected error occurred: %s", exc)
     finally:
+        if embedding_worker is not None:
+            try:
+                embedding_worker.stop(timeout_s=0.5)
+            except Exception as exc:
+                logger.warning("Failed stopping memory embedding worker: %s", exc)
         if ops_orchestrator:
             try:
                 ops_status = ops_orchestrator.stop_loop()

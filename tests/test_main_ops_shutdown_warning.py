@@ -21,6 +21,9 @@ class _FakeMemoryManager:
     def set_active_session_id(self, _: str) -> None:
         return None
 
+    def get_embedding_worker(self):
+        return None
+
 
 class _FakeRealtimeAPI:
     def __init__(self, prompts) -> None:
