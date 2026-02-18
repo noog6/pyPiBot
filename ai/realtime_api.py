@@ -433,6 +433,9 @@ class RealtimeAPI:
         self._last_connect_time: float | None = None
         self._last_disconnect_reason: str | None = None
         self._last_failure_reason: str | None = None
+        self._memory_retrieval_error_throttle_s = 60.0
+        self._memory_retrieval_last_error_log_at = 0.0
+        self._memory_retrieval_suppressed_errors = 0
 
         research_cfg = config.get("research") or {}
         self._research_enabled = bool(research_cfg.get("enabled", False))
@@ -649,6 +652,7 @@ class RealtimeAPI:
         )
 
     def get_session_health(self) -> dict[str, Any]:
+        retrieval_metrics = self._memory_manager.get_retrieval_health_metrics()
         return {
             "connected": self._session_connected,
             "ready": self.ready_event.is_set(),
@@ -659,6 +663,7 @@ class RealtimeAPI:
             "last_connect_time": self._last_connect_time or 0.0,
             "last_disconnect_reason": self._last_disconnect_reason or "",
             "last_failure_reason": self._last_failure_reason or "",
+            "memory_retrieval": retrieval_metrics,
         }
 
     def _note_connection_attempt(self) -> None:
@@ -1022,23 +1027,39 @@ class RealtimeAPI:
             retrieval_debug = manager.get_last_turn_retrieval_debug_metadata()
             if retrieval_debug:
                 logger.info(
-                    "Turn memory retrieval audit source=%s mode=%s semantic_enabled=%s semantic_attempted=%s semantic_applied=%s candidates=%s selected=%s truncated=%s",
+                    "Turn memory retrieval audit source=%s mode=%s lexical_candidates=%s semantic_candidates=%s semantic_scored=%s selected=%s fallback_reason=%s latency_ms=%s truncated=%s truncation_count=%s dedupe_count=%s",
                     source,
                     retrieval_debug.get("mode"),
-                    retrieval_debug.get("semantic_enabled"),
-                    retrieval_debug.get("semantic_attempted"),
-                    retrieval_debug.get("semantic_applied"),
-                    retrieval_debug.get("candidate_count"),
+                    retrieval_debug.get("lexical_candidate_count"),
+                    retrieval_debug.get("semantic_candidate_count"),
+                    retrieval_debug.get("semantic_scored_count"),
                     retrieval_debug.get("selected_count"),
+                    retrieval_debug.get("fallback_reason"),
+                    retrieval_debug.get("latency_ms"),
                     retrieval_debug.get("truncated"),
+                    retrieval_debug.get("truncation_count"),
+                    retrieval_debug.get("dedupe_count"),
                 )
         except Exception as exc:  # pragma: no cover - defensive fail-open
             self._pending_turn_memory_brief = None
-            logger.warning(
-                "Turn memory retrieval failed for source=%s: %s",
-                source,
-                exc,
+            now = time.monotonic()
+            throttle_s = max(1.0, float(getattr(self, "_memory_retrieval_error_throttle_s", 60.0)))
+            should_log = (
+                self._memory_retrieval_last_error_log_at <= 0.0
+                or (now - self._memory_retrieval_last_error_log_at) >= throttle_s
             )
+            if should_log:
+                suppressed = int(getattr(self, "_memory_retrieval_suppressed_errors", 0))
+                logger.warning(
+                    "Turn memory retrieval failed for source=%s suppressed_since_last=%s: %s",
+                    source,
+                    suppressed,
+                    exc,
+                )
+                self._memory_retrieval_last_error_log_at = now
+                self._memory_retrieval_suppressed_errors = 0
+            else:
+                self._memory_retrieval_suppressed_errors += 1
 
     def _consume_pending_memory_brief_note(self) -> str | None:
         brief = getattr(self, "_pending_turn_memory_brief", None)

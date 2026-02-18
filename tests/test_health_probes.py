@@ -1,0 +1,30 @@
+"""Tests for health probe detail enrichment."""
+
+from services.health_probes import probe_realtime_session
+
+
+class _FakeRealtime:
+    def get_session_health(self):
+        return {
+            "connected": True,
+            "ready": True,
+            "failures": 0,
+            "reconnects": 1,
+            "memory_retrieval": {
+                "embedding_coverage_pct": 87.5,
+                "semantic_provider_error_rate_pct": 2.0,
+                "average_retrieval_latency_ms": 14.2,
+                "retrieval_count": 10,
+                "semantic_provider_attempts": 8,
+                "semantic_provider_errors": 1,
+            },
+        }
+
+
+def test_probe_realtime_session_includes_memory_retrieval_details() -> None:
+    result = probe_realtime_session(_FakeRealtime())
+
+    assert result.details["memory_embedding_coverage_pct"] == 87.5
+    assert result.details["memory_semantic_provider_error_rate_pct"] == 2.0
+    assert result.details["memory_average_retrieval_latency_ms"] == 14.2
+    assert result.details["memory_retrieval_count"] == 10

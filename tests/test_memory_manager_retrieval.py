@@ -28,6 +28,17 @@ def _make_memory_manager(store: MemoryStore) -> MemoryManager:
     )
     manager._last_turn_retrieval_at = {}
     manager._last_turn_retrieval_debug = {}
+    manager._retrieval_total_count = 0
+    manager._retrieval_total_latency_ms = 0.0
+    manager._retrieval_semantic_attempt_count = 0
+    manager._retrieval_semantic_error_count = 0
+    manager._embedding_coverage_cache_ttl_s = 60.0
+    manager._embedding_coverage_cache_at = 0.0
+    manager._embedding_coverage_cache = {
+        "total_memories": 0,
+        "ready_embeddings": 0,
+        "coverage_pct": 0.0,
+    }
     manager._auto_pin_min_importance = 5
     manager._auto_pin_requires_review = True
     manager._auto_reflection_semantic_dedupe_enabled = False
@@ -411,3 +422,98 @@ def test_retrieve_for_turn_rerank_influence_min_cosine_gate(tmp_path) -> None:
         "Project alpha budget notes.",
         "Project alpha milestones checklist.",
     ]
+
+
+def test_retrieve_for_turn_reports_structured_debug_fields(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    now_ms = _now_ms()
+
+    store.append_memory(
+        content="User likes oat milk in coffee.",
+        tags=["coffee"],
+        importance=4,
+        user_id="default",
+        timestamp=now_ms,
+    )
+    store.append_memory(
+        content="User likes oat milk with coffee.",
+        tags=["coffee"],
+        importance=4,
+        user_id="default",
+        timestamp=now_ms - 10,
+    )
+
+    brief = manager.retrieve_for_turn(
+        latest_user_utterance="coffee",
+        user_id="default",
+        max_memories=2,
+        max_chars=80,
+    )
+
+    assert brief is not None
+    metadata = manager.get_last_turn_retrieval_debug_metadata()
+    assert metadata["mode"] == "lexical"
+    assert metadata["lexical_candidate_count"] >= 1
+    assert metadata["semantic_candidate_count"] == 0
+    assert metadata["semantic_scored_count"] == 0
+    assert metadata["latency_ms"] >= 0
+    assert metadata["dedupe_count"] >= 1
+    assert metadata["truncation_count"] >= 0
+
+
+def test_retrieval_health_metrics_include_coverage_error_rate_and_latency(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    now_ms = _now_ms()
+
+    first = store.append_memory(
+        content="Alpha memory.",
+        tags=["alpha"],
+        importance=3,
+        user_id="default",
+        timestamp=now_ms,
+    )
+    store.append_memory(
+        content="Beta memory.",
+        tags=["beta"],
+        importance=3,
+        user_id="default",
+        timestamp=now_ms - 1,
+    )
+    store.upsert_memory_embedding(
+        memory_id=first.memory_id,
+        model_id="unit",
+        dim=2,
+        vector=_encode_vector([1.0, 0.0]),
+        vector_norm=1.0,
+        status="ready",
+    )
+
+    manager._semantic_config = SimpleNamespace(
+        enabled=True,
+        rerank_enabled=True,
+        max_candidates_for_semantic=4,
+        min_similarity=0.0,
+        rerank_influence_min_cosine=0.0,
+        dedupe_strong_match_cosine=None,
+        background_embedding_enabled=False,
+    )
+
+    class _FailingProvider:
+        def embed_text(self, text: str):
+            raise RuntimeError("provider down")
+
+    manager._embedding_provider = _FailingProvider()
+    _ = manager.retrieve_for_turn(
+        latest_user_utterance="alpha",
+        user_id="default",
+        max_memories=2,
+        max_chars=120,
+    )
+
+    metrics = manager.get_retrieval_health_metrics()
+    assert metrics["embedding_coverage_pct"] == 50.0
+    assert metrics["semantic_provider_error_rate_pct"] == 100.0
+    assert metrics["average_retrieval_latency_ms"] >= 0.0
+    assert metrics["retrieval_count"] == 1
