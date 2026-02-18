@@ -513,10 +513,18 @@ class MemoryStore:
         """Return `(total_memories, ready_embeddings)` for approved memories in scope."""
 
         normalized_scope = (scope or USER_GLOBAL_SCOPE).strip().lower()
-        session_filter = session_id if normalized_scope == SESSION_LOCAL_SCOPE else None
+        if normalized_scope == SESSION_LOCAL_SCOPE:
+            if session_id is None:
+                return (0, 0)
+            scope_predicate = "m.session_id = ?"
+            scope_params: tuple[object, ...] = (session_id,)
+        else:
+            scope_predicate = "m.session_id IS NULL"
+            scope_params = ()
+
         with self._lock:
             row = self._conn.execute(
-                """
+                f"""
                 SELECT
                     COUNT(*) AS total_memories,
                     COALESCE(SUM(CASE WHEN e.status = 'ready' THEN 1 ELSE 0 END), 0) AS ready_embeddings
@@ -524,9 +532,9 @@ class MemoryStore:
                 LEFT JOIN memory_embeddings AS e ON e.memory_id = m.memory_id
                 WHERE m.user_id IS ?
                   AND m.needs_review = 0
-                  AND ((? = ?) OR m.session_id IS ?)
+                  AND {scope_predicate}
                 """,
-                (user_id, normalized_scope, USER_GLOBAL_SCOPE, session_filter),
+                (user_id, *scope_params),
             ).fetchone()
         if row is None:
             return (0, 0)
