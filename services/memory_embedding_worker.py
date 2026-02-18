@@ -111,7 +111,15 @@ class MemoryEmbeddingWorker:
         if not ready_entries:
             return 0
 
-        results = self._provider.embed_batch([entry.content for entry in ready_entries])
+        try:
+            results = self._provider.embed_batch([entry.content for entry in ready_entries])
+        except Exception as exc:  # noqa: BLE001
+            error_message = f"provider_exception:{type(exc).__name__}"
+            for entry in ready_entries:
+                self._record_failure(entry=entry, error_message=error_message)
+            self._consecutive_failures += 1
+            return 0
+
         success_count = 0
         for entry, result in zip(ready_entries, results):
             if result.status == "ready" and result.dimension > 0 and result.vector:
