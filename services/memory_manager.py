@@ -202,6 +202,20 @@ def estimate_realtime_memory_brief_item_chars(*, index: int, item: MemorySummary
     return len(render_realtime_memory_brief_item(index=index, item=item))
 
 
+def render_startup_memory_digest_item(*, index: int, item: MemorySummary) -> str:
+    """Render a single startup-digest line exactly as RealtimeAPI injects it."""
+
+    tags = f" tags=[{', '.join(item.tags)}]" if item.tags else ""
+    pin_state = " pinned" if item.pinned else ""
+    return f"{index}. (importance={item.importance}{pin_state}{tags}) {item.content}"
+
+
+def estimate_startup_memory_digest_item_chars(*, index: int, item: MemorySummary) -> int:
+    """Estimate injected chars for one memory item in the startup digest."""
+
+    return len(render_startup_memory_digest_item(index=index, item=item))
+
+
 @dataclass(frozen=True)
 class MemoryBrief:
     """Bounded memory context block for a single user turn."""
@@ -862,7 +876,7 @@ class MemoryManager:
                 truncated = True
                 break
             summary = MemorySummary.from_entry(entry)
-            chars = estimate_realtime_memory_brief_item_chars(index=len(selected) + 1, item=summary)
+            chars = estimate_startup_memory_digest_item_chars(index=len(selected) + 1, item=summary)
             if used_chars + chars > bounded_max_chars:
                 truncated = True
                 continue

@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from services.memory_manager import MemoryManager, MemoryScope
+from services.memory_manager import (
+    MemoryManager,
+    MemoryScope,
+    estimate_startup_memory_digest_item_chars,
+    render_startup_memory_digest_item,
+)
 from storage.memories import MemoryStore
 from ai.realtime_api import RealtimeAPI
 
@@ -106,3 +111,52 @@ def test_startup_digest_excludes_unpinned_and_review_pending_entries(tmp_path) -
 
     assert digest is not None
     assert [item.content for item in digest.items] == ["Pinned and approved memory should appear."]
+
+
+def test_startup_digest_enforces_rendered_budget_with_pinned_overhead(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_manager(store)
+
+    manager.remember_memory(
+        content="Pinned digest line should account for the pinned marker.",
+        importance=5,
+        pinned=True,
+        needs_review=False,
+    )
+    summary = manager.recall_memories(limit=1)[0]
+    rendered_len = len(render_startup_memory_digest_item(index=1, item=summary))
+
+    digest = manager.retrieve_startup_digest(max_items=2, max_chars=rendered_len - 1)
+
+    assert digest is None
+
+
+def test_startup_digest_total_chars_matches_rendered_lines(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_manager(store)
+
+    manager.remember_memory(
+        content="Primary pinned preference.",
+        importance=5,
+        pinned=True,
+        needs_review=False,
+        tags=["tone"],
+    )
+    manager.remember_memory(
+        content="Secondary pinned context.",
+        importance=4,
+        pinned=True,
+        needs_review=False,
+    )
+
+    digest = manager.retrieve_startup_digest(max_items=2, max_chars=800)
+
+    assert digest is not None
+    assert digest.total_chars == sum(
+        estimate_startup_memory_digest_item_chars(index=index, item=item)
+        for index, item in enumerate(digest.items, start=1)
+    )
+    assert digest.total_chars == sum(
+        len(render_startup_memory_digest_item(index=index, item=item))
+        for index, item in enumerate(digest.items, start=1)
+    )
