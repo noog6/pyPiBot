@@ -25,6 +25,10 @@ def _make_memory_manager(store: MemoryStore) -> MemoryManager:
         rerank_influence_min_cosine=0.25,
         dedupe_strong_match_cosine=None,
         background_embedding_enabled=False,
+        write_timeout_ms=75,
+        query_timeout_ms=40,
+        max_writes_per_minute=120,
+        max_queries_per_minute=240,
     )
     manager._last_turn_retrieval_at = {}
     manager._last_turn_retrieval_debug = {}
@@ -794,3 +798,221 @@ def test_retrieve_for_turn_semantic_provider_exception_falls_back_to_lexical(tmp
     metadata = manager.get_last_turn_retrieval_debug_metadata()
     assert metadata["mode"] == "hybrid_fallback_lexical"
     assert metadata["semantic_error"] == "exception"
+
+
+def test_retrieve_for_turn_semantic_query_timeout_respected(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._semantic_config = SimpleNamespace(
+        enabled=True,
+        rerank_enabled=True,
+        max_candidates_for_semantic=8,
+        min_similarity=0.0,
+        rerank_influence_min_cosine=0.0,
+        dedupe_strong_match_cosine=None,
+        background_embedding_enabled=False,
+        write_timeout_ms=75,
+        query_timeout_ms=1,
+        max_writes_per_minute=120,
+        max_queries_per_minute=240,
+    )
+    now_ms = _now_ms()
+
+    store.append_memory(
+        content="Remember project alpha milestones.",
+        tags=["work"],
+        importance=4,
+        user_id="default",
+        timestamp=now_ms - 1000,
+    )
+
+    class _SlowProvider:
+        def embed_text(self, text: str):
+            time.sleep(0.02)
+            return SimpleNamespace(status="ready", dimension=2, vector=_encode_vector([1.0, 0.0]), vector_norm=1.0)
+
+    manager._embedding_provider = _SlowProvider()
+
+    brief = manager.retrieve_for_turn(
+        latest_user_utterance="project alpha",
+        user_id="default",
+        max_memories=2,
+        max_chars=300,
+        cooldown_s=0.0,
+    )
+
+    assert brief is not None
+    metadata = manager.get_last_turn_retrieval_debug_metadata()
+    assert metadata["fallback_reason"] == "query_embedding_not_ready"
+    assert metadata["semantic_error_code"] == "timeout"
+
+
+def test_retrieve_for_turn_semantic_query_rate_limit_respected(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._semantic_config = SimpleNamespace(
+        enabled=True,
+        rerank_enabled=True,
+        max_candidates_for_semantic=8,
+        min_similarity=0.0,
+        rerank_influence_min_cosine=0.0,
+        dedupe_strong_match_cosine=None,
+        background_embedding_enabled=False,
+        write_timeout_ms=75,
+        query_timeout_ms=40,
+        max_writes_per_minute=120,
+        max_queries_per_minute=1,
+    )
+    now_ms = _now_ms()
+
+    store.append_memory(
+        content="Remember project alpha milestones.",
+        tags=["work"],
+        importance=4,
+        user_id="default",
+        timestamp=now_ms - 1000,
+    )
+
+    class _ReadyProvider:
+        def embed_text(self, text: str):
+            return SimpleNamespace(status="ready", dimension=2, vector=_encode_vector([1.0, 0.0]), vector_norm=1.0)
+
+    manager._embedding_provider = _ReadyProvider()
+
+    first = manager.retrieve_for_turn(
+        latest_user_utterance="project alpha",
+        user_id="default",
+        max_memories=2,
+        max_chars=300,
+        cooldown_s=0.0,
+    )
+    second = manager.retrieve_for_turn(
+        latest_user_utterance="project alpha",
+        user_id="default",
+        max_memories=2,
+        max_chars=300,
+        cooldown_s=0.0,
+    )
+
+    assert first is not None
+    assert second is not None
+    metadata = manager.get_last_turn_retrieval_debug_metadata()
+    assert metadata["fallback_reason"] == "query_embedding_not_ready"
+    assert metadata["semantic_error_code"] == "rate_limited"
+
+
+def test_find_semantic_duplicate_respects_write_timeout(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._semantic_config = SimpleNamespace(
+        enabled=True,
+        rerank_enabled=False,
+        max_candidates_for_semantic=8,
+        min_similarity=0.0,
+        rerank_influence_min_cosine=0.0,
+        dedupe_strong_match_cosine=0.9,
+        background_embedding_enabled=False,
+        write_timeout_ms=1,
+        query_timeout_ms=40,
+        max_writes_per_minute=120,
+        max_queries_per_minute=240,
+    )
+    manager._auto_reflection_semantic_dedupe_enabled = True
+    now_ms = _now_ms()
+    prior = store.append_memory(
+        content="Project alpha budget notes.",
+        tags=["work"],
+        importance=4,
+        user_id="default",
+        needs_review=False,
+        timestamp=now_ms,
+    )
+    store.upsert_memory_embedding(
+        memory_id=prior.memory_id,
+        model_id="unit",
+        dim=2,
+        vector=_encode_vector([1.0, 0.0]),
+        vector_norm=1.0,
+    )
+
+    class _SlowProvider:
+        def embed_text(self, text: str):
+            time.sleep(0.02)
+            return SimpleNamespace(status="ready", dimension=2, vector=_encode_vector([1.0, 0.0]), vector_norm=1.0)
+
+    manager._embedding_provider = _SlowProvider()
+
+    duplicate = manager._find_semantic_duplicate(
+        content="Project alpha budget notes.",
+        user_id="default",
+        scope=MemoryScope.USER_GLOBAL,
+        session_id=None,
+        source="auto_reflection",
+    )
+
+    assert duplicate is None
+
+
+def test_find_semantic_duplicate_respects_write_rate_limit(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._semantic_config = SimpleNamespace(
+        enabled=True,
+        rerank_enabled=False,
+        max_candidates_for_semantic=8,
+        min_similarity=0.0,
+        rerank_influence_min_cosine=0.0,
+        dedupe_strong_match_cosine=0.9,
+        background_embedding_enabled=False,
+        write_timeout_ms=75,
+        query_timeout_ms=40,
+        max_writes_per_minute=1,
+        max_queries_per_minute=240,
+    )
+    manager._auto_reflection_semantic_dedupe_enabled = True
+    now_ms = _now_ms()
+    prior = store.append_memory(
+        content="Project alpha budget notes.",
+        tags=["work"],
+        importance=4,
+        user_id="default",
+        needs_review=False,
+        timestamp=now_ms,
+    )
+    store.upsert_memory_embedding(
+        memory_id=prior.memory_id,
+        model_id="unit",
+        dim=2,
+        vector=_encode_vector([1.0, 0.0]),
+        vector_norm=1.0,
+    )
+
+    class _ReadyProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def embed_text(self, text: str):
+            self.calls += 1
+            return SimpleNamespace(status="ready", dimension=2, vector=_encode_vector([1.0, 0.0]), vector_norm=1.0)
+
+    provider = _ReadyProvider()
+    manager._embedding_provider = provider
+
+    first = manager._find_semantic_duplicate(
+        content="Project alpha budget notes.",
+        user_id="default",
+        scope=MemoryScope.USER_GLOBAL,
+        session_id=None,
+        source="auto_reflection",
+    )
+    second = manager._find_semantic_duplicate(
+        content="Project alpha budget notes.",
+        user_id="default",
+        scope=MemoryScope.USER_GLOBAL,
+        session_id=None,
+        source="auto_reflection",
+    )
+
+    assert first is not None
+    assert second is None
+    assert provider.calls == 1

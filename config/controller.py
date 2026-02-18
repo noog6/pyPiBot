@@ -221,6 +221,15 @@ class ConfigController:
         memory_semantic_cfg["min_similarity"] = float(
             memory_semantic_cfg.get("min_similarity", 0.25)
         )
+        memory_semantic_cfg["rerank_influence_min_cosine"] = float(
+            memory_semantic_cfg.get("rerank_influence_min_cosine", 0.25)
+        )
+        dedupe_cosine = memory_semantic_cfg.get("dedupe_strong_match_cosine")
+        memory_semantic_cfg["dedupe_strong_match_cosine"] = (
+            float(dedupe_cosine)
+            if dedupe_cosine is not None
+            else None
+        )
         memory_semantic_cfg["background_embedding_enabled"] = bool(
             memory_semantic_cfg.get("background_embedding_enabled", True)
         )
