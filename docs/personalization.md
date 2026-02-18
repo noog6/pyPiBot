@@ -114,3 +114,20 @@ memory_semantic:
 - **No DB rollback is required** when disabling this feature.
 - Existing `memories` and `memory_embeddings` rows can remain in place; the runtime
   will continue using lexical retrieval paths.
+
+## Semantic embedding write mode when background worker is disabled
+
+By default, `memory_semantic.background_embedding_enabled: false` keeps writes purely lexical and does not attempt embedding generation.
+
+To opt into synchronous write-time embeddings in this mode, set:
+
+```yaml
+memory_semantic:
+  enabled: true
+  background_embedding_enabled: false
+  inline_embedding_on_write_when_background_disabled: true
+```
+
+This path is **fail-open**: memory rows are still written even if embedding calls time out or fail, and embedding status is recorded as pending/error for observability.
+
+Tradeoff: inline embedding increases per-write CPU and can add write latency on constrained hardware, so the flag remains opt-in.
