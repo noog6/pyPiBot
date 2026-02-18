@@ -225,6 +225,19 @@ def probe_realtime_session(realtime_api: Any | None) -> HealthProbeResult:
         value = session_health.get(key)
         if isinstance(value, (int, float)):
             details[key] = value
+    memory_retrieval = session_health.get("memory_retrieval")
+    if isinstance(memory_retrieval, Mapping):
+        for key in (
+            "embedding_coverage_pct",
+            "semantic_provider_error_rate_pct",
+            "average_retrieval_latency_ms",
+            "retrieval_count",
+            "semantic_provider_attempts",
+            "semantic_provider_errors",
+        ):
+            value = memory_retrieval.get(key)
+            if isinstance(value, (int, float)):
+                details[f"memory_{key}"] = value
     for key in ("last_disconnect_reason", "last_failure_reason"):
         value = session_health.get(key)
         if isinstance(value, str) and value:

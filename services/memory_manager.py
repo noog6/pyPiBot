@@ -266,6 +266,17 @@ class MemoryManager:
             self._embedding_worker = MemoryEmbeddingWorker(store=self._store)
         self._last_turn_retrieval_at: dict[tuple[str, MemoryScope], float] = {}
         self._last_turn_retrieval_debug: dict[str, object] = {}
+        self._retrieval_total_count = 0
+        self._retrieval_total_latency_ms = 0.0
+        self._retrieval_semantic_attempt_count = 0
+        self._retrieval_semantic_error_count = 0
+        self._embedding_coverage_cache_ttl_s = 60.0
+        self._embedding_coverage_cache_at = 0.0
+        self._embedding_coverage_cache: dict[str, float | int] = {
+            "total_memories": 0,
+            "ready_embeddings": 0,
+            "coverage_pct": 0.0,
+        }
         MemoryManager._instance = self
 
     @classmethod
@@ -296,6 +307,49 @@ class MemoryManager:
         """Return internal retrieval metadata for debugging and audit logs."""
 
         return dict(self._last_turn_retrieval_debug)
+
+    def get_retrieval_health_metrics(self) -> dict[str, float | int]:
+        """Return retrieval counters for diagnostics and health summaries."""
+
+        total = max(0, int(self._retrieval_total_count))
+        avg_latency_ms = (
+            float(self._retrieval_total_latency_ms) / total
+            if total > 0
+            else 0.0
+        )
+        semantic_attempts = max(0, int(self._retrieval_semantic_attempt_count))
+        semantic_errors = max(0, int(self._retrieval_semantic_error_count))
+        semantic_error_rate_pct = (
+            (semantic_errors / semantic_attempts) * 100.0
+            if semantic_attempts > 0
+            else 0.0
+        )
+
+        now = time.monotonic()
+        if now - self._embedding_coverage_cache_at >= self._embedding_coverage_cache_ttl_s:
+            total_memories, ready_embeddings = self._store.get_embedding_coverage_counts(
+                user_id=self._active_user_id,
+                scope=self._default_scope.value,
+                session_id=self._active_session_id,
+            )
+            coverage_pct = (float(ready_embeddings) / float(total_memories) * 100.0) if total_memories else 0.0
+            self._embedding_coverage_cache = {
+                "total_memories": total_memories,
+                "ready_embeddings": ready_embeddings,
+                "coverage_pct": round(coverage_pct, 2),
+            }
+            self._embedding_coverage_cache_at = now
+
+        return {
+            "retrieval_count": total,
+            "average_retrieval_latency_ms": round(avg_latency_ms, 2),
+            "semantic_provider_attempts": semantic_attempts,
+            "semantic_provider_errors": semantic_errors,
+            "semantic_provider_error_rate_pct": round(semantic_error_rate_pct, 2),
+            "embedding_total_memories": int(self._embedding_coverage_cache["total_memories"]),
+            "embedding_ready_memories": int(self._embedding_coverage_cache["ready_embeddings"]),
+            "embedding_coverage_pct": float(self._embedding_coverage_cache["coverage_pct"]),
+        }
 
     def remember_memory(
         self,
@@ -522,6 +576,8 @@ class MemoryManager:
     ) -> MemoryBrief | None:
         """Retrieve a compact, deterministic memory brief for turn-time context."""
 
+        started_at = time.monotonic()
+
         self._last_turn_retrieval_debug = {
             "mode": "none",
             "semantic_enabled": False,
@@ -529,9 +585,16 @@ class MemoryManager:
             "semantic_applied": False,
             "semantic_error": None,
             "candidate_count": 0,
+            "lexical_candidate_count": 0,
+            "semantic_candidate_count": 0,
+            "semantic_scored_count": 0,
             "selected_count": 0,
             "scope": None,
             "cooldown_skipped": False,
+            "fallback_reason": None,
+            "latency_ms": 0,
+            "dedupe_count": 0,
+            "truncation_count": 0,
         }
 
         clean_utterance = " ".join(latest_user_utterance.strip().split())
@@ -598,6 +661,7 @@ class MemoryManager:
         semantic_enabled = self._semantic_config.enabled and self._semantic_config.rerank_enabled
         self._last_turn_retrieval_debug["semantic_enabled"] = semantic_enabled
         if semantic_enabled and lexical_ordered:
+            self._retrieval_semantic_attempt_count += 1
             self._last_turn_retrieval_debug["semantic_attempted"] = True
             semantic_limit = _clamp(
                 self._semantic_config.max_candidates_for_semantic,
@@ -605,6 +669,7 @@ class MemoryManager:
                 len(lexical_ordered),
             )
             semantic_pool = lexical_ordered[:semantic_limit]
+            self._last_turn_retrieval_debug["semantic_candidate_count"] = semantic_limit
             semantic_memory_ids = [entry.memory_id for _, entry in semantic_pool]
             try:
                 provider = getattr(self, "_embedding_provider", None)
@@ -616,6 +681,7 @@ class MemoryManager:
                     if query_norm > 0.0:
                         embeddings = self._store.fetch_embeddings_for_memories(memory_ids=semantic_memory_ids)
                         hybrid_pool: list[tuple[float, MemoryEntry]] = []
+                        semantic_scored_count = 0
                         for lexical_score, entry in semantic_pool:
                             embedding = embeddings.get(entry.memory_id)
                             semantic_score = 0.0
@@ -632,6 +698,7 @@ class MemoryManager:
                                 )
                                 if cosine is not None and cosine >= influence_threshold:
                                     semantic_score = cosine
+                                    semantic_scored_count += 1
                             hybrid_pool.append((lexical_score + semantic_score, entry))
 
                         reranked_pool = sorted(
@@ -644,26 +711,38 @@ class MemoryManager:
                                 "mode": "hybrid",
                                 "semantic_applied": True,
                                 "semantic_pool_size": semantic_limit,
+                                "semantic_scored_count": semantic_scored_count,
                             }
                         )
+                else:
+                    self._last_turn_retrieval_debug["fallback_reason"] = "query_embedding_not_ready"
             except Exception:  # noqa: BLE001
                 # Semantic reranking is best-effort and must never degrade lexical retrieval.
                 ordered = [item[1] for item in lexical_ordered]
+                self._retrieval_semantic_error_count += 1
                 self._last_turn_retrieval_debug.update(
                     {
                         "mode": "hybrid_fallback_lexical",
                         "semantic_error": "exception",
+                        "fallback_reason": "semantic_provider_error",
                     }
                 )
+        elif semantic_enabled:
+            self._last_turn_retrieval_debug["fallback_reason"] = "no_lexical_candidates"
         if self._last_turn_retrieval_debug.get("mode") == "none":
             self._last_turn_retrieval_debug["mode"] = "lexical"
+            if semantic_enabled and not self._last_turn_retrieval_debug.get("fallback_reason"):
+                self._last_turn_retrieval_debug["fallback_reason"] = "semantic_not_applied"
         selected: list[MemorySummary] = []
         seen_contents: list[str] = []
         used_chars = 0
         truncated = False
+        dedupe_count = 0
+        truncation_count = 0
         for entry in ordered:
             if len(selected) >= bounded_max_memories:
                 truncated = True
+                truncation_count += 1
                 break
 
             if any(
@@ -676,6 +755,7 @@ class MemoryManager:
                 for existing_content in seen_contents
             ):
                 truncated = True
+                dedupe_count += 1
                 continue
 
             candidate_summary = MemorySummary.from_entry(entry)
@@ -684,6 +764,7 @@ class MemoryManager:
                 remaining = bounded_max_chars - used_chars
                 if selected or remaining < 24:
                     truncated = True
+                    truncation_count += 1
                     continue
                 clipped = candidate_summary.content[: max(remaining - 1, 1)].rstrip()
                 if clipped != candidate_summary.content:
@@ -699,14 +780,22 @@ class MemoryManager:
                 )
                 candidate_chars = len(candidate_summary.content)
                 truncated = True
+                truncation_count += 1
 
             selected.append(candidate_summary)
             seen_contents.append(candidate_summary.content)
             used_chars += candidate_chars
 
         self._last_turn_retrieval_at[cooldown_key] = timestamp
+        latency_ms = int((time.monotonic() - started_at) * 1000)
+        self._retrieval_total_count += 1
+        self._retrieval_total_latency_ms += latency_ms
+        self._last_turn_retrieval_debug["lexical_candidate_count"] = len(lexical_ordered)
         self._last_turn_retrieval_debug["selected_count"] = len(selected)
         self._last_turn_retrieval_debug["truncated"] = truncated
+        self._last_turn_retrieval_debug["dedupe_count"] = dedupe_count
+        self._last_turn_retrieval_debug["truncation_count"] = truncation_count
+        self._last_turn_retrieval_debug["latency_ms"] = latency_ms
         if not selected:
             return None
         return MemoryBrief(
