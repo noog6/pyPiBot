@@ -99,3 +99,18 @@ Each memory row stores:
 ### Forgetting
 
 `forget_memory(memory_id=...)` deletes a memory row by id.
+
+## Semantic memory disable runbook
+
+The semantic memory rollout can be disabled explicitly with config only:
+
+```yaml
+memory_semantic:
+  enabled: false
+  rerank_enabled: false
+```
+
+- Set both keys together so semantic retrieval and reranking are unambiguously off.
+- **No DB rollback is required** when disabling this feature.
+- Existing `memories` and `memory_embeddings` rows can remain in place; the runtime
+  will continue using lexical retrieval paths.
