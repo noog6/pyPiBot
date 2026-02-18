@@ -564,6 +564,9 @@ def test_retrieve_for_turn_reports_structured_debug_fields(tmp_path) -> None:
     assert metadata["lexical_candidate_count"] >= 1
     assert metadata["semantic_candidate_count"] == 0
     assert metadata["semantic_scored_count"] == 0
+    assert metadata["candidates_without_ready_embedding"] == 0
+    assert metadata["candidates_below_influence_threshold"] == 0
+    assert metadata["candidates_semantic_applied"] == 0
     assert metadata["latency_ms"] >= 0
     assert metadata["dedupe_count"] >= 1
     assert metadata["truncation_count"] >= 0
@@ -908,6 +911,9 @@ def test_retrieve_for_turn_semantic_enabled_applies_hybrid_reranking(tmp_path) -
     metadata = manager.get_last_turn_retrieval_debug_metadata()
     assert metadata["mode"] == "hybrid"
     assert metadata["semantic_applied"] is True
+    assert metadata["candidates_without_ready_embedding"] == 0
+    assert metadata["candidates_below_influence_threshold"] == 0
+    assert metadata["candidates_semantic_applied"] == 2
 
 
 def test_retrieve_for_turn_semantic_provider_exception_falls_back_to_lexical(tmp_path) -> None:

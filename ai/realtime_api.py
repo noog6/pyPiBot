@@ -1017,12 +1017,15 @@ class RealtimeAPI:
             retrieval_debug = manager.get_last_turn_retrieval_debug_metadata()
             if retrieval_debug:
                 logger.info(
-                    "Turn memory retrieval audit source=%s mode=%s lexical_candidates=%s semantic_candidates=%s semantic_scored=%s selected=%s fallback_reason=%s latency_ms=%s truncated=%s truncation_count=%s dedupe_count=%s",
+                    "Turn memory retrieval audit source=%s mode=%s lexical_candidates=%s semantic_candidates=%s semantic_scored=%s candidates_without_ready_embedding=%s candidates_below_influence_threshold=%s candidates_semantic_applied=%s selected=%s fallback_reason=%s latency_ms=%s truncated=%s truncation_count=%s dedupe_count=%s",
                     source,
                     retrieval_debug.get("mode"),
                     retrieval_debug.get("lexical_candidate_count"),
                     retrieval_debug.get("semantic_candidate_count"),
                     retrieval_debug.get("semantic_scored_count"),
+                    retrieval_debug.get("candidates_without_ready_embedding"),
+                    retrieval_debug.get("candidates_below_influence_threshold"),
+                    retrieval_debug.get("candidates_semantic_applied"),
                     retrieval_debug.get("selected_count"),
                     retrieval_debug.get("fallback_reason"),
                     retrieval_debug.get("latency_ms"),
