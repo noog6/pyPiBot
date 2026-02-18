@@ -68,6 +68,7 @@ class MemoryEmbeddingWorker:
         self._idle_cycles_since_backfill = 0
 
         self._failures: dict[int, _FailureState] = {}
+        self._consecutive_failures = 0
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -102,6 +103,7 @@ class MemoryEmbeddingWorker:
         limit = self._batch_size if max_items is None else max(1, min(self._batch_size, int(max_items)))
         entries = self._store.fetch_pending_memories_for_embedding(limit=limit)
         if not entries:
+            self._consecutive_failures = 0
             return 0
 
         now = time.monotonic()
@@ -129,6 +131,10 @@ class MemoryEmbeddingWorker:
         if len(results) < len(ready_entries):
             for entry in ready_entries[len(results) :]:
                 self._record_failure(entry=entry, error_message="provider_returned_fewer_results")
+        if success_count > 0:
+            self._consecutive_failures = 0
+        elif ready_entries:
+            self._consecutive_failures += 1
         return success_count
 
     def _run_loop(self) -> None:
@@ -147,8 +153,29 @@ class MemoryEmbeddingWorker:
                         if queued > 0:
                             logger.debug("memory embedding rolling backfill queued=%s", queued)
             except Exception as exc:  # noqa: BLE001
+                self._consecutive_failures += 1
                 logger.debug("memory embedding worker pass failed open: %s", exc)
             self._stop_event.wait(self._idle_sleep_s)
+
+    def get_metrics(self) -> dict[str, int]:
+        """Return low-overhead worker queue and retry telemetry."""
+
+        pending_count, oldest_pending_updated_at = self._store.get_pending_embedding_queue_stats()
+        now_monotonic = time.monotonic()
+        retry_blocked_count = sum(
+            1
+            for failure in self._failures.values()
+            if float(failure.next_retry_monotonic) > now_monotonic
+        )
+        oldest_pending_age_ms = 0
+        if oldest_pending_updated_at is not None:
+            oldest_pending_age_ms = max(0, int(time.time() * 1000) - int(oldest_pending_updated_at))
+        return {
+            "pending_count": int(pending_count),
+            "retry_blocked_count": int(retry_blocked_count),
+            "consecutive_failures": int(self._consecutive_failures),
+            "oldest_pending_age_ms": int(oldest_pending_age_ms),
+        }
 
     def _is_retry_ready(self, memory_id: int, *, now_monotonic: float) -> bool:
         failure_state = self._failures.get(memory_id)

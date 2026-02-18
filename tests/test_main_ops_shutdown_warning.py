@@ -18,6 +18,18 @@ class _FakeStorageController:
 
 
 class _FakeMemoryManager:
+    def get_semantic_startup_summary(self) -> dict[str, object]:
+        return {
+            "enabled": True,
+            "provider": "openai",
+            "rerank_enabled": True,
+            "background_embedding_enabled": True,
+            "provider_ready": False,
+            "provider_readiness_reason": "openai_provider_disabled",
+            "max_queries_per_minute": 240,
+            "max_writes_per_minute": 120,
+        }
+
     def set_active_session_id(self, _: str) -> None:
         return None
 
@@ -218,3 +230,9 @@ def test_main_logs_semantic_memory_state_at_startup(monkeypatch) -> None:
     assert exit_code == 0
     assert "Semantic memory enabled=True" in infos
     assert "Semantic embeddings table available=False" in infos
+    assert (
+        "Semantic startup summary enabled=True provider=openai rerank_enabled=True "
+        "background_embedding_enabled=True provider_ready=False "
+        "readiness_reason=openai_provider_disabled max_queries_per_minute=240 "
+        "max_writes_per_minute=120"
+    ) in infos

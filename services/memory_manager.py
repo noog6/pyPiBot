@@ -439,7 +439,7 @@ class MemoryManager:
         backlog_delta = 0 if prior_backlog_total is None else int(backlog_total - prior_backlog_total)
         self._embedding_backlog_last[cache_key] = backlog_total
 
-        return {
+        metrics: dict[str, float | int] = {
             "retrieval_count": total,
             "average_retrieval_latency_ms": round(avg_latency_ms, 2),
             "semantic_provider_attempts": semantic_attempts,
@@ -452,6 +452,27 @@ class MemoryManager:
             "embedding_missing_memories": int(missing_embeddings),
             "embedding_backlog_memories": backlog_total,
             "embedding_backlog_delta_since_last": backlog_delta,
+        }
+        if self._embedding_worker is not None:
+            try:
+                metrics.update(self._embedding_worker.get_metrics())
+            except Exception:  # noqa: BLE001
+                pass
+        return metrics
+
+    def get_semantic_startup_summary(self) -> dict[str, str | bool | int | float]:
+        """Return semantic memory startup diagnostics for one-line logging."""
+
+        provider_ready, readiness_reason = self._is_semantic_provider_ready()
+        return {
+            "enabled": bool(self._semantic_config.enabled),
+            "provider": str(self._semantic_config.provider),
+            "rerank_enabled": bool(self._semantic_config.rerank_enabled),
+            "background_embedding_enabled": bool(self._semantic_config.background_embedding_enabled),
+            "provider_ready": bool(provider_ready),
+            "provider_readiness_reason": str(readiness_reason),
+            "max_queries_per_minute": int(self._semantic_config.max_queries_per_minute),
+            "max_writes_per_minute": int(self._semantic_config.max_writes_per_minute),
         }
 
     def remember_memory(
@@ -993,9 +1014,11 @@ class MemoryManager:
                         )
                 else:
                     self._last_turn_retrieval_debug["fallback_reason"] = "query_embedding_not_ready"
-                    error_code = getattr(query_embedding, "error_code", None)
-                    if error_code:
-                        self._last_turn_retrieval_debug["semantic_error_code"] = str(error_code)
+                    self._last_turn_retrieval_debug["semantic_error_code"] = str(
+                        getattr(query_embedding, "error_code", None)
+                        or getattr(query_embedding, "status", None)
+                        or "unknown"
+                    )
             except Exception:  # noqa: BLE001
                 # Semantic reranking is best-effort and must never degrade lexical retrieval.
                 ordered = [item[1] for item in lexical_ordered]

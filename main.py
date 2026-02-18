@@ -121,6 +121,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     runtime_session_id = f"run-{storage_controller.get_current_run_number()}"
     memory_manager = MemoryManager.get_instance()
+    semantic_startup_summary = memory_manager.get_semantic_startup_summary()
+    logger.info(
+        "Semantic startup summary enabled=%s provider=%s rerank_enabled=%s "
+        "background_embedding_enabled=%s provider_ready=%s readiness_reason=%s "
+        "max_queries_per_minute=%s max_writes_per_minute=%s",
+        semantic_startup_summary["enabled"],
+        semantic_startup_summary["provider"],
+        semantic_startup_summary["rerank_enabled"],
+        semantic_startup_summary["background_embedding_enabled"],
+        semantic_startup_summary["provider_ready"],
+        semantic_startup_summary["provider_readiness_reason"],
+        semantic_startup_summary["max_queries_per_minute"],
+        semantic_startup_summary["max_writes_per_minute"],
+    )
     memory_manager.set_active_session_id(runtime_session_id)
     logger.info("Assigned runtime memory session_id=%s", runtime_session_id)
 

@@ -36,6 +36,10 @@ class _FakeMemoryManager:
             "embedding_total_memories": 6,
             "embedding_ready_memories": 5,
             "embedding_coverage_pct": 83.33,
+            "pending_count": 4,
+            "retry_blocked_count": 2,
+            "consecutive_failures": 1,
+            "oldest_pending_age_ms": 1250,
         }
 
 
@@ -63,3 +67,5 @@ def test_get_session_health_passes_scope_and_active_session_to_memory_metrics() 
     assert api._memory_manager.calls == [("session_local", "session-abc")]
     assert health["memory_retrieval"]["embedding_coverage_pct"] == 83.33
     assert health["memory_retrieval"]["retrieval_count"] == 3
+    assert health["memory_retrieval"]["pending_count"] == 4
+    assert health["memory_retrieval"]["oldest_pending_age_ms"] == 1250
