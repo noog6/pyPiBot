@@ -343,6 +343,94 @@ class MemoryStore:
             ) in cursor.fetchall()
         }
 
+    def enqueue_memory_embedding(self, *, memory_id: int, updated_at: int | None = None) -> None:
+        """Mark a memory embedding row as pending without blocking memory writes."""
+
+        self.upsert_memory_embedding(
+            memory_id=memory_id,
+            model_id="",
+            dim=0,
+            vector=b"",
+            vector_norm=None,
+            updated_at=updated_at,
+            status="pending",
+            error=None,
+        )
+
+    def list_recent_memories_missing_embeddings(self, *, limit: int) -> list[int]:
+        bounded_limit = max(1, int(limit))
+        cursor = self._conn.cursor()
+        cursor.execute(
+            """
+            SELECT m.memory_id
+            FROM memories AS m
+            LEFT JOIN memory_embeddings AS e ON e.memory_id = m.memory_id
+            WHERE e.memory_id IS NULL
+            ORDER BY m.timestamp DESC, m.memory_id DESC
+            LIMIT ?
+            """,
+            (bounded_limit,),
+        )
+        return [int(memory_id) for (memory_id,) in cursor.fetchall()]
+
+    def fetch_pending_memories_for_embedding(self, *, limit: int) -> list[MemoryEntry]:
+        """Return pending memory rows that still need embeddings."""
+
+        bounded_limit = max(1, int(limit))
+        cursor = self._conn.cursor()
+        cursor.execute(
+            """
+            SELECT
+                m.memory_id,
+                m.timestamp,
+                m.user_id,
+                m.session_id,
+                m.content,
+                m.tags,
+                m.importance,
+                m.source,
+                m.pinned,
+                m.needs_review
+            FROM memories AS m
+            INNER JOIN memory_embeddings AS e ON e.memory_id = m.memory_id
+            WHERE e.status = 'pending'
+            ORDER BY COALESCE(e.updated_at, m.timestamp) ASC, m.memory_id ASC
+            LIMIT ?
+            """,
+            (bounded_limit,),
+        )
+
+        entries: list[MemoryEntry] = []
+        for row in cursor.fetchall():
+            (
+                memory_id,
+                timestamp,
+                user_id_value,
+                session_id_value,
+                content,
+                tags_json,
+                importance,
+                source,
+                pinned,
+                needs_review,
+            ) = row
+            tags = json.loads(tags_json) if tags_json else []
+            entries.append(
+                MemoryEntry(
+                    memory_id=int(memory_id),
+                    timestamp=int(timestamp),
+                    user_id=user_id_value,
+                    session_id=session_id_value,
+                    content=content,
+                    tags=tags,
+                    importance=int(importance),
+                    source=(source or "manual_tool"),
+                    pinned=bool(pinned),
+                    needs_review=bool(needs_review),
+                )
+            )
+        return entries
+
     def delete_memory_embedding(self, *, memory_id: int) -> bool:
         with self._lock:
             cursor = self._conn.execute(

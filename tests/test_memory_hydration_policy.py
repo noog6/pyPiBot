@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from services.memory_manager import MemoryManager, MemoryScope
 from storage.memories import MemoryStore
 from ai.realtime_api import RealtimeAPI
@@ -13,6 +15,8 @@ def _make_manager(store: MemoryStore) -> MemoryManager:
     manager._active_session_id = None
     manager._default_scope = MemoryScope.USER_GLOBAL
     manager._store = store
+    manager._embedding_worker = None
+    manager._semantic_config = SimpleNamespace(enabled=False, background_embedding_enabled=False)
     manager._last_turn_retrieval_at = {}
     manager._auto_pin_min_importance = 5
     manager._auto_pin_requires_review = True
