@@ -231,3 +231,70 @@ def test_memory_store_shared_connection_handles_interleaved_read_write_threads(
     assert writer.is_alive() is False
     assert reader.is_alive() is False
     assert errors == []
+
+
+def test_get_embedding_coverage_counts_applies_scope_predicates(tmp_path: Path, monkeypatch) -> None:
+    _configure(tmp_path, monkeypatch)
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+
+    global_ready = store.append_memory(
+        content="global-ready",
+        tags=["scope"],
+        importance=3,
+        user_id="u1",
+    )
+    global_pending = store.append_memory(
+        content="global-pending",
+        tags=["scope"],
+        importance=3,
+        user_id="u1",
+    )
+    session_ready = store.append_memory(
+        content="session-ready",
+        tags=["scope"],
+        importance=3,
+        user_id="u1",
+        session_id="s1",
+    )
+    session_other = store.append_memory(
+        content="session-other",
+        tags=["scope"],
+        importance=3,
+        user_id="u1",
+        session_id="s2",
+    )
+    store.append_memory(
+        content="global-reviewed",
+        tags=["scope"],
+        importance=3,
+        user_id="u1",
+        needs_review=True,
+    )
+    store.append_memory(
+        content="other-user-global",
+        tags=["scope"],
+        importance=3,
+        user_id="u2",
+    )
+
+    store.upsert_memory_embedding(
+        memory_id=global_ready.memory_id,
+        model_id="m",
+        dim=2,
+        vector=b"ok",
+        status="ready",
+    )
+    store.enqueue_memory_embedding(memory_id=global_pending.memory_id)
+    store.upsert_memory_embedding(
+        memory_id=session_ready.memory_id,
+        model_id="m",
+        dim=2,
+        vector=b"ok",
+        status="ready",
+    )
+    store.enqueue_memory_embedding(memory_id=session_other.memory_id)
+
+    assert store.get_embedding_coverage_counts(user_id="u1", scope="user_global") == (2, 1)
+    assert store.get_embedding_coverage_counts(user_id="u1", scope="session_local", session_id="s1") == (1, 1)
+    assert store.get_embedding_coverage_counts(user_id="u1", scope="session_local", session_id="s2") == (1, 0)
+    assert store.get_embedding_coverage_counts(user_id="u1", scope="session_local", session_id=None) == (0, 0)
