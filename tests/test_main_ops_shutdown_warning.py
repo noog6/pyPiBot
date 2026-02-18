@@ -185,3 +185,33 @@ def test_main_stops_ops_orchestrator_before_other_teardown(monkeypatch) -> None:
     assert exit_code == 0
     assert stop_order[0] == "ops"
     assert set(stop_order[1:]) == {"camera", "motion", "imu", "battery"}
+
+
+def test_main_logs_semantic_memory_state_at_startup(monkeypatch) -> None:
+    infos: list[str] = []
+
+    def capture_info(message: str, *args) -> None:
+        infos.append(message % args if args else message)
+
+    monkeypatch.setattr(main.ConfigController, "get_instance", lambda: _FakeConfigController())
+    monkeypatch.setattr(main.StorageController, "get_instance", lambda: _FakeStorageController())
+    monkeypatch.setattr(main.MemoryManager, "get_instance", lambda: _FakeMemoryManager())
+    monkeypatch.setattr(main, "RealtimeAPI", _FakeRealtimeAPI)
+    monkeypatch.setattr(main.MotionController, "get_instance", lambda: _FakeMotionController())
+    monkeypatch.setattr(main.CameraController, "get_instance", lambda: _FakeCameraController())
+    monkeypatch.setattr(main.ImuMonitor, "get_instance", lambda: _FakeMonitor())
+    monkeypatch.setattr(main.BatteryMonitor, "get_instance", lambda: _FakeMonitor())
+    monkeypatch.setattr(main.OpsOrchestrator, "get_instance", lambda: _FakeOpsOrchestrator())
+    monkeypatch.setattr(main, "suppress_noisy_stderr", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr(
+        main,
+        "inspect_memory_embeddings",
+        lambda _config: {"enabled": True, "table_exists": False},
+    )
+    monkeypatch.setattr(main.logger, "info", capture_info)
+
+    exit_code = main.main([])
+
+    assert exit_code == 0
+    assert "Semantic memory enabled=True" in infos
+    assert "Semantic embeddings table available=False" in infos
