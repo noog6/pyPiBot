@@ -937,6 +937,7 @@ class MemoryManager:
             "selected_count": 0,
             "scope": None,
             "cooldown_skipped": False,
+            "cooldown_consumed": False,
             "fallback_reason": None,
             "latency_ms": 0,
             "dedupe_count": 0,
@@ -999,7 +1000,6 @@ class MemoryManager:
                 break
 
         if not entries:
-            self._last_turn_retrieval_at[cooldown_key] = timestamp
             self._last_turn_retrieval_debug["mode"] = "empty"
             return None
 
@@ -1015,7 +1015,6 @@ class MemoryManager:
             scored_entries.append((score, entry))
 
         if not scored_entries:
-            self._last_turn_retrieval_at[cooldown_key] = timestamp
             self._last_turn_retrieval_debug["mode"] = "filtered_empty"
             return None
 
@@ -1192,7 +1191,6 @@ class MemoryManager:
             seen_contents.append(candidate_summary.content)
             used_chars += candidate_chars
 
-        self._last_turn_retrieval_at[cooldown_key] = timestamp
         latency_ms = int((time.monotonic() - started_at) * 1000)
         self._retrieval_total_count += 1
         self._retrieval_total_latency_ms += latency_ms
@@ -1204,6 +1202,8 @@ class MemoryManager:
         self._last_turn_retrieval_debug["latency_ms"] = latency_ms
         if not selected:
             return None
+        self._last_turn_retrieval_at[cooldown_key] = timestamp
+        self._last_turn_retrieval_debug["cooldown_consumed"] = True
         return MemoryBrief(
             items=selected,
             total_chars=used_chars,
