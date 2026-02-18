@@ -923,6 +923,9 @@ class MemoryManager:
             "lexical_candidate_count": 0,
             "semantic_candidate_count": 0,
             "semantic_scored_count": 0,
+            "candidates_without_ready_embedding": 0,
+            "candidates_below_influence_threshold": 0,
+            "candidates_semantic_applied": 0,
             "selected_count": 0,
             "scope": None,
             "cooldown_skipped": False,
@@ -1047,6 +1050,8 @@ class MemoryManager:
                         embeddings = self._store.fetch_embeddings_for_memories(memory_ids=semantic_memory_ids)
                         hybrid_pool: list[tuple[float, MemoryEntry]] = []
                         semantic_scored_count = 0
+                        candidates_without_ready_embedding = 0
+                        candidates_below_influence_threshold = 0
                         for lexical_score, entry in semantic_pool:
                             embedding = embeddings.get(entry.memory_id)
                             semantic_score = 0.0
@@ -1064,6 +1069,10 @@ class MemoryManager:
                                 if cosine is not None and cosine >= influence_threshold:
                                     semantic_score = cosine
                                     semantic_scored_count += 1
+                                else:
+                                    candidates_below_influence_threshold += 1
+                            else:
+                                candidates_without_ready_embedding += 1
                             hybrid_pool.append((lexical_score + semantic_score, entry))
 
                         reranked_pool = sorted(
@@ -1077,6 +1086,9 @@ class MemoryManager:
                                 "semantic_applied": True,
                                 "semantic_pool_size": semantic_limit,
                                 "semantic_scored_count": semantic_scored_count,
+                                "candidates_without_ready_embedding": candidates_without_ready_embedding,
+                                "candidates_below_influence_threshold": candidates_below_influence_threshold,
+                                "candidates_semantic_applied": semantic_scored_count,
                             }
                         )
                 else:
