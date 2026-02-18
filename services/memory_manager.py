@@ -264,7 +264,7 @@ class MemoryManager:
         self._embedding_provider: EmbeddingProvider = build_embedding_provider(config)
         if self._semantic_config.enabled and self._semantic_config.background_embedding_enabled:
             self._embedding_worker = MemoryEmbeddingWorker(store=self._store)
-        self._last_turn_retrieval_at: dict[tuple[str, MemoryScope], float] = {}
+        self._last_turn_retrieval_at: dict[tuple[str, MemoryScope, str | None], float] = {}
         self._last_turn_retrieval_debug: dict[str, object] = {}
         self._retrieval_total_count = 0
         self._retrieval_total_latency_ms = 0.0
@@ -610,7 +610,7 @@ class MemoryManager:
         )
 
         timestamp = now_monotonic if now_monotonic is not None else time.monotonic()
-        cooldown_key = (effective_user_id, resolved_scope)
+        cooldown_key = (effective_user_id, resolved_scope, resolved_session_id)
         self._last_turn_retrieval_debug["scope"] = resolved_scope.value
         if cooldown_s > 0.0:
             last_retrieval = self._last_turn_retrieval_at.get(cooldown_key)
