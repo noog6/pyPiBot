@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from enum import Enum
+import logging
 import math
 import re
 import struct
@@ -28,6 +29,7 @@ STALE_MEMORY_MAX_AGE_S = 60.0 * 60.0 * 24.0 * 365.0
 NEAR_DUPLICATE_THRESHOLD = 0.75
 NEAR_DUPLICATE_CHAR_RATIO = 0.9
 WORD_RE = re.compile(r"[a-zA-Z0-9]{2,}")
+logger = logging.getLogger(__name__)
 
 
 class MemoryScope(str, Enum):
@@ -270,6 +272,7 @@ class MemoryManager:
             self._embedding_worker = MemoryEmbeddingWorker(store=self._store)
         self._last_turn_retrieval_at: dict[tuple[str, MemoryScope, str | None], float] = {}
         self._last_turn_retrieval_debug: dict[str, object] = {}
+        self._last_semantic_dedupe_debug: dict[str, object] = {}
         self._retrieval_total_count = 0
         self._retrieval_total_latency_ms = 0.0
         self._retrieval_semantic_attempt_count = 0
@@ -311,6 +314,11 @@ class MemoryManager:
         """Return internal retrieval metadata for debugging and audit logs."""
 
         return dict(self._last_turn_retrieval_debug)
+
+    def get_last_semantic_dedupe_debug_metadata(self) -> dict[str, object]:
+        """Return semantic dedupe metadata for diagnostics."""
+
+        return dict(self._last_semantic_dedupe_debug)
 
     def get_retrieval_health_metrics(self) -> dict[str, float | int]:
         """Return retrieval counters for diagnostics and health summaries."""
@@ -490,6 +498,12 @@ class MemoryManager:
         session_id: str | None,
         source: str,
     ) -> MemoryEntry | None:
+        self._last_semantic_dedupe_debug = {
+            "enabled": False,
+            "status": "skipped",
+            "error_code": None,
+            "error_class": None,
+        }
         if not self._semantic_config.enabled:
             return None
         if source == "manual_tool" and not self._auto_reflection_dedupe_apply_to_manual_tool:
@@ -498,6 +512,7 @@ class MemoryManager:
             return None
         if not self._auto_reflection_semantic_dedupe_enabled:
             return None
+        self._last_semantic_dedupe_debug["enabled"] = True
 
         threshold = self._semantic_config.dedupe_strong_match_cosine
         if threshold is None:
@@ -517,13 +532,37 @@ class MemoryManager:
         if not recent_entries:
             return None
 
-        candidate_embedding = self._embed_text_with_semantic_policy(text=content, operation="write")
+        try:
+            candidate_embedding = self._embed_text_with_semantic_policy(text=content, operation="write")
+        except Exception as exc:  # noqa: BLE001
+            self._last_semantic_dedupe_debug.update(
+                {
+                    "status": "provider_error",
+                    "error_code": "embedding_provider_exception",
+                    "error_class": exc.__class__.__name__,
+                }
+            )
+            logger.warning(
+                "Semantic dedupe embedding failed; proceeding without duplicate match.",
+                extra={
+                    "error_code": "embedding_provider_exception",
+                    "error_class": exc.__class__.__name__,
+                    "source": source,
+                },
+            )
+            return None
+
+        self._last_semantic_dedupe_debug["status"] = "embedded"
         if (
             candidate_embedding.status != "ready"
             or candidate_embedding.dimension <= 0
             or not candidate_embedding.vector
             or float(candidate_embedding.vector_norm or 0.0) <= 0.0
         ):
+            error_code = getattr(candidate_embedding, "error_code", None)
+            if error_code:
+                self._last_semantic_dedupe_debug["error_code"] = str(error_code)
+            self._last_semantic_dedupe_debug["status"] = "embedding_not_ready"
             return None
 
         embeddings = self._store.fetch_embeddings_for_memories(
@@ -546,7 +585,9 @@ class MemoryManager:
                 strongest = (cosine, entry)
 
         if strongest is None:
+            self._last_semantic_dedupe_debug["status"] = "no_match"
             return None
+        self._last_semantic_dedupe_debug["status"] = "match"
         return strongest[1]
 
     def recall_memories(
