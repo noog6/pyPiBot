@@ -14,7 +14,7 @@ import time
 from types import SimpleNamespace
 
 from config import ConfigController
-from services.embedding_provider import EmbeddingProvider, build_embedding_provider
+from services.embedding_provider import EmbeddingProvider, NoopEmbeddingProvider, build_embedding_provider
 from services.memory_embedding_worker import MemoryEmbeddingWorker
 from storage.memories import MemoryEntry, MemoryStore
 
@@ -268,6 +268,10 @@ class MemoryManager:
         self._store = MemoryStore()
         self._embedding_worker: MemoryEmbeddingWorker | None = None
         self._embedding_provider: EmbeddingProvider = build_embedding_provider(config)
+        openai_cfg = semantic_cfg.get("openai") or {}
+        self._semantic_provider_enabled = {
+            "openai": bool(openai_cfg.get("enabled", False)),
+        }
         if self._semantic_config.enabled and self._semantic_config.background_embedding_enabled:
             self._embedding_worker = MemoryEmbeddingWorker(store=self._store)
         self._last_turn_retrieval_at: dict[tuple[str, MemoryScope, str | None], float] = {}
@@ -279,7 +283,37 @@ class MemoryManager:
         self._retrieval_semantic_error_count = 0
         self._embedding_coverage_cache_ttl_s = 60.0
         self._embedding_coverage_cache: dict[tuple[str, MemoryScope, str | None], dict[str, float | int]] = {}
+        semantic_active, semantic_reason = self._semantic_rerank_readiness()
+        logger.info("semantic_rerank_active=%s reason=%s", semantic_active, semantic_reason)
         MemoryManager._instance = self
+
+    def _is_semantic_provider_ready(self) -> tuple[bool, str]:
+        raw_provider = getattr(self._semantic_config, "provider", None)
+        provider_name = str(raw_provider).strip().lower() if raw_provider is not None else ""
+        if provider_name in {"none", "noop"}:
+            return False, "provider_not_configured"
+
+        provider_enabled = None
+        if provider_name:
+            provider_enabled = getattr(self, "_semantic_provider_enabled", {}).get(provider_name)
+            if provider_enabled is False:
+                return False, f"{provider_name}_provider_disabled"
+
+        provider = getattr(self, "_embedding_provider", None)
+        if provider is None:
+            return False, "provider_missing"
+        if isinstance(provider, NoopEmbeddingProvider):
+            return False, "provider_unavailable"
+        if not hasattr(provider, "embed_text"):
+            return False, "provider_missing_embed_text"
+        return True, "provider_ready"
+
+    def _semantic_rerank_readiness(self) -> tuple[bool, str]:
+        if not getattr(self._semantic_config, "enabled", False):
+            return False, "top_level_disabled"
+        if not getattr(self._semantic_config, "rerank_enabled", False):
+            return False, "rerank_disabled"
+        return self._is_semantic_provider_ready()
 
     @classmethod
     def get_instance(cls) -> "MemoryManager":
@@ -713,6 +747,7 @@ class MemoryManager:
         self._last_turn_retrieval_debug = {
             "mode": "none",
             "semantic_enabled": False,
+            "semantic_provider_ready": False,
             "semantic_attempted": False,
             "semantic_applied": False,
             "semantic_error": None,
@@ -790,8 +825,15 @@ class MemoryManager:
         )
         ordered = [item[1] for item in lexical_ordered]
 
-        semantic_enabled = self._semantic_config.enabled and self._semantic_config.rerank_enabled
+        semantic_provider_ready, semantic_readiness_reason = self._is_semantic_provider_ready()
+        semantic_enabled = (
+            self._semantic_config.enabled
+            and self._semantic_config.rerank_enabled
+            and semantic_provider_ready
+        )
         self._last_turn_retrieval_debug["semantic_enabled"] = semantic_enabled
+        self._last_turn_retrieval_debug["semantic_provider_ready"] = semantic_provider_ready
+        self._last_turn_retrieval_debug["semantic_readiness_reason"] = semantic_readiness_reason
         if semantic_enabled and lexical_ordered:
             self._retrieval_semantic_attempt_count += 1
             self._last_turn_retrieval_debug["semantic_attempted"] = True
@@ -864,6 +906,8 @@ class MemoryManager:
                 )
         elif semantic_enabled:
             self._last_turn_retrieval_debug["fallback_reason"] = "no_lexical_candidates"
+        elif self._semantic_config.enabled and self._semantic_config.rerank_enabled:
+            self._last_turn_retrieval_debug["fallback_reason"] = semantic_readiness_reason
         if self._last_turn_retrieval_debug.get("mode") == "none":
             self._last_turn_retrieval_debug["mode"] = "lexical"
             if semantic_enabled and not self._last_turn_retrieval_debug.get("fallback_reason"):

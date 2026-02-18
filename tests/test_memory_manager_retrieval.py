@@ -561,6 +561,65 @@ def test_retrieve_for_turn_semantic_disabled_keeps_lexical_path(tmp_path) -> Non
     assert metadata["semantic_attempted"] is False
 
 
+def test_retrieve_for_turn_top_level_semantic_enabled_but_provider_disabled_skips_semantic_attempt(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._semantic_config = SimpleNamespace(
+        enabled=True,
+        provider="openai",
+        rerank_enabled=True,
+        max_candidates_for_semantic=8,
+        min_similarity=0.0,
+        rerank_influence_min_cosine=0.0,
+        dedupe_strong_match_cosine=None,
+        background_embedding_enabled=False,
+        write_timeout_ms=75,
+        query_timeout_ms=40,
+        max_writes_per_minute=120,
+        max_queries_per_minute=240,
+    )
+    manager._semantic_provider_enabled = {"openai": False}
+    now_ms = _now_ms()
+
+    store.append_memory(
+        content="Remember project alpha milestones.",
+        tags=["work"],
+        importance=4,
+        user_id="default",
+        timestamp=now_ms - 2000,
+    )
+    store.append_memory(
+        content="Remember project alpha budget.",
+        tags=["work"],
+        importance=4,
+        user_id="default",
+        timestamp=now_ms - 1000,
+    )
+
+    class _ShouldNotBeCalledProvider:
+        def embed_text(self, text: str):
+            raise AssertionError("semantic provider should not be called when provider is disabled")
+
+    manager._embedding_provider = _ShouldNotBeCalledProvider()
+
+    brief = manager.retrieve_for_turn(
+        latest_user_utterance="project alpha",
+        user_id="default",
+        max_memories=2,
+        max_chars=300,
+    )
+
+    assert brief is not None
+    metadata = manager.get_last_turn_retrieval_debug_metadata()
+    assert metadata["semantic_enabled"] is False
+    assert metadata["semantic_provider_ready"] is False
+    assert metadata["semantic_attempted"] is False
+    assert metadata["fallback_reason"] == "openai_provider_disabled"
+
+    metrics = manager.get_retrieval_health_metrics()
+    assert metrics["semantic_provider_attempts"] == 0
+
+
 def test_retrieve_for_turn_semantic_fallback_when_query_embedding_not_ready(tmp_path) -> None:
     store = MemoryStore(db_path=tmp_path / "memories.db")
     manager = _make_memory_manager(store)
