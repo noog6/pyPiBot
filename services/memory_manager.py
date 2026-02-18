@@ -324,6 +324,12 @@ class MemoryManager:
         self._retrieval_total_latency_ms = 0.0
         self._retrieval_semantic_attempt_count = 0
         self._retrieval_semantic_error_count = 0
+        self._semantic_timeout_count = 0
+        self._semantic_timeout_consecutive_count = 0
+        self._semantic_timeout_backoff_until_monotonic = 0.0
+        self._semantic_timeout_backoff_activation_count = 0
+        self._semantic_timeout_backoff_threshold = 3
+        self._semantic_timeout_backoff_window_s = 5.0
         self._embedding_coverage_cache_ttl_s = 60.0
         self._embedding_coverage_cache: dict[tuple[str, MemoryScope, str | None], dict[str, float | int]] = {}
         self._embedding_backlog_last: dict[tuple[str, MemoryScope, str | None], int] = {}
@@ -504,12 +510,30 @@ class MemoryManager:
         backlog_delta = 0 if prior_backlog_total is None else int(backlog_total - prior_backlog_total)
         self._embedding_backlog_last[cache_key] = backlog_total
 
+        semantic_backoff_remaining_ms = max(
+            0,
+            int(
+                (
+                    float(getattr(self, "_semantic_timeout_backoff_until_monotonic", 0.0))
+                    - time.monotonic()
+                )
+                * 1000.0
+            ),
+        )
+
         metrics: dict[str, float | int] = {
             "retrieval_count": total,
             "average_retrieval_latency_ms": round(avg_latency_ms, 2),
             "semantic_provider_attempts": semantic_attempts,
             "semantic_provider_errors": semantic_errors,
             "semantic_provider_error_rate_pct": round(semantic_error_rate_pct, 2),
+            "semantic_timeout_count": int(getattr(self, "_semantic_timeout_count", 0)),
+            "semantic_timeout_consecutive_count": int(getattr(self, "_semantic_timeout_consecutive_count", 0)),
+            "semantic_timeout_backoff_activation_count": int(
+                getattr(self, "_semantic_timeout_backoff_activation_count", 0)
+            ),
+            "semantic_timeout_backoff_active": int(semantic_backoff_remaining_ms > 0),
+            "semantic_timeout_backoff_remaining_ms": semantic_backoff_remaining_ms,
             "embedding_total_memories": int(cached_coverage["total_memories"]),
             "embedding_ready_memories": int(cached_coverage["ready_embeddings"]),
             "embedding_coverage_pct": float(cached_coverage["coverage_pct"]),
@@ -687,6 +711,17 @@ class MemoryManager:
         if provider is None:
             provider = build_embedding_provider(ConfigController.get_instance().get_config())
 
+        now_monotonic = time.monotonic()
+        backoff_until = float(getattr(self, "_semantic_timeout_backoff_until_monotonic", 0.0))
+        if backoff_until > now_monotonic:
+            return SimpleNamespace(
+                status="unavailable",
+                dimension=0,
+                vector=b"",
+                vector_norm=None,
+                error_code="timeout_backoff",
+            )
+
         if not self._reserve_semantic_budget(operation=operation):
             return SimpleNamespace(
                 status="unavailable",
@@ -708,10 +743,22 @@ class MemoryManager:
         executor = self._get_embedding_executor()
         future = executor.submit(provider.embed_text, text)
         try:
-            return future.result(timeout=timeout_s)
+            result = future.result(timeout=timeout_s)
+            self._semantic_timeout_consecutive_count = 0
+            return result
         except FutureTimeoutError:
             future.cancel()
             self._shutdown_embedding_executor()
+            self._semantic_timeout_count = max(0, int(getattr(self, "_semantic_timeout_count", 0))) + 1
+            timeout_streak = max(0, int(getattr(self, "_semantic_timeout_consecutive_count", 0))) + 1
+            self._semantic_timeout_consecutive_count = timeout_streak
+            threshold = max(1, int(getattr(self, "_semantic_timeout_backoff_threshold", 3)))
+            if timeout_streak >= threshold:
+                window_s = max(0.1, float(getattr(self, "_semantic_timeout_backoff_window_s", 5.0)))
+                self._semantic_timeout_backoff_until_monotonic = time.monotonic() + window_s
+                self._semantic_timeout_backoff_activation_count = (
+                    max(0, int(getattr(self, "_semantic_timeout_backoff_activation_count", 0))) + 1
+                )
             return SimpleNamespace(
                 status="error",
                 dimension=0,
@@ -941,7 +988,24 @@ class MemoryManager:
             "latency_ms": 0,
             "dedupe_count": 0,
             "truncation_count": 0,
+            "semantic_timeout_count": int(getattr(self, "_semantic_timeout_count", 0)),
+            "semantic_timeout_consecutive_count": int(
+                getattr(self, "_semantic_timeout_consecutive_count", 0)
+            ),
+            "semantic_timeout_backoff_active": False,
+            "semantic_timeout_backoff_remaining_ms": 0,
+            "semantic_timeout_backoff_activation_count": int(
+                getattr(self, "_semantic_timeout_backoff_activation_count", 0)
+            ),
         }
+
+        now_for_backoff = time.monotonic()
+        backoff_until = float(getattr(self, "_semantic_timeout_backoff_until_monotonic", 0.0))
+        if backoff_until > now_for_backoff:
+            self._last_turn_retrieval_debug["semantic_timeout_backoff_active"] = True
+            self._last_turn_retrieval_debug["semantic_timeout_backoff_remaining_ms"] = int(
+                (backoff_until - now_for_backoff) * 1000.0
+            )
 
         clean_utterance = " ".join(latest_user_utterance.strip().split())
         if not clean_utterance:
