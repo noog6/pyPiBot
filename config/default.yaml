@@ -34,6 +34,22 @@ memory:
     downgrade_clear_pin: true
     downgrade_mark_needs_review: true
     apply_to_manual_tool: false
+  retention:
+    # Retention is applied by source and importance tier.
+    importance_tiers:
+      low: [1, 2]
+      medium: [3, 4]
+      high: [5]
+    max_age_days_by_source:
+      manual_tool:
+        low: 365
+      auto_reflection:
+        low: 60
+        medium: 180
+    # Keep strategic reviewed memories and pinned memories unless pruning is forced.
+    protect_review_approved_strategic: true
+    # Minimum rows deleted before VACUUM/optimize is triggered.
+    optimize_min_deleted_rows: 200
 
 # Two-tier hydration: tiny startup digest + per-turn retrieval
 memory_hydration:
