@@ -70,6 +70,7 @@ from services.memory_manager import (
     MemoryManager,
     MemoryScope,
     render_realtime_memory_brief_item,
+    render_startup_memory_digest_item,
 )
 from services.research import ResearchRequest, build_openai_service_or_null, has_research_intent
 from services.research.research_transcript import write_research_transcript
@@ -1083,9 +1084,7 @@ class RealtimeAPI:
             return None
         lines = ["Startup memory digest (stable user context):"]
         for index, item in enumerate(digest.items, start=1):
-            tags = f" tags=[{', '.join(item.tags)}]" if item.tags else ""
-            pin_state = " pinned" if item.pinned else ""
-            lines.append(f"{index}. (importance={item.importance}{pin_state}{tags}) {item.content}")
+            lines.append(render_startup_memory_digest_item(index=index, item=item))
         if digest.truncated:
             lines.append("Additional pinned memories were omitted due to startup digest limits.")
         return "\n".join(lines)
