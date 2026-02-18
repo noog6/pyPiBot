@@ -22,12 +22,22 @@ def _make_memory_manager(store: MemoryStore) -> MemoryManager:
         rerank_enabled=False,
         max_candidates_for_semantic=64,
         min_similarity=0.25,
+        rerank_influence_min_cosine=0.25,
+        dedupe_strong_match_cosine=None,
         background_embedding_enabled=False,
     )
     manager._last_turn_retrieval_at = {}
     manager._last_turn_retrieval_debug = {}
     manager._auto_pin_min_importance = 5
     manager._auto_pin_requires_review = True
+    manager._auto_reflection_semantic_dedupe_enabled = False
+    manager._auto_reflection_dedupe_recent_limit = 24
+    manager._auto_reflection_dedupe_high_risk_cosine = 0.9
+    manager._auto_reflection_dedupe_policy = "skip_write"
+    manager._auto_reflection_dedupe_importance = 2
+    manager._auto_reflection_dedupe_clear_pin = True
+    manager._auto_reflection_dedupe_needs_review = True
+    manager._auto_reflection_dedupe_apply_to_manual_tool = False
     manager._embedding_provider = None
     return manager
 
@@ -214,6 +224,8 @@ def test_retrieve_for_turn_semantic_reranks_within_lexical_pool(tmp_path) -> Non
         rerank_enabled=True,
         max_candidates_for_semantic=2,
         min_similarity=0.0,
+        rerank_influence_min_cosine=0.0,
+        dedupe_strong_match_cosine=None,
         background_embedding_enabled=False,
     )
     now_ms = _now_ms()
@@ -293,6 +305,8 @@ def test_retrieve_for_turn_semantic_unavailable_falls_back_to_lexical(tmp_path) 
         rerank_enabled=True,
         max_candidates_for_semantic=8,
         min_similarity=0.0,
+        rerank_influence_min_cosine=0.0,
+        dedupe_strong_match_cosine=None,
         background_embedding_enabled=False,
     )
     now_ms = _now_ms()
@@ -333,3 +347,67 @@ def test_retrieve_for_turn_semantic_unavailable_falls_back_to_lexical(tmp_path) 
     metadata = manager.get_last_turn_retrieval_debug_metadata()
     assert metadata["mode"] == "hybrid_fallback_lexical"
     assert metadata["semantic_error"] == "exception"
+
+
+def test_retrieve_for_turn_rerank_influence_min_cosine_gate(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._semantic_config = SimpleNamespace(
+        enabled=True,
+        rerank_enabled=True,
+        max_candidates_for_semantic=2,
+        min_similarity=0.0,
+        rerank_influence_min_cosine=0.95,
+        dedupe_strong_match_cosine=None,
+        background_embedding_enabled=False,
+    )
+    now_ms = _now_ms()
+
+    alpha = store.append_memory(
+        content="Project alpha budget notes.",
+        tags=["work"],
+        importance=4,
+        user_id="default",
+        timestamp=now_ms,
+    )
+    beta = store.append_memory(
+        content="Project alpha milestones checklist.",
+        tags=["work"],
+        importance=3,
+        user_id="default",
+        timestamp=now_ms - 1000,
+    )
+
+    store.upsert_memory_embedding(
+        memory_id=alpha.memory_id,
+        model_id="unit",
+        dim=2,
+        vector=_encode_vector([0.6, 0.0]),
+        vector_norm=0.6,
+    )
+    store.upsert_memory_embedding(
+        memory_id=beta.memory_id,
+        model_id="unit",
+        dim=2,
+        vector=_encode_vector([0.8, 0.0]),
+        vector_norm=0.8,
+    )
+
+    class _ReadyProvider:
+        def embed_text(self, text: str):
+            return SimpleNamespace(status="ready", dimension=2, vector=_encode_vector([1.0, 0.0]), vector_norm=1.0)
+
+    manager._embedding_provider = _ReadyProvider()
+
+    brief = manager.retrieve_for_turn(
+        latest_user_utterance="project alpha",
+        user_id="default",
+        max_memories=2,
+        max_chars=300,
+    )
+
+    assert brief is not None
+    assert [item.content for item in brief.items] == [
+        "Project alpha budget notes.",
+        "Project alpha milestones checklist.",
+    ]

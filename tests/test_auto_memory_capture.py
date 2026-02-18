@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import struct
+from types import SimpleNamespace
 
 from ai.realtime_api import RealtimeAPI
 from ai.tools import function_map
@@ -16,9 +18,19 @@ def _make_memory_manager(store: MemoryStore) -> MemoryManager:
     manager._active_session_id = None
     manager._default_scope = MemoryScope.USER_GLOBAL
     manager._store = store
+    manager._embedding_worker = None
     manager._last_turn_retrieval_at = {}
+    manager._semantic_config = SimpleNamespace(enabled=False, dedupe_strong_match_cosine=None)
     manager._auto_pin_min_importance = 5
     manager._auto_pin_requires_review = True
+    manager._auto_reflection_semantic_dedupe_enabled = False
+    manager._auto_reflection_dedupe_recent_limit = 24
+    manager._auto_reflection_dedupe_high_risk_cosine = 0.9
+    manager._auto_reflection_dedupe_policy = "skip_write"
+    manager._auto_reflection_dedupe_importance = 2
+    manager._auto_reflection_dedupe_clear_pin = True
+    manager._auto_reflection_dedupe_needs_review = True
+    manager._auto_reflection_dedupe_apply_to_manual_tool = False
     return manager
 
 
@@ -86,3 +98,81 @@ def test_memory_source_metadata_persists_for_audit(tmp_path) -> None:
     memories = manager.recall_memories(query="ambient", scope=MemoryScope.USER_GLOBAL)
     assert memories
     assert memories[0].source == "auto_reflection"
+
+
+def _encode_vector(values: list[float]) -> bytes:
+    return b"".join(struct.pack("<f", value) for value in values)
+
+
+def test_auto_reflection_semantic_duplicate_skip_write_policy(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._semantic_config = SimpleNamespace(enabled=True, dedupe_strong_match_cosine=0.85)
+    manager._auto_reflection_semantic_dedupe_enabled = True
+
+    existing = store.append_memory(
+        content="User likes jazz while coding.",
+        tags=["music"],
+        importance=4,
+        user_id="default",
+        needs_review=False,
+    )
+    store.upsert_memory_embedding(
+        memory_id=existing.memory_id,
+        model_id="unit",
+        dim=2,
+        vector=_encode_vector([1.0, 0.0]),
+        vector_norm=1.0,
+    )
+
+    class _ReadyProvider:
+        def embed_text(self, text: str):
+            return SimpleNamespace(status="ready", dimension=2, vector=_encode_vector([1.0, 0.0]), vector_norm=1.0)
+
+    manager._embedding_provider = _ReadyProvider()
+
+    result = manager.remember_memory(
+        content="User prefers jazz while coding sessions.",
+        source="auto_reflection",
+        importance=4,
+    )
+
+    assert result.memory_id == existing.memory_id
+    assert len(store.search_memories(user_id="default", scope=MemoryScope.USER_GLOBAL, limit=10, review_state="all")) == 1
+
+
+def test_manual_tool_write_remains_authoritative_under_default_policy(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._semantic_config = SimpleNamespace(enabled=True, dedupe_strong_match_cosine=0.85)
+    manager._auto_reflection_semantic_dedupe_enabled = True
+
+    existing = store.append_memory(
+        content="User likes jazz while coding.",
+        tags=["music"],
+        importance=4,
+        user_id="default",
+        needs_review=False,
+    )
+    store.upsert_memory_embedding(
+        memory_id=existing.memory_id,
+        model_id="unit",
+        dim=2,
+        vector=_encode_vector([1.0, 0.0]),
+        vector_norm=1.0,
+    )
+
+    class _ReadyProvider:
+        def embed_text(self, text: str):
+            return SimpleNamespace(status="ready", dimension=2, vector=_encode_vector([1.0, 0.0]), vector_norm=1.0)
+
+    manager._embedding_provider = _ReadyProvider()
+
+    result = manager.remember_memory(
+        content="User prefers jazz while coding sessions.",
+        source="manual_tool",
+        importance=4,
+    )
+
+    assert result.memory_id != existing.memory_id
+    assert len(store.search_memories(user_id="default", scope=MemoryScope.USER_GLOBAL, limit=10, review_state="all")) == 2

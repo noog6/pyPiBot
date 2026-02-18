@@ -203,6 +203,8 @@ class MemorySemanticConfig:
     rerank_enabled: bool
     max_candidates_for_semantic: int
     min_similarity: float
+    rerank_influence_min_cosine: float
+    dedupe_strong_match_cosine: float | None
     background_embedding_enabled: bool
     write_timeout_ms: int
     query_timeout_ms: int
@@ -229,6 +231,15 @@ class MemoryManager:
         )
         self._auto_pin_min_importance = int(memory_cfg.get("auto_pin_min_importance", 5))
         self._auto_pin_requires_review = bool(memory_cfg.get("auto_pin_requires_review", True))
+        auto_dedupe_cfg = memory_cfg.get("auto_reflection_semantic_dedupe") or {}
+        self._auto_reflection_semantic_dedupe_enabled = bool(auto_dedupe_cfg.get("enabled", False))
+        self._auto_reflection_dedupe_recent_limit = int(auto_dedupe_cfg.get("recent_approved_limit", 24))
+        self._auto_reflection_dedupe_high_risk_cosine = float(auto_dedupe_cfg.get("high_risk_cosine", 0.90))
+        self._auto_reflection_dedupe_policy = str(auto_dedupe_cfg.get("on_high_risk", "skip_write")).strip().lower()
+        self._auto_reflection_dedupe_importance = int(auto_dedupe_cfg.get("downgrade_importance_to", 2))
+        self._auto_reflection_dedupe_clear_pin = bool(auto_dedupe_cfg.get("downgrade_clear_pin", True))
+        self._auto_reflection_dedupe_needs_review = bool(auto_dedupe_cfg.get("downgrade_mark_needs_review", True))
+        self._auto_reflection_dedupe_apply_to_manual_tool = bool(auto_dedupe_cfg.get("apply_to_manual_tool", False))
         semantic_cfg = config.get("memory_semantic") or {}
         self._semantic_config = MemorySemanticConfig(
             enabled=bool(semantic_cfg.get("enabled", False)),
@@ -236,6 +247,12 @@ class MemoryManager:
             rerank_enabled=bool(semantic_cfg.get("rerank_enabled", False)),
             max_candidates_for_semantic=int(semantic_cfg.get("max_candidates_for_semantic", 64)),
             min_similarity=float(semantic_cfg.get("min_similarity", 0.25)),
+            rerank_influence_min_cosine=float(semantic_cfg.get("rerank_influence_min_cosine", 0.25)),
+            dedupe_strong_match_cosine=(
+                float(semantic_cfg.get("dedupe_strong_match_cosine"))
+                if semantic_cfg.get("dedupe_strong_match_cosine") is not None
+                else None
+            ),
             background_embedding_enabled=bool(semantic_cfg.get("background_embedding_enabled", True)),
             write_timeout_ms=int(semantic_cfg.get("write_timeout_ms", 75)),
             query_timeout_ms=int(semantic_cfg.get("query_timeout_ms", 40)),
@@ -306,6 +323,27 @@ class MemoryManager:
         effective_pinned = bool(pinned or auto_pin)
         effective_review = bool(needs_review or (auto_pin and self._auto_pin_requires_review))
 
+        duplicate_match = self._find_semantic_duplicate(
+            content=normalized_content,
+            user_id=user_id if user_id is not None else self._active_user_id,
+            scope=resolved_scope,
+            session_id=resolved_session_id,
+            source=source,
+        )
+        if duplicate_match is not None:
+            if self._auto_reflection_dedupe_policy == "downgrade":
+                bounded_importance = _clamp(
+                    self._auto_reflection_dedupe_importance,
+                    MIN_IMPORTANCE,
+                    MAX_IMPORTANCE,
+                )
+                if self._auto_reflection_dedupe_clear_pin:
+                    effective_pinned = False
+                if self._auto_reflection_dedupe_needs_review:
+                    effective_review = True
+            else:
+                return duplicate_match
+
         entry = self._store.append_memory(
             content=normalized_content,
             tags=normalized_tags,
@@ -323,6 +361,77 @@ class MemoryManager:
                 # Embedding scheduling is best-effort and must never block writes.
                 pass
         return entry
+
+    def _find_semantic_duplicate(
+        self,
+        *,
+        content: str,
+        user_id: str,
+        scope: MemoryScope,
+        session_id: str | None,
+        source: str,
+    ) -> MemoryEntry | None:
+        if not self._semantic_config.enabled:
+            return None
+        if source == "manual_tool" and not self._auto_reflection_dedupe_apply_to_manual_tool:
+            return None
+        if source != "auto_reflection" and source != "manual_tool":
+            return None
+        if not self._auto_reflection_semantic_dedupe_enabled:
+            return None
+
+        threshold = self._semantic_config.dedupe_strong_match_cosine
+        if threshold is None:
+            threshold = self._auto_reflection_dedupe_high_risk_cosine
+        if threshold <= 0.0:
+            return None
+
+        recent_limit = _clamp(self._auto_reflection_dedupe_recent_limit, 1, 128)
+        recent_entries = self._store.search_memories(
+            query=None,
+            limit=recent_limit,
+            user_id=user_id,
+            scope=scope,
+            session_id=session_id,
+            review_state="approved",
+        )
+        if not recent_entries:
+            return None
+
+        provider = getattr(self, "_embedding_provider", None)
+        if provider is None:
+            provider = build_embedding_provider(ConfigController.get_instance().get_config())
+        candidate_embedding = provider.embed_text(content)
+        if (
+            candidate_embedding.status != "ready"
+            or candidate_embedding.dimension <= 0
+            or not candidate_embedding.vector
+            or float(candidate_embedding.vector_norm or 0.0) <= 0.0
+        ):
+            return None
+
+        embeddings = self._store.fetch_embeddings_for_memories(
+            memory_ids=[entry.memory_id for entry in recent_entries]
+        )
+        strongest: tuple[float, MemoryEntry] | None = None
+        for entry in recent_entries:
+            embedding = embeddings.get(entry.memory_id)
+            if embedding is None or embedding.status != "ready":
+                continue
+            cosine = _cosine_similarity_bytes(
+                query_vector=candidate_embedding.vector,
+                query_norm=float(candidate_embedding.vector_norm or 0.0),
+                entry_vector=embedding.vector,
+                entry_norm=float(embedding.vector_norm or 0.0),
+            )
+            if cosine is None or cosine < threshold:
+                continue
+            if strongest is None or cosine > strongest[0]:
+                strongest = (cosine, entry)
+
+        if strongest is None:
+            return None
+        return strongest[1]
 
     def recall_memories(
         self,
@@ -517,7 +626,11 @@ class MemoryManager:
                                     entry_vector=embedding.vector,
                                     entry_norm=float(embedding.vector_norm or 0.0),
                                 )
-                                if cosine is not None and cosine >= self._semantic_config.min_similarity:
+                                influence_threshold = max(
+                                    self._semantic_config.min_similarity,
+                                    self._semantic_config.rerank_influence_min_cosine,
+                                )
+                                if cosine is not None and cosine >= influence_threshold:
                                     semantic_score = cosine
                             hybrid_pool.append((lexical_score + semantic_score, entry))
 
