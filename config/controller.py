@@ -244,6 +244,10 @@ class ConfigController:
             1,
             int(memory_semantic_cfg.get("rolling_backfill_interval_idle_cycles", 15)),
         )
+        memory_semantic_cfg["max_embedding_retries"] = max(
+            1,
+            int(memory_semantic_cfg.get("max_embedding_retries", 8)),
+        )
         memory_semantic_cfg["write_timeout_ms"] = int(
             memory_semantic_cfg.get("write_timeout_ms", 75)
         )

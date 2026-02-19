@@ -87,6 +87,7 @@ memory_semantic:
   inline_embedding_on_write_when_background_disabled: false
   rolling_backfill_batch_size: 4
   rolling_backfill_interval_idle_cycles: 15
+  max_embedding_retries: 8
   write_timeout_ms: 75
   query_timeout_ms: 40
   max_writes_per_minute: 120
