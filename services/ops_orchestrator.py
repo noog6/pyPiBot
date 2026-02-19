@@ -44,6 +44,7 @@ class OpsOrchestrator:
             raise RuntimeError("You cannot create another OpsOrchestrator class")
 
         self._stop_event = threading.Event()
+        self._loop_wake_event = threading.Event()
         self._loop_thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._loop_period_s = 1.0
@@ -77,6 +78,7 @@ class OpsOrchestrator:
         self._tick_started_at: float | None = None
         self._active_probe_name: str | None = None
         self._probe_started_monotonic: float | None = None
+        self._shutdown_requested_at: float | None = None
         self._memory_maintenance_enabled = True
         self._memory_maintenance_interval_s = 6 * 3600.0
         self._memory_maintenance_optimize_every_runs = 4
@@ -98,6 +100,8 @@ class OpsOrchestrator:
             self._heartbeat_period_s = max(heartbeat_period_s, self._loop_period_s)
             self._next_heartbeat = time.monotonic() + self._heartbeat_period_s
             self._stop_event.clear()
+            self._loop_wake_event.clear()
+            self._shutdown_requested_at = None
             self._loop_thread = threading.Thread(target=self._loop, daemon=True)
             self._loop_thread.start()
 
@@ -106,7 +110,9 @@ class OpsOrchestrator:
         shutdown_started = time.monotonic()
         if self._loop_thread is not None:
             thread = self._loop_thread
+            self._shutdown_requested_at = time.monotonic()
             self._stop_event.set()
+            self._wake_loop()
             self._forced_shutdown_continuation = False
             first_wait_started = time.monotonic()
             try:
@@ -178,6 +184,8 @@ class OpsOrchestrator:
                 )
 
                 if grace_period_s > 0.0:
+                    self._wake_loop()
+                    time.sleep(0)
                     try:
                         self._loop_thread.join(timeout=grace_period_s)
                     except Exception as exc:
@@ -236,7 +244,10 @@ class OpsOrchestrator:
             self._network_probe_enabled = enabled
 
     def _loop(self) -> None:
-        while not self._stop_event.is_set():
+        while True:
+            if self._stop_event.is_set():
+                self._emit_shutdown_heartbeat()
+                break
             tick_started_at = time.monotonic()
             with self._lock:
                 self._loop_phase = "tick"
@@ -253,18 +264,20 @@ class OpsOrchestrator:
                     self._tick_started_at = None
                     self._active_probe_name = None
                     self._probe_started_monotonic = None
-            self._stop_event.wait(timeout=self._loop_period_s)
+            self._loop_wake_event.wait(timeout=self._loop_period_s)
+            self._loop_wake_event.clear()
 
     def _tick(self) -> None:
         now = time.monotonic()
         timestamp = time.time()
         probe_results = self._run_health_probes()
         changed, overall_status, details = self._apply_health_results(probe_results, now)
+        health_snapshot: HealthSnapshot | None = None
         with self._lock:
             self._counters.ticks += 1
             if changed or self._latest_health is None:
                 summary = self._summarize_health(overall_status, probe_results)
-                self._latest_health = HealthSnapshot(
+                health_snapshot = HealthSnapshot(
                     timestamp=timestamp,
                     status=overall_status,
                     summary=summary,
@@ -274,8 +287,11 @@ class OpsOrchestrator:
                         **details,
                     },
                 )
-                self._emit_health_snapshot(self._latest_health)
+                self._latest_health = health_snapshot
             self._mode = ModeState.ACTIVE
+
+        if health_snapshot is not None:
+            self._emit_health_snapshot(health_snapshot)
 
         self._maybe_run_micro_presence(now)
         self._maybe_run_memory_maintenance(now)
@@ -470,6 +486,20 @@ class OpsOrchestrator:
             with self._lock:
                 self._loop_phase = "tick"
                 self._probe_started_monotonic = None
+
+    def _wake_loop(self) -> None:
+        self._loop_wake_event.set()
+
+    def _emit_shutdown_heartbeat(self) -> None:
+        with self._lock:
+            self._loop_phase = "stopping"
+            shutdown_requested_at = self._shutdown_requested_at
+        timestamp = time.time()
+        self._emit_heartbeat(timestamp)
+        LOGGER.info(
+            "[Ops] Loop observed stop_event and emitted final heartbeat shutdown_requested_at=%s",
+            f"{shutdown_requested_at:.3f}" if shutdown_requested_at is not None else "n/a",
+        )
 
     def _apply_health_results(
         self,

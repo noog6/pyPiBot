@@ -223,3 +223,49 @@ def test_stop_loop_normal_shutdown_emits_info_without_warning(monkeypatch) -> No
     assert orchestrator.forced_shutdown_continuation() is False
     assert warning_messages == []
     assert any("Loop thread stopped cleanly" in message for message in info_messages)
+
+
+def test_stop_loop_retries_join_after_explicit_wake(monkeypatch) -> None:
+    orchestrator = _new_orchestrator()
+    wake_calls = 0
+
+    class FakeThread:
+        name = "fake-ops"
+        ident = 11
+
+        def __init__(self) -> None:
+            self.join_calls = 0
+
+        def join(self, timeout=None) -> None:
+            self.join_calls += 1
+
+        def is_alive(self) -> bool:
+            return self.join_calls < 2
+
+    fake_thread = FakeThread()
+    orchestrator._loop_thread = fake_thread  # type: ignore[assignment]
+
+    def capture_wake() -> None:
+        nonlocal wake_calls
+        wake_calls += 1
+
+    monkeypatch.setattr(orchestrator, "_wake_loop", capture_wake)
+
+    status = orchestrator.stop_loop(timeout_s=0.01, grace_period_s=0.02)
+
+    assert status == "stopped"
+    assert wake_calls == 2
+    assert orchestrator.forced_shutdown_continuation() is False
+
+
+def test_loop_emits_final_heartbeat_after_stop_request() -> None:
+    orchestrator = _new_orchestrator()
+    orchestrator._tick = lambda: None  # type: ignore[method-assign]
+    orchestrator.start_loop(loop_period_s=0.05, heartbeat_period_s=30.0)
+    time.sleep(0.06)
+
+    status = orchestrator.stop_loop(timeout_s=0.2, grace_period_s=0.05)
+
+    assert status == "stopped"
+    counters = orchestrator.get_counters()
+    assert counters.heartbeats >= 1

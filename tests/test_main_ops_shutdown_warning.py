@@ -85,6 +85,9 @@ class _FakeMonitor:
 
 
 class _FakeOpsOrchestrator:
+    def __init__(self, loop_alive: bool = True) -> None:
+        self._loop_alive = loop_alive
+
     def set_realtime_api(self, _realtime_api) -> None:
         return None
 
@@ -99,6 +102,9 @@ class _FakeOpsOrchestrator:
 
     def forced_shutdown_continuation(self) -> bool:
         return True
+
+    def is_loop_alive(self) -> bool:
+        return self._loop_alive
 
 
 def test_main_logs_warning_when_ops_shutdown_not_stopped(monkeypatch) -> None:
@@ -124,8 +130,9 @@ def test_main_logs_warning_when_ops_shutdown_not_stopped(monkeypatch) -> None:
     assert exit_code == 0
     assert (
         "Ops orchestrator shutdown incomplete "
-        "(status=timed_out forced_shutdown_continuation=True)"
+        "(status=timed_out forced_shutdown_continuation=True loop_alive=True)"
     ) in warnings
+    assert any("Ops orchestrator timed out. Follow-up:" in message for message in warnings)
 
 
 class _FakeInterruptingOpsOrchestrator(_FakeOpsOrchestrator):
@@ -157,8 +164,9 @@ def test_main_handles_keyboard_interrupt_while_stopping_ops(monkeypatch) -> None
     assert "Interrupted while stopping ops orchestrator; continuing shutdown." in warnings
     assert (
         "Ops orchestrator shutdown incomplete "
-        "(status=interrupted forced_shutdown_continuation=True)"
+        "(status=interrupted forced_shutdown_continuation=True loop_alive=True)"
     ) in warnings
+    assert not any("Ops orchestrator timed out. Follow-up:" in message for message in warnings)
 
 
 def test_main_stops_ops_orchestrator_before_other_teardown(monkeypatch) -> None:
