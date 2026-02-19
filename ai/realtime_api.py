@@ -1428,14 +1428,17 @@ class RealtimeAPI:
         query = str(getattr(request, "prompt", ""))
         source = context.get("source")
         fingerprint = self._build_research_request_fingerprint(request)
+        query_fingerprint = self._build_research_query_fingerprint(query)
         self._prior_research_permission_marker = {
             "granted_at": time.monotonic(),
             "prompt": request.prompt,
             "query": query,
             "source": source,
             "fingerprint": fingerprint,
+            "query_fingerprint": query_fingerprint,
         }
         self._record_research_permission_outcome(fingerprint, approved=True)
+        self._record_research_permission_outcome(query_fingerprint, approved=True)
 
     def _normalize_research_query_text(self, query: str) -> str:
         return " ".join((query or "").strip().lower().split())
@@ -1450,6 +1453,9 @@ class RealtimeAPI:
         }
         payload = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _build_research_query_fingerprint(self, query: str) -> str:
+        return self._build_research_fingerprint(query=query, source=None)
 
     def _build_research_request_fingerprint(self, request: ResearchRequest) -> str:
         context_value = getattr(request, "context", None)
@@ -1528,8 +1534,14 @@ class RealtimeAPI:
         if action.tool_name != "perform_research":
             return False
         action_fingerprint = self._build_research_args_fingerprint(action.tool_args)
+        action_query_fingerprint = self._build_research_query_fingerprint(
+            str(action.tool_args.get("query") or action.tool_args.get("prompt") or "")
+        )
         outcome = self._get_research_permission_outcome(action_fingerprint)
         if outcome is True:
+            return True
+        query_only_outcome = self._get_research_permission_outcome(action_query_fingerprint)
+        if query_only_outcome is True:
             return True
         marker = getattr(self, "_prior_research_permission_marker", None)
         if marker is None:
@@ -1543,6 +1555,13 @@ class RealtimeAPI:
             return False
         marker_fingerprint = marker.get("fingerprint")
         if isinstance(marker_fingerprint, str) and marker_fingerprint == action_fingerprint:
+            self._prior_research_permission_marker = None
+            return True
+        marker_query_fingerprint = marker.get("query_fingerprint")
+        if (
+            isinstance(marker_query_fingerprint, str)
+            and marker_query_fingerprint == action_query_fingerprint
+        ):
             self._prior_research_permission_marker = None
             return True
         if not self._is_research_fingerprint_equivalent_for_grace_window(action.tool_args, marker):

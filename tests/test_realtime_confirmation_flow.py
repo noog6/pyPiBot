@@ -1544,6 +1544,9 @@ def test_accepted_intent_permission_short_circuits_governance_confirmation_when_
 
     api._create_confirmation_token = _create_confirmation_token
 
+    governance_calls = {"build": 0, "review": 0}
+    api._debug_governance_decisions = True
+
     action = type(
         "Action",
         (),
@@ -1554,12 +1557,14 @@ def test_accepted_intent_permission_short_circuits_governance_confirmation_when_
             "summary": lambda self: "summary",
         },
     )()
-    api._governance = type(
-        "Gov",
-        (),
-        {
-            "build_action_packet": lambda *args, **kwargs: action,
-            "review": lambda *args, **kwargs: type(
+    class _Gov:
+        def build_action_packet(self, *args, **kwargs):
+            governance_calls["build"] += 1
+            return action
+
+        def review(self, *args, **kwargs):
+            governance_calls["review"] += 1
+            return type(
                 "Decision",
                 (),
                 {
@@ -1568,9 +1573,9 @@ def test_accepted_intent_permission_short_circuits_governance_confirmation_when_
                     "status": "needs_confirmation",
                     "reason": "expensive read",
                 },
-            )(),
-        },
-    )()
+            )()
+
+    api._governance = _Gov()
 
     executed: list[str] = []
 
@@ -1590,10 +1595,18 @@ def test_accepted_intent_permission_short_circuits_governance_confirmation_when_
 
     assert asyncio.run(api._maybe_handle_research_permission_response("yes", _Ws())) is True
 
-    asyncio.run(api.handle_function_call({}, _Ws()))
+    with patch("ai.realtime_api.logger.info") as mock_info:
+        asyncio.run(api.handle_function_call({}, _Ws()))
+
+    logged = [call.args[0] % call.args[1:] for call in mock_info.call_args_list if call.args]
 
     assert executed == ["done"]
     assert created_tokens == []
+    assert governance_calls == {"build": 1, "review": 1}
+    assert any(
+        "Function call outcome: executing tool | tool=perform_research call_id=call_research_without_source" in line
+        for line in logged
+    )
 
 
 def test_handle_function_call_replays_stable_blocked_intent_permission_output_for_same_fingerprint() -> None:
