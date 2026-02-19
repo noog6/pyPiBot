@@ -1526,6 +1526,76 @@ def test_accepted_intent_permission_short_circuits_governance_confirmation_for_s
     assert created_tokens == []
 
 
+def test_accepted_intent_permission_short_circuits_governance_confirmation_when_function_call_omits_source() -> None:
+    api = _make_api_stub()
+    api.function_call = {"name": "perform_research", "call_id": "call_research_without_source"}
+    api.function_call_args = '{"query":"Status"}'
+    api._extract_dry_run_flag = lambda args: False
+    api._is_duplicate_tool_call = lambda *args, **kwargs: False
+    api._is_suppressed_after_confirmation_timeout = lambda *args, **kwargs: False
+    api._tool_execution_cooldown_remaining = lambda: 0.0
+    api._stage_action = lambda action: {"valid": True}
+
+    created_tokens: list[str] = []
+
+    def _create_confirmation_token(*args, **kwargs):
+        created_tokens.append(kwargs["kind"])
+        raise AssertionError("tool_governance token should not be created for approved intent fingerprint")
+
+    api._create_confirmation_token = _create_confirmation_token
+
+    action = type(
+        "Action",
+        (),
+        {
+            "id": "call_research_without_source",
+            "tool_name": "perform_research",
+            "tool_args": {"query": "Status"},
+            "summary": lambda self: "summary",
+        },
+    )()
+    api._governance = type(
+        "Gov",
+        (),
+        {
+            "build_action_packet": lambda *args, **kwargs: action,
+            "review": lambda *args, **kwargs: type(
+                "Decision",
+                (),
+                {
+                    "approved": False,
+                    "needs_confirmation": True,
+                    "status": "needs_confirmation",
+                    "reason": "expensive read",
+                },
+            )(),
+        },
+    )()
+
+    executed: list[str] = []
+
+    async def _execute_action(*args, **kwargs):
+        executed.append("done")
+
+    api._execute_action = _execute_action
+    api._pending_confirmation_token = _build_confirmation_token(
+        kind="research_permission",
+        request=type(
+            "Req",
+            (),
+            {"prompt": "Status", "context": {"source": "input_audio_transcription"}},
+        )(),
+    )
+    api._dispatch_research_request = lambda *_args, **_kwargs: asyncio.sleep(0)
+
+    assert asyncio.run(api._maybe_handle_research_permission_response("yes", _Ws())) is True
+
+    asyncio.run(api.handle_function_call({}, _Ws()))
+
+    assert executed == ["done"]
+    assert created_tokens == []
+
+
 def test_handle_function_call_replays_stable_blocked_intent_permission_output_for_same_fingerprint() -> None:
     api = _make_api_stub()
     fingerprint = api._build_research_fingerprint(query="status", source="user_text")
