@@ -1423,10 +1423,16 @@ class RealtimeAPI:
         }
 
     def _mark_prior_research_permission_granted(self, request: ResearchRequest) -> None:
+        context_value = getattr(request, "context", None)
+        context = context_value if isinstance(context_value, dict) else {}
+        query = str(getattr(request, "prompt", ""))
+        source = context.get("source")
         fingerprint = self._build_research_request_fingerprint(request)
         self._prior_research_permission_marker = {
             "granted_at": time.monotonic(),
             "prompt": request.prompt,
+            "query": query,
+            "source": source,
             "fingerprint": fingerprint,
         }
         self._record_research_permission_outcome(fingerprint, approved=True)
@@ -1434,10 +1440,13 @@ class RealtimeAPI:
     def _normalize_research_query_text(self, query: str) -> str:
         return " ".join((query or "").strip().lower().split())
 
+    def _normalize_research_source_text(self, source: str | None) -> str:
+        return str(source or "").strip().lower()
+
     def _build_research_fingerprint(self, *, query: str, source: str | None) -> str:
         normalized = {
             "query": self._normalize_research_query_text(query),
-            "source": str(source or "").strip().lower(),
+            "source": self._normalize_research_source_text(source),
         }
         payload = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -1456,6 +1465,26 @@ class RealtimeAPI:
             query=str(args.get("query") or args.get("prompt") or ""),
             source=context.get("source"),
         )
+
+    def _is_research_fingerprint_equivalent_for_grace_window(
+        self,
+        action_args: dict[str, Any],
+        marker: dict[str, Any],
+    ) -> bool:
+        marker_query = self._normalize_research_query_text(str(marker.get("query") or marker.get("prompt") or ""))
+        action_query = self._normalize_research_query_text(
+            str(action_args.get("query") or action_args.get("prompt") or "")
+        )
+        if not marker_query or marker_query != action_query:
+            return False
+        marker_source = self._normalize_research_source_text(marker.get("source"))
+        action_context = (
+            action_args.get("context") if isinstance(action_args.get("context"), dict) else {}
+        )
+        action_source = self._normalize_research_source_text(action_context.get("source"))
+        if marker_source and action_source:
+            return marker_source == action_source
+        return True
 
     def _prune_research_permission_outcomes(self, now: float | None = None) -> None:
         now_ts = time.monotonic() if now is None else now
@@ -1513,7 +1542,10 @@ class RealtimeAPI:
             self._prior_research_permission_marker = None
             return False
         marker_fingerprint = marker.get("fingerprint")
-        if isinstance(marker_fingerprint, str) and marker_fingerprint != action_fingerprint:
+        if isinstance(marker_fingerprint, str) and marker_fingerprint == action_fingerprint:
+            self._prior_research_permission_marker = None
+            return True
+        if not self._is_research_fingerprint_equivalent_for_grace_window(action.tool_args, marker):
             return False
         self._prior_research_permission_marker = None
         return True
