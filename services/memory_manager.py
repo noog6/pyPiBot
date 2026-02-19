@@ -500,15 +500,20 @@ class MemoryManager:
 
         assert cached_coverage is not None
 
-        pending_embeddings, missing_embeddings = self._store.get_embedding_backlog_counts(
+        pending_embeddings, missing_embeddings, error_embeddings = self._store.get_embedding_backlog_counts(
             user_id=self._active_user_id,
             scope=normalized_scope.value,
             session_id=resolved_session_id,
         )
-        backlog_total = int(pending_embeddings + missing_embeddings)
+        backlog_total_legacy = int(pending_embeddings + missing_embeddings)
+        backlog_total_with_errors = int(backlog_total_legacy + error_embeddings)
         prior_backlog_total = self._embedding_backlog_last.get(cache_key)
-        backlog_delta = 0 if prior_backlog_total is None else int(backlog_total - prior_backlog_total)
-        self._embedding_backlog_last[cache_key] = backlog_total
+        backlog_delta = (
+            0
+            if prior_backlog_total is None
+            else int(backlog_total_with_errors - prior_backlog_total)
+        )
+        self._embedding_backlog_last[cache_key] = backlog_total_with_errors
 
         semantic_backoff_remaining_ms = max(
             0,
@@ -539,7 +544,9 @@ class MemoryManager:
             "embedding_coverage_pct": float(cached_coverage["coverage_pct"]),
             "embedding_pending_memories": int(pending_embeddings),
             "embedding_missing_memories": int(missing_embeddings),
-            "embedding_backlog_memories": backlog_total,
+            "embedding_error_memories": int(error_embeddings),
+            "embedding_backlog_memories": backlog_total_legacy,
+            "embedding_backlog_memories_with_errors": backlog_total_with_errors,
             "embedding_backlog_delta_since_last": backlog_delta,
         }
         if self._embedding_worker is not None:

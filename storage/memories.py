@@ -572,13 +572,13 @@ class MemoryStore:
         user_id: str | None,
         scope: str = USER_GLOBAL_SCOPE,
         session_id: str | None = None,
-    ) -> tuple[int, int]:
-        """Return `(pending_embeddings, missing_embeddings)` for approved memories in scope."""
+    ) -> tuple[int, int, int]:
+        """Return `(pending_embeddings, missing_embeddings, error_embeddings)` for approved memories in scope."""
 
         normalized_scope = (scope or USER_GLOBAL_SCOPE).strip().lower()
         if normalized_scope == SESSION_LOCAL_SCOPE:
             if session_id is None:
-                return (0, 0)
+                return (0, 0, 0)
             scope_predicate = "m.session_id = ?"
             scope_params: tuple[object, ...] = (session_id,)
         else:
@@ -590,7 +590,8 @@ class MemoryStore:
                 f"""
                 SELECT
                     COALESCE(SUM(CASE WHEN e.status = 'pending' THEN 1 ELSE 0 END), 0) AS pending_embeddings,
-                    COALESCE(SUM(CASE WHEN e.memory_id IS NULL THEN 1 ELSE 0 END), 0) AS missing_embeddings
+                    COALESCE(SUM(CASE WHEN e.memory_id IS NULL THEN 1 ELSE 0 END), 0) AS missing_embeddings,
+                    COALESCE(SUM(CASE WHEN e.status = 'error' THEN 1 ELSE 0 END), 0) AS error_embeddings
                 FROM memories AS m
                 LEFT JOIN memory_embeddings AS e ON e.memory_id = m.memory_id
                 WHERE m.user_id IS ?
@@ -600,8 +601,8 @@ class MemoryStore:
                 (user_id, *scope_params),
             ).fetchone()
         if row is None:
-            return (0, 0)
-        return (int(row[0] or 0), int(row[1] or 0))
+            return (0, 0, 0)
+        return (int(row[0] or 0), int(row[1] or 0), int(row[2] or 0))
 
     def get_pending_embedding_queue_stats(self) -> tuple[int, int | None]:
         """Return `(pending_count, oldest_pending_updated_at_ms)` across all memories."""
