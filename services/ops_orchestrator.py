@@ -82,6 +82,7 @@ class OpsOrchestrator:
         self._memory_maintenance_optimize_every_runs = 4
         self._memory_maintenance_next_ts = time.monotonic()
         self._memory_maintenance_run_count = 0
+        self._semantic_offline_streak_threshold = 20
         OpsOrchestrator._instance = self
 
     @classmethod
@@ -378,6 +379,16 @@ class OpsOrchestrator:
             ),
             1,
         )
+        semantic_runtime_cfg = (config.get("memory_semantic") or {}).get("runtime_health") or {}
+        self._semantic_offline_streak_threshold = max(
+            1,
+            int(
+                semantic_runtime_cfg.get(
+                    "query_embedding_not_ready_streak_threshold",
+                    self._semantic_offline_streak_threshold,
+                )
+            ),
+        )
         now = time.monotonic()
         self._memory_maintenance_next_ts = now + self._memory_maintenance_interval_s
         self._memory_maintenance_run_count = 0
@@ -400,6 +411,7 @@ class OpsOrchestrator:
             self._execute_probe("battery", probe_battery),
             self._execute_probe("motion", probe_motion),
             self._execute_probe("realtime_session", lambda: probe_realtime_session(realtime_api)),
+            self._execute_probe("memory_semantic_runtime", self._probe_memory_semantic_runtime),
         ]
         if network_enabled:
             results.append(
@@ -410,6 +422,41 @@ class OpsOrchestrator:
             )
         self._last_probe_results = list(results)
         return results
+
+    def _probe_memory_semantic_runtime(self) -> HealthProbeResult:
+        manager = MemoryManager.get_instance()
+        runtime = manager.get_semantic_runtime_health()
+        streak = int(runtime.get("query_embedding_not_ready_streak", 0))
+        ready = bool(runtime.get("ready", False))
+        error_code = str(runtime.get("last_error_code", "none") or "none")
+        threshold = max(1, int(getattr(self, "_semantic_offline_streak_threshold", 20)))
+
+        details: dict[str, str | float | int] = {
+            "ready": int(ready),
+            "query_embedding_not_ready_streak": streak,
+            "last_error_code": error_code,
+            "offline_streak_threshold": threshold,
+        }
+        if streak >= threshold:
+            return HealthProbeResult(
+                name="memory_semantic_runtime",
+                status=HealthStatus.DEGRADED,
+                summary=f"Semantic retrieval offline (streak={streak}, code={error_code})",
+                details=details,
+            )
+        if streak > 0:
+            return HealthProbeResult(
+                name="memory_semantic_runtime",
+                status=HealthStatus.OK,
+                summary=f"Semantic retrieval warming (streak={streak})",
+                details=details,
+            )
+        return HealthProbeResult(
+            name="memory_semantic_runtime",
+            status=HealthStatus.OK,
+            summary="Semantic retrieval ready",
+            details=details,
+        )
 
     def _execute_probe(self, probe_name: str, probe_fn: Callable[[], HealthProbeResult]) -> HealthProbeResult:
         started_monotonic = time.monotonic()

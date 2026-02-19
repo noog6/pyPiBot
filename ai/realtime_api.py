@@ -1016,8 +1016,20 @@ class RealtimeAPI:
             )
             retrieval_debug = manager.get_last_turn_retrieval_debug_metadata()
             if retrieval_debug:
+                semantic_runtime_health = manager.get_semantic_runtime_health()
+                semantic_streak = int(semantic_runtime_health.get("query_embedding_not_ready_streak", 0))
+                semantic_health_suffix = ""
+                if semantic_streak > 0:
+                    semantic_health_suffix = (
+                        " semantic_runtime_ready=%s semantic_runtime_streak=%s semantic_runtime_last_error=%s"
+                        % (
+                            semantic_runtime_health.get("ready"),
+                            semantic_streak,
+                            semantic_runtime_health.get("last_error_code"),
+                        )
+                    )
                 logger.info(
-                    "Turn memory retrieval audit source=%s mode=%s lexical_candidates=%s semantic_candidates=%s semantic_scored=%s candidates_without_ready_embedding=%s candidates_below_influence_threshold=%s candidates_semantic_applied=%s selected=%s fallback_reason=%s latency_ms=%s truncated=%s truncation_count=%s dedupe_count=%s",
+                    "Turn memory retrieval audit source=%s mode=%s lexical_candidates=%s semantic_candidates=%s semantic_scored=%s candidates_without_ready_embedding=%s candidates_below_influence_threshold=%s candidates_semantic_applied=%s selected=%s fallback_reason=%s latency_ms=%s truncated=%s truncation_count=%s dedupe_count=%s%s",
                     source,
                     retrieval_debug.get("mode"),
                     retrieval_debug.get("lexical_candidate_count"),
@@ -1032,6 +1044,7 @@ class RealtimeAPI:
                     retrieval_debug.get("truncated"),
                     retrieval_debug.get("truncation_count"),
                     retrieval_debug.get("dedupe_count"),
+                    semantic_health_suffix,
                 )
         except Exception as exc:  # pragma: no cover - defensive fail-open
             self._pending_turn_memory_brief = None

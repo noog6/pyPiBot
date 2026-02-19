@@ -49,6 +49,9 @@ def _make_memory_manager(store: MemoryStore) -> MemoryManager:
     manager._semantic_timeout_backoff_activation_count = 0
     manager._semantic_timeout_backoff_threshold = 3
     manager._semantic_timeout_backoff_window_s = 5.0
+    manager._semantic_provider_last_error_code = "none"
+    manager._semantic_provider_ready_last = False
+    manager._semantic_query_embedding_not_ready_streak = 0
     manager._embedding_coverage_cache_ttl_s = 60.0
     manager._embedding_coverage_cache = {}
     manager._embedding_backlog_last = {}
@@ -1695,3 +1698,60 @@ def test_get_retrieval_health_metrics_includes_embedding_backlog_keys_and_mixed_
     assert metrics["embedding_backlog_memories"] == 2
     assert metrics["embedding_backlog_memories_with_errors"] == 3
     assert metrics["embedding_backlog_delta_since_last"] == 0
+
+
+def test_semantic_runtime_health_tracks_query_not_ready_streak(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    now_ms = _now_ms()
+
+    store.append_memory(
+        content="Call mom on Sunday evening.",
+        tags=["family"],
+        importance=4,
+        user_id="default",
+        timestamp=now_ms,
+    )
+    manager._semantic_config.enabled = True
+    manager._semantic_config.rerank_enabled = True
+    manager._semantic_provider_enabled = {"openai": True}
+    manager._semantic_config.provider = "openai"
+    manager._embedding_provider = SimpleNamespace(
+        embed_text=lambda text: SimpleNamespace(
+            status="unavailable",
+            dimension=0,
+            vector=b"",
+            vector_norm=None,
+            error_code="timeout_backoff",
+        )
+    )
+
+    _ = manager.retrieve_for_turn(
+        latest_user_utterance="when should I call family",
+        user_id="default",
+        max_memories=1,
+        max_chars=160,
+    )
+    _ = manager.retrieve_for_turn(
+        latest_user_utterance="remind me who to call",
+        user_id="default",
+        max_memories=1,
+        max_chars=160,
+    )
+
+    runtime = manager.get_semantic_runtime_health()
+
+    assert runtime["ready"] is False
+    assert runtime["query_embedding_not_ready_streak"] == 2
+    assert runtime["last_error_code"] == "timeout_backoff"
+
+    manager._semantic_config.enabled = False
+    _ = manager.retrieve_for_turn(
+        latest_user_utterance="family reminder",
+        user_id="default",
+        max_memories=1,
+        max_chars=160,
+    )
+
+    runtime_after_reset = manager.get_semantic_runtime_health()
+    assert runtime_after_reset["query_embedding_not_ready_streak"] == 0

@@ -330,6 +330,9 @@ class MemoryManager:
         self._semantic_timeout_backoff_activation_count = 0
         self._semantic_timeout_backoff_threshold = 3
         self._semantic_timeout_backoff_window_s = 5.0
+        self._semantic_provider_last_error_code = "none"
+        self._semantic_provider_ready_last = False
+        self._semantic_query_embedding_not_ready_streak = 0
         self._embedding_coverage_cache_ttl_s = 60.0
         self._embedding_coverage_cache: dict[tuple[str, MemoryScope, str | None], dict[str, float | int]] = {}
         self._embedding_backlog_last: dict[tuple[str, MemoryScope, str | None], int] = {}
@@ -571,6 +574,16 @@ class MemoryManager:
             "max_writes_per_minute": int(self._semantic_config.max_writes_per_minute),
         }
 
+    def get_semantic_runtime_health(self) -> dict[str, bool | int | str]:
+        """Return runtime semantic-readiness telemetry for operations and auditing."""
+
+        provider_ready, _ = self._is_semantic_provider_ready()
+        return {
+            "ready": bool(provider_ready and self._semantic_provider_ready_last),
+            "query_embedding_not_ready_streak": int(self._semantic_query_embedding_not_ready_streak),
+            "last_error_code": str(getattr(self, "_semantic_provider_last_error_code", "none") or "none"),
+        }
+
     def remember_memory(
         self,
         *,
@@ -721,22 +734,28 @@ class MemoryManager:
         now_monotonic = time.monotonic()
         backoff_until = float(getattr(self, "_semantic_timeout_backoff_until_monotonic", 0.0))
         if backoff_until > now_monotonic:
-            return SimpleNamespace(
+            result = SimpleNamespace(
                 status="unavailable",
                 dimension=0,
                 vector=b"",
                 vector_norm=None,
                 error_code="timeout_backoff",
             )
+            self._semantic_provider_ready_last = False
+            self._semantic_provider_last_error_code = "timeout_backoff"
+            return result
 
         if not self._reserve_semantic_budget(operation=operation):
-            return SimpleNamespace(
+            result = SimpleNamespace(
                 status="unavailable",
                 dimension=0,
                 vector=b"",
                 vector_norm=None,
                 error_code="rate_limited",
             )
+            self._semantic_provider_ready_last = False
+            self._semantic_provider_last_error_code = "rate_limited"
+            return result
 
         timeout_ms = int(
             getattr(
@@ -752,6 +771,11 @@ class MemoryManager:
         try:
             result = future.result(timeout=timeout_s)
             self._semantic_timeout_consecutive_count = 0
+            status = str(getattr(result, "status", ""))
+            ready = status == "ready" and bool(getattr(result, "vector", b""))
+            error_code = str(getattr(result, "error_code", "") or ("none" if ready else (status or "unknown")))
+            self._semantic_provider_ready_last = ready
+            self._semantic_provider_last_error_code = error_code
             return result
         except FutureTimeoutError:
             future.cancel()
@@ -766,13 +790,16 @@ class MemoryManager:
                 self._semantic_timeout_backoff_activation_count = (
                     max(0, int(getattr(self, "_semantic_timeout_backoff_activation_count", 0))) + 1
                 )
-            return SimpleNamespace(
+            result = SimpleNamespace(
                 status="error",
                 dimension=0,
                 vector=b"",
                 vector_norm=None,
                 error_code="timeout",
             )
+            self._semantic_provider_ready_last = False
+            self._semantic_provider_last_error_code = "timeout"
+            return result
 
     def _find_semantic_duplicate(
         self,
@@ -1184,6 +1211,17 @@ class MemoryManager:
             self._last_turn_retrieval_debug["fallback_reason"] = "no_lexical_candidates"
         elif self._semantic_config.enabled and self._semantic_config.rerank_enabled:
             self._last_turn_retrieval_debug["fallback_reason"] = semantic_readiness_reason
+
+        if self._last_turn_retrieval_debug.get("fallback_reason") == "query_embedding_not_ready":
+            self._semantic_query_embedding_not_ready_streak = (
+                max(0, int(getattr(self, "_semantic_query_embedding_not_ready_streak", 0))) + 1
+            )
+        else:
+            self._semantic_query_embedding_not_ready_streak = 0
+        self._last_turn_retrieval_debug["semantic_query_embedding_not_ready_streak"] = int(
+            self._semantic_query_embedding_not_ready_streak
+        )
+
         if self._last_turn_retrieval_debug.get("mode") == "none":
             self._last_turn_retrieval_debug["mode"] = "lexical"
             if semantic_enabled and not self._last_turn_retrieval_debug.get("fallback_reason"):
