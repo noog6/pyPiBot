@@ -35,7 +35,14 @@ def _make_api_stub() -> RealtimeAPI:
     api = RealtimeAPI.__new__(RealtimeAPI)
     api.websocket = _Ws()
     api._pending_action = object()
-    api.orchestration_state = type("S", (), {"phase": OrchestrationPhase.AWAITING_CONFIRMATION})()
+    api.orchestration_state = type(
+        "S",
+        (),
+        {
+            "phase": OrchestrationPhase.AWAITING_CONFIRMATION,
+            "transition": lambda *args, **kwargs: None,
+        },
+    )()
     api._injection_response_triggers = {}
     api._injection_response_cooldown_s = 0.0
     api._max_injection_responses_per_minute = 0
@@ -64,6 +71,9 @@ def _make_api_stub() -> RealtimeAPI:
     api._pending_research_request = None
     api._prior_research_permission_marker = None
     api._prior_research_permission_grace_s = 8.0
+    api._research_permission_outcome_ttl_s = 20.0
+    api._research_permission_outcomes = {}
+    api._research_suppressed_fingerprints = {}
     api._presented_actions = set()
     api._pending_confirmation_token = None
     api._confirmation_state = ConfirmationState.IDLE
@@ -1083,7 +1093,7 @@ def test_handle_function_call_duplicate_logs_skip_without_execution(caplog) -> N
     assert executed == []
 
 
-def test_handle_function_call_logs_tool_and_call_id_with_parse_status(monkeypatch, caplog) -> None:
+def test_handle_function_call_logs_tool_and_call_id_with_parse_status(monkeypatch) -> None:
     api = _make_api_stub()
     api.function_call = {"name": "perform_research", "call_id": "call_123"}
     api.function_call_args = '{"query":'
@@ -1094,16 +1104,17 @@ def test_handle_function_call_logs_tool_and_call_id_with_parse_status(monkeypatc
 
     monkeypatch.setattr(api, "_send_awaiting_confirmation_output", _send_awaiting_confirmation_output)
 
-    caplog.set_level(logging.INFO)
-    asyncio.run(api.handle_function_call({}, _Ws()))
+    with patch("ai.realtime_api.logger.info") as mock_info:
+        asyncio.run(api.handle_function_call({}, _Ws()))
 
-    assert (
-        "Function call payload parsed | tool=perform_research "
-        "call_id=call_123 parse=invalid_json"
-    ) in caplog.text
+    logged = [call.args[0] % call.args[1:] for call in mock_info.call_args_list if call.args]
+    assert any(
+        "Function call received | tool=perform_research call_id=call_123 args_parsed=False" in line
+        for line in logged
+    )
 
 
-def test_handle_function_call_logs_consolidated_governance_review_summary(caplog) -> None:
+def test_handle_function_call_logs_consolidated_governance_review_summary() -> None:
     api = _make_api_stub()
     api._pending_action = None
     api.function_call = {"name": "perform_research", "call_id": "call_gov_1"}
@@ -1145,14 +1156,16 @@ def test_handle_function_call_logs_consolidated_governance_review_summary(caplog
 
     api._request_tool_confirmation = _request_tool_confirmation
 
-    caplog.set_level(logging.INFO)
-    asyncio.run(api.handle_function_call({}, _Ws()))
+    with patch("ai.realtime_api.logger.info") as mock_info:
+        asyncio.run(api.handle_function_call({}, _Ws()))
 
-    assert (
+    logged = [call.args[0] % call.args[1:] for call in mock_info.call_args_list if call.args]
+    assert any(
         "Governance review summary | call_id=call_gov_1 tool=perform_research "
         "initial_status=needs_confirmation initial_reason=expensive_read "
-        "prior_permission_override=False final_execution_decision=request_confirmation"
-    ) in caplog.text
+        "prior_permission_override=False final_execution_decision=request_confirmation" in line
+        for line in logged
+    )
 
 
 
@@ -1445,6 +1458,100 @@ def test_research_permission_yes_executes_without_second_governance_confirmation
     assert executed == ["done"]
     assert created_tokens == []
     assert transitions == [(OrchestrationPhase.ACT, "function_call perform_research")]
+
+
+def test_accepted_intent_permission_short_circuits_governance_confirmation_for_same_fingerprint() -> None:
+    api = _make_api_stub()
+    api.function_call = {"name": "perform_research", "call_id": "call_research_short_circuit"}
+    api.function_call_args = '{"query":"Status", "context": {"source": "user_text"}}'
+    api._extract_dry_run_flag = lambda args: False
+    api._is_duplicate_tool_call = lambda *args, **kwargs: False
+    api._is_suppressed_after_confirmation_timeout = lambda *args, **kwargs: False
+    api._tool_execution_cooldown_remaining = lambda: 0.0
+    api._stage_action = lambda action: {"valid": True}
+
+    created_tokens: list[str] = []
+
+    def _create_confirmation_token(*args, **kwargs):
+        created_tokens.append(kwargs["kind"])
+        raise AssertionError("tool_governance token should not be created for approved intent fingerprint")
+
+    api._create_confirmation_token = _create_confirmation_token
+
+    action = type(
+        "Action",
+        (),
+        {
+            "id": "call_research_short_circuit",
+            "tool_name": "perform_research",
+            "tool_args": {"query": "Status", "context": {"source": "user_text"}},
+            "summary": lambda self: "summary",
+        },
+    )()
+    api._governance = type(
+        "Gov",
+        (),
+        {
+            "build_action_packet": lambda *args, **kwargs: action,
+            "review": lambda *args, **kwargs: type(
+                "Decision",
+                (),
+                {
+                    "approved": False,
+                    "needs_confirmation": True,
+                    "status": "needs_confirmation",
+                    "reason": "expensive read",
+                },
+            )(),
+        },
+    )()
+
+    executed: list[str] = []
+
+    async def _execute_action(*args, **kwargs):
+        executed.append("done")
+
+    api._execute_action = _execute_action
+    api._pending_confirmation_token = _build_confirmation_token(
+        kind="research_permission",
+        request=type("Req", (), {"prompt": "Status", "context": {"source": "user_text"}})(),
+    )
+    api._dispatch_research_request = lambda *_args, **_kwargs: asyncio.sleep(0)
+
+    assert asyncio.run(api._maybe_handle_research_permission_response("yes", _Ws())) is True
+
+    asyncio.run(api.handle_function_call({}, _Ws()))
+
+    assert executed == ["done"]
+    assert created_tokens == []
+
+
+def test_handle_function_call_replays_stable_blocked_intent_permission_output_for_same_fingerprint() -> None:
+    api = _make_api_stub()
+    fingerprint = api._build_research_fingerprint(query="status", source="user_text")
+    api._record_research_permission_outcome(fingerprint, approved=False)
+    api._pending_action = None
+    api.function_call = {"name": "perform_research", "call_id": "call_blocked_one"}
+    api.function_call_args = '{"query":"status", "context": {"source": "user_text"}}'
+
+    sent_payloads: list[dict[str, object]] = []
+
+    class _SendWs:
+        async def send(self, payload: str) -> None:
+            sent_payloads.append(json.loads(payload))
+
+    asyncio.run(api.handle_function_call({}, _SendWs()))
+
+    api.function_call = {"name": "perform_research", "call_id": "call_blocked_two"}
+    api.function_call_args = '{"query":"status", "context": {"source": "user_text"}}'
+    asyncio.run(api.handle_function_call({}, _SendWs()))
+
+    assert len(sent_payloads) == 2
+    first_output = json.loads(sent_payloads[0]["item"]["output"])
+    second_output = json.loads(sent_payloads[1]["item"]["output"])
+    assert first_output["status"] == "blocked_by_intent_permission"
+    assert second_output["status"] == "blocked_by_intent_permission"
+    assert first_output == second_output
 
 
 def test_tool_confirmation_token_closes_and_state_returns_idle_on_reject() -> None:
