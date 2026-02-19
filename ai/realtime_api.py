@@ -435,6 +435,11 @@ class RealtimeAPI:
         self._prior_research_permission_grace_s = float(
             research_cfg.get("prior_permission_grace_s", 8.0)
         )
+        self._research_permission_outcome_ttl_s = float(
+            research_cfg.get("permission_outcome_ttl_s", 20.0)
+        )
+        self._research_permission_outcomes: dict[str, dict[str, Any]] = {}
+        self._research_suppressed_fingerprints: dict[str, str] = {}
         self._tool_call_dedupe_ttl_s = float(research_cfg.get("tool_call_dedupe_ttl_s", 30.0))
         self._research_spoken_response_dedupe_ttl_s = float(
             research_cfg.get("spoken_response_dedupe_ttl_s", 60.0)
@@ -1418,14 +1423,85 @@ class RealtimeAPI:
         }
 
     def _mark_prior_research_permission_granted(self, request: ResearchRequest) -> None:
+        fingerprint = self._build_research_request_fingerprint(request)
         self._prior_research_permission_marker = {
             "granted_at": time.monotonic(),
             "prompt": request.prompt,
+            "fingerprint": fingerprint,
         }
+        self._record_research_permission_outcome(fingerprint, approved=True)
+
+    def _normalize_research_query_text(self, query: str) -> str:
+        return " ".join((query or "").strip().lower().split())
+
+    def _build_research_fingerprint(self, *, query: str, source: str | None) -> str:
+        normalized = {
+            "query": self._normalize_research_query_text(query),
+            "source": str(source or "").strip().lower(),
+        }
+        payload = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _build_research_request_fingerprint(self, request: ResearchRequest) -> str:
+        context_value = getattr(request, "context", None)
+        context = context_value if isinstance(context_value, dict) else {}
+        return self._build_research_fingerprint(
+            query=str(getattr(request, "prompt", "")),
+            source=context.get("source"),
+        )
+
+    def _build_research_args_fingerprint(self, args: dict[str, Any]) -> str:
+        context = args.get("context") if isinstance(args.get("context"), dict) else {}
+        return self._build_research_fingerprint(
+            query=str(args.get("query") or args.get("prompt") or ""),
+            source=context.get("source"),
+        )
+
+    def _prune_research_permission_outcomes(self, now: float | None = None) -> None:
+        now_ts = time.monotonic() if now is None else now
+        outcomes = getattr(self, "_research_permission_outcomes", None)
+        if not isinstance(outcomes, dict):
+            self._research_permission_outcomes = {}
+            self._research_suppressed_fingerprints = {}
+            return
+        ttl_s = float(getattr(self, "_research_permission_outcome_ttl_s", 20.0))
+        expired = [
+            fingerprint
+            for fingerprint, payload in outcomes.items()
+            if now_ts - float(payload.get("recorded_at", 0.0)) > ttl_s
+        ]
+        for fingerprint in expired:
+            outcomes.pop(fingerprint, None)
+            if isinstance(getattr(self, "_research_suppressed_fingerprints", None), dict):
+                self._research_suppressed_fingerprints.pop(fingerprint, None)
+
+    def _record_research_permission_outcome(self, fingerprint: str, *, approved: bool) -> None:
+        self._prune_research_permission_outcomes()
+        if not isinstance(getattr(self, "_research_permission_outcomes", None), dict):
+            self._research_permission_outcomes = {}
+        self._research_permission_outcomes[fingerprint] = {
+            "approved": approved,
+            "recorded_at": time.monotonic(),
+        }
+        if not isinstance(getattr(self, "_research_suppressed_fingerprints", None), dict):
+            self._research_suppressed_fingerprints = {}
+        if approved:
+            self._research_suppressed_fingerprints.pop(fingerprint, None)
+
+    def _get_research_permission_outcome(self, fingerprint: str) -> bool | None:
+        self._prune_research_permission_outcomes()
+        payload = self._research_permission_outcomes.get(fingerprint)
+        if payload is None:
+            return None
+        return bool(payload.get("approved"))
 
     def _consume_prior_research_permission_marker_if_fresh(self, action: ActionPacket) -> bool:
         if action.tool_name != "perform_research":
             return False
+        action_fingerprint = self._build_research_args_fingerprint(action.tool_args)
+        outcome = self._get_research_permission_outcome(action_fingerprint)
+        if outcome is True:
+            return True
         marker = getattr(self, "_prior_research_permission_marker", None)
         if marker is None:
             return False
@@ -1435,6 +1511,9 @@ class RealtimeAPI:
             return False
         if time.monotonic() - float(granted_at) > self._prior_research_permission_grace_s:
             self._prior_research_permission_marker = None
+            return False
+        marker_fingerprint = marker.get("fingerprint")
+        if isinstance(marker_fingerprint, str) and marker_fingerprint != action_fingerprint:
             return False
         self._prior_research_permission_marker = None
         return True
@@ -2134,6 +2213,8 @@ class RealtimeAPI:
             return True
 
         if decision == "no":
+            fingerprint = self._build_research_request_fingerprint(request)
+            self._record_research_permission_outcome(fingerprint, approved=False)
             if token is not None:
                 self._set_confirmation_state(ConfirmationState.RESOLVING, reason="research_permission_rejected")
             logger.info("[Research] Permission denied by user")
@@ -2204,6 +2285,15 @@ class RealtimeAPI:
             )
 
         request = ResearchRequest(prompt=text, context={"source": source})
+        request_fingerprint = self._build_research_request_fingerprint(request)
+        outcome = self._get_research_permission_outcome(request_fingerprint)
+        if outcome is False:
+            logger.info("[Research] Suppressing re-prompt for recently denied request fingerprint")
+            await self.send_assistant_message(
+                "Understood — I won't perform web research for that request right now.",
+                websocket,
+            )
+            return True
         logger.info("[Research] Requested from %s", source)
 
         if self._research_permission_required:
@@ -2892,6 +2982,48 @@ class RealtimeAPI:
                 args_parsed,
             )
             token = getattr(self, "_pending_confirmation_token", None)
+            research_fingerprint = (
+                self._build_research_args_fingerprint(args)
+                if function_name == "perform_research"
+                else None
+            )
+            if function_name == "perform_research" and research_fingerprint is not None:
+                research_outcome = self._get_research_permission_outcome(research_fingerprint)
+                if research_outcome is False:
+                    already_suppressed = research_fingerprint in self._research_suppressed_fingerprints
+                    self._research_suppressed_fingerprints[research_fingerprint] = "blocked_by_intent_permission"
+                    if already_suppressed:
+                        logger.info(
+                            "Function call outcome: stable suppression replay | tool=%s call_id=%s",
+                            function_name,
+                            call_id,
+                        )
+                    else:
+                        logger.info(
+                            "Function call outcome: suppressed by denied intent permission | tool=%s call_id=%s",
+                            function_name,
+                            call_id,
+                        )
+                    function_call_output = {
+                        "type": "conversation.item.create",
+                        "item": {
+                            "type": "function_call_output",
+                            "call_id": call_id,
+                            "output": json.dumps(
+                                {
+                                    "status": "blocked_by_intent_permission",
+                                    "message": "Research request was denied for this query; do not retry until user re-approves.",
+                                    "tool": function_name,
+                                }
+                            ),
+                        },
+                    }
+                    log_ws_event("Outgoing", function_call_output)
+                    self._track_outgoing_event(function_call_output)
+                    await websocket.send(json.dumps(function_call_output))
+                    self.function_call = None
+                    self.function_call_args = ""
+                    return
             if (
                 function_name == "perform_research"
                 and ((token is not None and token.kind == "research_permission") or self._pending_research_request is not None)
