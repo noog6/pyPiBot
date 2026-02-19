@@ -296,7 +296,7 @@ governance:
       cost_hint: "med"
       safety_tags: ["storage"]
     perform_research:
-      tier: 2
+      tier: 1
       reversible: false
       cost_hint: "expensive"
       safety_tags: ["network", "research"]
