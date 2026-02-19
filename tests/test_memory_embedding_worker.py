@@ -92,6 +92,52 @@ def test_worker_keeps_pending_with_backoff_on_failures(tmp_path: Path) -> None:
     assert metrics["oldest_pending_age_ms"] >= 0
 
 
+def test_worker_marks_embedding_error_after_retry_budget_exhausted(tmp_path: Path, caplog) -> None:
+    _reset_singletons()
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    entry = store.append_memory(content="fail forever", tags=[], importance=3, user_id="default")
+    store.enqueue_memory_embedding(memory_id=entry.memory_id)
+
+    provider = _SequenceProvider(
+        results=[
+            EmbeddingResult(
+                vector=b"",
+                dimension=0,
+                model="test-model",
+                model_version=None,
+                vector_norm=None,
+                provider="test",
+                status="error",
+                error_code="boom",
+                error_message="boom",
+            )
+            for _ in range(2)
+        ]
+    )
+    worker = MemoryEmbeddingWorker(
+        store=store,
+        provider=provider,
+        batch_size=1,
+        base_backoff_s=0.01,
+        max_backoff_s=0.01,
+    )
+    worker._max_embedding_retries = 1
+
+    caplog.set_level("INFO")
+    assert worker.run_once() == 0
+    worker._failures[entry.memory_id].next_retry_monotonic = 0
+    assert worker.run_once() == 0
+
+    failed = store.fetch_embeddings_for_memories(memory_ids=[entry.memory_id])[entry.memory_id]
+    assert failed.status == "error"
+    assert failed.error == "terminal_retry_exhausted:boom"
+    assert entry.memory_id not in worker._failures
+    assert (
+        f"memory embedding retry exhausted memory_id={entry.memory_id} failures=2 last_error_code=boom"
+        in caplog.text
+    )
+
+
 def test_worker_metrics_reset_consecutive_failures_after_success(tmp_path: Path) -> None:
     _reset_singletons()
     store = MemoryStore(db_path=tmp_path / "memories.db")

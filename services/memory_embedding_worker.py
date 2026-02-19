@@ -23,6 +23,8 @@ class _FailureState:
 class MemoryEmbeddingWorker:
     """Best-effort, fail-open embedding worker for pending memories."""
 
+    _TERMINAL_ERROR_MARKER = "terminal_retry_exhausted"
+
     def __init__(
         self,
         *,
@@ -43,6 +45,8 @@ class MemoryEmbeddingWorker:
         self._base_backoff_s = max(0.1, float(base_backoff_s))
         self._max_backoff_s = max(self._base_backoff_s, float(max_backoff_s))
         semantic_cfg = config.get("memory_semantic", {})
+        configured_max_embedding_retries = int(semantic_cfg.get("max_embedding_retries", 8))
+        self._max_embedding_retries = max(1, configured_max_embedding_retries)
         configured_backfill_batch_size = int(
             semantic_cfg.get("rolling_backfill_batch_size", 4)
         )
@@ -114,9 +118,9 @@ class MemoryEmbeddingWorker:
         try:
             results = self._provider.embed_batch([entry.content for entry in ready_entries])
         except Exception as exc:  # noqa: BLE001
-            error_message = f"provider_exception:{type(exc).__name__}"
+            error_code = f"provider_exception:{type(exc).__name__}"
             for entry in ready_entries:
-                self._record_failure(entry=entry, error_message=error_message)
+                self._record_failure(entry=entry, error_message=error_code, error_code=error_code)
             self._consecutive_failures += 1
             return 0
 
@@ -135,10 +139,19 @@ class MemoryEmbeddingWorker:
                 self._failures.pop(entry.memory_id, None)
                 success_count += 1
                 continue
-            self._record_failure(entry=entry, error_message=result.error_message or result.error_code or "embedding_failed")
+            error_code = result.error_code or "embedding_failed"
+            self._record_failure(
+                entry=entry,
+                error_message=result.error_message or error_code,
+                error_code=error_code,
+            )
         if len(results) < len(ready_entries):
             for entry in ready_entries[len(results) :]:
-                self._record_failure(entry=entry, error_message="provider_returned_fewer_results")
+                self._record_failure(
+                    entry=entry,
+                    error_message="provider_returned_fewer_results",
+                    error_code="provider_returned_fewer_results",
+                )
         if success_count > 0:
             self._consecutive_failures = 0
         elif ready_entries:
@@ -191,9 +204,28 @@ class MemoryEmbeddingWorker:
             return True
         return now_monotonic >= failure_state.next_retry_monotonic
 
-    def _record_failure(self, *, entry: MemoryEntry, error_message: str) -> None:
+    def _record_failure(self, *, entry: MemoryEntry, error_message: str, error_code: str) -> None:
         prior = self._failures.get(entry.memory_id)
         failures = 1 if prior is None else prior.failures + 1
+        if failures > self._max_embedding_retries:
+            terminal_error = f"{self._TERMINAL_ERROR_MARKER}:{error_code}"
+            self._store.upsert_memory_embedding(
+                memory_id=entry.memory_id,
+                model_id="",
+                dim=0,
+                vector=b"",
+                vector_norm=None,
+                status="error",
+                error=terminal_error,
+            )
+            self._failures.pop(entry.memory_id, None)
+            logger.info(
+                "memory embedding retry exhausted memory_id=%s failures=%s last_error_code=%s",
+                entry.memory_id,
+                failures,
+                error_code,
+            )
+            return
         backoff_s = min(self._max_backoff_s, self._base_backoff_s * (2 ** (failures - 1)))
         self._failures[entry.memory_id] = _FailureState(
             failures=failures,
