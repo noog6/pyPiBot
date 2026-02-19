@@ -260,6 +260,8 @@ class RealtimeAPI:
         self.audio_player: AudioPlayer | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
         self.ready_event = threading.Event()
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_requested = False
 
         self.assistant_reply = ""
         self._assistant_reply_accum = ""
@@ -3999,6 +4001,12 @@ class RealtimeAPI:
             await self._close_websocket("audio loop exiting", websocket=websocket)
 
     def shutdown_handler(self) -> None:
+        with self._shutdown_lock:
+            if self._shutdown_requested:
+                logger.debug("Shutdown already in progress; ignoring duplicate shutdown signal.")
+                return
+            self._shutdown_requested = True
+
         logger.info("Received shutdown signal. Initiating graceful shutdown...")
         if self.loop and self.loop.is_running():
             self.loop.call_soon_threadsafe(self._request_shutdown)
