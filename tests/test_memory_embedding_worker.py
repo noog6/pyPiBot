@@ -138,6 +138,43 @@ def test_worker_marks_embedding_error_after_retry_budget_exhausted(tmp_path: Pat
     )
 
 
+def test_record_failure_caps_backoff_and_transitions_to_terminal_error(tmp_path: Path) -> None:
+    _reset_singletons()
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    entry = store.append_memory(content="bounded retries", tags=[], importance=3, user_id="default")
+    store.enqueue_memory_embedding(memory_id=entry.memory_id)
+
+    worker = MemoryEmbeddingWorker(
+        store=store,
+        batch_size=1,
+        base_backoff_s=0.2,
+        max_backoff_s=0.3,
+    )
+    worker._max_embedding_retries = 2
+
+    worker._record_failure(entry=entry, error_message="boom", error_code="boom")
+    first_failure = worker._failures[entry.memory_id]
+    first_backoff_s = first_failure.next_retry_monotonic - time.monotonic()
+    assert first_failure.failures == 1
+    assert 0.0 < first_backoff_s <= 0.35
+
+    worker._record_failure(entry=entry, error_message="boom", error_code="boom")
+    second_failure = worker._failures[entry.memory_id]
+    second_backoff_s = second_failure.next_retry_monotonic - time.monotonic()
+    assert second_failure.failures == 2
+    assert 0.0 < second_backoff_s <= 0.35
+
+    worker._record_failure(entry=entry, error_message="boom", error_code="boom")
+    failed = store.fetch_embeddings_for_memories(memory_ids=[entry.memory_id])[entry.memory_id]
+    assert failed.status == "error"
+    assert failed.error == "terminal_retry_exhausted:boom"
+    assert entry.memory_id not in worker._failures
+
+    metrics = worker.get_metrics()
+    assert metrics["pending_count"] == 0
+    assert metrics["retry_blocked_count"] == 0
+
+
 def test_worker_metrics_reset_consecutive_failures_after_success(tmp_path: Path) -> None:
     _reset_singletons()
     store = MemoryStore(db_path=tmp_path / "memories.db")
