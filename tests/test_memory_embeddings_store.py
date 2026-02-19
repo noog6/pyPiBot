@@ -324,6 +324,12 @@ def test_get_embedding_coverage_counts_applies_scope_predicates(tmp_path: Path, 
         importance=3,
         user_id="u1",
     )
+    global_error = store.append_memory(
+        content="global-error",
+        tags=["scope"],
+        importance=3,
+        user_id="u1",
+    )
     session_ready = store.append_memory(
         content="session-ready",
         tags=["scope"],
@@ -361,6 +367,13 @@ def test_get_embedding_coverage_counts_applies_scope_predicates(tmp_path: Path, 
     )
     store.enqueue_memory_embedding(memory_id=global_pending.memory_id)
     store.upsert_memory_embedding(
+        memory_id=global_error.memory_id,
+        model_id="m",
+        dim=2,
+        vector=b"ok",
+        status="error",
+    )
+    store.upsert_memory_embedding(
         memory_id=session_ready.memory_id,
         model_id="m",
         dim=2,
@@ -369,11 +382,11 @@ def test_get_embedding_coverage_counts_applies_scope_predicates(tmp_path: Path, 
     )
     store.enqueue_memory_embedding(memory_id=session_other.memory_id)
 
-    assert store.get_embedding_coverage_counts(user_id="u1", scope="user_global") == (2, 1)
+    assert store.get_embedding_coverage_counts(user_id="u1", scope="user_global") == (3, 1)
     assert store.get_embedding_coverage_counts(user_id="u1", scope="session_local", session_id="s1") == (1, 1)
     assert store.get_embedding_coverage_counts(user_id="u1", scope="session_local", session_id="s2") == (1, 0)
     assert store.get_embedding_coverage_counts(user_id="u1", scope="session_local", session_id=None) == (0, 0)
-    assert store.get_embedding_backlog_counts(user_id="u1", scope="user_global") == (1, 0)
-    assert store.get_embedding_backlog_counts(user_id="u1", scope="session_local", session_id="s1") == (0, 0)
-    assert store.get_embedding_backlog_counts(user_id="u1", scope="session_local", session_id="s2") == (1, 0)
-    assert store.get_embedding_backlog_counts(user_id="u1", scope="session_local", session_id=None) == (0, 0)
+    assert store.get_embedding_backlog_counts(user_id="u1", scope="user_global") == (1, 0, 1)
+    assert store.get_embedding_backlog_counts(user_id="u1", scope="session_local", session_id="s1") == (0, 0, 0)
+    assert store.get_embedding_backlog_counts(user_id="u1", scope="session_local", session_id="s2") == (1, 0, 0)
+    assert store.get_embedding_backlog_counts(user_id="u1", scope="session_local", session_id=None) == (0, 0, 0)

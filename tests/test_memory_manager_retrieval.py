@@ -1564,7 +1564,9 @@ def test_retrieval_health_metrics_accept_scope_and_session_overrides(tmp_path) -
     assert default_metrics["embedding_coverage_pct"] == 100.0
     assert default_metrics["embedding_pending_memories"] == 0
     assert default_metrics["embedding_missing_memories"] == 0
+    assert default_metrics["embedding_error_memories"] == 0
     assert default_metrics["embedding_backlog_memories"] == 0
+    assert default_metrics["embedding_backlog_memories_with_errors"] == 0
     assert default_metrics["embedding_backlog_delta_since_last"] == 0
 
     session_metrics = manager.get_retrieval_health_metrics(
@@ -1576,7 +1578,9 @@ def test_retrieval_health_metrics_accept_scope_and_session_overrides(tmp_path) -
     assert session_metrics["embedding_coverage_pct"] == 0.0
     assert session_metrics["embedding_pending_memories"] == 1
     assert session_metrics["embedding_missing_memories"] == 0
+    assert session_metrics["embedding_error_memories"] == 0
     assert session_metrics["embedding_backlog_memories"] == 1
+    assert session_metrics["embedding_backlog_memories_with_errors"] == 1
     assert session_metrics["embedding_backlog_delta_since_last"] == 0
 
     store.upsert_memory_embedding(
@@ -1591,5 +1595,40 @@ def test_retrieval_health_metrics_accept_scope_and_session_overrides(tmp_path) -
         scope=MemoryScope.SESSION_LOCAL,
         session_id="session-1",
     )
+    assert updated_session_metrics["embedding_error_memories"] == 0
     assert updated_session_metrics["embedding_backlog_memories"] == 0
+    assert updated_session_metrics["embedding_backlog_memories_with_errors"] == 0
     assert updated_session_metrics["embedding_backlog_delta_since_last"] == -1
+
+
+def test_get_retrieval_health_metrics_reports_embedding_errors_in_backlog_total(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+
+    errored_entry = store.append_memory(
+        content="Errored session memory.",
+        tags=["session"],
+        importance=3,
+        user_id="default",
+        session_id="session-1",
+    )
+    store.upsert_memory_embedding(
+        memory_id=errored_entry.memory_id,
+        model_id="unit",
+        dim=2,
+        vector=_encode_vector([0.0, 1.0]),
+        vector_norm=1.0,
+        status="error",
+    )
+
+    metrics = manager.get_retrieval_health_metrics(
+        scope=MemoryScope.SESSION_LOCAL,
+        session_id="session-1",
+    )
+
+    assert metrics["embedding_pending_memories"] == 0
+    assert metrics["embedding_missing_memories"] == 0
+    assert metrics["embedding_error_memories"] == 1
+    assert metrics["embedding_backlog_memories"] == 0
+    assert metrics["embedding_backlog_memories_with_errors"] == 1
+    assert metrics["embedding_backlog_delta_since_last"] == 0
