@@ -58,3 +58,43 @@ def test_summarize_health_truncates_to_safe_maximum() -> None:
 
     assert len(summary) <= orchestrator._MAX_HEALTH_SUMMARY_CHARS
     assert summary.endswith("...")
+
+
+def test_probe_memory_semantic_runtime_degrades_when_streak_exceeds_threshold(monkeypatch) -> None:
+    orchestrator = _new_orchestrator()
+    orchestrator._semantic_offline_streak_threshold = 2
+
+    class _Mgr:
+        def get_semantic_runtime_health(self):
+            return {
+                "ready": False,
+                "query_embedding_not_ready_streak": 3,
+                "last_error_code": "timeout_backoff",
+            }
+
+    monkeypatch.setattr("services.ops_orchestrator.MemoryManager.get_instance", lambda: _Mgr())
+
+    result = orchestrator._probe_memory_semantic_runtime()
+
+    assert result.name == "memory_semantic_runtime"
+    assert result.status == HealthStatus.DEGRADED
+    assert "offline" in result.summary
+    assert result.details["query_embedding_not_ready_streak"] == 3
+
+
+def test_summarize_health_includes_semantic_runtime_probe_reason() -> None:
+    orchestrator = _new_orchestrator()
+
+    summary = orchestrator._summarize_health(
+        HealthStatus.DEGRADED,
+        [
+            HealthProbeResult(
+                "memory_semantic_runtime",
+                HealthStatus.DEGRADED,
+                "Semantic retrieval offline (streak=24, code=timeout_backoff)",
+            )
+        ],
+    )
+
+    assert summary.startswith("Degraded:")
+    assert "memory_semantic_runtime (offline)" in summary
