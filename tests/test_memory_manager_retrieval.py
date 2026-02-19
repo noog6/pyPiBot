@@ -1632,3 +1632,66 @@ def test_get_retrieval_health_metrics_reports_embedding_errors_in_backlog_total(
     assert metrics["embedding_backlog_memories"] == 0
     assert metrics["embedding_backlog_memories_with_errors"] == 1
     assert metrics["embedding_backlog_delta_since_last"] == 0
+
+
+def test_get_retrieval_health_metrics_includes_embedding_backlog_keys_and_mixed_counts(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+
+    pending_entry = store.append_memory(
+        content="Pending session memory.",
+        tags=["session"],
+        importance=3,
+        user_id="default",
+        session_id="session-mixed",
+    )
+    store.upsert_memory_embedding(
+        memory_id=pending_entry.memory_id,
+        model_id="unit",
+        dim=2,
+        vector=_encode_vector([1.0, 0.0]),
+        vector_norm=1.0,
+        status="pending",
+    )
+
+    store.append_memory(
+        content="Missing session memory.",
+        tags=["session"],
+        importance=3,
+        user_id="default",
+        session_id="session-mixed",
+    )
+
+    errored_entry = store.append_memory(
+        content="Errored session memory.",
+        tags=["session"],
+        importance=3,
+        user_id="default",
+        session_id="session-mixed",
+    )
+    store.upsert_memory_embedding(
+        memory_id=errored_entry.memory_id,
+        model_id="unit",
+        dim=2,
+        vector=_encode_vector([0.0, 1.0]),
+        vector_norm=1.0,
+        status="error",
+    )
+
+    metrics = manager.get_retrieval_health_metrics(
+        scope=MemoryScope.SESSION_LOCAL,
+        session_id="session-mixed",
+    )
+
+    assert "embedding_backlog_memories" in metrics
+    assert "embedding_backlog_memories_with_errors" in metrics
+    assert "embedding_error_memories" in metrics
+
+    assert metrics["embedding_total_memories"] == 3
+    assert metrics["embedding_ready_memories"] == 0
+    assert metrics["embedding_pending_memories"] == 1
+    assert metrics["embedding_missing_memories"] == 1
+    assert metrics["embedding_error_memories"] == 1
+    assert metrics["embedding_backlog_memories"] == 2
+    assert metrics["embedding_backlog_memories_with_errors"] == 3
+    assert metrics["embedding_backlog_delta_since_last"] == 0
