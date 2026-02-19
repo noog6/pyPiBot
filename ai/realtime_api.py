@@ -419,6 +419,8 @@ class RealtimeAPI:
         self._session_reconnects = 0
         self._session_failures = 0
         self._session_connected = False
+        self._missing_requests_bucket_warning_interval = 3
+        self._missing_requests_bucket_consecutive_updates = 0
         self._last_connect_time: float | None = None
         self._last_disconnect_reason: str | None = None
         self._last_failure_reason: str | None = None
@@ -2993,10 +2995,36 @@ class RealtimeAPI:
 
             self._last_rate_limit_present_buckets = set(present_buckets)
 
+            has_requests_bucket = "requests" in rl
+            if has_requests_bucket:
+                self._missing_requests_bucket_consecutive_updates = 0
+            else:
+                self._missing_requests_bucket_consecutive_updates = (
+                    getattr(self, "_missing_requests_bucket_consecutive_updates", 0) + 1
+                )
+                warning_interval = max(
+                    1,
+                    int(getattr(self, "_missing_requests_bucket_warning_interval", 3)),
+                )
+                if self._missing_requests_bucket_consecutive_updates % warning_interval == 0:
+                    session_id = "unknown"
+                    memory_manager = getattr(self, "_memory_manager", None)
+                    if memory_manager is not None:
+                        session_id_value = memory_manager.get_active_session_id()
+                        if session_id_value:
+                            session_id = str(session_id_value)
+                    logger.warning(
+                        "Realtime API requests bucket missing for %s consecutive rate_limits.updated events "
+                        "(session_id=%s)",
+                        self._missing_requests_bucket_consecutive_updates,
+                        session_id,
+                    )
+
             req = rl.get("requests", {})
             tok = rl.get("tokens", {})
             logger.info(
-                "Rate limits: requests %s/%s reset=%s | tokens %s/%s reset=%s",
+                "Rate limits: requests_bucket=%s | requests %s/%s reset=%s | tokens %s/%s reset=%s",
+                "present" if has_requests_bucket else "missing",
                 _format_rate_limit_field(req.get("remaining")),
                 _format_rate_limit_field(req.get("limit")),
                 _format_rate_limit_duration(req.get("reset_seconds")),

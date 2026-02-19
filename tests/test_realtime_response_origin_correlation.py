@@ -35,6 +35,11 @@ class _Mic:
         return None
 
 
+class _MemoryManager:
+    def get_active_session_id(self) -> str:
+        return "sess-test"
+
+
 def _build_api() -> RealtimeAPI:
     api = RealtimeAPI.__new__(RealtimeAPI)
     api._pending_response_create_origins = deque(maxlen=64)
@@ -54,6 +59,7 @@ def _build_api() -> RealtimeAPI:
     api._reflection_enqueued = False
     api.state_manager = _StateManager()
     api.mic = _Mic()
+    api._memory_manager = _MemoryManager()
     return api
 
 
@@ -106,7 +112,9 @@ def test_response_created_from_pending_action_with_server_auto_keeps_awaiting_ph
     assert "response.created consumed by confirmation flow; origin=server_auto" in logs
 
 
-def test_rate_limits_updated_tokens_only_steady_payload_logs_info_only(monkeypatch) -> None:
+def test_rate_limits_updated_tokens_only_steady_payload_logs_info_and_throttled_warning(
+    monkeypatch,
+) -> None:
     api = _build_api()
     info_logs: list[str] = []
     warning_logs: list[str] = []
@@ -134,9 +142,17 @@ def test_rate_limits_updated_tokens_only_steady_payload_logs_info_only(monkeypat
 
     asyncio.run(api.handle_event(event, websocket=None))
     asyncio.run(api.handle_event(event, websocket=None))
+    asyncio.run(api.handle_event(event, websocket=None))
 
-    assert warning_logs == []
-    assert info_logs[-1] == "Rate limits: requests n/a/n/a reset=n/a | tokens 995/1000 reset=n/a"
+    assert warning_logs[-1] == (
+        "Realtime API requests bucket missing for 3 consecutive rate_limits.updated events "
+        "(session_id=sess-test)"
+    )
+    assert (
+        info_logs[-1]
+        == "Rate limits: requests_bucket=missing | requests n/a/n/a reset=n/a | "
+        "tokens 995/1000 reset=n/a"
+    )
 
 
 def test_rate_limits_updated_missing_requests_does_not_suffix_na_reset(monkeypatch) -> None:
@@ -162,6 +178,7 @@ def test_rate_limits_updated_missing_requests_does_not_suffix_na_reset(monkeypat
 
     asyncio.run(api.handle_event(event, websocket=None))
 
+    assert "requests_bucket=missing" in info_logs[-1]
     assert "reset=n/a" in info_logs[-1]
     assert "n/as" not in info_logs[-1]
 
