@@ -248,11 +248,18 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 ops_status = "interrupted"
             if ops_status != "stopped":
+                loop_alive = ops_orchestrator.is_loop_alive()
                 logger.warning(
-                    "Ops orchestrator shutdown incomplete (status=%s forced_shutdown_continuation=%s)",
+                    "Ops orchestrator shutdown incomplete (status=%s forced_shutdown_continuation=%s loop_alive=%s)",
                     ops_status,
                     ops_orchestrator.forced_shutdown_continuation(),
+                    loop_alive,
                 )
+                if ops_status == "timed_out":
+                    logger.warning(
+                        "Ops orchestrator timed out. Follow-up: inspect blocked probes/ticks and verify loop thread exits cleanly before restart (loop_alive=%s).",
+                        loop_alive,
+                    )
         if camera_instance:
             with suppress_noisy_stderr(
                 "camera shutdown",
