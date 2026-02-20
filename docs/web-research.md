@@ -77,6 +77,10 @@ All keys below are under the top-level `research:` block.
 
 - `OPENAI_API_KEY` is required for the OpenAI provider path.
 - `FIRECRAWL_API_KEY` is required only when `research.firecrawl.enabled: true`.
+- Set/update Firecrawl credentials with:
+  ```bash
+  ./scripts/update-firecrawl-key.sh
+  ```
 
 ## Operator Notes
 

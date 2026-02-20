@@ -52,6 +52,13 @@ See [docs/installation.md](docs/installation.md) for Raspberry Pi OS setup
 steps, git clone details, and the environment setup script. Hardware assembly
 notes live in [docs/hardware-setup.md](docs/hardware-setup.md).
 
+If you enable optional Firecrawl-backed research
+(`research.firecrawl.enabled: true`), set `FIRECRAWL_API_KEY` with:
+
+```bash
+./scripts/update-firecrawl-key.sh
+```
+
 ### Run the Runtime
 
 ```bash
@@ -98,6 +105,10 @@ See [docs/systemd-setup.md](docs/systemd-setup.md) and the template unit in
 [systemd/pyPiBot.service](systemd/pyPiBot.service) for Raspberry Pi deployment
 instructions, including best-effort pre-start git sync logging and the
 logrotate template at `ops/logrotate/pypibot`.
+
+For systemd deployments that use Firecrawl, operators can manage
+`FIRECRAWL_API_KEY` with `./scripts/update-firecrawl-key.sh` before restarting
+the service.
 
 ## Diagnostics & Tests
 
