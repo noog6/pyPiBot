@@ -291,7 +291,7 @@ governance:
       cost_hint: "cheap"
       safety_tags: ["storage"]
     forget_memory:
-      tier: 2
+      tier: 1
       reversible: false
       cost_hint: "med"
       safety_tags: ["storage"]
