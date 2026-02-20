@@ -40,3 +40,17 @@ sudo raspi-config
 # Interface Options -> I2C -> Enable
 sudo reboot
 ```
+
+## 5) Configure API keys
+
+Set required provider keys before running services:
+
+```bash
+./scripts/update-openai-key.sh
+```
+
+If you enable Firecrawl research (`research.firecrawl.enabled: true`), also run:
+
+```bash
+./scripts/update-firecrawl-key.sh
+```
