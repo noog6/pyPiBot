@@ -90,6 +90,8 @@ def test_allowlist_blocks_localhost_target(tmp_path: Path) -> None:
     packet = svc.request_research(ResearchRequest(prompt="find datasheet abc"))
 
     assert packet.status == "ok"
+    assert packet.metadata["content_fetch_status"] == "skipped"
+    assert packet.metadata["content_fetch_skip_reason"] == "allowlist_blocked"
     assert any(note.startswith("blocked_by_domain_policy:") for note in packet.safety_notes)
 
 
@@ -113,8 +115,8 @@ def test_malicious_markdown_flags_prompt_injection_and_schema(tmp_path: Path) ->
     """
     svc = _FakeOpenAIResearchService(
         search_result={
-            "best_url": "https://vendor.com/datasheet.pdf",
-            "sources": [{"title": "Vendor DS", "url": "https://vendor.com/datasheet.pdf"}],
+            "best_url": "https://vendor.com/datasheet",
+            "sources": [{"title": "Vendor DS", "url": "https://vendor.com/datasheet"}],
             "search_summary": "Found vendor datasheet",
             "safety_notes": [],
         },
@@ -122,7 +124,7 @@ def test_malicious_markdown_flags_prompt_injection_and_schema(tmp_path: Path) ->
             '{"schema":"research_packet_v1","status":"ok",'
             '"answer_summary":"Result",'
             '"extracted_facts":["Fact A (sec 3)"],'
-            '"sources":[{"title":"Doc","url":"https://vendor.com/datasheet.pdf"}],'
+            '"sources":[{"title":"Doc","url":"https://vendor.com/datasheet"}],'
             '"safety_notes":[]}'
         ),
         firecrawl_enabled=True,
@@ -140,7 +142,7 @@ def test_malicious_markdown_flags_prompt_injection_and_schema(tmp_path: Path) ->
 def test_firecrawl_missing_key_returns_sources_only_packet(tmp_path: Path) -> None:
     svc = _FakeOpenAIResearchService(
         search_result={
-            "best_url": "https://vendor.com/datasheet.pdf",
+            "best_url": "https://vendor.com/datasheet",
             "sources": [{"title": "Vendor DS", "url": "https://vendor.com/datasheet.pdf"}],
             "search_summary": "Found vendor datasheet",
             "safety_notes": [],
@@ -156,4 +158,51 @@ def test_firecrawl_missing_key_returns_sources_only_packet(tmp_path: Path) -> No
     assert packet.status == "ok"
     assert packet.extracted_facts == []
     assert packet.sources
-    assert "FIRECRAWL_API_KEY_missing" in packet.safety_notes
+    assert packet.metadata["content_fetch_status"] == "skipped"
+    assert packet.metadata["content_fetch_skip_reason"] == "firecrawl_key_missing"
+
+
+def test_fetch_pass_succeeds_and_attaches_markdown(tmp_path: Path) -> None:
+    markdown = "# Heading\n" + ("x" * 50)
+    svc = _FakeOpenAIResearchService(
+        search_result={
+            "best_url": "https://vendor.com/page",
+            "sources": [{"title": "Vendor", "url": "https://vendor.com/page"}],
+            "search_summary": "Found candidate sources",
+            "safety_notes": [],
+        },
+        extract_result='{"schema":"research_packet_v1","status":"ok","answer_summary":"ok","extracted_facts":[],"sources":[],"safety_notes":[]}',
+        firecrawl_enabled=True,
+        firecrawl_client=_FakeFirecrawlClient(markdown, enabled=True),
+        firecrawl_max_markdown_chars=20,
+        budget_state_file=str(tmp_path / "budget.json"),
+        cache_dir=str(tmp_path / "cache"),
+    )
+
+    packet = svc.request_research(ResearchRequest(prompt="find datasheet abc"))
+
+    assert packet.metadata["content_fetch_status"] == "ok"
+    assert packet.metadata["content_fetch_provider"] == "firecrawl"
+    assert packet.metadata["content_fetch_markdown_chars"] > 0
+    assert packet.metadata["content_fetch_markdown"]
+    assert len(packet.metadata["content_fetch_markdown"]) <= svc._firecrawl_max_markdown_chars + 1
+
+
+def test_fetch_pass_skipped_when_firecrawl_disabled(tmp_path: Path) -> None:
+    svc = _FakeOpenAIResearchService(
+        search_result={
+            "best_url": "https://vendor.com/page",
+            "sources": [{"title": "Vendor", "url": "https://vendor.com/page"}],
+            "search_summary": "Found candidate sources",
+            "safety_notes": [],
+        },
+        extract_result="{}",
+        firecrawl_enabled=False,
+        firecrawl_client=_FakeFirecrawlClient("markdown", enabled=True),
+        budget_state_file=str(tmp_path / "budget.json"),
+        cache_dir=str(tmp_path / "cache"),
+    )
+    packet = svc.request_research(ResearchRequest(prompt="find datasheet abc"))
+
+    assert packet.metadata["content_fetch_status"] == "skipped"
+    assert packet.metadata["content_fetch_skip_reason"] == "firecrawl_disabled"

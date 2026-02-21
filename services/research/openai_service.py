@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import socket
+import time
 from typing import Any
 from urllib import parse, request
 
@@ -41,9 +42,9 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else f"{text[:limit]}…"
 
 
-def _looks_like_datasheet(url: str) -> bool:
-    normalized = url.lower()
-    return normalized.endswith(".pdf") or "datasheet" in normalized or "data-sheet" in normalized
+
+def _is_pdf_url(url: str) -> bool:
+    return parse.urlparse(url).path.lower().endswith(".pdf")
 
 
 class OpenAIResearchService(ResearchService):
@@ -132,49 +133,82 @@ class OpenAIResearchService(ResearchService):
         sources = self._sanitize_sources(search_result.get("sources") or [])
         safety_notes = self._sanitize_notes(search_result.get("safety_notes") or [])
 
-        if not best_url:
-            safety_notes.append("No likely datasheet URL found from web_search.")
-            packet = self._sources_only_packet(search_result, sources, safety_notes)
+        fetch_url = str((sources[0] if sources else {}).get("url") or best_url).strip()
+        fetch_meta = self._default_fetch_metadata()
+        markdown = ""
+
+        if not fetch_url:
+            fetch_meta["content_fetch_skip_reason"] = "no_sources"
+            safety_notes.append("content_fetch_skipped:no_sources")
+        elif not self._firecrawl_enabled:
+            fetch_meta["content_fetch_skip_reason"] = "firecrawl_disabled"
+            safety_notes.append("content_fetch_skipped:firecrawl_disabled")
+        elif not self._firecrawl_client.enabled:
+            fetch_meta["content_fetch_skip_reason"] = "firecrawl_key_missing"
+            safety_notes.append("content_fetch_skipped:firecrawl_key_missing")
+        else:
+            allowed, policy_reason = self._is_url_allowed(fetch_url)
+            if not allowed:
+                LOGGER.warning("[Research] blocked URL by allowlist policy: %s", policy_reason)
+                fetch_meta["content_fetch_skip_reason"] = "allowlist_blocked"
+                safety_notes.append(f"blocked_by_domain_policy:{policy_reason}")
+                safety_notes.append("content_fetch_skipped:allowlist_blocked")
+            elif _is_pdf_url(fetch_url):
+                fetch_meta["content_fetch_skip_reason"] = "unsupported"
+                safety_notes.append("content_fetch_skipped:unsupported")
+            else:
+                fetch_meta["content_fetch_attempted"] = True
+                fetch_meta["content_fetch_provider"] = "firecrawl"
+                fetch_meta["content_fetch_url"] = fetch_url
+                started = time.perf_counter()
+                try:
+                    markdown = self._load_markdown(fetch_url) or ""
+                    if not markdown:
+                        markdown = self._firecrawl_client.fetch_markdown(
+                            fetch_url,
+                            max_pages=self._firecrawl_max_pages,
+                            max_markdown_chars=self._firecrawl_max_markdown_chars,
+                        )
+                        self._cache.set("url_markdown", fetch_url, {"markdown": markdown})
+                        LOGGER.info("[Research] cache miss scope=url_markdown")
+                    fetch_meta["content_fetch_status"] = "ok"
+                    fetch_meta["content_fetch_markdown_chars"] = len(markdown)
+                    fetch_meta["content_fetch_latency_ms"] = int((time.perf_counter() - started) * 1000)
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.warning("[Research] Firecrawl ingestion failed: %s", exc)
+                    fetch_meta["content_fetch_status"] = "failed"
+                    fetch_meta["content_fetch_error"] = type(exc).__name__
+                    fetch_meta["content_fetch_latency_ms"] = int((time.perf_counter() - started) * 1000)
+                    safety_notes.append(f"firecrawl_failed:{type(exc).__name__}")
+
+        url_domain = parse.urlparse(fetch_url).hostname or ""
+        LOGGER.info(
+            "[Research] content_fetch attempted=%s provider=%s status=%s domain=%s markdown_chars=%s",
+            fetch_meta["content_fetch_attempted"],
+            fetch_meta["content_fetch_provider"],
+            fetch_meta["content_fetch_status"],
+            url_domain,
+            fetch_meta["content_fetch_markdown_chars"],
+        )
+
+        if not markdown:
+            packet = self._sources_only_packet(search_result, sources, safety_notes, metadata_extra=fetch_meta)
             self._cache.set("query", request_packet.prompt, self._packet_to_payload(packet))
             self._budget.spend(1)
             LOGGER.info("[Research] rounds_used=1")
             return packet
 
-        LOGGER.info("[Research] Datasheet candidate selected: %s", best_url)
-
-        if not self._firecrawl_enabled:
-            safety_notes.append("firecrawl_disabled")
-            return self._finish_sources_only(request_packet, search_result, sources, safety_notes)
-        if not self._firecrawl_client.enabled:
-            safety_notes.append("FIRECRAWL_API_KEY_missing")
-            return self._finish_sources_only(request_packet, search_result, sources, safety_notes)
-        if not _looks_like_datasheet(best_url):
-            safety_notes.append("candidate_url_not_datasheet_like")
-            return self._finish_sources_only(request_packet, search_result, sources, safety_notes)
-
-        allowed, policy_reason = self._is_url_allowed(best_url)
-        if not allowed:
-            LOGGER.warning("[Research] blocked URL by allowlist policy: %s", policy_reason)
-            safety_notes.append(f"blocked_by_domain_policy:{policy_reason}")
-            return self._finish_sources_only(request_packet, search_result, sources, safety_notes)
-
-        markdown = self._load_markdown(best_url)
-        if markdown is None:
-            try:
-                markdown = self._firecrawl_client.fetch_markdown(
-                    best_url,
-                    max_pages=self._firecrawl_max_pages,
-                    max_markdown_chars=self._firecrawl_max_markdown_chars,
-                )
-                self._cache.set("url_markdown", best_url, {"markdown": markdown})
-                LOGGER.info("[Research] cache miss scope=url_markdown")
-            except Exception as exc:  # noqa: BLE001
-                LOGGER.warning("[Research] Firecrawl ingestion failed: %s", exc)
-                safety_notes.append(f"firecrawl_failed:{type(exc).__name__}")
-                return self._finish_sources_only(request_packet, search_result, sources, safety_notes)
-
         rounds_used = 2 if self._max_rounds >= 2 else 1
-        packet = self._extract_from_markdown(request_packet, best_url, markdown, sources, safety_notes)
+        packet = self._extract_from_markdown(request_packet, fetch_url, markdown, sources, safety_notes)
+        packet = ResearchPacket(
+            schema=packet.schema,
+            status=packet.status,
+            answer_summary=packet.answer_summary,
+            extracted_facts=packet.extracted_facts,
+            sources=packet.sources,
+            safety_notes=packet.safety_notes,
+            metadata={**packet.metadata, **fetch_meta, "content_fetch_markdown": _clip(markdown, self._firecrawl_max_markdown_chars)},
+        )
 
         if rounds_used == 2 and self._escalation_enabled and self._should_escalate(packet):
             LOGGER.info("[Research] escalation triggered for second pass")
@@ -405,6 +439,8 @@ class OpenAIResearchService(ResearchService):
         search_result: dict[str, Any],
         sources: list[dict[str, str]],
         safety_notes: list[str],
+        *,
+        metadata_extra: dict[str, Any] | None = None,
     ) -> ResearchPacket:
         summary = _strip_html(str(search_result.get("search_summary") or "Found candidate sources only."))
         return ResearchPacket(
@@ -414,8 +450,17 @@ class OpenAIResearchService(ResearchService):
             extracted_facts=[],
             sources=sources,
             safety_notes=self._sanitize_notes(safety_notes),
-            metadata={"provider": "openai_responses_web_search"},
+            metadata={"provider": "openai_responses_web_search", **(metadata_extra or {})},
         )
+
+    def _default_fetch_metadata(self) -> dict[str, Any]:
+        return {
+            "content_fetch_attempted": False,
+            "content_fetch_provider": "none",
+            "content_fetch_status": "skipped",
+            "content_fetch_skip_reason": "unsupported",
+            "content_fetch_markdown_chars": 0,
+        }
 
     def _packet_to_payload(self, packet: ResearchPacket) -> dict[str, Any]:
         return {
@@ -425,6 +470,7 @@ class OpenAIResearchService(ResearchService):
             "extracted_facts": list(packet.extracted_facts),
             "sources": [dict(item) for item in packet.sources],
             "safety_notes": list(packet.safety_notes),
+            "metadata": dict(packet.metadata),
         }
 
     def _load_markdown(self, url: str) -> str | None:
