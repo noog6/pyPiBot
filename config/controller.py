@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,9 @@ MEMORY_SEMANTIC_QUERY_TIMEOUT_DEFAULT_MS = 2000
 MEMORY_SEMANTIC_OPENAI_TIMEOUT_DEFAULT_S = 10.0
 MEMORY_SEMANTIC_STARTUP_CANARY_TIMEOUT_FLOOR_MS = 500
 MEMORY_SEMANTIC_STARTUP_CANARY_TIMEOUT_DEFAULT_MS = 1500
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -296,11 +300,40 @@ class ConfigController:
             0.1,
             float(memory_openai_cfg.get("timeout_s", MEMORY_SEMANTIC_OPENAI_TIMEOUT_DEFAULT_S)),
         )
+        # Semantic timeout relationships are normalized to keep deterministic guardrails:
+        # write_timeout_ms <= query_timeout_ms < provider_timeout_ms and
+        # startup_canary_timeout_ms < provider_timeout_ms.
+        if memory_semantic_cfg["write_timeout_ms"] > memory_semantic_cfg["query_timeout_ms"]:
+            logger.warning(
+                "memory_semantic.write_timeout_ms exceeds query_timeout_ms; clamping write timeout to query timeout.",
+                extra={
+                    "configured_write_timeout_ms": memory_semantic_cfg["write_timeout_ms"],
+                    "configured_query_timeout_ms": memory_semantic_cfg["query_timeout_ms"],
+                },
+            )
+            memory_semantic_cfg["write_timeout_ms"] = memory_semantic_cfg["query_timeout_ms"]
+
         # Query timeout is bounded to a practical floor and should remain below provider timeout
         # so semantic retrieval can fail open before provider-level request timeout is hit.
         provider_timeout_ms = int(memory_openai_cfg["timeout_s"] * 1000)
-        if provider_timeout_ms <= memory_semantic_cfg["query_timeout_ms"]:
-            provider_timeout_ms = memory_semantic_cfg["query_timeout_ms"] + 1
+        min_provider_timeout_ms = (
+            max(
+                memory_semantic_cfg["query_timeout_ms"],
+                memory_semantic_cfg["startup_canary_timeout_ms"],
+            )
+            + 1
+        )
+        if provider_timeout_ms < min_provider_timeout_ms:
+            logger.warning(
+                "memory_semantic.openai.timeout_s too low for configured semantic timeout budget; increasing provider timeout.",
+                extra={
+                    "configured_provider_timeout_ms": provider_timeout_ms,
+                    "required_min_provider_timeout_ms": min_provider_timeout_ms,
+                    "query_timeout_ms": memory_semantic_cfg["query_timeout_ms"],
+                    "startup_canary_timeout_ms": memory_semantic_cfg["startup_canary_timeout_ms"],
+                },
+            )
+            provider_timeout_ms = min_provider_timeout_ms
             memory_openai_cfg["timeout_s"] = provider_timeout_ms / 1000.0
         memory_semantic_cfg["openai"] = memory_openai_cfg
         normalized["memory_semantic"] = memory_semantic_cfg

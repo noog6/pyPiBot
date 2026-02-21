@@ -764,6 +764,12 @@ class MemoryManager:
 
         provider_ready, readiness_reason = self._is_semantic_provider_ready()
         canary_state = getattr(self, "_semantic_canary_last", {}) or {}
+        provider_timeout_ms = int(max(1.0, float(getattr(self._semantic_config, "provider_timeout_s", 0.0)) * 1000.0))
+        effective_timeout_budget_ms = min(
+            int(self._semantic_config.query_timeout_ms),
+            int(getattr(self._semantic_config, "startup_canary_timeout_ms", 0)),
+            max(1, provider_timeout_ms - 1),
+        )
         return {
             "enabled": bool(self._semantic_config.enabled),
             "provider": str(self._semantic_config.provider),
@@ -780,6 +786,7 @@ class MemoryManager:
             "canary_dimension": int(canary_state.get("dimension", 0) or 0),
             "canary_error_code": str(canary_state.get("error_code", "not_run") or "not_run"),
             "startup_canary_timeout_ms": int(getattr(self._semantic_config, "startup_canary_timeout_ms", 0)),
+            "effective_timeout_budget_ms": int(effective_timeout_budget_ms),
             "startup_canary_bypass": bool(getattr(self, "_semantic_canary_bypass", False)),
             "max_queries_per_minute": int(self._semantic_config.max_queries_per_minute),
             "max_writes_per_minute": int(self._semantic_config.max_writes_per_minute),

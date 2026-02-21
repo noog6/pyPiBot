@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from config.controller import ConfigController
@@ -84,3 +85,57 @@ def test_config_controller_clamps_semantic_query_timeout_and_provider_timeout(tm
     assert semantic_cfg["query_timeout_ms"] == 100
     assert semantic_cfg["openai"]["timeout_s"] > 0.1
     assert semantic_cfg["openai"]["timeout_s"] * 1000 > semantic_cfg["query_timeout_ms"]
+
+
+def test_config_controller_normalizes_invalid_semantic_timeout_relationships(tmp_path: Path, monkeypatch, caplog) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "default.yaml").write_text(
+        """memory_semantic:
+  write_timeout_ms: 700
+  query_timeout_ms: 300
+  startup_canary_timeout_ms: 200
+  openai:
+    timeout_s: 0.2
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    _reset_singletons()
+
+    with caplog.at_level(logging.WARNING):
+        semantic_cfg = ConfigController.get_instance().get_config()["memory_semantic"]
+
+    assert semantic_cfg["write_timeout_ms"] == 300
+    assert semantic_cfg["query_timeout_ms"] == 300
+    assert semantic_cfg["startup_canary_timeout_ms"] == 500
+    assert semantic_cfg["openai"]["timeout_s"] == 0.501
+    assert semantic_cfg["write_timeout_ms"] <= semantic_cfg["query_timeout_ms"]
+    assert semantic_cfg["query_timeout_ms"] <= semantic_cfg["startup_canary_timeout_ms"]
+    assert semantic_cfg["startup_canary_timeout_ms"] < int(semantic_cfg["openai"]["timeout_s"] * 1000)
+    assert "clamping write timeout to query timeout" in caplog.text
+    assert "increasing provider timeout" in caplog.text
+
+
+def test_config_controller_increases_provider_timeout_to_cover_startup_canary(tmp_path: Path, monkeypatch, caplog) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "default.yaml").write_text(
+        """memory_semantic:
+  query_timeout_ms: 400
+  startup_canary_timeout_ms: 900
+  openai:
+    timeout_s: 0.2
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    _reset_singletons()
+
+    with caplog.at_level(logging.WARNING):
+        semantic_cfg = ConfigController.get_instance().get_config()["memory_semantic"]
+
+    assert semantic_cfg["query_timeout_ms"] == 400
+    assert semantic_cfg["startup_canary_timeout_ms"] == 900
+    assert semantic_cfg["openai"]["timeout_s"] == 0.901
+    assert "increasing provider timeout" in caplog.text
