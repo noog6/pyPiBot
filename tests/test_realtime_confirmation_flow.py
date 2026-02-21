@@ -74,6 +74,11 @@ def _make_api_stub() -> RealtimeAPI:
     api._research_permission_outcome_ttl_s = 20.0
     api._research_permission_outcomes = {}
     api._research_suppressed_fingerprints = {}
+    api._research_mode = "auto"
+    api._research_provider = "openai"
+    api._research_firecrawl_enabled = False
+    api._research_firecrawl_allowlist_mode = "public"
+    api._research_firecrawl_allowlist_domains = set()
     api._presented_actions = set()
     api._pending_confirmation_token = None
     api._confirmation_state = ConfirmationState.IDLE
@@ -494,7 +499,11 @@ def test_maybe_process_research_intent_emits_single_permission_prompt_for_duplic
     api = RealtimeAPI.__new__(RealtimeAPI)
     api._pending_research_request = None
     api._pending_action = None
-    api._research_permission_required = True
+    api._research_mode = "ask"
+    api._research_provider = "openai"
+    api._research_firecrawl_enabled = False
+    api._research_firecrawl_allowlist_mode = "public"
+    api._research_firecrawl_allowlist_domains = set()
     api._clip_text = lambda value, limit=80: value[:limit]
 
     prompted: list[str] = []
@@ -952,11 +961,11 @@ def test_handle_function_call_suppresses_during_pending_confirmation_without_act
     assert api.function_call_args == ""
 
 
-def test_handle_function_call_suppresses_research_while_intent_permission_pending() -> None:
+def test_handle_function_call_suppresses_research_while_research_permission_pending() -> None:
     api = _make_api_stub()
     api._pending_action = None
     api._pending_research_request = object()
-    api.function_call = {"name": "perform_research", "call_id": "call_intent_permission"}
+    api.function_call = {"name": "perform_research", "call_id": "call_research_permission"}
     api.function_call_args = '{"query":"status"}'
     transitions: list[tuple[object, str | None]] = []
     api.orchestration_state = type(
@@ -1001,7 +1010,7 @@ def test_handle_function_call_suppresses_research_while_intent_permission_pendin
     assert governance_calls == {"build": 0, "review": 0}
     assert len(sent_payloads) == 1
     output_payload = json.loads(sent_payloads[0]["item"]["output"])
-    assert output_payload["status"] == "awaiting_intent_permission"
+    assert output_payload["status"] == "awaiting_research_permission"
     assert api.function_call is None
     assert api.function_call_args == ""
 
@@ -1460,7 +1469,7 @@ def test_research_permission_yes_executes_without_second_governance_confirmation
     assert transitions == [(OrchestrationPhase.ACT, "function_call perform_research")]
 
 
-def test_accepted_intent_permission_short_circuits_governance_confirmation_for_same_fingerprint() -> None:
+def test_accepted_research_permission_short_circuits_governance_confirmation_for_same_fingerprint() -> None:
     api = _make_api_stub()
     api.function_call = {"name": "perform_research", "call_id": "call_research_short_circuit"}
     api.function_call_args = '{"query":"Status", "context": {"source": "user_text"}}'
@@ -1526,7 +1535,7 @@ def test_accepted_intent_permission_short_circuits_governance_confirmation_for_s
     assert created_tokens == []
 
 
-def test_accepted_intent_permission_short_circuits_governance_confirmation_when_function_call_omits_source() -> None:
+def test_accepted_research_permission_short_circuits_governance_confirmation_when_function_call_omits_source() -> None:
     api = _make_api_stub()
     api.function_call = {"name": "perform_research", "call_id": "call_research_without_source"}
     api.function_call_args = '{"query":"Status"}'
@@ -1609,7 +1618,7 @@ def test_accepted_intent_permission_short_circuits_governance_confirmation_when_
     )
 
 
-def test_handle_function_call_replays_stable_blocked_intent_permission_output_for_same_fingerprint() -> None:
+def test_handle_function_call_replays_stable_blocked_research_permission_output_for_same_fingerprint() -> None:
     api = _make_api_stub()
     fingerprint = api._build_research_fingerprint(query="status", source="user_text")
     api._record_research_permission_outcome(fingerprint, approved=False)
@@ -1632,8 +1641,8 @@ def test_handle_function_call_replays_stable_blocked_intent_permission_output_fo
     assert len(sent_payloads) == 2
     first_output = json.loads(sent_payloads[0]["item"]["output"])
     second_output = json.loads(sent_payloads[1]["item"]["output"])
-    assert first_output["status"] == "blocked_by_intent_permission"
-    assert second_output["status"] == "blocked_by_intent_permission"
+    assert first_output["status"] == "blocked_by_research_permission"
+    assert second_output["status"] == "blocked_by_research_permission"
     assert first_output == second_output
 
 

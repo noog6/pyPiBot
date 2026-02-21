@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 import hashlib
+import ipaddress
 from io import BytesIO
 import json
 import os
@@ -446,6 +447,20 @@ class RealtimeAPI:
         research_cfg = config.get("research") or {}
         self._research_enabled = bool(research_cfg.get("enabled", False))
         self._research_permission_required = bool(research_cfg.get("permission_required", True))
+        self._research_mode = str(research_cfg.get("research_mode", "")).strip().lower()
+        if self._research_mode not in {"auto", "ask", "disabled"}:
+            self._research_mode = "ask" if self._research_permission_required else "auto"
+        self._research_provider = str(research_cfg.get("provider", "null")).strip().lower()
+        firecrawl_cfg = research_cfg.get("firecrawl") or {}
+        self._research_firecrawl_enabled = bool(firecrawl_cfg.get("enabled", False))
+        self._research_firecrawl_allowlist_mode = str(
+            firecrawl_cfg.get("allowlist_mode", "public")
+        ).strip().lower()
+        self._research_firecrawl_allowlist_domains = {
+            domain.strip().lower()
+            for domain in (firecrawl_cfg.get("allowlist_domains") or [])
+            if isinstance(domain, str) and domain.strip()
+        }
         self._research_service = build_openai_service_or_null(config)
         self._pending_research_request: ResearchRequest | None = None
         self._prior_research_permission_marker: dict[str, Any] | None = None
@@ -2484,8 +2499,16 @@ class RealtimeAPI:
             return True
         logger.info("[Research] Requested from %s", source)
 
-        if self._research_permission_required:
-            logger.info("[Research] research_confirmation_mode=intent_permission")
+        permission_needed, reason = self.should_request_research_permission(request)
+        if permission_needed:
+            provider = "firecrawl_fetch" if self._research_firecrawl_enabled else "openai_responses_web_search"
+            domain = self._extract_primary_research_domain(request.prompt)
+            logger.info(
+                "[Research] permission_required reason=%s provider=%s domain=%s",
+                reason,
+                provider,
+                domain or "n/a",
+            )
             token = self._create_confirmation_token(
                 kind="research_permission",
                 tool_name="perform_research",
@@ -2508,8 +2531,82 @@ class RealtimeAPI:
             self._set_confirmation_state(ConfirmationState.AWAITING_DECISION, reason="research_prompt_sent")
             return True
 
-        logger.info("[Research] research_confirmation_mode=governance")
+        provider = "firecrawl_fetch" if self._research_firecrawl_enabled else "openai_responses_web_search"
+        allowlisted = self._research_request_domains_allowlisted(request)
+        logger.info(
+            "[Research] permission_bypass reason=%s mode=%s allowlisted=%s provider=%s",
+            reason,
+            self._research_mode,
+            allowlisted,
+            provider,
+        )
         await self._dispatch_research_request(request, websocket)
+        return True
+
+    def should_request_research_permission(self, request: ResearchRequest) -> tuple[bool, str]:
+        mode = getattr(self, "_research_mode", "auto")
+        if mode == "disabled":
+            return True, "research_mode_disabled"
+        if mode == "ask":
+            return True, "research_mode_forced_ask"
+
+        for candidate_url in self._extract_research_urls(request.prompt):
+            parsed = urlparse(candidate_url)
+            host = (parsed.hostname or "").lower().strip()
+            if host and not self._is_research_domain_allowlisted(host):
+                return True, "non_allowlisted_domain"
+            if parsed.path.lower().endswith(".pdf"):
+                return True, "pdf_ingestion"
+
+        if self._research_provider == "openai" and self._research_firecrawl_enabled:
+            return True, "paid_provider_firecrawl"
+
+        return False, "allowlisted_low_risk"
+
+    def _extract_research_urls(self, prompt: str) -> list[str]:
+        return re.findall(r"https?://[^\s)\]>\"']+", str(prompt or ""), flags=re.IGNORECASE)
+
+    def _extract_primary_research_domain(self, prompt: str) -> str | None:
+        urls = self._extract_research_urls(prompt)
+        if not urls:
+            return None
+        return (urlparse(urls[0]).hostname or "").lower().strip() or None
+
+    def _research_request_domains_allowlisted(self, request: ResearchRequest) -> bool:
+        urls = self._extract_research_urls(request.prompt)
+        if not urls:
+            return True
+        for candidate_url in urls:
+            host = (urlparse(candidate_url).hostname or "").lower().strip()
+            if host and not self._is_research_domain_allowlisted(host):
+                return False
+        return True
+
+    def _is_research_domain_allowlisted(self, host: str) -> bool:
+        mode = getattr(self, "_research_firecrawl_allowlist_mode", "public")
+        normalized_host = host.lower().strip()
+        if not normalized_host:
+            return False
+        if mode == "off":
+            return True
+        if normalized_host in {"localhost", "127.0.0.1", "::1"} or normalized_host.endswith(".local"):
+            return False
+        try:
+            ip = ipaddress.ip_address(normalized_host)
+        except ValueError:
+            ip = None
+        if ip is not None and (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved):
+            return False
+        if normalized_host.endswith(".internal"):
+            return False
+        if mode == "explicit":
+            allowlist = getattr(self, "_research_firecrawl_allowlist_domains", set())
+            if not allowlist:
+                return False
+            return any(
+                normalized_host == allowed or normalized_host.endswith(f".{allowed}")
+                for allowed in allowlist
+            )
         return True
 
     async def _dispatch_research_request(self, request: ResearchRequest, websocket: Any) -> None:
@@ -3227,7 +3324,7 @@ class RealtimeAPI:
                 research_outcome = self._get_research_permission_outcome(research_fingerprint)
                 if research_outcome is False:
                     already_suppressed = research_fingerprint in self._research_suppressed_fingerprints
-                    self._research_suppressed_fingerprints[research_fingerprint] = "blocked_by_intent_permission"
+                    self._research_suppressed_fingerprints[research_fingerprint] = "blocked_by_research_permission"
                     if already_suppressed:
                         logger.info(
                             "Function call outcome: stable suppression replay | tool=%s call_id=%s",
@@ -3236,7 +3333,7 @@ class RealtimeAPI:
                         )
                     else:
                         logger.info(
-                            "Function call outcome: suppressed by denied intent permission | tool=%s call_id=%s",
+                            "Function call outcome: suppressed by denied research permission | tool=%s call_id=%s",
                             function_name,
                             call_id,
                         )
@@ -3247,7 +3344,7 @@ class RealtimeAPI:
                             "call_id": call_id,
                             "output": json.dumps(
                                 {
-                                    "status": "blocked_by_intent_permission",
+                                    "status": "blocked_by_research_permission",
                                     "message": "Research request was denied for this query; do not retry until user re-approves.",
                                     "tool": function_name,
                                 }
@@ -3265,7 +3362,7 @@ class RealtimeAPI:
                 and ((token is not None and token.kind == "research_permission") or self._pending_research_request is not None)
             ):
                 logger.info(
-                    "Function call outcome: suppressed pending intent permission | tool=%s call_id=%s",
+                    "Function call outcome: suppressed pending research permission | tool=%s call_id=%s",
                     function_name,
                     call_id,
                 )
@@ -3276,8 +3373,8 @@ class RealtimeAPI:
                         "call_id": call_id,
                         "output": json.dumps(
                             {
-                                "status": "awaiting_intent_permission",
-                                "message": "Research request is awaiting user intent permission.",
+                                "status": "awaiting_research_permission",
+                                "message": "Research request is awaiting user research permission.",
                                 "tool": function_name,
                             }
                         ),

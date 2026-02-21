@@ -168,6 +168,10 @@ class ConfigController:
         research_cfg["permission_required"] = bool(
             research_cfg.get("permission_required", True)
         )
+        requested_research_mode = str(research_cfg.get("research_mode", "")).strip().lower()
+        if requested_research_mode not in {"auto", "ask", "disabled"}:
+            requested_research_mode = "ask" if research_cfg["permission_required"] else "auto"
+        research_cfg["research_mode"] = requested_research_mode
         openai_cfg = dict(research_cfg.get("openai") or {})
         openai_cfg["enabled"] = bool(openai_cfg.get("enabled", False))
         openai_cfg["model"] = str(openai_cfg.get("model", "gpt-4.1-mini"))
