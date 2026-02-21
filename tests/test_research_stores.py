@@ -7,7 +7,7 @@ import json
 import pytest
 
 from services.research.budget_manager import ResearchBudgetManager
-from services.research.stores import ResearchBudgetTracker, ResearchCacheStore
+from services.research.stores import ResearchCacheStore
 
 
 class _FakeConfigController:
@@ -35,17 +35,33 @@ def _init_budget_manager(monkeypatch, tmp_path, daily_limit: int, legacy_state_f
     return manager, StorageController
 
 
-def test_budget_tracker_is_read_only_compatibility_layer(tmp_path) -> None:
-    state_file = tmp_path / "budget.json"
-    state_file.write_text("{}", encoding="utf-8")
+def test_budget_manager_migrates_legacy_json_state(monkeypatch, tmp_path) -> None:
+    state_file = tmp_path / "legacy-budget.json"
+    state_file.write_text(
+        json.dumps({"date": "2025-01-01", "count": 2}),
+        encoding="utf-8",
+    )
 
-    with pytest.deprecated_call(match="ResearchBudgetTracker is deprecated"):
-        tracker = ResearchBudgetTracker(str(state_file), daily_limit=2)
+    monkeypatch.setattr(
+        "services.research.budget_manager.ResearchBudgetManager._today_utc",
+        lambda self: "2025-01-01",
+    )
 
-    assert tracker.can_spend()
-    assert tracker.get_remaining() == 2
-    with pytest.raises(RuntimeError, match="read-only"):
-        tracker.spend()
+    manager, StorageController = _init_budget_manager(
+        monkeypatch,
+        tmp_path,
+        daily_limit=5,
+        legacy_state_file=str(state_file),
+    )
+    try:
+        state = manager.current_state()
+        assert state["count"] == 2
+        assert state["remaining"] == 3
+    finally:
+        controller = StorageController._instance
+        if controller is not None:
+            controller.close()
+        StorageController._instance = None
 
 
 def test_cache_store_round_trip(tmp_path) -> None:

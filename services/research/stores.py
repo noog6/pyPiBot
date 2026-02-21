@@ -7,7 +7,6 @@ import json
 from pathlib import Path
 import time
 from typing import Any
-import warnings
 
 
 class ResearchCacheStore:
@@ -42,43 +41,3 @@ class ResearchCacheStore:
         digest = hashlib.sha256(f"{scope}:{key}".encode("utf-8")).hexdigest()
         return self._base_dir / f"{digest}.json"
 
-
-class ResearchBudgetTracker:
-    """Deprecated read-only compatibility shim for the retired JSON budget tracker.
-
-    This helper only reads legacy JSON budget files. Runtime budget writes are handled
-    by ``ResearchBudgetManager`` via SQLite storage.
-    """
-
-    def __init__(self, state_file: str, daily_limit: int) -> None:
-        warnings.warn(
-            "ResearchBudgetTracker is deprecated and read-only; use ResearchBudgetManager instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        self._state_file = Path(state_file)
-        self._daily_limit = max(0, int(daily_limit))
-
-    def get_remaining(self) -> int:
-        state = self._load_state()
-        return max(0, self._daily_limit - int(state.get("count", 0)))
-
-    def can_spend(self, units: int = 1) -> bool:
-        if self._daily_limit <= 0:
-            return True
-        return self.get_remaining() >= max(1, int(units))
-
-    def spend(self, units: int = 1) -> int:
-        raise RuntimeError("ResearchBudgetTracker is read-only and no longer supports writes.")
-
-    def _load_state(self) -> dict[str, Any]:
-        today = time.strftime("%Y-%m-%d", time.gmtime())
-        if not self._state_file.exists():
-            return {"date": today, "count": 0}
-        try:
-            payload = json.loads(self._state_file.read_text(encoding="utf-8"))
-            if payload.get("date") != today:
-                return {"date": today, "count": 0}
-            return {"date": today, "count": int(payload.get("count", 0))}
-        except Exception:
-            return {"date": today, "count": 0}
