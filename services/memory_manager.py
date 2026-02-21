@@ -510,12 +510,12 @@ class MemoryManager:
             30.0,
             float(semantic_cfg.get("canary_refresh_interval_s", SEMANTIC_CANARY_REFRESH_INTERVAL_S)),
         )
+        self._query_embedding_latency_samples = _LatencyWindowSampler()
+        self._canary_refresh_latency_samples = _LatencyWindowSampler()
         self._run_embedding_canary()
         _, self._semantic_readiness_reason_last = self._is_semantic_provider_ready()
         self._semantic_query_timeout_floor_warned = False
         self._semantic_query_embedding_not_ready_streak = 0
-        self._query_embedding_latency_samples = _LatencyWindowSampler()
-        self._canary_refresh_latency_samples = _LatencyWindowSampler()
         self._embedding_coverage_cache_ttl_s = 60.0
         self._embedding_coverage_cache: dict[tuple[str, MemoryScope, str | None], dict[str, float | int]] = {}
         self._embedding_backlog_last: dict[tuple[str, MemoryScope, str | None], int] = {}
