@@ -28,6 +28,8 @@ def test_config_controller_sets_safe_research_defaults(tmp_path: Path, monkeypat
     assert research_cfg["openai"]["enabled"] is False
     assert research_cfg["openai"]["model"] == "gpt-4.1-mini"
     assert research_cfg["firecrawl"]["enabled"] is False
+    assert research_cfg["firecrawl"]["pdf_ingestion_enabled"] is False
+    assert research_cfg["firecrawl"]["timeout_s"] == 15.0
     assert research_cfg["firecrawl"]["max_pages"] == 1
     assert research_cfg["firecrawl"]["allowlist_mode"] == "public"
     assert research_cfg["firecrawl"]["allowlist_domains"] == []

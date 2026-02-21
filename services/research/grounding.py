@@ -6,10 +6,10 @@ from services.research.models import ResearchPacket
 
 _SKIP_REASON_MESSAGES: dict[str, str] = {
     "firecrawl_disabled": "content fetching is disabled in config",
-    "firecrawl_key_missing": "content fetching is enabled but key is missing",
+    "firecrawl_missing_key": "PDF ingestion requires FIRECRAWL_API_KEY but it is missing",
     "allowlist_blocked": "content fetching blocked by allowlist policy",
     "domain_not_allowed": "content fetching blocked by allowlist policy",
-    "pdf_unsupported": "only PDF sources were found and PDF parsing is disabled",
+    "pdf_disabled": "PDF sources were found but PDF ingestion is disabled",
     "no_sources": "no sources returned to fetch",
 }
 

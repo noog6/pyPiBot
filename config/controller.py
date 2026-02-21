@@ -183,6 +183,11 @@ class ConfigController:
 
         firecrawl_cfg = dict(research_cfg.get("firecrawl") or {})
         firecrawl_cfg["enabled"] = bool(firecrawl_cfg.get("enabled", False))
+        firecrawl_cfg["pdf_ingestion_enabled"] = bool(
+            firecrawl_cfg.get("pdf_ingestion_enabled", False)
+        )
+        firecrawl_cfg["timeout_s"] = float(firecrawl_cfg.get("timeout_s", 15.0))
+        firecrawl_cfg["api_key"] = str(firecrawl_cfg.get("api_key", ""))
         firecrawl_cfg["max_pages"] = int(firecrawl_cfg.get("max_pages", 1))
         firecrawl_cfg["max_markdown_chars"] = int(
             firecrawl_cfg.get("max_markdown_chars", 20000)
