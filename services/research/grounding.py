@@ -8,6 +8,8 @@ _SKIP_REASON_MESSAGES: dict[str, str] = {
     "firecrawl_disabled": "content fetching is disabled in config",
     "firecrawl_key_missing": "content fetching is enabled but key is missing",
     "allowlist_blocked": "content fetching blocked by allowlist policy",
+    "domain_not_allowed": "content fetching blocked by allowlist policy",
+    "pdf_unsupported": "only PDF sources were found and PDF parsing is disabled",
     "no_sources": "no sources returned to fetch",
 }
 
