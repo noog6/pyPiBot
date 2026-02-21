@@ -136,11 +136,20 @@ class MemoryEmbeddingWorker:
             return 0
 
         try:
+            batch_started_monotonic = time.monotonic()
             results = self._provider.embed_batch([entry.content for entry in ready_entries])
+            batch_latency_ms = int((time.monotonic() - batch_started_monotonic) * 1000.0)
         except Exception as exc:  # noqa: BLE001
             error_code = f"provider_exception:{type(exc).__name__}"
+            batch_latency_ms = int((time.monotonic() - batch_started_monotonic) * 1000.0)
             for entry in ready_entries:
                 self._record_failure(entry=entry, error_message=error_code, error_code=error_code)
+                logger.info(
+                    "memory_embedding_audit event=processed memory_id=%s outcome=failure latency_ms=%s error_code=%s",
+                    entry.memory_id,
+                    batch_latency_ms,
+                    error_code,
+                )
             self._consecutive_failures += 1
             logger.warning(
                 "memory embedding batch summary processed=%s succeeded=0 failed=%s error_code=%s",
@@ -152,7 +161,24 @@ class MemoryEmbeddingWorker:
 
         success_count = 0
         failure_count = 0
-        for entry, result in zip(ready_entries, results):
+        for index, entry in enumerate(ready_entries):
+            if index >= len(results):
+                error_code = "provider_returned_fewer_results"
+                self._record_failure(
+                    entry=entry,
+                    error_message=error_code,
+                    error_code=error_code,
+                )
+                logger.info(
+                    "memory_embedding_audit event=processed memory_id=%s outcome=failure latency_ms=%s error_code=%s",
+                    entry.memory_id,
+                    batch_latency_ms,
+                    error_code,
+                )
+                failure_count += 1
+                continue
+
+            result = results[index]
             if result.status == "ready" and result.dimension > 0 and result.vector:
                 self._store.upsert_memory_embedding(
                     memory_id=entry.memory_id,
@@ -164,6 +190,11 @@ class MemoryEmbeddingWorker:
                     error=None,
                 )
                 self._failures.pop(entry.memory_id, None)
+                logger.info(
+                    "memory_embedding_audit event=processed memory_id=%s outcome=success latency_ms=%s error_code=none",
+                    entry.memory_id,
+                    batch_latency_ms,
+                )
                 success_count += 1
                 continue
             error_code = result.error_code or "embedding_failed"
@@ -172,15 +203,13 @@ class MemoryEmbeddingWorker:
                 error_message=result.error_message or error_code,
                 error_code=error_code,
             )
+            logger.info(
+                "memory_embedding_audit event=processed memory_id=%s outcome=failure latency_ms=%s error_code=%s",
+                entry.memory_id,
+                batch_latency_ms,
+                error_code,
+            )
             failure_count += 1
-        if len(results) < len(ready_entries):
-            for entry in ready_entries[len(results) :]:
-                self._record_failure(
-                    entry=entry,
-                    error_message="provider_returned_fewer_results",
-                    error_code="provider_returned_fewer_results",
-                )
-                failure_count += 1
         if success_count > 0:
             self._consecutive_failures = 0
         elif ready_entries:

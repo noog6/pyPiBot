@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 from config.controller import ConfigController
 from services.embedding_provider import EmbeddingResult
@@ -18,7 +19,8 @@ class _SequenceProvider:
     results: list[EmbeddingResult]
 
     def embed_text(self, text: str) -> EmbeddingResult:
-        return self.embed_batch([text])[0]
+        result = self.embed_batch([text])[0]
+        return SimpleNamespace(**result.__dict__)
 
     def embed_batch(self, texts: list[str]) -> list[EmbeddingResult]:
         return [self.results.pop(0) for _ in texts]
@@ -246,6 +248,10 @@ def test_worker_logs_batch_summary_and_metrics_on_success(tmp_path: Path, caplog
     worker.enqueue_memory(memory_id=entry.memory_id)
     assert worker.run_once() == 1
 
+    assert (
+        f"memory_embedding_audit event=processed memory_id={entry.memory_id} "
+        "outcome=success"
+    ) in caplog.text
     assert "memory embedding batch summary processed=1 succeeded=1 failed=0" in caplog.text
     metrics = worker.get_metrics()
     assert set(("pending_count", "retry_blocked_count", "consecutive_failures", "oldest_pending_age_ms")).issubset(metrics)
@@ -282,7 +288,14 @@ def test_worker_logs_failure_classification_and_metrics_on_error(tmp_path: Path,
     worker.enqueue_memory(memory_id=entry.memory_id)
     assert worker.run_once() == 0
 
-    assert "classification=retry_backoff" in caplog.text
+    assert (
+        f"memory_embedding_audit event=processed memory_id={entry.memory_id} "
+        "outcome=failure latency_ms="
+    ) in caplog.text
+    assert (
+        f"memory embedding failure memory_id={entry.memory_id} "
+        "classification=retry_backoff failures=1 error_code=boom"
+    ) in caplog.text
     assert "memory embedding batch summary processed=1 succeeded=0 failed=1" in caplog.text
     metrics = worker.get_metrics()
     assert metrics["pending_count"] == 1
@@ -312,15 +325,35 @@ def test_remember_memory_enqueues_pending_embedding_when_enabled(tmp_path: Path,
 
     manager = MemoryManager.get_instance()
     manager._store = MemoryStore(db_path=tmp_path / "memories.db")
-    manager._embedding_worker = MemoryEmbeddingWorker(store=manager._store)
+    manager._embedding_worker = MemoryEmbeddingWorker(
+        store=manager._store,
+        provider=_SequenceProvider(
+            results=[
+                EmbeddingResult(
+                    vector=(1.0).hex().encode("utf-8"),
+                    dimension=1,
+                    model="test-model",
+                    model_version="v1",
+                    vector_norm=1.0,
+                    provider="test",
+                    status="ready",
+                )
+            ]
+        ),
+    )
     manager._default_scope = MemoryScope.USER_GLOBAL
 
     caplog.set_level("INFO")
     entry = manager.remember_memory(content="queue this memory", importance=3)
+    assert manager._embedding_worker.run_once() == 1
 
     embedding = manager._store.fetch_embeddings_for_memories(memory_ids=[entry.memory_id])[entry.memory_id]
-    assert embedding.status == "pending"
+    assert embedding.status == "ready"
     assert f"memory_embedding_audit event=enqueued memory_id={entry.memory_id}" in caplog.text
+    assert (
+        f"memory_embedding_audit event=processed memory_id={entry.memory_id} "
+        "outcome=success"
+    ) in caplog.text
 
 
 def test_worker_run_loop_periodically_backfills_missing_rows(tmp_path: Path) -> None:
