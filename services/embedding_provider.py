@@ -9,7 +9,9 @@ import math
 import os
 import struct
 from typing import Any
+from urllib import error as urllib_error
 from urllib import request
+import socket
 
 
 @dataclass(frozen=True)
@@ -130,14 +132,38 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
                 ]
             return [self._success_result(item) for item in vectors]
         except Exception as exc:  # noqa: BLE001
+            code = self._classify_request_error_code(exc)
             error_type = type(exc).__name__
             return [
                 self._failure_result(
-                    code="provider_request_failed",
+                    code=code,
                     message=f"OpenAI embeddings request failed: {error_type}",
                 )
                 for _ in texts
             ]
+
+
+    def _classify_request_error_code(self, exc: Exception) -> str:
+        if isinstance(exc, TimeoutError | socket.timeout):
+            return "request_timeout"
+        if isinstance(exc, urllib_error.HTTPError):
+            if exc.code in {401, 403}:
+                return "auth_forbidden"
+            if exc.code == 404:
+                return "model_not_found"
+            return "provider_http_error"
+        if isinstance(exc, urllib_error.URLError):
+            reason = getattr(exc, "reason", None)
+            if isinstance(reason, ConnectionRefusedError):
+                return "connection_refused"
+            if isinstance(reason, TimeoutError | socket.timeout):
+                return "request_timeout"
+            return "connection_error"
+        if isinstance(exc, ConnectionRefusedError):
+            return "connection_refused"
+        if isinstance(exc, ConnectionResetError | ConnectionAbortedError | BrokenPipeError):
+            return "connection_error"
+        return "provider_request_failed"
 
     def _success_result(self, payload: dict[str, Any]) -> EmbeddingResult:
         embedding = payload.get("embedding") or []

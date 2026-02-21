@@ -31,6 +31,15 @@ class _FakeManager:
             "truncated": False,
             "truncation_count": 0,
             "dedupe_count": 0,
+            "semantic_provider": "openai",
+            "semantic_model": "text-embedding-3-small",
+            "semantic_query_timeout_ms": 40,
+            "semantic_query_duration_ms": 12,
+            "semantic_error_code": "timeout",
+            "semantic_error_class": "TimeoutError",
+            "semantic_scoring_skipped_reason": "query_embedding_timeout",
+            "query_fingerprint_hash": "abcdef0123456789",
+            "query_fingerprint_length": 19,
         }
 
     def get_semantic_runtime_health(self):
@@ -67,3 +76,12 @@ def test_prepare_turn_memory_brief_logs_semantic_runtime_health_when_streak_non_
     message = captured["message"]
     assert "semantic_runtime_streak=5" in message
     assert "semantic_runtime_last_error=timeout_backoff" in message
+    assert "semantic_provider=openai" in message
+    assert "semantic_model=text-embedding-3-small" in message
+    assert "semantic_query_timeout_ms=40" in message
+    assert "semantic_query_duration_ms=12" in message
+    assert "semantic_error_code=timeout" in message
+    assert "semantic_error_class=TimeoutError" in message
+    assert "semantic_scoring_skipped_reason=query_embedding_timeout" in message
+    assert "query_fingerprint_hash=abcdef0123456789" in message
+    assert "query_fingerprint_length=19" in message
