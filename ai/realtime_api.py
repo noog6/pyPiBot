@@ -3562,7 +3562,21 @@ class RealtimeAPI:
                 message = await websocket.recv()
                 event = json.loads(message)
                 log_ws_event("Incoming", event)
-                await self.handle_event(event, websocket)
+                try:
+                    await self.handle_event(event, websocket)
+                except Exception:
+                    event_type = str(event.get("type") or "unknown")
+                    token = getattr(self, "_pending_confirmation_token", None)
+                    phase = getattr(getattr(self, "orchestration_state", None), "phase", None)
+                    logger.exception(
+                        "Unhandled event handler exception event=%s token_id=%s token_kind=%s phase=%s",
+                        event_type,
+                        getattr(token, "id", "none"),
+                        getattr(token, "kind", "none"),
+                        getattr(phase, "value", str(phase)),
+                    )
+                    logger.error("EVENT_HANDLER_ERROR event=%s", event_type)
+                    await self._recover_from_event_handler_error(event_type, websocket)
             except asyncio.CancelledError:
                 log_info("WebSocket receive loop cancelled.")
                 self._note_disconnect("websocket loop cancelled")
@@ -3571,6 +3585,37 @@ class RealtimeAPI:
                 log_warning("⚠️ WebSocket connection lost.")
                 self._note_disconnect("websocket connection closed")
                 break
+
+    async def _recover_from_event_handler_error(self, event_type: str, websocket: Any) -> None:
+        self._active_response_confirmation_guarded = False
+        self._awaiting_confirmation_completion = False
+
+        token = getattr(self, "_pending_confirmation_token", None)
+        phase = getattr(getattr(self, "orchestration_state", None), "phase", None)
+        in_confirmation_or_research_flow = bool(
+            (token is not None and getattr(token, "kind", "") in {"research_permission", "research_budget", "tool_governance"})
+            or phase == OrchestrationPhase.AWAITING_CONFIRMATION
+            or getattr(self, "_pending_research_request", None) is not None
+        )
+
+        if in_confirmation_or_research_flow:
+            if token is not None:
+                self._close_confirmation_token(outcome="event_handler_error")
+            if phase != OrchestrationPhase.IDLE:
+                self.orchestration_state.transition(
+                    OrchestrationPhase.IDLE,
+                    reason="event handler error recovery",
+                )
+            try:
+                await self.send_assistant_message(
+                    "Sorry—I hit an internal error while handling that confirmation/research request, so I cancelled it. Please try again.",
+                    websocket,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to send confirmation/research fallback after event handler error event=%s",
+                    event_type,
+                )
 
     async def handle_event(self, event: dict[str, Any], websocket: Any) -> None:
         event_type = event.get("type")

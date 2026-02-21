@@ -1449,6 +1449,105 @@ def test_awaiting_confirmation_timeout_clears_token_and_transitions_idle() -> No
     assert messages == ["I didn't get a clear yes/no in time, so I cancelled that request."]
 
 
+def test_process_ws_messages_recovers_from_event_handler_exception_and_continues(
+    monkeypatch,
+) -> None:
+    api = _make_api_stub()
+    transitions: list[tuple[OrchestrationPhase, str | None]] = []
+    api.orchestration_state = type(
+        "S",
+        (),
+        {
+            "phase": OrchestrationPhase.AWAITING_CONFIRMATION,
+            "transition": lambda _self, phase, reason=None: transitions.append((phase, reason)),
+        },
+    )()
+    api._pending_confirmation_token = PendingConfirmationToken(
+        id="token_123",
+        kind="research_budget",
+        tool_name="perform_research",
+        request=ResearchRequest(prompt="weather"),
+        pending_action=None,
+        created_at=0.0,
+        expiry_ts=None,
+    )
+    api._active_response_confirmation_guarded = True
+    api._log_user_transcripts_enabled = False
+
+    async def _false(*_args, **_kwargs) -> bool:
+        return False
+
+    async def _raise_budget(*_args, **_kwargs) -> bool:
+        raise RuntimeError("boom")
+
+    sent_messages: list[str] = []
+
+    async def _send_assistant_message(message: str, _websocket, **_kwargs) -> None:
+        sent_messages.append(message)
+
+    api._maybe_handle_confirmation_decision_timeout = _false
+    api._maybe_handle_approval_response = _false
+    api._handle_stop_word = _false
+    api._maybe_handle_research_permission_response = _false
+    api._maybe_handle_research_budget_response = _raise_budget
+    api._maybe_apply_late_confirmation_decision = _false
+    api._maybe_process_research_intent = _false
+    api.send_assistant_message = _send_assistant_message
+
+    class _ConnectionClosed(Exception):
+        pass
+
+    class _LoopWs:
+        def __init__(self) -> None:
+            self._messages = [
+                json.dumps(
+                    {
+                        "type": "conversation.item.input_audio_transcription.completed",
+                        "transcript": "yes",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "rate_limits.updated",
+                        "rate_limits": [{"name": "requests", "remaining": 9}],
+                    }
+                ),
+            ]
+            self._index = 0
+
+        async def recv(self) -> str:
+            if self._index >= len(self._messages):
+                raise _ConnectionClosed()
+            payload = self._messages[self._index]
+            self._index += 1
+            return payload
+
+    monkeypatch.setattr("ai.realtime_api._require_websockets", lambda: object())
+    monkeypatch.setattr(
+        "ai.realtime_api._resolve_websocket_exceptions",
+        lambda _websockets: (_ConnectionClosed, _ConnectionClosed),
+    )
+
+    with (
+        patch("ai.realtime_api.logger.exception") as mock_exception,
+        patch("ai.realtime_api.logger.error") as mock_error,
+    ):
+        asyncio.run(api.process_ws_messages(_LoopWs()))
+
+    assert mock_exception.call_count == 1
+    assert mock_exception.call_args.args[0].startswith("Unhandled event handler exception event=%s")
+    assert mock_error.call_args_list[0].args == (
+        "EVENT_HANDLER_ERROR event=%s",
+        "conversation.item.input_audio_transcription.completed",
+    )
+    assert api.rate_limits == {"requests": {"name": "requests", "remaining": 9}}
+    assert sent_messages == [
+        "Sorry—I hit an internal error while handling that confirmation/research request, so I cancelled it. Please try again.",
+    ]
+    assert api._active_response_confirmation_guarded is False
+    assert transitions == [(OrchestrationPhase.IDLE, "event handler error recovery")]
+
+
 def test_research_permission_parser_accepts_natural_language_yes_no_variants() -> None:
     api_yes = _make_api_stub()
     api_yes._pending_confirmation_token = _build_confirmation_token(
