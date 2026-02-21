@@ -6,7 +6,7 @@ from services.research.firecrawl_client import FirecrawlClient
 from services.research.models import RESEARCH_PACKET_SCHEMA, ResearchPacket, ResearchRequest
 from services.research.openai_service import OpenAIResearchService, build_openai_service_or_null
 from services.research.service import NullResearchService, ResearchService
-from services.research.stores import ResearchBudgetTracker, ResearchCacheStore
+from services.research.stores import ResearchCacheStore
 
 __all__ = [
     "RESEARCH_INTENT_PATTERNS",
@@ -19,7 +19,6 @@ __all__ = [
     "OpenAIResearchService",
     "FirecrawlClient",
     "ResearchBudgetManager",
-    "ResearchBudgetTracker",
     "ResearchCacheStore",
     "build_openai_service_or_null",
 ]
