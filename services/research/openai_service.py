@@ -234,7 +234,10 @@ class OpenAIResearchService(ResearchService):
 
         remaining = int(self._budget.current_state().get("remaining", 0))
         LOGGER.info("[Research] budget remaining=%s", remaining)
-        if not self._budget.can_spend(1) and not self._over_budget_approved(request_packet):
+        can_spend_now = self._budget.can_spend(1)
+        over_budget_approved = self._over_budget_approved(request_packet)
+        use_override_spend = (not can_spend_now) and over_budget_approved
+        if not can_spend_now and not over_budget_approved:
             return ResearchPacket(
                 schema=RESEARCH_PACKET_SCHEMA,
                 status="error",
@@ -329,7 +332,7 @@ class OpenAIResearchService(ResearchService):
         if not markdown:
             packet = self._sources_only_packet(search_result, sources, safety_notes, metadata_extra=fetch_meta)
             self._cache.set("query", request_packet.prompt, self._packet_to_payload(packet))
-            self._budget.spend_if_allowed(1, audit_payload=self._budget_audit_payload(request_packet))
+            self._record_budget_spend(request_packet, use_override_spend=use_override_spend)
             LOGGER.info("[Research] rounds_used=1")
             return packet
 
@@ -356,7 +359,7 @@ class OpenAIResearchService(ResearchService):
             )
 
         self._cache.set("query", request_packet.prompt, self._packet_to_payload(packet))
-        self._budget.spend_if_allowed(1, audit_payload=self._budget_audit_payload(request_packet))
+        self._record_budget_spend(request_packet, use_override_spend=use_override_spend)
         remaining_after = int(self._budget.current_state().get("remaining", 0))
         LOGGER.info("[Research] rounds_used=%s budget_remaining=%s", rounds_used, remaining_after)
         return packet
@@ -403,9 +406,20 @@ class OpenAIResearchService(ResearchService):
     ) -> ResearchPacket:
         packet = self._sources_only_packet(search_result, sources, safety_notes)
         self._cache.set("query", request_packet.prompt, self._packet_to_payload(packet))
-        self._budget.spend_if_allowed(1, audit_payload=self._budget_audit_payload(request_packet))
+        self._record_budget_spend(request_packet, use_override_spend=False)
         LOGGER.info("[Research] rounds_used=1")
         return packet
+
+    def _record_budget_spend(self, request_packet: ResearchRequest, *, use_override_spend: bool) -> None:
+        audit_payload = self._budget_audit_payload(request_packet)
+        if use_override_spend:
+            self._budget.spend_with_override(
+                1,
+                audit_payload=audit_payload,
+                decision_source=self._over_budget_decision_source(request_packet),
+            )
+            return
+        self._budget.spend_if_allowed(1, audit_payload=audit_payload)
 
     def _budget_audit_payload(self, request_packet: ResearchRequest) -> dict[str, Any]:
         context = request_packet.context if isinstance(request_packet.context, dict) else {}
@@ -416,6 +430,14 @@ class OpenAIResearchService(ResearchService):
             "prompt_preview": _clip(request_packet.prompt, 160),
             "provider": "openai_responses_web_search",
         }
+
+    def _over_budget_decision_source(self, request_packet: ResearchRequest) -> str:
+        context = request_packet.context if isinstance(request_packet.context, dict) else {}
+        source = context.get("over_budget_decision_source") or context.get("decision_source")
+        if source is None:
+            return "operator_confirmation"
+        normalized = str(source).strip()
+        return normalized or "operator_confirmation"
 
     def _over_budget_approved(self, request_packet: ResearchRequest) -> bool:
         value = request_packet.context.get("over_budget_approved")

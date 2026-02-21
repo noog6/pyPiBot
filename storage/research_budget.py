@@ -171,7 +171,7 @@ class ResearchBudgetStorage:
         provider: str | None = None,
         metadata: dict[str, object] | None = None,
     ) -> int:
-        metadata_json = json.dumps(metadata) if metadata is not None else None
+        metadata_json = json.dumps(self.build_usage_metadata(metadata)) if metadata is not None else None
         with self._lock:
             with self._conn:
                 cursor = self._conn.execute(
@@ -332,7 +332,7 @@ class ResearchBudgetStorage:
                     (new_remaining, spent_at_ts, key),
                 )
                 metadata_json = (
-                    json.dumps(usage_event.metadata)
+                    json.dumps(self.build_usage_metadata(usage_event.metadata))
                     if usage_event.metadata is not None
                     else None
                 )
@@ -412,3 +412,20 @@ class ResearchBudgetStorage:
                 )
             )
         return usage_rows
+
+    @staticmethod
+    def build_usage_metadata(
+        metadata: dict[str, object] | None = None,
+        *,
+        over_budget_approved: bool = False,
+        decision_source: str | None = None,
+    ) -> dict[str, object] | None:
+        """Normalize usage metadata and optionally stamp override authorization details."""
+
+        normalized: dict[str, object] = dict(metadata or {})
+        if over_budget_approved:
+            normalized["over_budget_approved"] = True
+            normalized["over_budget_decision_source"] = (
+                str(decision_source).strip() if decision_source else "operator_confirmation"
+            )
+        return normalized or None
