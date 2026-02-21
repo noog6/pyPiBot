@@ -34,7 +34,7 @@ def _make_memory_manager(store: MemoryStore) -> MemoryManager:
         dedupe_strong_match_cosine=None,
         background_embedding_enabled=False,
         write_timeout_ms=75,
-        query_timeout_ms=40,
+        query_timeout_ms=2000,
         max_writes_per_minute=120,
         max_queries_per_minute=240,
     )
@@ -60,6 +60,7 @@ def _make_memory_manager(store: MemoryStore) -> MemoryManager:
         "dimension": None,
         "error_code": "not_run",
     }
+    manager._semantic_query_timeout_floor_warned = False
     manager._semantic_query_embedding_not_ready_streak = 0
     manager._embedding_coverage_cache_ttl_s = 60.0
     manager._embedding_coverage_cache = {}
@@ -471,6 +472,7 @@ def test_retrieve_for_turn_semantic_reranks_within_lexical_pool(tmp_path) -> Non
         rerank_influence_min_cosine=0.0,
         dedupe_strong_match_cosine=None,
         background_embedding_enabled=False,
+        provider="openai",
     )
     now_ms = _now_ms()
 
@@ -552,6 +554,7 @@ def test_retrieve_for_turn_semantic_unavailable_falls_back_to_lexical(tmp_path) 
         rerank_influence_min_cosine=0.0,
         dedupe_strong_match_cosine=None,
         background_embedding_enabled=False,
+        provider="openai",
     )
     now_ms = _now_ms()
 
@@ -604,6 +607,7 @@ def test_retrieve_for_turn_rerank_influence_min_cosine_gate(tmp_path) -> None:
         rerank_influence_min_cosine=0.95,
         dedupe_strong_match_cosine=None,
         background_embedding_enabled=False,
+        provider="openai",
     )
     now_ms = _now_ms()
 
@@ -734,6 +738,7 @@ def test_retrieval_health_metrics_include_coverage_error_rate_and_latency(tmp_pa
         rerank_influence_min_cosine=0.0,
         dedupe_strong_match_cosine=None,
         background_embedding_enabled=False,
+        provider="openai",
     )
 
     class _FailingProvider:
@@ -868,6 +873,7 @@ def test_retrieve_for_turn_semantic_fallback_when_query_embedding_not_ready(tmp_
         rerank_influence_min_cosine=0.0,
         dedupe_strong_match_cosine=None,
         background_embedding_enabled=False,
+        provider="openai",
     )
     now_ms = _now_ms()
 
@@ -983,6 +989,7 @@ def test_retrieve_for_turn_semantic_enabled_applies_hybrid_reranking(tmp_path) -
         rerank_influence_min_cosine=0.0,
         dedupe_strong_match_cosine=None,
         background_embedding_enabled=False,
+        provider="openai",
     )
     now_ms = _now_ms()
 
@@ -1053,6 +1060,7 @@ def test_retrieve_for_turn_semantic_provider_exception_falls_back_to_lexical(tmp
         rerank_influence_min_cosine=0.0,
         dedupe_strong_match_cosine=None,
         background_embedding_enabled=False,
+        provider="openai",
     )
     now_ms = _now_ms()
 
@@ -1122,7 +1130,7 @@ def test_retrieve_for_turn_semantic_query_timeout_respected(tmp_path) -> None:
 
     class _SlowProvider:
         def embed_text(self, text: str):
-            time.sleep(0.02)
+            time.sleep(0.12)
             return SimpleNamespace(status="ready", dimension=2, vector=_encode_vector([1.0, 0.0]), vector_norm=1.0)
 
     manager._embedding_provider = _SlowProvider()
@@ -1139,6 +1147,8 @@ def test_retrieve_for_turn_semantic_query_timeout_respected(tmp_path) -> None:
     metadata = manager.get_last_turn_retrieval_debug_metadata()
     assert metadata["fallback_reason"] == "query_embedding_not_ready"
     assert metadata["semantic_error_code"] == "timeout"
+    assert metadata["semantic_query_timeout_ms_used"] == 100
+    assert metadata["semantic_query_embed_elapsed_ms"] >= 100
 
 
 def test_retrieve_for_turn_semantic_query_rate_limit_respected(tmp_path) -> None:
@@ -1256,6 +1266,7 @@ def test_find_semantic_duplicate_respects_write_timeout(tmp_path) -> None:
         rerank_influence_min_cosine=0.0,
         dedupe_strong_match_cosine=0.9,
         background_embedding_enabled=False,
+        provider="openai",
         write_timeout_ms=1,
         query_timeout_ms=40,
         max_writes_per_minute=120,
@@ -1281,7 +1292,7 @@ def test_find_semantic_duplicate_respects_write_timeout(tmp_path) -> None:
 
     class _SlowProvider:
         def embed_text(self, text: str):
-            time.sleep(0.02)
+            time.sleep(0.12)
             return SimpleNamespace(status="ready", dimension=2, vector=_encode_vector([1.0, 0.0]), vector_norm=1.0)
 
     manager._embedding_provider = _SlowProvider()
@@ -1310,6 +1321,7 @@ def test_embed_text_repeated_timeouts_enter_and_skip_during_backoff(tmp_path) ->
         rerank_influence_min_cosine=0.0,
         dedupe_strong_match_cosine=0.9,
         background_embedding_enabled=False,
+        provider="openai",
         write_timeout_ms=1,
         query_timeout_ms=1,
         max_writes_per_minute=120,
@@ -1324,7 +1336,7 @@ def test_embed_text_repeated_timeouts_enter_and_skip_during_backoff(tmp_path) ->
 
         def embed_text(self, text: str):
             self.calls += 1
-            time.sleep(0.02)
+            time.sleep(0.12)
             return SimpleNamespace(status="ready", dimension=2, vector=_encode_vector([1.0, 0.0]), vector_norm=1.0)
 
     provider = _SlowProvider()
@@ -1335,7 +1347,9 @@ def test_embed_text_repeated_timeouts_enter_and_skip_during_backoff(tmp_path) ->
     third = manager._embed_text_with_semantic_policy(text="third", operation="query")
 
     assert first.error_code == "timeout"
+    assert first.timeout_ms_used == 100
     assert second.error_code == "timeout"
+    assert second.timeout_ms_used == 100
     assert third.error_code == "timeout_backoff"
     assert provider.calls == 2
     assert manager._semantic_timeout_backoff_activation_count == 1
@@ -1352,6 +1366,7 @@ def test_embed_text_timeout_backoff_recovers_after_expiry(tmp_path) -> None:
         rerank_influence_min_cosine=0.0,
         dedupe_strong_match_cosine=0.9,
         background_embedding_enabled=False,
+        provider="openai",
         write_timeout_ms=1,
         query_timeout_ms=1,
         max_writes_per_minute=120,
@@ -1367,7 +1382,7 @@ def test_embed_text_timeout_backoff_recovers_after_expiry(tmp_path) -> None:
         def embed_text(self, text: str):
             self.calls += 1
             if self.calls == 1:
-                time.sleep(0.02)
+                time.sleep(0.12)
             return SimpleNamespace(status="ready", dimension=2, vector=_encode_vector([1.0, 0.0]), vector_norm=1.0)
 
     provider = _SlowThenFastProvider()
@@ -1376,6 +1391,7 @@ def test_embed_text_timeout_backoff_recovers_after_expiry(tmp_path) -> None:
     timed_out = manager._embed_text_with_semantic_policy(text="first", operation="query")
     immediate = manager._embed_text_with_semantic_policy(text="second", operation="query")
     assert timed_out.error_code == "timeout"
+    assert timed_out.timeout_ms_used == 100
     assert immediate.error_code == "timeout_backoff"
 
     manager._semantic_timeout_backoff_until_monotonic = time.monotonic() - 0.01
@@ -1436,6 +1452,41 @@ def test_retrieve_for_turn_reports_timeout_backoff_in_metadata_and_metrics(tmp_p
     assert metrics["semantic_timeout_backoff_active"] == 1
     assert metrics["semantic_timeout_backoff_remaining_ms"] > 0
 
+
+
+def test_embed_text_query_timeout_floor_logs_warning_once(tmp_path, caplog) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._semantic_config = SimpleNamespace(
+        enabled=True,
+        rerank_enabled=False,
+        max_candidates_for_semantic=8,
+        min_similarity=0.0,
+        rerank_influence_min_cosine=0.0,
+        dedupe_strong_match_cosine=0.9,
+        background_embedding_enabled=False,
+        provider="openai",
+        write_timeout_ms=75,
+        query_timeout_ms=1,
+        max_writes_per_minute=120,
+        max_queries_per_minute=240,
+    )
+
+    class _ReadyProvider:
+        def embed_text(self, text: str):
+            return SimpleNamespace(status="ready", dimension=2, vector=_encode_vector([1.0, 0.0]), vector_norm=1.0)
+
+    manager._embedding_provider = _ReadyProvider()
+
+    with caplog.at_level("WARNING"):
+        first = manager._embed_text_with_semantic_policy(text="first", operation="query")
+        second = manager._embed_text_with_semantic_policy(text="second", operation="query")
+
+    warnings = [r for r in caplog.records if "Semantic query timeout below supported floor" in r.message]
+    assert first.timeout_ms_used == 100
+    assert second.timeout_ms_used == 100
+    assert len(warnings) == 1
+
 def test_embed_text_timeout_resets_executor_for_next_call(tmp_path) -> None:
     store = MemoryStore(db_path=tmp_path / "memories.db")
     manager = _make_memory_manager(store)
@@ -1447,6 +1498,7 @@ def test_embed_text_timeout_resets_executor_for_next_call(tmp_path) -> None:
         rerank_influence_min_cosine=0.0,
         dedupe_strong_match_cosine=0.9,
         background_embedding_enabled=False,
+        provider="openai",
         write_timeout_ms=1,
         query_timeout_ms=40,
         max_writes_per_minute=120,
@@ -1483,6 +1535,7 @@ def test_find_semantic_duplicate_respects_write_rate_limit(tmp_path) -> None:
         rerank_influence_min_cosine=0.0,
         dedupe_strong_match_cosine=0.9,
         background_embedding_enabled=False,
+        provider="openai",
         write_timeout_ms=75,
         query_timeout_ms=40,
         max_writes_per_minute=1,

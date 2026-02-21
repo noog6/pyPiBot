@@ -8,6 +8,10 @@ from typing import Any
 
 import yaml
 
+MEMORY_SEMANTIC_QUERY_TIMEOUT_FLOOR_MS = 100
+MEMORY_SEMANTIC_QUERY_TIMEOUT_DEFAULT_MS = 2000
+MEMORY_SEMANTIC_OPENAI_TIMEOUT_DEFAULT_S = 10.0
+
 
 @dataclass(frozen=True)
 class ConfigPaths:
@@ -248,11 +252,18 @@ class ConfigController:
             1,
             int(memory_semantic_cfg.get("max_embedding_retries", 8)),
         )
-        memory_semantic_cfg["write_timeout_ms"] = int(
-            memory_semantic_cfg.get("write_timeout_ms", 75)
+        memory_semantic_cfg["write_timeout_ms"] = max(
+            1,
+            int(memory_semantic_cfg.get("write_timeout_ms", 75)),
         )
-        memory_semantic_cfg["query_timeout_ms"] = int(
-            memory_semantic_cfg.get("query_timeout_ms", 40)
+        memory_semantic_cfg["query_timeout_ms"] = max(
+            MEMORY_SEMANTIC_QUERY_TIMEOUT_FLOOR_MS,
+            int(
+                memory_semantic_cfg.get(
+                    "query_timeout_ms",
+                    MEMORY_SEMANTIC_QUERY_TIMEOUT_DEFAULT_MS,
+                )
+            ),
         )
         memory_semantic_cfg["startup_canary_timeout_ms"] = max(
             1,
@@ -272,7 +283,16 @@ class ConfigController:
         memory_openai_cfg["model"] = str(
             memory_openai_cfg.get("model", "text-embedding-3-small")
         )
-        memory_openai_cfg["timeout_s"] = float(memory_openai_cfg.get("timeout_s", 10.0))
+        memory_openai_cfg["timeout_s"] = max(
+            0.1,
+            float(memory_openai_cfg.get("timeout_s", MEMORY_SEMANTIC_OPENAI_TIMEOUT_DEFAULT_S)),
+        )
+        # Query timeout is bounded to a practical floor and should remain below provider timeout
+        # so semantic retrieval can fail open before provider-level request timeout is hit.
+        provider_timeout_ms = int(memory_openai_cfg["timeout_s"] * 1000)
+        if provider_timeout_ms <= memory_semantic_cfg["query_timeout_ms"]:
+            provider_timeout_ms = memory_semantic_cfg["query_timeout_ms"] + 1
+            memory_openai_cfg["timeout_s"] = provider_timeout_ms / 1000.0
         memory_semantic_cfg["openai"] = memory_openai_cfg
         normalized["memory_semantic"] = memory_semantic_cfg
 

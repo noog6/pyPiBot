@@ -35,6 +35,8 @@ NEAR_DUPLICATE_CHAR_RATIO = 0.9
 WORD_RE = re.compile(r"[a-zA-Z0-9]{2,}")
 logger = logging.getLogger(__name__)
 
+SEMANTIC_QUERY_TIMEOUT_FLOOR_MS = 100
+
 
 def _safe_text_fingerprint(text: str) -> dict[str, object]:
     normalized = " ".join(text.strip().split())
@@ -323,7 +325,7 @@ class MemoryManager:
             rolling_backfill_batch_size=max(1, int(semantic_cfg.get("rolling_backfill_batch_size", 4))),
             rolling_backfill_interval_idle_cycles=max(1, int(semantic_cfg.get("rolling_backfill_interval_idle_cycles", 15))),
             write_timeout_ms=int(semantic_cfg.get("write_timeout_ms", 75)),
-            query_timeout_ms=int(semantic_cfg.get("query_timeout_ms", 40)),
+            query_timeout_ms=int(semantic_cfg.get("query_timeout_ms", 2000)),
             startup_canary_timeout_ms=int(semantic_cfg.get("startup_canary_timeout_ms", 120)),
             startup_canary_bypass=bool(semantic_cfg.get("startup_canary_bypass", False)),
             max_writes_per_minute=int(semantic_cfg.get("max_writes_per_minute", 120)),
@@ -373,6 +375,7 @@ class MemoryManager:
             "error_code": "not_run",
         }
         self._run_embedding_canary()
+        self._semantic_query_timeout_floor_warned = False
         self._semantic_query_embedding_not_ready_streak = 0
         self._embedding_coverage_cache_ttl_s = 60.0
         self._embedding_coverage_cache: dict[tuple[str, MemoryScope, str | None], dict[str, float | int]] = {}
@@ -899,15 +902,34 @@ class MemoryManager:
             else getattr(
                 self._semantic_config,
                 "write_timeout_ms" if operation == "write" else "query_timeout_ms",
-                75 if operation == "write" else 40,
+                75 if operation == "write" else 2000,
             )
         )
+        if operation == "query" and timeout_ms < SEMANTIC_QUERY_TIMEOUT_FLOOR_MS:
+            if not bool(getattr(self, "_semantic_query_timeout_floor_warned", False)):
+                logger.warning(
+                    "Semantic query timeout below supported floor; clamping to floor.",
+                    extra={
+                        "configured_query_timeout_ms": timeout_ms,
+                        "query_timeout_floor_ms": SEMANTIC_QUERY_TIMEOUT_FLOOR_MS,
+                    },
+                )
+                setattr(self, "_semantic_query_timeout_floor_warned", True)
+            timeout_ms = SEMANTIC_QUERY_TIMEOUT_FLOOR_MS
         timeout_s = max(0.001, timeout_ms / 1000.0)
 
         executor = self._get_embedding_executor()
         future = executor.submit(provider.embed_text, text)
+        started_monotonic = time.monotonic()
+
+        def _attach_timing_metadata(response: object) -> None:
+            elapsed_ms = int((time.monotonic() - started_monotonic) * 1000)
+            setattr(response, "timeout_ms_used", timeout_ms)
+            setattr(response, "elapsed_ms", elapsed_ms)
+
         try:
             result = future.result(timeout=timeout_s)
+            _attach_timing_metadata(result)
             self._semantic_timeout_consecutive_count = 0
             status = str(getattr(result, "status", ""))
             ready = status == "ready" and bool(getattr(result, "vector", b""))
@@ -935,6 +957,7 @@ class MemoryManager:
                 vector_norm=None,
                 error_code="timeout",
             )
+            _attach_timing_metadata(result)
             self._semantic_provider_ready_last = False
             self._semantic_provider_last_error_code = "timeout"
             return result
@@ -1165,7 +1188,7 @@ class MemoryManager:
             ),
             "semantic_provider": str(getattr(self._semantic_config, "provider", "none") or "none"),
             "semantic_model": None,
-            "semantic_query_timeout_ms": int(getattr(self._semantic_config, "query_timeout_ms", 40)),
+            "semantic_query_timeout_ms": int(getattr(self._semantic_config, "query_timeout_ms", 2000)),
             "semantic_query_duration_ms": 0,
             "semantic_error_code": None,
             "semantic_error_class": None,
@@ -1295,6 +1318,12 @@ class MemoryManager:
                 )
                 self._last_turn_retrieval_debug["semantic_query_duration_ms"] = int(
                     (time.monotonic() - semantic_started_at) * 1000
+                )
+                self._last_turn_retrieval_debug["semantic_query_timeout_ms_used"] = int(
+                    getattr(query_embedding, "timeout_ms_used", self._semantic_config.query_timeout_ms)
+                )
+                self._last_turn_retrieval_debug["semantic_query_embed_elapsed_ms"] = int(
+                    getattr(query_embedding, "elapsed_ms", self._last_turn_retrieval_debug["semantic_query_duration_ms"])
                 )
                 self._last_turn_retrieval_debug["semantic_model"] = str(
                     getattr(query_embedding, "model", None)
