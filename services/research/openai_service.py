@@ -202,6 +202,14 @@ class OpenAIResearchService(ResearchService):
 
         self._cache = ResearchCacheStore(cache_dir, ttl_hours=cache_ttl_hours)
         self._budget = ResearchBudgetManager(budget_state_file, daily_limit=daily_budget)
+        budget_startup = self._budget.startup_status()
+        LOGGER.info(
+            "[Research] startup daily_limit=%s authority=%s legacy_json=%s migration=%s",
+            budget_startup["daily_limit"],
+            budget_startup["authority"],
+            budget_startup["legacy_json"],
+            budget_startup["migration"],
+        )
         self._escalation_enabled = bool(escalation_enabled)
         self._max_rounds = min(2, max(1, int(max_rounds)))
 
@@ -905,6 +913,10 @@ def build_openai_service_or_null(config: dict[str, Any]) -> ResearchService:
         trusted_domain_store.get_domain_set(),
     )
     budget_cfg = research_cfg.get("budget") or {}
+    if budget_cfg.get("state_file") is not None:
+        LOGGER.warning(
+            "[Research] Ignoring deprecated research.budget.state_file; SQLite storage is authoritative."
+        )
     cache_cfg = research_cfg.get("cache") or {}
     escalation_cfg = research_cfg.get("escalation") or {}
 

@@ -33,7 +33,21 @@ class ResearchBudgetManager:
         self._storage = storage or ResearchBudgetStorage()
         digest = hashlib.sha256(str(self._legacy_state_file).encode("utf-8")).hexdigest()[:12]
         self._budget_key = f"research_daily_fetch:{digest}"
+        self._legacy_json_present = self._legacy_state_file.exists()
+        self._migration_status = "skipped"
+        self._migration_reason = "not_attempted"
         self._migrate_legacy_json_once()
+
+    def startup_status(self) -> dict[str, Any]:
+        """Return initialization metadata used for operator-facing startup logs."""
+
+        return {
+            "daily_limit": self._daily_limit,
+            "authority": "sqlite_storage_controller",
+            "legacy_json": "present" if self._legacy_json_present else "absent",
+            "migration": self._migration_status,
+            "migration_reason": self._migration_reason,
+        }
 
     def can_spend(self, units: int = 1) -> bool:
         amount = max(1, int(units))
@@ -156,20 +170,27 @@ class ResearchBudgetManager:
         return str(value) if value is not None else None
 
     def _migrate_legacy_json_once(self) -> None:
-        if self._daily_limit <= 0 or not self._legacy_state_file.exists():
+        if self._daily_limit <= 0:
+            self._migration_reason = "daily_limit_non_positive"
+            return
+        if not self._legacy_json_present:
+            self._migration_reason = "legacy_json_absent"
             return
 
         today = self._today_utc()
         existing = self._storage.get_state(self._budget_key)
         if existing is not None and existing.date_utc == today:
+            self._migration_reason = "already_initialized_for_today"
             return
 
         try:
             payload = json.loads(self._legacy_state_file.read_text(encoding="utf-8"))
         except Exception:
+            self._migration_reason = "legacy_json_invalid"
             return
 
         if str(payload.get("date")) != today:
+            self._migration_reason = "legacy_json_date_mismatch"
             return
 
         count = max(0, int(payload.get("count", 0)))
@@ -181,4 +202,6 @@ class ResearchBudgetManager:
             limit=self._daily_limit,
             updated_at_ts=int(time.time()),
         )
+        self._migration_status = "migrated"
+        self._migration_reason = "legacy_json_loaded"
         LOGGER.info("research_budget_migration migrated=true source=json")
