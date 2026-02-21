@@ -16,10 +16,11 @@ from urllib import parse, request
 
 from core.logging import logger as LOGGER
 
+from services.research.budget_manager import ResearchBudgetManager
 from services.research.firecrawl_client import FirecrawlClient, FirecrawlHTTPError
 from services.research.models import RESEARCH_PACKET_SCHEMA, ResearchPacket, ResearchRequest
 from services.research.service import NullResearchService, ResearchService
-from services.research.stores import ResearchBudgetTracker, ResearchCacheStore
+from services.research.stores import ResearchCacheStore
 from storage.trusted_domains import TrustedDomainStore, merge_allowlists
 
 
@@ -200,12 +201,12 @@ class OpenAIResearchService(ResearchService):
         self._firecrawl_enabled_banner_seen: set[str] = set()
 
         self._cache = ResearchCacheStore(cache_dir, ttl_hours=cache_ttl_hours)
-        self._budget = ResearchBudgetTracker(budget_state_file, daily_limit=daily_budget)
+        self._budget = ResearchBudgetManager(budget_state_file, daily_limit=daily_budget)
         self._escalation_enabled = bool(escalation_enabled)
         self._max_rounds = min(2, max(1, int(max_rounds)))
 
     def get_budget_remaining(self) -> int | None:
-        return int(self._budget.get_remaining())
+        return int(self._budget.current_state().get("remaining", 0))
 
     def can_run_research_now(self) -> bool:
         return bool(self._budget.can_spend(1))
@@ -223,7 +224,7 @@ class OpenAIResearchService(ResearchService):
             LOGGER.warning("[Research] OPENAI_API_KEY missing; using safe error packet.")
             return self._safe_error_packet("OPENAI_API_KEY_not_set")
 
-        remaining = self._budget.get_remaining()
+        remaining = int(self._budget.current_state().get("remaining", 0))
         LOGGER.info("[Research] budget remaining=%s", remaining)
         if not self._budget.can_spend(1) and not self._over_budget_approved(request_packet):
             return ResearchPacket(
@@ -320,7 +321,7 @@ class OpenAIResearchService(ResearchService):
         if not markdown:
             packet = self._sources_only_packet(search_result, sources, safety_notes, metadata_extra=fetch_meta)
             self._cache.set("query", request_packet.prompt, self._packet_to_payload(packet))
-            self._budget.spend(1)
+            self._budget.spend_if_allowed(1, audit_payload=self._budget_audit_payload(request_packet))
             LOGGER.info("[Research] rounds_used=1")
             return packet
 
@@ -347,7 +348,8 @@ class OpenAIResearchService(ResearchService):
             )
 
         self._cache.set("query", request_packet.prompt, self._packet_to_payload(packet))
-        remaining_after = self._budget.spend(1)
+        self._budget.spend_if_allowed(1, audit_payload=self._budget_audit_payload(request_packet))
+        remaining_after = int(self._budget.current_state().get("remaining", 0))
         LOGGER.info("[Research] rounds_used=%s budget_remaining=%s", rounds_used, remaining_after)
         return packet
 
@@ -393,9 +395,19 @@ class OpenAIResearchService(ResearchService):
     ) -> ResearchPacket:
         packet = self._sources_only_packet(search_result, sources, safety_notes)
         self._cache.set("query", request_packet.prompt, self._packet_to_payload(packet))
-        self._budget.spend(1)
+        self._budget.spend_if_allowed(1, audit_payload=self._budget_audit_payload(request_packet))
         LOGGER.info("[Research] rounds_used=1")
         return packet
+
+    def _budget_audit_payload(self, request_packet: ResearchRequest) -> dict[str, Any]:
+        context = request_packet.context if isinstance(request_packet.context, dict) else {}
+        return {
+            "request_fingerprint": context.get("request_fingerprint") or context.get("fingerprint"),
+            "research_id": context.get("research_id"),
+            "source": context.get("source"),
+            "prompt_preview": _clip(request_packet.prompt, 160),
+            "provider": "openai_responses_web_search",
+        }
 
     def _over_budget_approved(self, request_packet: ResearchRequest) -> bool:
         value = request_packet.context.get("over_budget_approved")
