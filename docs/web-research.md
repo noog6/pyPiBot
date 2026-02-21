@@ -126,6 +126,7 @@ Research budget tracking is now database-backed. The SQLite database is the sour
   - Append-only audit log of successful spend events.
   - One inserted row per successful spend attempt.
   - Includes `date_utc`, timestamp, units, and optional request context fields (`request_fingerprint`, `research_id`, `source`, `provider`).
+  - Override-authorized executions include `metadata_json` with `over_budget_approved=true` and `over_budget_decision_source` so operators can distinguish explicit approvals from in-budget spends.
 
 ### Auditing today's budget consumers
 
@@ -139,7 +140,9 @@ SELECT
   research_id,
   source,
   provider,
-  prompt_preview
+  prompt_preview,
+  json_extract(metadata_json, '$.over_budget_approved') AS over_budget_approved,
+  json_extract(metadata_json, '$.over_budget_decision_source') AS over_budget_decision_source
 FROM research_budget_usage
 WHERE date_utc = strftime('%Y-%m-%d', 'now')
 ORDER BY spent_at_ts ASC, id ASC;

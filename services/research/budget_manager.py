@@ -101,6 +101,42 @@ class ResearchBudgetManager:
         self._record_rate_limit_spend()
         return True
 
+    def spend_with_override(
+        self,
+        units: int = 1,
+        *,
+        audit_payload: dict[str, Any] | None = None,
+        decision_source: str | None = None,
+    ) -> bool:
+        """Record an explicitly authorized over-budget spend audit row.
+
+        This path bypasses remaining-budget checks and persists explicit authorization
+        metadata for operator auditing.
+        """
+
+        amount = max(1, int(units))
+        if not self._within_rate_limit():
+            return False
+
+        spent_at_ts = int(time.time())
+        usage_metadata = self._storage.build_usage_metadata(
+            over_budget_approved=True,
+            decision_source=decision_source,
+        )
+        self._storage.append_usage(
+            date_utc=self._today_utc(),
+            spent_at_ts=spent_at_ts,
+            units=amount,
+            request_fingerprint=self._audit_field(audit_payload, "request_fingerprint"),
+            research_id=self._audit_field(audit_payload, "research_id"),
+            source=self._audit_field(audit_payload, "source"),
+            prompt_preview=self._audit_field(audit_payload, "prompt_preview"),
+            provider=self._audit_field(audit_payload, "provider"),
+            metadata=usage_metadata,
+        )
+        self._record_rate_limit_spend()
+        return True
+
     def current_state(self) -> dict[str, Any]:
         date_utc = self._today_utc()
         if self._daily_limit <= 0:

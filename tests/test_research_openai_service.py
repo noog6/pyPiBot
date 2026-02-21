@@ -420,6 +420,75 @@ def test_sources_only_packet_includes_candidate_urls(tmp_path: Path) -> None:
     assert packet.sources[0]["url"] == "https://docs.vendor.com/ds.pdf"
 
 
+
+
+def test_over_budget_approved_executes_and_writes_single_override_usage_row(tmp_path: Path) -> None:
+    svc = _FakeOpenAIResearchService(
+        search_result={"best_url": "", "sources": [], "search_summary": "summary", "safety_notes": []},
+        extract_result="{}",
+        daily_budget=1,
+        budget_state_file=str(tmp_path / "budget.json"),
+        cache_dir=str(tmp_path / "cache"),
+    )
+
+    _ = svc.request_research(ResearchRequest(prompt="first request"))
+    date_utc = str(svc._budget.current_state()["date"])
+    rows_before = svc._budget._storage.get_usage_for_date(date_utc)
+
+    packet = svc.request_research(
+        ResearchRequest(
+            prompt="approved over budget request",
+            context={"over_budget_approved": True, "over_budget_decision_source": "operator_ui"},
+        )
+    )
+    rows_after = svc._budget._storage.get_usage_for_date(date_utc)
+
+    assert packet.status == "ok"
+    assert len(rows_after) == len(rows_before) + 1
+    override_row = rows_after[-1]
+    assert override_row.metadata == {
+        "over_budget_approved": True,
+        "over_budget_decision_source": "operator_ui",
+    }
+
+
+def test_repeated_approved_over_budget_calls_are_auditable_and_operator_visible(tmp_path: Path) -> None:
+    svc = _FakeOpenAIResearchService(
+        search_result={"best_url": "", "sources": [], "search_summary": "summary", "safety_notes": []},
+        extract_result="{}",
+        daily_budget=1,
+        budget_state_file=str(tmp_path / "budget.json"),
+        cache_dir=str(tmp_path / "cache"),
+    )
+
+    _ = svc.request_research(ResearchRequest(prompt="first request"))
+    _ = svc.request_research(
+        ResearchRequest(
+            prompt="approved call one",
+            context={"over_budget_approved": True, "over_budget_decision_source": "operator_ui"},
+        )
+    )
+    _ = svc.request_research(
+        ResearchRequest(
+            prompt="approved call two",
+            context={"over_budget_approved": True, "over_budget_decision_source": "operator_ui"},
+        )
+    )
+
+    date_utc = str(svc._budget.current_state()["date"])
+    usage_rows = svc._budget._storage.get_usage_for_date(date_utc)
+    override_rows = [
+        row
+        for row in usage_rows
+        if row.metadata
+        and row.metadata.get("over_budget_approved") is True
+        and row.prompt_preview in {"approved call one", "approved call two"}
+    ]
+
+    assert len(override_rows) == 2
+    assert all(row.metadata and row.metadata.get("over_budget_decision_source") == "operator_ui" for row in override_rows)
+    assert svc._budget.current_state()["last_audit"]["prompt_preview"] == "approved call two"
+
 def test_budget_audit_payload_uses_request_context_fields(tmp_path: Path) -> None:
     svc = _FakeOpenAIResearchService(
         search_result={"best_url": "", "sources": [], "search_summary": "summary", "safety_notes": []},
