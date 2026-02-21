@@ -126,6 +126,7 @@ realtime:
   vad_profile: "short_confirmations"
   minimum_non_confirmation_duration_ms: 120
   confirmation_awaiting_decision_timeout_s: 60.0
+  confirmation_late_decision_grace_s: 15.0
   confirmation_unclear_max_reprompts: 1
   awaiting_confirmation_allowed_sources:
     - "battery:critical"
@@ -353,6 +354,7 @@ research:
   provider: "openai"
   packet_schema: "research_packet_v1"
   permission_required: false
+  permission_awaiting_decision_timeout_s: 60.0
   research_mode: "ask_on_assistant_or_unknown"  # auto | ask | disabled | ask_on_assistant_or_unknown
   tool_call_dedupe_ttl_s: 30
   spoken_response_dedupe_ttl_s: 60
