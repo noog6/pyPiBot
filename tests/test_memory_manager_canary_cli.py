@@ -118,3 +118,30 @@ def test_embed_canary_cli_bypass_mode_succeeds_for_offline_validation(tmp_path: 
     assert exit_code == 0
     assert "canary_success=True" in output
     assert "error_code=bypassed" in output
+
+
+def test_semantic_startup_summary_reports_effective_timeout_budget(tmp_path: Path, monkeypatch) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "default.yaml").write_text(
+        """memory_semantic:
+  enabled: true
+  provider: openai
+  query_timeout_ms: 900
+  startup_canary_timeout_ms: 1000
+  startup_canary_bypass: true
+  openai:
+    enabled: false
+    timeout_s: 1.2
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    _reset_singletons()
+
+    summary = MemoryManager.get_instance().get_semantic_startup_summary()
+
+    assert summary["provider_timeout_s"] == 1.2
+    assert summary["query_timeout_ms"] == 900
+    assert summary["startup_canary_timeout_ms"] == 1000
+    assert summary["effective_timeout_budget_ms"] == 900
