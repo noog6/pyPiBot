@@ -39,7 +39,7 @@ def test_perform_research_routes_through_packet_flow(monkeypatch, tmp_path: Path
         extracted_facts=["fact"],
         sources=[{"title": "src", "url": "https://example.com"}],
         safety_notes=["note"],
-        metadata={"provider": "fake"},
+        metadata={"provider": "fake", "content_fetch_status": "ok"},
     )
     service = _FakeResearchService(packet)
     monkeypatch.setattr(ai_tools, "_research_service", service)
@@ -52,6 +52,7 @@ def test_perform_research_routes_through_packet_flow(monkeypatch, tmp_path: Path
     assert result["answer_summary"] == "summary"
     assert result["extracted_facts"] == ["fact"]
     assert result["sources"] == [{"title": "src", "url": "https://example.com"}]
-    assert result["metadata"] == {"provider": "fake"}
+    assert result["metadata"] == {"provider": "fake", "content_fetch_status": "ok"}
+    assert "From the fetched source content" in result["grounding_explanation"]
     assert result["transcript_path"] is not None
     assert Path(result["transcript_path"]).exists()

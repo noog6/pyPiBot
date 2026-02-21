@@ -73,6 +73,7 @@ from services.memory_manager import (
     render_startup_memory_digest_item,
 )
 from services.research import ResearchRequest, build_openai_service_or_null, has_research_intent
+from services.research.grounding import build_research_grounding_explanation, get_content_fetch_state
 from services.research.research_transcript import write_research_transcript
 from storage import StorageController
 
@@ -2432,11 +2433,24 @@ class RealtimeAPI:
             )
             return
 
-        await self.send_assistant_message(
-            realtime_payload["answer_summary"]
-            or "Research request accepted. I'll summarize findings without quoting raw web content.",
-            websocket,
+        grounding_explanation = build_research_grounding_explanation(packet)
+        status, skip_reason, failure_name = get_content_fetch_state(packet)
+        logger.info(
+            "[Research] response_grounding research_id=%s content_fetch_status=%s skip_reason=%s failure=%s sources_count=%s",
+            research_id,
+            status,
+            skip_reason,
+            failure_name,
+            len(packet.sources),
         )
+
+        summary = (realtime_payload["answer_summary"] or "").strip()
+        if summary:
+            message = f"{summary}\n\n{grounding_explanation}"
+        else:
+            message = grounding_explanation
+
+        await self.send_assistant_message(message, websocket)
 
     def _build_response_done_prompt(self, trigger: str) -> str:
         tool_calls = self._clip_text(
@@ -3373,6 +3387,21 @@ class RealtimeAPI:
             output_payload["action_packet"] = action.to_payload()
         if staging is not None:
             output_payload["staging"] = staging
+
+        if function_name == "perform_research" and isinstance(result, dict):
+            metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+            status = str(metadata.get("content_fetch_status") or "skipped")
+            skip_reason = metadata.get("content_fetch_skip_reason")
+            failure_name = metadata.get("content_fetch_error")
+            sources = result.get("sources") if isinstance(result.get("sources"), list) else []
+            logger.info(
+                "[Research] response_grounding research_id=%s content_fetch_status=%s skip_reason=%s failure=%s sources_count=%s",
+                result.get("research_id"),
+                status,
+                skip_reason,
+                failure_name,
+                len(sources),
+            )
 
         function_call_output = {
             "type": "conversation.item.create",
