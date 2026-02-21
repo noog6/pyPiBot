@@ -36,6 +36,7 @@ WORD_RE = re.compile(r"[a-zA-Z0-9]{2,}")
 logger = logging.getLogger(__name__)
 
 SEMANTIC_QUERY_TIMEOUT_FLOOR_MS = 100
+SEMANTIC_CANARY_REFRESH_INTERVAL_S = 60.0 * 5.0
 
 
 def _safe_text_fingerprint(text: str) -> dict[str, object]:
@@ -400,7 +401,14 @@ class MemoryManager:
             "dimension": None,
             "error_code": "not_run",
         }
+        self._semantic_canary_last_checked_monotonic = 0.0
+        self._semantic_readiness_reason_last = "not_run"
+        self._semantic_canary_refresh_interval_s = max(
+            30.0,
+            float(semantic_cfg.get("canary_refresh_interval_s", SEMANTIC_CANARY_REFRESH_INTERVAL_S)),
+        )
         self._run_embedding_canary()
+        _, self._semantic_readiness_reason_last = self._is_semantic_provider_ready()
         self._semantic_query_timeout_floor_warned = False
         self._semantic_query_embedding_not_ready_streak = 0
         self._embedding_coverage_cache_ttl_s = 60.0
@@ -521,6 +529,7 @@ class MemoryManager:
                     operation="query",
                     enforce_budget=False,
                     timeout_override_ms=max(1, int(getattr(self._semantic_config, "startup_canary_timeout_ms", 120))),
+                    suppress_canary_refresh=True,
                 )
                 latency_ms = int((time.perf_counter() - started) * 1000.0)
                 canary_state["latency_ms"] = latency_ms
@@ -541,7 +550,38 @@ class MemoryManager:
                 canary_state["error_code"] = self._map_canary_error_code(None, exc=exc)
 
         self._semantic_canary_last = canary_state
+        self._semantic_canary_last_checked_monotonic = time.monotonic()
         return dict(canary_state)
+
+    def _maybe_refresh_canary(self, *, reason: str) -> bool:
+        now_monotonic = time.monotonic()
+        last_checked = float(getattr(self, "_semantic_canary_last_checked_monotonic", 0.0) or 0.0)
+        refresh_interval_s = max(30.0, float(getattr(self, "_semantic_canary_refresh_interval_s", 300.0)))
+        is_stale = (now_monotonic - last_checked) >= refresh_interval_s
+        timeout_streak = max(0, int(getattr(self, "_semantic_timeout_consecutive_count", 0)))
+        timeout_threshold = max(1, int(getattr(self, "_semantic_timeout_backoff_threshold", 3)))
+        timeout_triggered = reason == "runtime_timeout_streak" and timeout_streak >= timeout_threshold
+
+        if not is_stale and not timeout_triggered:
+            return False
+
+        before_ready, _ = self._is_semantic_provider_ready()
+        self._run_embedding_canary()
+        after_ready, after_reason = self._is_semantic_provider_ready()
+        previous_reason = str(getattr(self, "_semantic_readiness_reason_last", "not_run") or "not_run")
+        reason_changed = after_reason != previous_reason
+        transitioned_not_ready = before_ready and not after_ready
+        if transitioned_not_ready or reason_changed:
+            logger.info(
+                "semantic_readiness_updated ready=%s previous_ready=%s reason=%s previous_reason=%s refresh_reason=%s",
+                after_ready,
+                before_ready,
+                after_reason,
+                previous_reason,
+                reason,
+            )
+        self._semantic_readiness_reason_last = after_reason
+        return True
 
     def _semantic_rerank_readiness(self) -> tuple[bool, str]:
         if not getattr(self._semantic_config, "enabled", False):
@@ -735,11 +775,16 @@ class MemoryManager:
     def get_semantic_runtime_health(self) -> dict[str, bool | int | str]:
         """Return runtime semantic-readiness telemetry for operations and auditing."""
 
-        provider_ready, _ = self._is_semantic_provider_ready()
+        self._maybe_refresh_canary(reason="periodic")
+        provider_ready, readiness_reason = self._is_semantic_provider_ready()
+        last_checked = float(getattr(self, "_semantic_canary_last_checked_monotonic", 0.0) or 0.0)
+        canary_age_ms = int(max(0.0, (time.monotonic() - last_checked) * 1000.0)) if last_checked > 0.0 else -1
         return {
             "ready": bool(provider_ready and self._semantic_provider_ready_last),
             "query_embedding_not_ready_streak": int(self._semantic_query_embedding_not_ready_streak),
             "last_error_code": str(getattr(self, "_semantic_provider_last_error_code", "none") or "none"),
+            "readiness_reason": str(readiness_reason),
+            "last_canary_age_ms": canary_age_ms,
         }
 
     def remember_memory(
@@ -932,6 +977,7 @@ class MemoryManager:
         operation: str,
         enforce_budget: bool = True,
         timeout_override_ms: int | None = None,
+        suppress_canary_refresh: bool = False,
     ):
         provider = getattr(self, "_embedding_provider", None)
         if provider is None:
@@ -1008,15 +1054,19 @@ class MemoryManager:
             future.cancel()
             self._shutdown_embedding_executor()
             self._semantic_timeout_count = max(0, int(getattr(self, "_semantic_timeout_count", 0))) + 1
-            timeout_streak = max(0, int(getattr(self, "_semantic_timeout_consecutive_count", 0))) + 1
+            previous_timeout_streak = max(0, int(getattr(self, "_semantic_timeout_consecutive_count", 0)))
+            timeout_streak = previous_timeout_streak + 1
             self._semantic_timeout_consecutive_count = timeout_streak
             threshold = max(1, int(getattr(self, "_semantic_timeout_backoff_threshold", 3)))
+            crossed_timeout_threshold = previous_timeout_streak < threshold <= timeout_streak
             if timeout_streak >= threshold:
                 window_s = max(0.1, float(getattr(self, "_semantic_timeout_backoff_window_s", 5.0)))
                 self._semantic_timeout_backoff_until_monotonic = time.monotonic() + window_s
                 self._semantic_timeout_backoff_activation_count = (
                     max(0, int(getattr(self, "_semantic_timeout_backoff_activation_count", 0))) + 1
                 )
+            if crossed_timeout_threshold and not suppress_canary_refresh:
+                self._maybe_refresh_canary(reason="runtime_timeout_streak")
             result = SimpleNamespace(
                 status="error",
                 dimension=0,
@@ -1361,6 +1411,7 @@ class MemoryManager:
         )
         ordered = [item[1] for item in lexical_ordered]
 
+        self._maybe_refresh_canary(reason="periodic")
         semantic_provider_ready, semantic_readiness_reason = self._is_semantic_provider_ready()
         semantic_enabled = (
             self._semantic_config.enabled
