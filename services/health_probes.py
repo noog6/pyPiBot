@@ -234,6 +234,9 @@ def probe_realtime_session(realtime_api: Any | None) -> HealthProbeResult:
             "retrieval_count",
             "semantic_provider_attempts",
             "semantic_provider_errors",
+            "pending_count",
+            "retry_blocked_count",
+            "oldest_pending_age_ms",
         ):
             value = memory_retrieval.get(key)
             if isinstance(value, (int, float)):

@@ -148,6 +148,15 @@ def main(argv: list[str] | None = None) -> int:
     memory_manager.set_active_session_id(runtime_session_id)
     logger.info("Assigned runtime memory session_id=%s", runtime_session_id)
 
+    retrieval_metrics_fn = getattr(memory_manager, "get_retrieval_health_metrics", None)
+    startup_retrieval_metrics = retrieval_metrics_fn() if callable(retrieval_metrics_fn) else {}
+    logger.info(
+        "Memory embedding queue startup pending=%s retry_blocked=%s oldest_pending_age_ms=%s",
+        startup_retrieval_metrics.get("pending_count", 0),
+        startup_retrieval_metrics.get("retry_blocked_count", 0),
+        startup_retrieval_metrics.get("oldest_pending_age_ms", 0),
+    )
+
     embedding_worker = memory_manager.get_embedding_worker()
     if embedding_worker is not None:
         try:
