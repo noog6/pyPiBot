@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from collections import deque
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from enum import Enum
@@ -40,6 +41,74 @@ logger = logging.getLogger(__name__)
 
 SEMANTIC_QUERY_TIMEOUT_FLOOR_MS = 100
 SEMANTIC_CANARY_REFRESH_INTERVAL_S = 60.0 * 5.0
+LATENCY_SAMPLE_WINDOW_SIZE = 64
+LATENCY_BUCKET_UPPER_BOUNDS_MS: tuple[int, ...] = (25, 50, 100, 250, 500, 1000)
+
+
+class _LatencyWindowSampler:
+    """Track bounded latency samples and summarize percentiles and buckets."""
+
+    def __init__(self, *, max_samples: int = LATENCY_SAMPLE_WINDOW_SIZE) -> None:
+        self._samples_ms: deque[int] = deque(maxlen=max(1, int(max_samples)))
+
+    def add_sample(self, latency_ms: int) -> None:
+        self._samples_ms.append(max(0, int(latency_ms)))
+
+    def summary(self) -> dict[str, int]:
+        if not self._samples_ms:
+            return {
+                "samples": 0,
+                "p50_ms": 0,
+                "p90_ms": 0,
+                "p99_ms": 0,
+                "bucket_le_25ms": 0,
+                "bucket_le_50ms": 0,
+                "bucket_le_100ms": 0,
+                "bucket_le_250ms": 0,
+                "bucket_le_500ms": 0,
+                "bucket_le_1000ms": 0,
+                "bucket_gt_1000ms": 0,
+            }
+
+        values = sorted(self._samples_ms)
+        sample_count = len(values)
+
+        def _nearest_rank_percentile(percentile: float) -> int:
+            rank = max(1, math.ceil(percentile * sample_count))
+            return values[min(sample_count - 1, rank - 1)]
+
+        buckets: dict[str, int] = {
+            "bucket_le_25ms": 0,
+            "bucket_le_50ms": 0,
+            "bucket_le_100ms": 0,
+            "bucket_le_250ms": 0,
+            "bucket_le_500ms": 0,
+            "bucket_le_1000ms": 0,
+            "bucket_gt_1000ms": 0,
+        }
+        for value in values:
+            if value <= LATENCY_BUCKET_UPPER_BOUNDS_MS[0]:
+                buckets["bucket_le_25ms"] += 1
+            elif value <= LATENCY_BUCKET_UPPER_BOUNDS_MS[1]:
+                buckets["bucket_le_50ms"] += 1
+            elif value <= LATENCY_BUCKET_UPPER_BOUNDS_MS[2]:
+                buckets["bucket_le_100ms"] += 1
+            elif value <= LATENCY_BUCKET_UPPER_BOUNDS_MS[3]:
+                buckets["bucket_le_250ms"] += 1
+            elif value <= LATENCY_BUCKET_UPPER_BOUNDS_MS[4]:
+                buckets["bucket_le_500ms"] += 1
+            elif value <= LATENCY_BUCKET_UPPER_BOUNDS_MS[5]:
+                buckets["bucket_le_1000ms"] += 1
+            else:
+                buckets["bucket_gt_1000ms"] += 1
+
+        return {
+            "samples": sample_count,
+            "p50_ms": _nearest_rank_percentile(0.50),
+            "p90_ms": _nearest_rank_percentile(0.90),
+            "p99_ms": _nearest_rank_percentile(0.99),
+            **buckets,
+        }
 
 
 def _safe_text_fingerprint(text: str) -> dict[str, object]:
@@ -441,6 +510,8 @@ class MemoryManager:
             30.0,
             float(semantic_cfg.get("canary_refresh_interval_s", SEMANTIC_CANARY_REFRESH_INTERVAL_S)),
         )
+        self._query_embedding_latency_samples = _LatencyWindowSampler()
+        self._canary_refresh_latency_samples = _LatencyWindowSampler()
         self._run_embedding_canary()
         _, self._semantic_readiness_reason_last = self._is_semantic_provider_ready()
         self._semantic_query_timeout_floor_warned = False
@@ -560,6 +631,7 @@ class MemoryManager:
 
         self._semantic_canary_last = canary_state
         self._semantic_canary_last_checked_monotonic = time.monotonic()
+        self._canary_refresh_latency_samples.add_sample(int(canary_state.get("latency_ms", 0) or 0))
         return dict(canary_state)
 
     def _maybe_refresh_canary(self, *, reason: str) -> bool:
@@ -729,6 +801,9 @@ class MemoryManager:
             ),
         )
 
+        query_latency = self._query_embedding_latency_samples.summary()
+        canary_latency = self._canary_refresh_latency_samples.summary()
+
         metrics: dict[str, float | int] = {
             "retrieval_count": total,
             "average_retrieval_latency_ms": round(avg_latency_ms, 2),
@@ -751,6 +826,28 @@ class MemoryManager:
             "embedding_backlog_memories": backlog_total_legacy,
             "embedding_backlog_memories_with_errors": backlog_total_with_errors,
             "embedding_backlog_delta_since_last": backlog_delta,
+            "query_embedding_latency_samples": int(query_latency["samples"]),
+            "query_embedding_latency_p50_ms": int(query_latency["p50_ms"]),
+            "query_embedding_latency_p90_ms": int(query_latency["p90_ms"]),
+            "query_embedding_latency_p99_ms": int(query_latency["p99_ms"]),
+            "query_embedding_latency_bucket_le_25ms": int(query_latency["bucket_le_25ms"]),
+            "query_embedding_latency_bucket_le_50ms": int(query_latency["bucket_le_50ms"]),
+            "query_embedding_latency_bucket_le_100ms": int(query_latency["bucket_le_100ms"]),
+            "query_embedding_latency_bucket_le_250ms": int(query_latency["bucket_le_250ms"]),
+            "query_embedding_latency_bucket_le_500ms": int(query_latency["bucket_le_500ms"]),
+            "query_embedding_latency_bucket_le_1000ms": int(query_latency["bucket_le_1000ms"]),
+            "query_embedding_latency_bucket_gt_1000ms": int(query_latency["bucket_gt_1000ms"]),
+            "canary_refresh_latency_samples": int(canary_latency["samples"]),
+            "canary_refresh_latency_p50_ms": int(canary_latency["p50_ms"]),
+            "canary_refresh_latency_p90_ms": int(canary_latency["p90_ms"]),
+            "canary_refresh_latency_p99_ms": int(canary_latency["p99_ms"]),
+            "canary_refresh_latency_bucket_le_25ms": int(canary_latency["bucket_le_25ms"]),
+            "canary_refresh_latency_bucket_le_50ms": int(canary_latency["bucket_le_50ms"]),
+            "canary_refresh_latency_bucket_le_100ms": int(canary_latency["bucket_le_100ms"]),
+            "canary_refresh_latency_bucket_le_250ms": int(canary_latency["bucket_le_250ms"]),
+            "canary_refresh_latency_bucket_le_500ms": int(canary_latency["bucket_le_500ms"]),
+            "canary_refresh_latency_bucket_le_1000ms": int(canary_latency["bucket_le_1000ms"]),
+            "canary_refresh_latency_bucket_gt_1000ms": int(canary_latency["bucket_gt_1000ms"]),
         }
         if self._embedding_worker is not None:
             try:
@@ -1070,6 +1167,8 @@ class MemoryManager:
             elapsed_ms = int((time.monotonic() - started_monotonic) * 1000)
             setattr(response, "timeout_ms_used", timeout_ms)
             setattr(response, "elapsed_ms", elapsed_ms)
+            if operation == "query" and not suppress_canary_refresh:
+                self._query_embedding_latency_samples.add_sample(elapsed_ms)
 
         try:
             result = future.result(timeout=timeout_s)

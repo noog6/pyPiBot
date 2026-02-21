@@ -17,6 +17,10 @@ class _FakeRealtime:
                 "retrieval_count": 10,
                 "semantic_provider_attempts": 8,
                 "semantic_provider_errors": 1,
+                "query_embedding_latency_p90_ms": 120,
+                "query_embedding_latency_bucket_gt_1000ms": 2,
+                "canary_refresh_latency_p50_ms": 40,
+                "canary_refresh_latency_bucket_le_100ms": 4,
             },
         }
 
@@ -30,3 +34,7 @@ def test_probe_realtime_session_includes_memory_retrieval_details() -> None:
     assert result.details["memory_retrieval_count"] == 10
     assert result.details["memory_semantic_provider_attempts"] == 8
     assert result.details["memory_semantic_provider_errors"] == 1
+    assert result.details["memory_query_embedding_latency_p90_ms"] == 120
+    assert result.details["memory_query_embedding_latency_bucket_gt_1000ms"] == 2
+    assert result.details["memory_canary_refresh_latency_p50_ms"] == 40
+    assert result.details["memory_canary_refresh_latency_bucket_le_100ms"] == 4
