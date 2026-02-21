@@ -4,25 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from services.research.firecrawl_client import FirecrawlClient
 from services.research.models import RESEARCH_PACKET_SCHEMA, ResearchRequest
 from services.research.openai_service import OpenAIResearchService
-
-
-class _FakeFirecrawlClient(FirecrawlClient):
-    def __init__(self, markdown: str, *, enabled: bool = True, should_fail: bool = False) -> None:
-        self._markdown = markdown
-        self._enabled = enabled
-        self._should_fail = should_fail
-
-    @property
-    def enabled(self) -> bool:
-        return self._enabled
-
-    def fetch_markdown(self, url: str, *, max_pages: int = 1, max_markdown_chars: int = 20000) -> str:
-        if self._should_fail:
-            raise RuntimeError("firecrawl down")
-        return self._markdown[:max_markdown_chars]
 
 
 class _FakeOpenAIResearchService(OpenAIResearchService):
@@ -39,6 +22,9 @@ class _FakeOpenAIResearchService(OpenAIResearchService):
 
     def _responses_call(self, *, input_messages, use_web_search: bool, max_output_tokens: int) -> str:
         return self._extract_result
+
+    def _probe_content_type(self, url: str) -> str:
+        return ""
 
 
 def test_budget_exceeded_returns_approval_prompt(tmp_path: Path) -> None:
@@ -75,14 +61,13 @@ def test_query_cache_skips_repeat_search(tmp_path: Path) -> None:
 def test_allowlist_blocks_localhost_target(tmp_path: Path) -> None:
     svc = _FakeOpenAIResearchService(
         search_result={
-            "best_url": "https://localhost/internal-datasheet.pdf",
-            "sources": [{"title": "Bad", "url": "https://localhost/internal-datasheet.pdf"}],
+            "best_url": "https://localhost/internal-datasheet.html",
+            "sources": [{"title": "Bad", "url": "https://localhost/internal-datasheet.html"}],
             "search_summary": "candidate",
             "safety_notes": [],
         },
         extract_result='{"schema":"research_packet_v1","status":"ok","answer_summary":"ok","extracted_facts":[],"sources":[],"safety_notes":[]}',
         firecrawl_enabled=True,
-        firecrawl_client=_FakeFirecrawlClient("md", enabled=True),
         budget_state_file=str(tmp_path / "budget.json"),
         cache_dir=str(tmp_path / "cache"),
         firecrawl_allowlist_mode="public",
@@ -91,7 +76,7 @@ def test_allowlist_blocks_localhost_target(tmp_path: Path) -> None:
 
     assert packet.status == "ok"
     assert packet.metadata["content_fetch_status"] == "skipped"
-    assert packet.metadata["content_fetch_skip_reason"] == "allowlist_blocked"
+    assert packet.metadata["content_fetch_skip_reason"] == "domain_not_allowed"
     assert any(note.startswith("blocked_by_domain_policy:") for note in packet.safety_notes)
 
 
@@ -106,6 +91,7 @@ def test_allowlist_blocks_loopback_alias_and_decimal_forms(tmp_path: Path) -> No
 
     assert svc._is_url_allowed("https://127.1/internal")[0] is False
     assert svc._is_url_allowed("https://2130706433/internal")[0] is False
+
 
 def test_malicious_markdown_flags_prompt_injection_and_schema(tmp_path: Path) -> None:
     malicious_markdown = """
@@ -128,38 +114,15 @@ def test_malicious_markdown_flags_prompt_injection_and_schema(tmp_path: Path) ->
             '"safety_notes":[]}'
         ),
         firecrawl_enabled=True,
-        firecrawl_client=_FakeFirecrawlClient(malicious_markdown, enabled=True),
         budget_state_file=str(tmp_path / "budget.json"),
         cache_dir=str(tmp_path / "cache"),
     )
+    svc._fetch_html_markdown = lambda url: malicious_markdown  # type: ignore[method-assign]
 
     packet = svc.request_research(ResearchRequest(prompt="what does datasheet say"))
     assert packet.schema == RESEARCH_PACKET_SCHEMA
     assert packet.status == "ok"
     assert any(note.startswith("prompt_injection_detected:") for note in packet.safety_notes)
-
-
-def test_firecrawl_missing_key_returns_sources_only_packet(tmp_path: Path) -> None:
-    svc = _FakeOpenAIResearchService(
-        search_result={
-            "best_url": "https://vendor.com/datasheet",
-            "sources": [{"title": "Vendor DS", "url": "https://vendor.com/datasheet.pdf"}],
-            "search_summary": "Found vendor datasheet",
-            "safety_notes": [],
-        },
-        extract_result='{"schema":"research_packet_v1","status":"ok","answer_summary":"ok","extracted_facts":[],"sources":[],"safety_notes":[]}',
-        firecrawl_enabled=True,
-        firecrawl_client=_FakeFirecrawlClient("markdown", enabled=False),
-        budget_state_file=str(tmp_path / "budget.json"),
-        cache_dir=str(tmp_path / "cache"),
-    )
-    packet = svc.request_research(ResearchRequest(prompt="find datasheet abc"))
-
-    assert packet.status == "ok"
-    assert packet.extracted_facts == []
-    assert packet.sources
-    assert packet.metadata["content_fetch_status"] == "skipped"
-    assert packet.metadata["content_fetch_skip_reason"] == "firecrawl_key_missing"
 
 
 def test_fetch_pass_succeeds_and_attaches_markdown(tmp_path: Path) -> None:
@@ -173,16 +136,16 @@ def test_fetch_pass_succeeds_and_attaches_markdown(tmp_path: Path) -> None:
         },
         extract_result='{"schema":"research_packet_v1","status":"ok","answer_summary":"ok","extracted_facts":[],"sources":[],"safety_notes":[]}',
         firecrawl_enabled=True,
-        firecrawl_client=_FakeFirecrawlClient(markdown, enabled=True),
         firecrawl_max_markdown_chars=20,
         budget_state_file=str(tmp_path / "budget.json"),
         cache_dir=str(tmp_path / "cache"),
     )
+    svc._fetch_html_markdown = lambda url: markdown[:20]  # type: ignore[method-assign]
 
     packet = svc.request_research(ResearchRequest(prompt="find datasheet abc"))
 
     assert packet.metadata["content_fetch_status"] == "ok"
-    assert packet.metadata["content_fetch_provider"] == "firecrawl"
+    assert packet.metadata["content_fetch_provider"] == "simple_requests_html"
     assert packet.metadata["content_fetch_markdown_chars"] > 0
     assert packet.metadata["content_fetch_markdown"]
     assert len(packet.metadata["content_fetch_markdown"]) <= svc._firecrawl_max_markdown_chars + 1
@@ -198,7 +161,6 @@ def test_fetch_pass_skipped_when_firecrawl_disabled(tmp_path: Path) -> None:
         },
         extract_result="{}",
         firecrawl_enabled=False,
-        firecrawl_client=_FakeFirecrawlClient("markdown", enabled=True),
         budget_state_file=str(tmp_path / "budget.json"),
         cache_dir=str(tmp_path / "cache"),
     )
@@ -206,3 +168,69 @@ def test_fetch_pass_skipped_when_firecrawl_disabled(tmp_path: Path) -> None:
 
     assert packet.metadata["content_fetch_status"] == "skipped"
     assert packet.metadata["content_fetch_skip_reason"] == "firecrawl_disabled"
+
+
+def test_pdf_candidates_are_skipped(tmp_path: Path) -> None:
+    svc = _FakeOpenAIResearchService(
+        search_result={
+            "best_url": "https://vendor.com/datasheet.pdf",
+            "sources": [{"title": "Vendor", "url": "https://vendor.com/datasheet.pdf"}],
+            "search_summary": "Found candidate sources",
+            "safety_notes": [],
+        },
+        extract_result="{}",
+        firecrawl_enabled=True,
+        budget_state_file=str(tmp_path / "budget.json"),
+        cache_dir=str(tmp_path / "cache"),
+    )
+    packet = svc.request_research(ResearchRequest(prompt="find datasheet abc"))
+
+    assert packet.metadata["content_fetch_status"] == "skipped"
+    assert packet.metadata["content_fetch_skip_reason"] == "pdf_unsupported"
+
+
+def test_html_url_gets_fetched_and_parsed(tmp_path: Path) -> None:
+    class _FakeResponse:
+        def __init__(self, body: bytes, content_type: str = "text/html; charset=utf-8") -> None:
+            from email.message import Message
+
+            self._body = body
+            msg = Message()
+            msg["Content-Type"] = content_type
+            self.headers = msg
+
+        def read(self) -> bytes:
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    svc = _FakeOpenAIResearchService(
+        search_result={
+            "best_url": "https://www.waveshare.com/wiki/Servo_Driver_HAT",
+            "sources": [{"title": "Waveshare", "url": "https://www.waveshare.com/wiki/Servo_Driver_HAT"}],
+            "search_summary": "Found source",
+            "safety_notes": [],
+        },
+        extract_result='{"schema":"research_packet_v1","status":"ok","answer_summary":"ok","extracted_facts":[],"sources":[],"safety_notes":[]}',
+        firecrawl_enabled=True,
+        budget_state_file=str(tmp_path / "budget.json"),
+        cache_dir=str(tmp_path / "cache"),
+    )
+
+    html = b"""
+    <html><body><nav>menu</nav><h1>Servo Driver HAT</h1><p>Supports PCA9685.</p>
+    <table><tr><th>Spec</th><th>Value</th></tr><tr><td>PWM</td><td>16-channel</td></tr></table>
+    <script>alert(1)</script></body></html>
+    """
+    svc._safe_urlopen = lambda req, timeout: _FakeResponse(html)  # type: ignore[method-assign]
+
+    packet = svc.request_research(ResearchRequest(prompt="find servo hat details"))
+
+    assert packet.metadata["content_fetch_status"] == "ok"
+    assert packet.metadata["content_fetch_markdown_chars"] > 0
+    assert "Servo Driver HAT" in packet.metadata["content_fetch_markdown"]
+    assert "menu" not in packet.metadata["content_fetch_markdown"]

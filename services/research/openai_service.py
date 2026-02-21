@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ipaddress
+from html import unescape
+from html.parser import HTMLParser
 import json
 import os
 from pathlib import Path
@@ -45,6 +47,98 @@ def _clip(text: str, limit: int) -> str:
 
 def _is_pdf_url(url: str) -> bool:
     return parse.urlparse(url).path.lower().endswith(".pdf")
+
+
+class _HTMLToMarkdownParser(HTMLParser):
+    """Tiny HTML -> markdown converter for datasource grounding."""
+
+    _SKIP_TAGS = {"script", "style", "nav", "noscript"}
+    _BLOCK_TAGS = {"p", "div", "section", "article", "main", "ul", "ol", "br", "hr"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._chunks: list[str] = []
+        self._skip_depth = 0
+        self._heading_level = 0
+        self._table_rows: list[list[str]] = []
+        self._current_row: list[str] | None = None
+        self._current_cell: list[str] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:  # noqa: ARG002
+        tag = tag.lower()
+        if tag in self._SKIP_TAGS:
+            self._skip_depth += 1
+            return
+        if self._skip_depth > 0:
+            return
+        if tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+            self._heading_level = int(tag[1])
+            self._chunks.append("\n")
+        elif tag == "li":
+            self._chunks.append("\n- ")
+        elif tag in self._BLOCK_TAGS:
+            self._chunks.append("\n")
+        elif tag == "tr":
+            self._current_row = []
+        elif tag in {"th", "td"}:
+            self._current_cell = []
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag in self._SKIP_TAGS:
+            self._skip_depth = max(0, self._skip_depth - 1)
+            return
+        if self._skip_depth > 0:
+            return
+        if tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+            self._heading_level = 0
+            self._chunks.append("\n")
+        elif tag == "tr" and self._current_row is not None:
+            if any(cell for cell in self._current_row):
+                self._table_rows.append(self._current_row)
+            self._current_row = None
+        elif tag in {"th", "td"} and self._current_row is not None and self._current_cell is not None:
+            text = " ".join("".join(self._current_cell).split())
+            self._current_row.append(text)
+            self._current_cell = None
+        elif tag == "table":
+            self._flush_table()
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth > 0:
+            return
+        text = unescape(data).replace("\xa0", " ")
+        if not text.strip():
+            return
+        normalized = " ".join(text.split())
+        if self._current_cell is not None:
+            self._current_cell.append(normalized)
+            return
+        if self._heading_level:
+            prefix = "#" * min(6, max(1, self._heading_level))
+            self._chunks.append(f"{prefix} {normalized}")
+            return
+        self._chunks.append(normalized)
+
+    def get_markdown(self) -> str:
+        self._flush_table()
+        text = "".join(self._chunks)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    def _flush_table(self) -> None:
+        if not self._table_rows:
+            return
+        self._chunks.append("\n\n")
+        width = max(len(row) for row in self._table_rows)
+        normalized_rows = [row + [""] * (width - len(row)) for row in self._table_rows]
+        header = normalized_rows[0]
+        self._chunks.append("| " + " | ".join(header) + " |\n")
+        self._chunks.append("| " + " | ".join(["---"] * width) + " |\n")
+        for row in normalized_rows[1:]:
+            self._chunks.append("| " + " | ".join(row) + " |\n")
+        self._chunks.append("\n")
+        self._table_rows = []
 
 
 class OpenAIResearchService(ResearchService):
@@ -133,53 +227,46 @@ class OpenAIResearchService(ResearchService):
         sources = self._sanitize_sources(search_result.get("sources") or [])
         safety_notes = self._sanitize_notes(search_result.get("safety_notes") or [])
 
-        fetch_url = str((sources[0] if sources else {}).get("url") or best_url).strip()
+        fetch_url, url_skip_reason = self._choose_fetch_url(search_result, sources, best_url)
         fetch_meta = self._default_fetch_metadata()
         markdown = ""
 
         if not fetch_url:
-            fetch_meta["content_fetch_skip_reason"] = "no_sources"
-            safety_notes.append("content_fetch_skipped:no_sources")
+            fetch_meta["content_fetch_skip_reason"] = url_skip_reason or "no_sources"
+            safety_notes.append(f"content_fetch_skipped:{fetch_meta['content_fetch_skip_reason']}")
         elif not self._firecrawl_enabled:
             fetch_meta["content_fetch_skip_reason"] = "firecrawl_disabled"
             safety_notes.append("content_fetch_skipped:firecrawl_disabled")
-        elif not self._firecrawl_client.enabled:
-            fetch_meta["content_fetch_skip_reason"] = "firecrawl_key_missing"
-            safety_notes.append("content_fetch_skipped:firecrawl_key_missing")
         else:
             allowed, policy_reason = self._is_url_allowed(fetch_url)
             if not allowed:
                 LOGGER.warning("[Research] blocked URL by allowlist policy: %s", policy_reason)
-                fetch_meta["content_fetch_skip_reason"] = "allowlist_blocked"
+                fetch_meta["content_fetch_skip_reason"] = "domain_not_allowed"
                 safety_notes.append(f"blocked_by_domain_policy:{policy_reason}")
-                safety_notes.append("content_fetch_skipped:allowlist_blocked")
+                safety_notes.append("content_fetch_skipped:domain_not_allowed")
             elif _is_pdf_url(fetch_url):
-                fetch_meta["content_fetch_skip_reason"] = "unsupported"
-                safety_notes.append("content_fetch_skipped:unsupported")
+                fetch_meta["content_fetch_skip_reason"] = "pdf_unsupported"
+                safety_notes.append("content_fetch_skipped:pdf_unsupported")
             else:
                 fetch_meta["content_fetch_attempted"] = True
-                fetch_meta["content_fetch_provider"] = "firecrawl"
+                fetch_meta["content_fetch_provider"] = "simple_requests_html"
                 fetch_meta["content_fetch_url"] = fetch_url
                 started = time.perf_counter()
                 try:
                     markdown = self._load_markdown(fetch_url) or ""
                     if not markdown:
-                        markdown = self._firecrawl_client.fetch_markdown(
-                            fetch_url,
-                            max_pages=self._firecrawl_max_pages,
-                            max_markdown_chars=self._firecrawl_max_markdown_chars,
-                        )
+                        markdown = self._fetch_html_markdown(fetch_url)
                         self._cache.set("url_markdown", fetch_url, {"markdown": markdown})
                         LOGGER.info("[Research] cache miss scope=url_markdown")
                     fetch_meta["content_fetch_status"] = "ok"
                     fetch_meta["content_fetch_markdown_chars"] = len(markdown)
                     fetch_meta["content_fetch_latency_ms"] = int((time.perf_counter() - started) * 1000)
                 except Exception as exc:  # noqa: BLE001
-                    LOGGER.warning("[Research] Firecrawl ingestion failed: %s", exc)
+                    LOGGER.warning("[Research] HTML ingestion failed: %s", exc)
                     fetch_meta["content_fetch_status"] = "failed"
                     fetch_meta["content_fetch_error"] = type(exc).__name__
                     fetch_meta["content_fetch_latency_ms"] = int((time.perf_counter() - started) * 1000)
-                    safety_notes.append(f"firecrawl_failed:{type(exc).__name__}")
+                    safety_notes.append(f"content_fetch_failed:{type(exc).__name__}")
 
         url_domain = parse.urlparse(fetch_url).hostname or ""
         LOGGER.info(
@@ -461,6 +548,85 @@ class OpenAIResearchService(ResearchService):
             "content_fetch_skip_reason": "unsupported",
             "content_fetch_markdown_chars": 0,
         }
+
+    def _choose_fetch_url(
+        self,
+        search_result: dict[str, Any],
+        sources: list[dict[str, str]],
+        best_url: str,
+    ) -> tuple[str, str | None]:
+        candidates: list[str] = []
+        for source in sources:
+            url = str(source.get("url") or "").strip()
+            if url and url not in candidates:
+                candidates.append(url)
+        for item in search_result.get("candidate_urls") or []:
+            url = str(item or "").strip()
+            if url and url not in candidates:
+                candidates.append(url)
+        if best_url and best_url not in candidates:
+            candidates.append(best_url)
+        if not candidates:
+            return "", "no_sources"
+
+        pdf_only = True
+        for url in candidates:
+            if _is_pdf_url(url):
+                continue
+            content_type = self._probe_content_type(url)
+            if content_type.startswith("application/pdf"):
+                continue
+            pdf_only = False
+            return url, None
+        return "", "pdf_unsupported" if pdf_only else "no_sources"
+
+    def _probe_content_type(self, url: str) -> str:
+        try:
+            req = request.Request(url, method="HEAD", headers={"User-Agent": "pyPiBot-research/1.0"})
+            with self._safe_urlopen(req, timeout=min(self._timeout_s, 8.0)) as resp:
+                return str(resp.headers.get("Content-Type", "")).lower()
+        except Exception:
+            return ""
+
+    def _safe_urlopen(self, req: request.Request, *, timeout: float):
+        class _RedirectLimiter(request.HTTPRedirectHandler):
+            def __init__(self, max_redirects: int = 5) -> None:
+                super().__init__()
+                self._max_redirects = max_redirects
+
+            def redirect_request(self, req_obj, fp, code, msg, headers, newurl):  # noqa: ANN001
+                count = int(req_obj.headers.get("X-Redirect-Count", "0"))
+                if count >= self._max_redirects:
+                    raise RuntimeError("too_many_redirects")
+                redirected = super().redirect_request(req_obj, fp, code, msg, headers, newurl)
+                if redirected is None:
+                    return None
+                redirected.add_header("X-Redirect-Count", str(count + 1))
+                return redirected
+
+        opener = request.build_opener(_RedirectLimiter())
+        return opener.open(req, timeout=timeout)
+
+    def _fetch_html_markdown(self, url: str) -> str:
+        req = request.Request(
+            url,
+            headers={
+                "User-Agent": "pyPiBot-research/1.0",
+                "Accept": "text/html,application/xhtml+xml",
+            },
+            method="GET",
+        )
+        with self._safe_urlopen(req, timeout=self._timeout_s) as response:
+            content_type = str(response.headers.get("Content-Type", "")).lower()
+            if "text/html" not in content_type and "application/xhtml+xml" not in content_type:
+                raise RuntimeError("non_html_content")
+            body = response.read()
+            charset = response.headers.get_content_charset() or "utf-8"
+        html = body.decode(charset, errors="replace")
+        parser = _HTMLToMarkdownParser()
+        parser.feed(html)
+        parser.close()
+        return _clip(parser.get_markdown(), self._firecrawl_max_markdown_chars)
 
     def _packet_to_payload(self, packet: ResearchPacket) -> dict[str, Any]:
         return {
