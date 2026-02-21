@@ -378,8 +378,7 @@ research:
     allowlist_domains:
       - "files.waveshare.com"
   budget:
-    daily_limit: 20
-    state_file: "./var/research_budget.json"
+    daily_limit: 50
   cache:
     dir: "./var/research_cache"
     ttl_hours: 24

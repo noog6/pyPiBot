@@ -212,10 +212,16 @@ class ConfigController:
         research_cfg["firecrawl"] = firecrawl_cfg
 
         budget_cfg = dict(research_cfg.get("budget") or {})
-        budget_cfg["daily_limit"] = int(budget_cfg.get("daily_limit", 20))
-        budget_cfg["state_file"] = str(
-            budget_cfg.get("state_file", "./var/research_budget.json")
-        )
+        budget_cfg["daily_limit"] = int(budget_cfg.get("daily_limit", 50))
+        # Deprecated legacy key retained in normalized config for backward compatibility.
+        # Budget persistence no longer reads this setting.
+        legacy_budget_state_file = budget_cfg.get("state_file")
+        if legacy_budget_state_file is not None:
+            budget_cfg["state_file"] = str(legacy_budget_state_file)
+            logger.warning(
+                "research.budget.state_file is deprecated and ignored; remove it from config.",
+                extra={"deprecated_key": "research.budget.state_file"},
+            )
         research_cfg["budget"] = budget_cfg
 
         cache_cfg = dict(research_cfg.get("cache") or {})

@@ -928,7 +928,6 @@ def build_openai_service_or_null(config: dict[str, Any]) -> ResearchService:
         cache_dir=cache_dir,
         cache_ttl_hours=cache_ttl_hours,
         daily_budget=int(budget_cfg.get("daily_limit", 0)),
-        budget_state_file=str(budget_cfg.get("state_file", "./var/research_budget.json")),
         escalation_enabled=bool(escalation_cfg.get("enabled", False)),
         max_rounds=int(escalation_cfg.get("max_rounds", 1)),
     )
