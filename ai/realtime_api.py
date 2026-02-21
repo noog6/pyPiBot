@@ -96,6 +96,9 @@ Response metadata: {response_metadata}
 ALLOWED_OUTBOUND_HOSTS = {"api.openai.com"}
 ALLOWED_OUTBOUND_SCHEMES = {"https", "wss"}
 
+_EMAIL_REDACT_RE = re.compile(r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[A-Za-z]{2,}\b")
+_PHONE_REDACT_RE = re.compile(r"(?:(?<=\s)|^)(?:\+?\d[\d()\-\s]{7,}\d)(?=\s|$)")
+
 
 @dataclass
 class PendingAction:
@@ -374,6 +377,17 @@ class RealtimeAPI:
             if isinstance(word, str) and word.strip()
         ]
         self._stop_word_cooldown_s = float(config.get("stop_word_cooldown_s", 0.0))
+        logging_cfg = config.get("logging") or {}
+        user_transcripts_cfg = logging_cfg.get("user_transcripts") or {}
+        partials_cfg = user_transcripts_cfg.get("partials") or {}
+        redact_cfg = user_transcripts_cfg.get("redact") or {}
+        self._log_user_transcripts_enabled = bool(user_transcripts_cfg.get("enabled", False))
+        self._log_user_transcript_partials_enabled = bool(partials_cfg.get("enabled", False))
+        self._log_user_transcript_partials_min_chars_delta = max(
+            1, int(partials_cfg.get("min_chars_delta", 8))
+        )
+        self._log_user_transcript_redact_enabled = bool(redact_cfg.get("enabled", True))
+        self._last_logged_partial_user_transcript = ""
         memory_retrieval_cfg = config.get("memory_retrieval") or {}
         self._memory_retrieval_enabled = bool(memory_retrieval_cfg.get("enabled", True))
         self._memory_retrieval_max_memories = int(memory_retrieval_cfg.get("max_memories", 3))
@@ -1214,6 +1228,67 @@ class RealtimeAPI:
                 if content.get("type") == "input_text" and content.get("text"):
                     return content["text"]
         return None
+
+    def _current_run_id(self) -> str | None:
+        storage = getattr(self, "_storage", None)
+        if storage is None:
+            return None
+        try:
+            storage_info = storage.get_storage_info()
+        except Exception:
+            return None
+        run_id = getattr(storage_info, "run_id", None)
+        return str(run_id) if run_id else None
+
+    def _redact_user_transcript_text(self, text: str) -> str:
+        redacted = _EMAIL_REDACT_RE.sub("<redacted_email>", text)
+        return _PHONE_REDACT_RE.sub("<redacted_phone>", redacted)
+
+    def _should_log_partial_user_transcript(self, transcript: str) -> bool:
+        cleaned = transcript.strip()
+        if not cleaned:
+            return False
+        previous = getattr(self, "_last_logged_partial_user_transcript", "")
+        if not previous:
+            return True
+        if cleaned == previous:
+            return False
+        delta = abs(len(cleaned) - len(previous))
+        return delta >= self._log_user_transcript_partials_min_chars_delta
+
+    def _log_user_transcript(self, transcript: str, *, final: bool, event_type: str) -> None:
+        if not self._log_user_transcripts_enabled:
+            return
+        cleaned = " ".join((transcript or "").split())
+        if not cleaned:
+            return
+        if not final:
+            if not self._log_user_transcript_partials_enabled:
+                return
+            if not self._should_log_partial_user_transcript(cleaned):
+                return
+            self._last_logged_partial_user_transcript = cleaned
+        else:
+            self._last_logged_partial_user_transcript = ""
+
+        log_text = (
+            self._redact_user_transcript_text(cleaned)
+            if self._log_user_transcript_redact_enabled
+            else cleaned
+        )
+        escaped = log_text.replace("\\", "\\\\").replace('"', '\\"')
+        meta = {
+            "event_type": event_type,
+            "run_id": self._current_run_id(),
+            "source": "input_audio_transcription",
+        }
+        logger.info(
+            '[USER] transcript %s: "%s" meta=%s',
+            "final" if final else "partial",
+            escaped,
+            json.dumps(meta, sort_keys=True),
+        )
+
 
     def _maybe_enqueue_reflection(self, trigger: str) -> None:
         if self._reflection_enqueued:
@@ -2921,8 +2996,17 @@ class RealtimeAPI:
             await self.handle_response_completed(event)
         elif event_type == "error":
             await self.handle_error(event, websocket)
+        elif event_type in {
+            "conversation.item.input_audio_transcription.delta",
+            "conversation.item.input_audio_transcription.partial",
+        }:
+            partial_text = event.get("delta")
+            if not isinstance(partial_text, str) or not partial_text.strip():
+                partial_text = self._extract_transcript(event) or ""
+            self._log_user_transcript(partial_text, final=False, event_type=event_type)
         elif event_type == "conversation.item.input_audio_transcription.completed":
             transcript = self._extract_transcript(event)
+            self._log_user_transcript(transcript or "", final=True, event_type=event_type)
             if self._active_utterance is not None:
                 self._active_utterance["transcript"] = transcript or ""
                 self._active_utterance["transcript_len"] = len((transcript or "").strip())

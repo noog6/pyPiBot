@@ -338,4 +338,20 @@ class ConfigController:
         memory_semantic_cfg["openai"] = memory_openai_cfg
         normalized["memory_semantic"] = memory_semantic_cfg
 
+        logging_cfg = dict(normalized.get("logging") or {})
+        user_transcripts_cfg = dict(logging_cfg.get("user_transcripts") or {})
+        user_transcripts_cfg["enabled"] = bool(user_transcripts_cfg.get("enabled", False))
+
+        partials_cfg = dict(user_transcripts_cfg.get("partials") or {})
+        partials_cfg["enabled"] = bool(partials_cfg.get("enabled", False))
+        partials_cfg["min_chars_delta"] = max(1, int(partials_cfg.get("min_chars_delta", 8)))
+        user_transcripts_cfg["partials"] = partials_cfg
+
+        redact_cfg = dict(user_transcripts_cfg.get("redact") or {})
+        redact_cfg["enabled"] = bool(redact_cfg.get("enabled", True))
+        user_transcripts_cfg["redact"] = redact_cfg
+
+        logging_cfg["user_transcripts"] = user_transcripts_cfg
+        normalized["logging"] = logging_cfg
+
         return normalized
