@@ -352,7 +352,7 @@ research:
   enabled: true
   provider: "openai"
   packet_schema: "research_packet_v1"
-  permission_required: true
+  permission_required: false
   research_mode: "ask_on_assistant_or_unknown"  # auto | ask | disabled | ask_on_assistant_or_unknown
   tool_call_dedupe_ttl_s: 30
   spoken_response_dedupe_ttl_s: 60
