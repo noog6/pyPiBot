@@ -6,6 +6,7 @@ import asyncio
 
 from ai.realtime_api import ConfirmationState, RealtimeAPI
 from services.research.models import ResearchPacket, ResearchRequest
+from storage.trusted_domains import TrustedDomainStore
 
 
 class _FakeService:
@@ -16,6 +17,21 @@ class _FakeService:
     def request_research(self, request: ResearchRequest) -> ResearchPacket:
         self.calls.append(request)
         return self.packet
+
+class _InMemoryTrustedDomainStore:
+    def __init__(self) -> None:
+        self.domains: set[str] = set()
+
+    def add_domain(self, domain_or_url: str, *, added_by: str = "user") -> str | None:
+        domain = str(domain_or_url).strip().lower()
+        if not domain:
+            return None
+        self.domains.add(domain)
+        return domain
+
+    def get_domain_set(self) -> set[str]:
+        return set(self.domains)
+
 
 
 def _make_api_stub() -> RealtimeAPI:
@@ -33,6 +49,8 @@ def _make_api_stub() -> RealtimeAPI:
     api._research_suppressed_fingerprints = {}
     api._presented_actions = set()
     api._tool_call_dedupe_ttl_s = 30.0
+    api._trusted_domain_store = _InMemoryTrustedDomainStore()
+    api._trusted_research_domains = set()
     api.send_assistant_message = lambda *args, **kwargs: None
     return api
 
@@ -182,7 +200,7 @@ def test_non_allowlisted_domain_requires_permission_token() -> None:
     assert handled is True
     assert api._pending_confirmation_token is not None
     assert api._pending_confirmation_token.kind == "research_permission"
-    assert prompts and "Do I have your permission" in prompts[0]
+    assert prompts and "trusted list" in prompts[0]
 
 
 def test_pdf_url_requires_permission_token() -> None:
@@ -212,3 +230,107 @@ def test_pdf_url_requires_permission_token() -> None:
     assert api._pending_confirmation_token is not None
     assert api._pending_confirmation_token.kind == "research_permission"
     assert prompts and "Do I have your permission" in prompts[0]
+
+
+def test_non_allowlisted_domain_permission_prompt_requests_trusted_list() -> None:
+    api = _make_api_stub()
+    api._research_mode = "auto"
+    api._research_provider = "openai"
+    api._research_firecrawl_enabled = False
+    api._research_firecrawl_allowlist_mode = "explicit"
+    api._research_firecrawl_allowlist_domains = {"wikipedia.org"}
+
+    prompts: list[str] = []
+
+    async def _send_assistant_message(message: str, *args, **kwargs) -> None:
+        prompts.append(message)
+
+    api.send_assistant_message = _send_assistant_message
+
+    handled = asyncio.run(
+        api._maybe_process_research_intent(
+            "search the web for https://example.com/deep-dive",
+            websocket=object(),
+            source="text_message",
+        )
+    )
+
+    assert handled is True
+    assert prompts
+    assert "May I add example.com to your trusted list" in prompts[0]
+
+
+def test_permission_approval_adds_domain_and_dispatches() -> None:
+    api = _make_api_stub()
+    api._research_mode = "auto"
+    api._research_provider = "openai"
+    api._research_firecrawl_enabled = False
+    api._research_firecrawl_allowlist_mode = "explicit"
+    api._research_firecrawl_allowlist_domains = {"wikipedia.org"}
+
+    calls: list[str] = []
+
+    async def _dispatch(request: ResearchRequest, websocket: object) -> None:
+        calls.append(request.prompt)
+
+    api._dispatch_research_request = _dispatch
+
+    async def _send_assistant_message(message: str, *args, **kwargs) -> None:
+        return None
+
+    api.send_assistant_message = _send_assistant_message
+
+    asyncio.run(
+        api._maybe_process_research_intent(
+            "search the web for https://example.com/deep-dive",
+            websocket=object(),
+            source="text_message",
+        )
+    )
+
+    handled = asyncio.run(api._maybe_handle_research_permission_response("yes", object()))
+
+    assert handled is True
+    assert calls == ["search the web for https://example.com/deep-dive"]
+    assert "example.com" in api._trusted_research_domains
+    assert "example.com" in api._research_firecrawl_allowlist_domains
+
+
+def test_permission_decline_does_not_add_domain() -> None:
+    api = _make_api_stub()
+    api._research_mode = "auto"
+    api._research_provider = "openai"
+    api._research_firecrawl_enabled = False
+    api._research_firecrawl_allowlist_mode = "explicit"
+    api._research_firecrawl_allowlist_domains = {"wikipedia.org"}
+
+    async def _send_assistant_message(message: str, *args, **kwargs) -> None:
+        return None
+
+    api.send_assistant_message = _send_assistant_message
+
+    asyncio.run(
+        api._maybe_process_research_intent(
+            "search the web for https://example.com/deep-dive",
+            websocket=object(),
+            source="text_message",
+        )
+    )
+
+    handled = asyncio.run(api._maybe_handle_research_permission_response("no", object()))
+
+    assert handled is True
+    assert "example.com" not in api._trusted_research_domains
+
+
+def test_trusted_domain_store_persists_across_instances(tmp_path) -> None:
+    db_path = tmp_path / "trusted.db"
+
+    first = TrustedDomainStore(db_path=db_path)
+    added = first.add_domain("https://Example.COM/deep-dive?foo=1")
+
+    second = TrustedDomainStore(db_path=db_path)
+    domains = second.get_domain_set()
+
+    assert added == "example.com"
+    assert "example.com" in domains

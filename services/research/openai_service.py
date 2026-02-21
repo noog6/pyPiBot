@@ -20,6 +20,7 @@ from services.research.firecrawl_client import FirecrawlClient, FirecrawlHTTPErr
 from services.research.models import RESEARCH_PACKET_SCHEMA, ResearchPacket, ResearchRequest
 from services.research.service import NullResearchService, ResearchService
 from services.research.stores import ResearchBudgetTracker, ResearchCacheStore
+from storage.trusted_domains import TrustedDomainStore, merge_allowlists
 
 
 INJECTION_MARKERS: tuple[str, ...] = (
@@ -832,6 +833,11 @@ def build_openai_service_or_null(config: dict[str, Any]) -> ResearchService:
 
     openai_cfg = research_cfg.get("openai") or {}
     firecrawl_cfg = research_cfg.get("firecrawl") or {}
+    trusted_domain_store = TrustedDomainStore()
+    merged_allowlist_domains = merge_allowlists(
+        firecrawl_cfg.get("allowlist_domains") or [],
+        trusted_domain_store.get_domain_set(),
+    )
     budget_cfg = research_cfg.get("budget") or {}
     cache_cfg = research_cfg.get("cache") or {}
     escalation_cfg = research_cfg.get("escalation") or {}
@@ -852,7 +858,7 @@ def build_openai_service_or_null(config: dict[str, Any]) -> ResearchService:
         firecrawl_max_pages=int(firecrawl_cfg.get("max_pages", 1)),
         firecrawl_max_markdown_chars=int(firecrawl_cfg.get("max_markdown_chars", 20000)),
         firecrawl_allowlist_mode=str(firecrawl_cfg.get("allowlist_mode", "public")),
-        firecrawl_allowlist_domains=list(firecrawl_cfg.get("allowlist_domains") or []),
+        firecrawl_allowlist_domains=sorted(merged_allowlist_domains),
         cache_dir=cache_dir,
         cache_ttl_hours=cache_ttl_hours,
         daily_budget=int(budget_cfg.get("daily_limit", 0)),
