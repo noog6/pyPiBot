@@ -33,7 +33,7 @@ def test_config_controller_sets_memory_semantic_defaults(tmp_path: Path, monkeyp
     assert semantic_cfg["max_embedding_retries"] == 8
     assert semantic_cfg["write_timeout_ms"] == 75
     assert semantic_cfg["query_timeout_ms"] == 2000
-    assert semantic_cfg["startup_canary_timeout_ms"] == 120
+    assert semantic_cfg["startup_canary_timeout_ms"] == 1500
     assert semantic_cfg["startup_canary_bypass"] is False
     assert semantic_cfg["max_writes_per_minute"] == 120
     assert semantic_cfg["max_queries_per_minute"] == 240
@@ -41,6 +41,22 @@ def test_config_controller_sets_memory_semantic_defaults(tmp_path: Path, monkeyp
     assert semantic_cfg["openai"]["model"] == "text-embedding-3-small"
     assert semantic_cfg["openai"]["timeout_s"] == 10.0
 
+
+def test_config_controller_clamps_semantic_startup_canary_timeout_floor(tmp_path: Path, monkeypatch) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "default.yaml").write_text(
+        """memory_semantic:
+  startup_canary_timeout_ms: 25
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    _reset_singletons()
+
+    semantic_cfg = ConfigController.get_instance().get_config()["memory_semantic"]
+
+    assert semantic_cfg["startup_canary_timeout_ms"] == 500
 
 
 def test_repo_default_config_uses_supported_semantic_provider() -> None:
