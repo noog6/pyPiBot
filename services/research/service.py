@@ -21,6 +21,16 @@ class ResearchService(ABC):
 
         return []
 
+    def get_budget_remaining(self) -> int | None:
+        """Return remaining budget units when provider tracks budget, else None."""
+
+        return None
+
+    def can_run_research_now(self) -> bool:
+        """Return whether a standard (non-over-budget) request may execute now."""
+
+        return True
+
 
 class NullResearchService(ResearchService):
     """Safe default implementation that does not perform any network activity."""
@@ -47,6 +57,9 @@ class NullResearchService(ResearchService):
             },
         )
         return packet
+
+    def can_run_research_now(self) -> bool:
+        return False
 
     def build_packet(self, request: ResearchRequest) -> ResearchPacket:
         """Backward-compatible alias for older call sites."""

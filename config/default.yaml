@@ -375,7 +375,8 @@ research:
     cache_dir: "./var/research_cache"
     cache_ttl_hours: 24
     allowlist_mode: "public"  # off | public | explicit
-    allowlist_domains: []
+    allowlist_domains:
+      - "files.waveshare.com"
   budget:
     daily_limit: 20
     state_file: "./var/research_budget.json"

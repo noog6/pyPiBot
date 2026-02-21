@@ -51,7 +51,7 @@ def test_budget_exceeded_returns_approval_prompt(tmp_path: Path) -> None:
 
     assert packet.status == "error"
     assert "budget" in packet.answer_summary.lower()
-    assert "awaiting_over_budget_approval" in packet.safety_notes
+    assert "awaiting_budget_confirmation" in packet.safety_notes
 
 
 def test_query_cache_skips_repeat_search(tmp_path: Path) -> None:
@@ -359,3 +359,40 @@ def test_html_url_gets_fetched_and_parsed(tmp_path: Path) -> None:
     assert packet.metadata["content_fetch_markdown_chars"] > 0
     assert "Servo Driver HAT" in packet.metadata["content_fetch_markdown"]
     assert "menu" not in packet.metadata["content_fetch_markdown"]
+
+def test_budget_zero_blocks_research_before_dispatch(tmp_path: Path) -> None:
+    svc = _FakeOpenAIResearchService(
+        search_result={"best_url": "https://vendor.com/a", "sources": [], "search_summary": "none", "safety_notes": []},
+        extract_result="{}",
+        daily_budget=1,
+        budget_state_file=str(tmp_path / "budget.json"),
+        cache_dir=str(tmp_path / "cache"),
+    )
+
+    _ = svc.request_research(ResearchRequest(prompt="first request"))
+    packet = svc.request_research(ResearchRequest(prompt="find datasheet"))
+
+    assert packet.status == "error"
+    assert "awaiting_budget_confirmation" in packet.safety_notes
+    assert svc.search_calls == 1
+
+
+def test_sources_only_packet_includes_candidate_urls(tmp_path: Path) -> None:
+    svc = _FakeOpenAIResearchService(
+        search_result={
+            "best_url": "",
+            "candidate_urls": ["https://docs.vendor.com/ds.pdf"],
+            "sources": [],
+            "search_summary": "candidate links discovered",
+            "safety_notes": [],
+        },
+        extract_result="{}",
+        firecrawl_enabled=False,
+        budget_state_file=str(tmp_path / "budget.json"),
+        cache_dir=str(tmp_path / "cache"),
+    )
+
+    packet = svc.request_research(ResearchRequest(prompt="find official pdf"))
+
+    assert packet.sources
+    assert packet.sources[0]["url"] == "https://docs.vendor.com/ds.pdf"
