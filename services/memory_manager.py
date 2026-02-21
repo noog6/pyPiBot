@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from enum import Enum
+import hashlib
 import logging
 import math
 import re
@@ -32,6 +33,24 @@ NEAR_DUPLICATE_THRESHOLD = 0.75
 NEAR_DUPLICATE_CHAR_RATIO = 0.9
 WORD_RE = re.compile(r"[a-zA-Z0-9]{2,}")
 logger = logging.getLogger(__name__)
+
+
+def _safe_text_fingerprint(text: str) -> dict[str, object]:
+    normalized = " ".join(text.strip().split())
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+    return {
+        "hash": digest,
+        "length": len(normalized),
+    }
+
+
+def _sanitize_error_class_name(value: object) -> str | None:
+    if value is None:
+        return None
+    class_name = re.sub(r"[^a-zA-Z0-9_]", "", str(value).strip())
+    if not class_name:
+        return None
+    return class_name[:64]
 
 
 class MemoryScope(str, Enum):
@@ -555,7 +574,7 @@ class MemoryManager:
         if self._embedding_worker is not None:
             try:
                 metrics.update(self._embedding_worker.get_metrics())
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 pass
         return metrics
 
@@ -644,7 +663,7 @@ class MemoryManager:
         if self._embedding_worker is not None:
             try:
                 self._embedding_worker.enqueue_memory(memory_id=entry.memory_id)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 # Embedding scheduling is best-effort and must never block writes.
                 pass
             return entry
@@ -1025,6 +1044,15 @@ class MemoryManager:
             "semantic_timeout_backoff_activation_count": int(
                 getattr(self, "_semantic_timeout_backoff_activation_count", 0)
             ),
+            "semantic_provider": str(getattr(self._semantic_config, "provider", "none") or "none"),
+            "semantic_model": None,
+            "semantic_query_timeout_ms": int(getattr(self._semantic_config, "query_timeout_ms", 40)),
+            "semantic_query_duration_ms": 0,
+            "semantic_error_code": None,
+            "semantic_error_class": None,
+            "semantic_scoring_skipped_reason": None,
+            "query_fingerprint_hash": None,
+            "query_fingerprint_length": 0,
         }
 
         now_for_backoff = time.monotonic()
@@ -1038,6 +1066,9 @@ class MemoryManager:
         clean_utterance = " ".join(latest_user_utterance.strip().split())
         if not clean_utterance:
             return None
+        query_fingerprint = _safe_text_fingerprint(clean_utterance)
+        self._last_turn_retrieval_debug["query_fingerprint_hash"] = query_fingerprint["hash"]
+        self._last_turn_retrieval_debug["query_fingerprint_length"] = query_fingerprint["length"]
 
         effective_user_id = user_id if user_id is not None else self._active_user_id
         resolved_scope = _normalize_scope(scope, fallback=self._default_scope)
@@ -1138,9 +1169,18 @@ class MemoryManager:
             self._last_turn_retrieval_debug["semantic_candidate_count"] = semantic_limit
             semantic_memory_ids = [entry.memory_id for _, entry in semantic_pool]
             try:
+                semantic_started_at = time.monotonic()
                 query_embedding = self._embed_text_with_semantic_policy(
                     text=clean_utterance,
                     operation="query",
+                )
+                self._last_turn_retrieval_debug["semantic_query_duration_ms"] = int(
+                    (time.monotonic() - semantic_started_at) * 1000
+                )
+                self._last_turn_retrieval_debug["semantic_model"] = str(
+                    getattr(query_embedding, "model", None)
+                    or getattr(self._embedding_provider, "_model", None)
+                    or "unknown"
                 )
                 if query_embedding.status == "ready" and query_embedding.dimension > 0 and query_embedding.vector:
                     query_norm = float(query_embedding.vector_norm or 0.0)
@@ -1189,14 +1229,21 @@ class MemoryManager:
                                 "candidates_semantic_applied": semantic_scored_count,
                             }
                         )
+                    else:
+                        self._last_turn_retrieval_debug["semantic_scoring_skipped_reason"] = "query_embedding_zero_norm"
                 else:
                     self._last_turn_retrieval_debug["fallback_reason"] = "query_embedding_not_ready"
-                    self._last_turn_retrieval_debug["semantic_error_code"] = str(
-                        getattr(query_embedding, "error_code", None)
-                        or getattr(query_embedding, "status", None)
-                        or "unknown"
+                    error_code = str(getattr(query_embedding, "error_code", None) or getattr(query_embedding, "status", None) or "unknown")
+                    self._last_turn_retrieval_debug["semantic_error_code"] = error_code
+                    self._last_turn_retrieval_debug["semantic_error_class"] = _sanitize_error_class_name(
+                        getattr(query_embedding, "error_class", None)
                     )
-            except Exception:  # noqa: BLE001
+                    self._last_turn_retrieval_debug["semantic_scoring_skipped_reason"] = (
+                        "query_embedding_timeout"
+                        if error_code in {"timeout", "timeout_backoff"}
+                        else "query_embedding_not_ready"
+                    )
+            except Exception as exc:  # noqa: BLE001
                 # Semantic reranking is best-effort and must never degrade lexical retrieval.
                 ordered = [item[1] for item in lexical_ordered]
                 self._retrieval_semantic_error_count += 1
@@ -1204,13 +1251,18 @@ class MemoryManager:
                     {
                         "mode": "hybrid_fallback_lexical",
                         "semantic_error": "exception",
+                        "semantic_error_code": "semantic_provider_exception",
+                        "semantic_error_class": _sanitize_error_class_name(exc.__class__.__name__),
+                        "semantic_scoring_skipped_reason": "semantic_provider_error",
                         "fallback_reason": "semantic_provider_error",
                     }
                 )
         elif semantic_enabled:
             self._last_turn_retrieval_debug["fallback_reason"] = "no_lexical_candidates"
+            self._last_turn_retrieval_debug["semantic_scoring_skipped_reason"] = "no_lexical_candidates"
         elif self._semantic_config.enabled and self._semantic_config.rerank_enabled:
             self._last_turn_retrieval_debug["fallback_reason"] = semantic_readiness_reason
+            self._last_turn_retrieval_debug["semantic_scoring_skipped_reason"] = "semantic_not_ready"
 
         if self._last_turn_retrieval_debug.get("fallback_reason") == "query_embedding_not_ready":
             self._semantic_query_embedding_not_ready_streak = (

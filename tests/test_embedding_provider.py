@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import socket
 from urllib import error
 
 from services.embedding_provider import (
@@ -77,7 +78,7 @@ def test_openai_provider_handles_request_error(monkeypatch) -> None:
     result = provider.embed_text("hello")
 
     assert result.status == "error"
-    assert result.error_code == "provider_request_failed"
+    assert result.error_code == "connection_error"
 
 
 def test_build_embedding_provider_uses_openai_when_configured() -> None:
@@ -130,3 +131,55 @@ def test_build_embedding_provider_surfaces_unsupported_provider() -> None:
     assert result.status == "unavailable"
     assert result.error_code == "unsupported_provider"
     assert "local_light" in (result.error_message or "")
+
+
+def test_openai_provider_classifies_http_auth_error(monkeypatch) -> None:
+    def _failing_urlopen(req, timeout):  # noqa: ANN001
+        raise error.HTTPError(url="https://api.openai.com/v1/embeddings", code=401, msg="unauthorized", hdrs=None, fp=None)
+
+    monkeypatch.setattr("services.embedding_provider.request.urlopen", _failing_urlopen)
+    provider = OpenAIEmbeddingProvider(api_key="key", enabled=True)
+
+    result = provider.embed_text("hello")
+
+    assert result.status == "error"
+    assert result.error_code == "auth_forbidden"
+
+
+def test_openai_provider_classifies_model_not_found_error(monkeypatch) -> None:
+    def _failing_urlopen(req, timeout):  # noqa: ANN001
+        raise error.HTTPError(url="https://api.openai.com/v1/embeddings", code=404, msg="not found", hdrs=None, fp=None)
+
+    monkeypatch.setattr("services.embedding_provider.request.urlopen", _failing_urlopen)
+    provider = OpenAIEmbeddingProvider(api_key="key", enabled=True)
+
+    result = provider.embed_text("hello")
+
+    assert result.status == "error"
+    assert result.error_code == "model_not_found"
+
+
+def test_openai_provider_classifies_timeout_error(monkeypatch) -> None:
+    def _failing_urlopen(req, timeout):  # noqa: ANN001
+        raise socket.timeout("timed out")
+
+    monkeypatch.setattr("services.embedding_provider.request.urlopen", _failing_urlopen)
+    provider = OpenAIEmbeddingProvider(api_key="key", enabled=True)
+
+    result = provider.embed_text("hello")
+
+    assert result.status == "error"
+    assert result.error_code == "request_timeout"
+
+
+def test_openai_provider_classifies_connection_refused(monkeypatch) -> None:
+    def _failing_urlopen(req, timeout):  # noqa: ANN001
+        raise error.URLError(ConnectionRefusedError("refused"))
+
+    monkeypatch.setattr("services.embedding_provider.request.urlopen", _failing_urlopen)
+    provider = OpenAIEmbeddingProvider(api_key="key", enabled=True)
+
+    result = provider.embed_text("hello")
+
+    assert result.status == "error"
+    assert result.error_code == "connection_refused"
