@@ -1,5 +1,6 @@
 """Research subsystem service scaffolding."""
 
+from services.research.budget_manager import ResearchBudgetManager
 from services.research.intent import RESEARCH_INTENT_PATTERNS, has_research_intent
 from services.research.firecrawl_client import FirecrawlClient
 from services.research.models import RESEARCH_PACKET_SCHEMA, ResearchPacket, ResearchRequest
@@ -17,6 +18,7 @@ __all__ = [
     "NullResearchService",
     "OpenAIResearchService",
     "FirecrawlClient",
+    "ResearchBudgetManager",
     "ResearchBudgetTracker",
     "ResearchCacheStore",
     "build_openai_service_or_null",

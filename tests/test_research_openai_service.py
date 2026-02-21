@@ -396,3 +396,47 @@ def test_sources_only_packet_includes_candidate_urls(tmp_path: Path) -> None:
 
     assert packet.sources
     assert packet.sources[0]["url"] == "https://docs.vendor.com/ds.pdf"
+
+
+def test_budget_audit_payload_uses_request_context_fields(tmp_path: Path) -> None:
+    svc = _FakeOpenAIResearchService(
+        search_result={"best_url": "", "sources": [], "search_summary": "summary", "safety_notes": []},
+        extract_result="{}",
+        daily_budget=5,
+        budget_state_file=str(tmp_path / "budget.json"),
+        cache_dir=str(tmp_path / "cache"),
+    )
+
+    request = ResearchRequest(
+        prompt="find datasheet with context",
+        context={
+            "request_fingerprint": "fp-ctx",
+            "research_id": "research-123",
+            "source": "realtime",
+        },
+    )
+    _ = svc.request_research(request)
+
+    state = svc._budget.current_state()
+    assert state["last_audit"]["request_fingerprint"] == "fp-ctx"
+    assert state["last_audit"]["research_id"] == "research-123"
+    assert state["last_audit"]["source"] == "realtime"
+    assert state["last_audit"]["provider"] == "openai_responses_web_search"
+
+
+def test_budget_compat_methods_reflect_manager_state(tmp_path: Path) -> None:
+    svc = _FakeOpenAIResearchService(
+        search_result={"best_url": "", "sources": [], "search_summary": "summary", "safety_notes": []},
+        extract_result="{}",
+        daily_budget=1,
+        budget_state_file=str(tmp_path / "budget.json"),
+        cache_dir=str(tmp_path / "cache"),
+    )
+
+    assert svc.can_run_research_now() is True
+    assert svc.get_budget_remaining() == 1
+
+    _ = svc.request_research(ResearchRequest(prompt="first request"))
+
+    assert svc.can_run_research_now() is False
+    assert svc.get_budget_remaining() == 0
