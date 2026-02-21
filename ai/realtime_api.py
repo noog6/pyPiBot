@@ -461,8 +461,10 @@ class RealtimeAPI:
         self._research_enabled = bool(research_cfg.get("enabled", False))
         self._research_permission_required = bool(research_cfg.get("permission_required", True))
         self._research_mode = str(research_cfg.get("research_mode", "")).strip().lower()
-        if self._research_mode not in {"auto", "ask", "disabled"}:
-            self._research_mode = "ask" if self._research_permission_required else "auto"
+        if self._research_mode not in {"auto", "ask", "disabled", "ask_on_assistant_or_unknown"}:
+            self._research_mode = (
+                "ask_on_assistant_or_unknown" if self._research_permission_required else "auto"
+            )
         self._research_provider = str(research_cfg.get("provider", "null")).strip().lower()
         firecrawl_cfg = research_cfg.get("firecrawl") or {}
         self._research_firecrawl_enabled = bool(firecrawl_cfg.get("enabled", False))
@@ -2589,11 +2591,15 @@ class RealtimeAPI:
             return True
         logger.info("[Research] Requested from %s", source)
 
-        permission_needed, reason = self.should_request_research_permission(request)
+        domains = await self._discover_research_domains(request)
+        domains_known = bool(domains) and all(self._is_research_domain_allowlisted(domain) for domain in domains)
+        permission_needed, reason = self.should_request_research_permission(
+            request,
+            source=source,
+            domains_known=domains_known,
+        )
         if permission_needed:
             provider = "firecrawl_fetch" if self._research_firecrawl_enabled else "openai_responses_web_search"
-            domains = await self._discover_research_domains(request)
-            domains_known = bool(domains)
             if reason == "non_allowlisted_domain" and domains:
                 logger.info("[Allowlist] permission_required domain=%s", domains[0])
             logger.info(
@@ -2641,12 +2647,29 @@ class RealtimeAPI:
         await self._dispatch_research_request(request, websocket)
         return True
 
-    def should_request_research_permission(self, request: ResearchRequest) -> tuple[bool, str]:
+    def _classify_research_initiator(self, source: str | None) -> str:
+        normalized = str(source or "").strip().lower()
+        if normalized in {"input_audio_transcription", "text_message", "startup_prompt"}:
+            return "user_initiated"
+        return "assistant_initiated"
+
+    def should_request_research_permission(
+        self,
+        request: ResearchRequest,
+        *,
+        source: str | None,
+        domains_known: bool,
+    ) -> tuple[bool, str]:
         mode = getattr(self, "_research_mode", "auto")
+        initiator = self._classify_research_initiator(source)
         if mode == "disabled":
             return True, "research_mode_disabled"
         if mode == "ask":
             return True, "research_mode_forced_ask"
+        if not domains_known:
+            return True, "unknown_or_unallowlisted_domains"
+        if mode == "ask_on_assistant_or_unknown" and initiator == "assistant_initiated":
+            return True, "assistant_initiated"
 
         for candidate_url in self._extract_research_urls(request.prompt):
             parsed = urlparse(candidate_url)
@@ -3529,8 +3552,9 @@ class RealtimeAPI:
                         "call_id": call_id,
                         "output": json.dumps(
                             {
-                                "status": "awaiting_research_permission",
-                                "message": "Research request is awaiting user research permission.",
+                                "status": "waiting_for_permission",
+                                "token": token.id if token is not None else "",
+                                "message": "Permission required; ask user first.",
                                 "tool": function_name,
                             }
                         ),

@@ -1012,7 +1012,7 @@ def test_handle_function_call_suppresses_research_while_research_permission_pend
     assert governance_calls == {"build": 0, "review": 0}
     assert len(sent_payloads) == 1
     output_payload = json.loads(sent_payloads[0]["item"]["output"])
-    assert output_payload["status"] == "awaiting_research_permission"
+    assert output_payload["status"] == "waiting_for_permission"
     assert api.function_call is None
     assert api.function_call_args == ""
 

@@ -75,16 +75,17 @@ def test_auto_approved_research_intent_short_circuits_normal_flow() -> None:
 
     api._dispatch_research_request = _dispatch
 
+
     handled = asyncio.run(
         api._maybe_process_research_intent(
-            "find datasheet for ads1015",
+            "find datasheet for https://wikipedia.org/wiki/ADS1015",
             websocket=object(),
             source="text_message",
         )
     )
 
     assert handled is True
-    assert calls == ["find datasheet for ads1015"]
+    assert calls == ["find datasheet for https://wikipedia.org/wiki/ADS1015"]
 
 
 def test_dispatch_research_uses_worker_thread(monkeypatch) -> None:
@@ -119,7 +120,7 @@ def test_dispatch_research_uses_worker_thread(monkeypatch) -> None:
 
 def test_send_initial_prompt_routes_research_intent() -> None:
     api = _make_api_stub()
-    api.prompts = ["Can you search the web for Waveshare Servo Driver HAT voltage requirements?"]
+    api.prompts = ["Can you search the web for https://en.wikipedia.org/wiki/Servo_control?"]
 
     calls: list[str] = []
 
@@ -177,6 +178,94 @@ def test_allowlisted_html_url_bypasses_permission_and_dispatches() -> None:
     assert api._pending_confirmation_token is None
 
 
+
+def test_user_initiated_known_domains_bypass_permission_prompt(caplog) -> None:
+    api = _make_api_stub()
+    api._research_mode = "ask_on_assistant_or_unknown"
+    api._research_provider = "openai"
+    api._research_firecrawl_enabled = False
+    api._research_firecrawl_allowlist_mode = "explicit"
+    api._research_firecrawl_allowlist_domains = {"wikipedia.org"}
+
+    calls: list[str] = []
+
+    async def _dispatch(request: ResearchRequest, websocket: object) -> None:
+        calls.append(request.prompt)
+
+    api._dispatch_research_request = _dispatch
+
+    caplog.set_level("INFO")
+
+    handled = asyncio.run(
+        api._maybe_process_research_intent(
+            "search the web for https://en.wikipedia.org/wiki/Servo_control",
+            websocket=object(),
+            source="text_message",
+        )
+    )
+
+    assert handled is True
+    assert calls == ["search the web for https://en.wikipedia.org/wiki/Servo_control"]
+    assert api._pending_confirmation_token is None
+    assert "reason=research_mode_forced_ask" not in caplog.text
+
+
+def test_assistant_initiated_known_domains_still_require_permission_prompt() -> None:
+    api = _make_api_stub()
+    api._research_mode = "ask_on_assistant_or_unknown"
+    api._research_provider = "openai"
+    api._research_firecrawl_enabled = False
+    api._research_firecrawl_allowlist_mode = "explicit"
+    api._research_firecrawl_allowlist_domains = {"wikipedia.org"}
+
+    prompts: list[str] = []
+
+    async def _send_assistant_message(message: str, *args, **kwargs) -> None:
+        prompts.append(message)
+
+    api.send_assistant_message = _send_assistant_message
+
+    handled = asyncio.run(
+        api._maybe_process_research_intent(
+            "search the web for https://en.wikipedia.org/wiki/Servo_control",
+            websocket=object(),
+            source="auto_reflection",
+        )
+    )
+
+    assert handled is True
+    assert prompts
+    assert api._pending_confirmation_token is not None
+
+
+def test_user_initiated_unknown_domains_require_permission_prompt() -> None:
+    api = _make_api_stub()
+    api._research_mode = "ask_on_assistant_or_unknown"
+    api._research_provider = "openai"
+    api._research_firecrawl_enabled = False
+    api._research_firecrawl_allowlist_mode = "explicit"
+    api._research_firecrawl_allowlist_domains = {"wikipedia.org"}
+
+    prompts: list[str] = []
+
+    async def _send_assistant_message(message: str, *args, **kwargs) -> None:
+        prompts.append(message)
+
+    api.send_assistant_message = _send_assistant_message
+
+    handled = asyncio.run(
+        api._maybe_process_research_intent(
+            "search the web for https://example.com/deep-dive",
+            websocket=object(),
+            source="text_message",
+        )
+    )
+
+    assert handled is True
+    assert prompts
+    assert api._pending_confirmation_token is not None
+    assert api._pending_confirmation_token.metadata.get("domains_known") is False
+
 def test_non_allowlisted_domain_requires_permission_token() -> None:
     api = _make_api_stub()
     api._research_mode = "auto"
@@ -204,8 +293,8 @@ def test_non_allowlisted_domain_requires_permission_token() -> None:
     assert api._pending_confirmation_token is not None
     assert api._pending_confirmation_token.kind == "research_permission"
     assert api._pending_confirmation_token.metadata.get("domains") == ["example.com"]
-    assert api._pending_confirmation_token.metadata.get("domains_known") is True
-    assert prompts and "example.com" in prompts[0]
+    assert api._pending_confirmation_token.metadata.get("domains_known") is False
+    assert prompts and "permission" in prompts[0].lower()
 
 
 def test_pdf_url_requires_permission_token() -> None:
