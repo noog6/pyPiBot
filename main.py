@@ -123,17 +123,27 @@ def main(argv: list[str] | None = None) -> int:
     memory_manager = MemoryManager.get_instance()
     semantic_startup_summary = memory_manager.get_semantic_startup_summary()
     logger.info(
-        "Semantic startup summary enabled=%s provider=%s rerank_enabled=%s "
+        "Semantic startup summary enabled=%s provider=%s model=%s rerank_enabled=%s "
         "background_embedding_enabled=%s provider_ready=%s readiness_reason=%s "
-        "max_queries_per_minute=%s max_writes_per_minute=%s",
+        "query_timeout_ms=%s write_timeout_ms=%s max_queries_per_minute=%s max_writes_per_minute=%s",
         semantic_startup_summary["enabled"],
         semantic_startup_summary["provider"],
+        semantic_startup_summary["provider_model"],
         semantic_startup_summary["rerank_enabled"],
         semantic_startup_summary["background_embedding_enabled"],
         semantic_startup_summary["provider_ready"],
         semantic_startup_summary["provider_readiness_reason"],
+        semantic_startup_summary["query_timeout_ms"],
+        semantic_startup_summary["write_timeout_ms"],
         semantic_startup_summary["max_queries_per_minute"],
         semantic_startup_summary["max_writes_per_minute"],
+    )
+    logger.info(
+        "embedding_canary success=%s latency_ms=%s dimension=%s error_code=%s",
+        semantic_startup_summary["canary_success"],
+        semantic_startup_summary["canary_latency_ms"],
+        semantic_startup_summary["canary_dimension"],
+        semantic_startup_summary["canary_error_code"],
     )
     memory_manager.set_active_session_id(runtime_session_id)
     logger.info("Assigned runtime memory session_id=%s", runtime_session_id)

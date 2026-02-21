@@ -254,6 +254,13 @@ class ConfigController:
         memory_semantic_cfg["query_timeout_ms"] = int(
             memory_semantic_cfg.get("query_timeout_ms", 40)
         )
+        memory_semantic_cfg["startup_canary_timeout_ms"] = max(
+            1,
+            int(memory_semantic_cfg.get("startup_canary_timeout_ms", 120)),
+        )
+        memory_semantic_cfg["startup_canary_bypass"] = bool(
+            memory_semantic_cfg.get("startup_canary_bypass", False)
+        )
         memory_semantic_cfg["max_writes_per_minute"] = int(
             memory_semantic_cfg.get("max_writes_per_minute", 120)
         )

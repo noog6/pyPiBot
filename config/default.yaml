@@ -90,6 +90,10 @@ memory_semantic:
   max_embedding_retries: 8
   write_timeout_ms: 75
   query_timeout_ms: 40
+  # Startup probe timeout for the embedding canary.
+  startup_canary_timeout_ms: 120
+  # Test/offline bypass for canary gating (can also be overridden by PYPIBOT_SEMANTIC_CANARY_BYPASS).
+  startup_canary_bypass: false
   max_writes_per_minute: 120
   max_queries_per_minute: 240
   openai:

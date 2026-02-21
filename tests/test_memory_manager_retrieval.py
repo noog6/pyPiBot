@@ -26,6 +26,7 @@ def _make_memory_manager(store: MemoryStore) -> MemoryManager:
     manager._embedding_executor_lock = None
     manager._semantic_config = SimpleNamespace(
         enabled=False,
+        provider="none",
         rerank_enabled=False,
         max_candidates_for_semantic=64,
         min_similarity=0.25,
@@ -51,6 +52,14 @@ def _make_memory_manager(store: MemoryStore) -> MemoryManager:
     manager._semantic_timeout_backoff_window_s = 5.0
     manager._semantic_provider_last_error_code = "none"
     manager._semantic_provider_ready_last = False
+    manager._semantic_provider_enabled = {"openai": True}
+    manager._semantic_canary_bypass = True
+    manager._semantic_canary_last = {
+        "canary_success": False,
+        "latency_ms": None,
+        "dimension": None,
+        "error_code": "not_run",
+    }
     manager._semantic_query_embedding_not_ready_streak = 0
     manager._embedding_coverage_cache_ttl_s = 60.0
     manager._embedding_coverage_cache = {}
@@ -1755,3 +1764,66 @@ def test_semantic_runtime_health_tracks_query_not_ready_streak(tmp_path) -> None
 
     runtime_after_reset = manager.get_semantic_runtime_health()
     assert runtime_after_reset["query_embedding_not_ready_streak"] == 0
+
+
+def test_semantic_provider_ready_requires_successful_canary(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._semantic_config.enabled = True
+    manager._semantic_config.rerank_enabled = True
+    manager._semantic_config.provider = "openai"
+    manager._embedding_provider = SimpleNamespace(embed_text=lambda text: None)
+    manager._semantic_canary_bypass = False
+
+    manager._semantic_canary_last = {
+        "canary_success": True,
+        "latency_ms": 3,
+        "dimension": 2,
+        "error_code": "none",
+    }
+    ready, reason = manager._semantic_rerank_readiness()
+
+    assert ready is True
+    assert reason == "provider_ready"
+
+
+def test_semantic_provider_ready_reports_canary_timeout(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._semantic_config.enabled = True
+    manager._semantic_config.rerank_enabled = True
+    manager._semantic_config.provider = "openai"
+    manager._embedding_provider = SimpleNamespace(embed_text=lambda text: None)
+    manager._semantic_canary_bypass = False
+
+    manager._semantic_canary_last = {
+        "canary_success": False,
+        "latency_ms": 40,
+        "dimension": None,
+        "error_code": "timeout",
+    }
+    ready, reason = manager._semantic_rerank_readiness()
+
+    assert ready is False
+    assert reason == "canary_timeout"
+
+
+def test_semantic_provider_ready_canary_bypass_allows_rerank(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._semantic_config.enabled = True
+    manager._semantic_config.rerank_enabled = True
+    manager._semantic_config.provider = "openai"
+    manager._embedding_provider = SimpleNamespace(embed_text=lambda text: None)
+    manager._semantic_canary_bypass = True
+    manager._semantic_canary_last = {
+        "canary_success": False,
+        "latency_ms": None,
+        "dimension": None,
+        "error_code": "timeout",
+    }
+
+    ready, reason = manager._semantic_rerank_readiness()
+
+    assert ready is True
+    assert reason == "canary_bypassed"

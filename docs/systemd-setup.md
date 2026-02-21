@@ -183,6 +183,7 @@ Update the following fields in `systemd/pyPiBot.service` as needed:
 - Log file paths in `StandardOutput` and `StandardError`.
 - `User` to the appropriate runtime user.
 - `EnvironmentFile` if you store API keys (`OPENAI_API_KEY`, optional `FIRECRAWL_API_KEY`) somewhere else.
+- Optional semantic startup override: `PYPIBOT_SEMANTIC_CANARY_BYPASS=1` (recommended only for explicit offline/testing scenarios).
 
 ## Auto-sync security considerations
 

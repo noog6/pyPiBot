@@ -22,10 +22,18 @@ class _FakeMemoryManager:
         return {
             "enabled": True,
             "provider": "openai",
+            "provider_model": "text-embedding-3-small",
+            "provider_timeout_s": 10.0,
+            "query_timeout_ms": 40,
+            "write_timeout_ms": 75,
             "rerank_enabled": True,
             "background_embedding_enabled": True,
             "provider_ready": False,
             "provider_readiness_reason": "openai_provider_disabled",
+            "canary_success": False,
+            "canary_latency_ms": 12,
+            "canary_dimension": 0,
+            "canary_error_code": "auth",
             "max_queries_per_minute": 240,
             "max_writes_per_minute": 120,
         }
@@ -239,8 +247,8 @@ def test_main_logs_semantic_memory_state_at_startup(monkeypatch) -> None:
     assert "Semantic memory enabled=True" in infos
     assert "Semantic embeddings table available=False" in infos
     assert (
-        "Semantic startup summary enabled=True provider=openai rerank_enabled=True "
-        "background_embedding_enabled=True provider_ready=False "
-        "readiness_reason=openai_provider_disabled max_queries_per_minute=240 "
-        "max_writes_per_minute=120"
+        "Semantic startup summary enabled=True provider=openai model=text-embedding-3-small rerank_enabled=True "
+        "background_embedding_enabled=True provider_ready=False readiness_reason=openai_provider_disabled "
+        "query_timeout_ms=40 write_timeout_ms=75 max_queries_per_minute=240 max_writes_per_minute=120"
     ) in infos
+    assert "embedding_canary success=False latency_ms=12 dimension=0 error_code=auth" in infos
