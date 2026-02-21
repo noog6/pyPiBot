@@ -16,7 +16,7 @@ from urllib import parse, request
 
 from core.logging import logger as LOGGER
 
-from services.research.firecrawl_client import FirecrawlClient
+from services.research.firecrawl_client import FirecrawlClient, FirecrawlHTTPError
 from services.research.models import RESEARCH_PACKET_SCHEMA, ResearchPacket, ResearchRequest
 from services.research.service import NullResearchService, ResearchService
 from services.research.stores import ResearchBudgetTracker, ResearchCacheStore
@@ -47,6 +47,11 @@ def _clip(text: str, limit: int) -> str:
 
 def _is_pdf_url(url: str) -> bool:
     return parse.urlparse(url).path.lower().endswith(".pdf")
+
+
+def _query_prefers_pdf(prompt: str) -> bool:
+    lowered = str(prompt or "").lower()
+    return "datasheet pdf" in lowered or lowered.startswith("pdf") or " pdf" in lowered
 
 
 class _HTMLToMarkdownParser(HTMLParser):
@@ -155,8 +160,11 @@ class OpenAIResearchService(ResearchService):
         system_instructions: str | None = None,
         firecrawl_enabled: bool = False,
         firecrawl_client: FirecrawlClient | None = None,
+        firecrawl_api_key: str | None = None,
         firecrawl_max_pages: int = 1,
         firecrawl_max_markdown_chars: int = 20000,
+        pdf_ingestion_enabled: bool = False,
+        firecrawl_timeout_s: float = 15.0,
         firecrawl_allowlist_mode: str = "public",
         firecrawl_allowlist_domains: list[str] | None = None,
         cache_dir: str = "./var/research_cache",
@@ -179,9 +187,10 @@ class OpenAIResearchService(ResearchService):
         self._null_service = NullResearchService()
 
         self._firecrawl_enabled = bool(firecrawl_enabled)
-        self._firecrawl_client = firecrawl_client or FirecrawlClient(timeout_s=timeout_s)
+        self._firecrawl_client = firecrawl_client or FirecrawlClient(api_key=firecrawl_api_key, timeout_s=firecrawl_timeout_s)
         self._firecrawl_max_pages = max(1, int(firecrawl_max_pages))
         self._firecrawl_max_markdown_chars = max(1000, int(firecrawl_max_markdown_chars))
+        self._pdf_ingestion_enabled = bool(pdf_ingestion_enabled)
         self._firecrawl_allowlist_mode = str(firecrawl_allowlist_mode or "public").strip().lower()
         self._firecrawl_allowlist_domains = {
             d.strip().lower() for d in (firecrawl_allowlist_domains or []) if d and d.strip()
@@ -227,7 +236,12 @@ class OpenAIResearchService(ResearchService):
         sources = self._sanitize_sources(search_result.get("sources") or [])
         safety_notes = self._sanitize_notes(search_result.get("safety_notes") or [])
 
-        fetch_url, url_skip_reason = self._choose_fetch_url(search_result, sources, best_url)
+        fetch_url, url_skip_reason = self._choose_fetch_url(
+            search_result,
+            sources,
+            best_url,
+            prefer_pdf=_query_prefers_pdf(request_packet.prompt),
+        )
         fetch_meta = self._default_fetch_metadata()
         markdown = ""
 
@@ -244,38 +258,46 @@ class OpenAIResearchService(ResearchService):
                 fetch_meta["content_fetch_skip_reason"] = "domain_not_allowed"
                 safety_notes.append(f"blocked_by_domain_policy:{policy_reason}")
                 safety_notes.append("content_fetch_skipped:domain_not_allowed")
-            elif _is_pdf_url(fetch_url):
-                fetch_meta["content_fetch_skip_reason"] = "pdf_unsupported"
-                safety_notes.append("content_fetch_skipped:pdf_unsupported")
             else:
                 fetch_meta["content_fetch_attempted"] = True
-                fetch_meta["content_fetch_provider"] = "simple_requests_html"
                 fetch_meta["content_fetch_url"] = fetch_url
                 started = time.perf_counter()
                 try:
-                    markdown = self._load_markdown(fetch_url) or ""
-                    if not markdown:
-                        markdown = self._fetch_html_markdown(fetch_url)
-                        self._cache.set("url_markdown", fetch_url, {"markdown": markdown})
-                        LOGGER.info("[Research] cache miss scope=url_markdown")
+                    markdown, provider = self._fetch_markdown_for_url(fetch_url)
+                    fetch_meta["content_fetch_provider"] = provider
                     fetch_meta["content_fetch_status"] = "ok"
                     fetch_meta["content_fetch_markdown_chars"] = len(markdown)
                     fetch_meta["content_fetch_latency_ms"] = int((time.perf_counter() - started) * 1000)
                 except Exception as exc:  # noqa: BLE001
-                    LOGGER.warning("[Research] HTML ingestion failed: %s", exc)
-                    fetch_meta["content_fetch_status"] = "failed"
-                    fetch_meta["content_fetch_error"] = type(exc).__name__
                     fetch_meta["content_fetch_latency_ms"] = int((time.perf_counter() - started) * 1000)
-                    safety_notes.append(f"content_fetch_failed:{type(exc).__name__}")
+                    reason = str(exc).strip().lower()
+                    if reason in {"pdf_disabled", "firecrawl_missing_key"}:
+                        fetch_meta["content_fetch_status"] = "skipped"
+                        fetch_meta["content_fetch_skip_reason"] = reason
+                        safety_notes.append(f"content_fetch_skipped:{reason}")
+                    else:
+                        fetch_meta["content_fetch_status"] = "failed"
+                        fetch_meta["content_fetch_error"] = type(exc).__name__
+                        if isinstance(exc, FirecrawlHTTPError):
+                            LOGGER.warning(
+                                "[Research] firecrawl_fetch_failed error=%s status_code=%s url=%s",
+                                type(exc).__name__,
+                                exc.status_code,
+                                self._redact_url(fetch_url),
+                            )
+                        else:
+                            LOGGER.warning("[Research] content fetch failed: %s", exc)
+                        safety_notes.append(f"content_fetch_failed:{type(exc).__name__}")
 
         url_domain = parse.urlparse(fetch_url).hostname or ""
         LOGGER.info(
-            "[Research] content_fetch attempted=%s provider=%s status=%s domain=%s markdown_chars=%s",
+            "[Research] content_fetch attempted=%s provider=%s status=%s domain=%s markdown_chars=%s latency_ms=%s",
             fetch_meta["content_fetch_attempted"],
             fetch_meta["content_fetch_provider"],
             fetch_meta["content_fetch_status"],
             url_domain,
             fetch_meta["content_fetch_markdown_chars"],
+            fetch_meta.get("content_fetch_latency_ms", 0),
         )
 
         if not markdown:
@@ -547,6 +569,8 @@ class OpenAIResearchService(ResearchService):
             "content_fetch_status": "skipped",
             "content_fetch_skip_reason": "unsupported",
             "content_fetch_markdown_chars": 0,
+            "content_fetch_url": "",
+            "content_fetch_latency_ms": 0,
         }
 
     def _choose_fetch_url(
@@ -554,6 +578,8 @@ class OpenAIResearchService(ResearchService):
         search_result: dict[str, Any],
         sources: list[dict[str, str]],
         best_url: str,
+        *,
+        prefer_pdf: bool = False,
     ) -> tuple[str, str | None]:
         candidates: list[str] = []
         for source in sources:
@@ -569,16 +595,68 @@ class OpenAIResearchService(ResearchService):
         if not candidates:
             return "", "no_sources"
 
-        pdf_only = True
+        pdf_candidates: list[str] = []
+        html_candidates: list[str] = []
         for url in candidates:
             if _is_pdf_url(url):
+                pdf_candidates.append(url)
                 continue
             content_type = self._probe_content_type(url)
             if content_type.startswith("application/pdf"):
-                continue
-            pdf_only = False
-            return url, None
-        return "", "pdf_unsupported" if pdf_only else "no_sources"
+                pdf_candidates.append(url)
+            else:
+                html_candidates.append(url)
+
+        if prefer_pdf and pdf_candidates:
+            return pdf_candidates[0], None
+        if html_candidates:
+            return html_candidates[0], None
+        if pdf_candidates:
+            return pdf_candidates[0], None
+        return "", "no_sources"
+
+    def _fetch_markdown_for_url(self, url: str) -> tuple[str, str]:
+        cached = self._load_markdown(url) or ""
+        if cached:
+            provider = "firecrawl_pdf_to_markdown" if _is_pdf_url(url) else "simple_requests_html"
+            return cached, provider
+
+        content_type = self._probe_content_type(url)
+        is_pdf = _is_pdf_url(url) or content_type.startswith("application/pdf")
+        if is_pdf:
+            if not self._pdf_ingestion_enabled:
+                raise RuntimeError("pdf_disabled")
+            if not self._firecrawl_client.enabled:
+                raise RuntimeError("firecrawl_missing_key")
+            markdown = self._firecrawl_client.fetch_markdown(
+                url,
+                max_pages=self._firecrawl_max_pages,
+                max_markdown_chars=self._firecrawl_max_markdown_chars,
+            )
+            if not markdown.strip():
+                raise RuntimeError("empty_markdown")
+            self._cache.set("url_markdown", url, {"markdown": markdown})
+            LOGGER.info("[Research] cache miss scope=url_markdown")
+            return markdown, "firecrawl_pdf_to_markdown"
+
+        markdown = self._fetch_html_markdown(url)
+        self._cache.set("url_markdown", url, {"markdown": markdown})
+        LOGGER.info("[Research] cache miss scope=url_markdown")
+        return markdown, "simple_requests_html"
+
+    def _redact_url(self, raw_url: str) -> str:
+        parsed = parse.urlparse(raw_url)
+        if not parsed.query:
+            return raw_url
+        parts = parse.parse_qsl(parsed.query, keep_blank_values=True)
+        redacted = []
+        for key, value in parts:
+            lowered = key.lower()
+            if any(token in lowered for token in ("token", "key", "secret", "password")):
+                redacted.append((key, "***redacted***"))
+            else:
+                redacted.append((key, value))
+        return parse.urlunparse(parsed._replace(query=parse.urlencode(redacted)))
 
     def _probe_content_type(self, url: str) -> str:
         try:
@@ -728,6 +806,9 @@ def build_openai_service_or_null(config: dict[str, Any]) -> ResearchService:
         max_sources=int(openai_cfg.get("max_sources", 6)),
         timeout_s=float(openai_cfg.get("timeout_s", 30.0)),
         firecrawl_enabled=bool(firecrawl_cfg.get("enabled", False)),
+        firecrawl_api_key=str(firecrawl_cfg.get("api_key", os.getenv("FIRECRAWL_API_KEY", ""))),
+        pdf_ingestion_enabled=bool(firecrawl_cfg.get("pdf_ingestion_enabled", False)),
+        firecrawl_timeout_s=float(firecrawl_cfg.get("timeout_s", 15.0)),
         firecrawl_max_pages=int(firecrawl_cfg.get("max_pages", 1)),
         firecrawl_max_markdown_chars=int(firecrawl_cfg.get("max_markdown_chars", 20000)),
         firecrawl_allowlist_mode=str(firecrawl_cfg.get("allowlist_mode", "public")),

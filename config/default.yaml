@@ -363,6 +363,8 @@ research:
     max_sources: 6
   firecrawl:
     enabled: false
+    pdf_ingestion_enabled: false
+    timeout_s: 15
     max_pages: 1
     max_markdown_chars: 20000
     cache_dir: "./var/research_cache"

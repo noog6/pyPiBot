@@ -12,7 +12,7 @@ from services.research.models import ResearchPacket
     ("metadata", "expected"),
     [
         ({"content_fetch_status": "skipped", "content_fetch_skip_reason": "firecrawl_disabled"}, "content fetching is disabled in config"),
-        ({"content_fetch_status": "skipped", "content_fetch_skip_reason": "firecrawl_key_missing"}, "content fetching is enabled but key is missing"),
+        ({"content_fetch_status": "skipped", "content_fetch_skip_reason": "firecrawl_missing_key"}, "PDF ingestion requires FIRECRAWL_API_KEY but it is missing"),
         ({"content_fetch_status": "skipped", "content_fetch_skip_reason": "allowlist_blocked"}, "content fetching blocked by allowlist policy"),
         ({"content_fetch_status": "skipped", "content_fetch_skip_reason": "no_sources"}, "no sources returned to fetch"),
     ],
