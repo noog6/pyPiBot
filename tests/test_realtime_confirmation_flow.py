@@ -65,7 +65,16 @@ def _make_api_stub() -> RealtimeAPI:
     api._confirmation_timeout_debounce_window_s = 5.0
     api._approval_timeout_s = 30.0
     api._confirmation_awaiting_decision_timeout_s = 20.0
+    api._research_permission_awaiting_decision_timeout_s = 60.0
+    api._confirmation_late_decision_grace_s = 15.0
     api._confirmation_unclear_max_reprompts = 1
+    api._confirmation_token_created_at = None
+    api._confirmation_last_activity_at = None
+    api._confirmation_speech_active = False
+    api._confirmation_asr_pending = False
+    api._confirmation_pause_started_at = None
+    api._confirmation_paused_accum_s = 0.0
+    api._confirmation_last_closed_token = None
     api._awaiting_confirmation_completion = False
     api._last_user_input_text = None
     api._stop_words = []
@@ -86,6 +95,7 @@ def _make_api_stub() -> RealtimeAPI:
     api._confirmation_state = ConfirmationState.IDLE
     api._last_executed_tool_call = None
     api._debug_governance_decisions = False
+    api._active_utterance = None
     api.mic = _Mic()
     return api
 
@@ -1405,6 +1415,7 @@ def test_awaiting_confirmation_timeout_clears_token_and_transitions_idle() -> No
     api._pending_confirmation_token = token
     api._confirmation_state = ConfirmationState.AWAITING_DECISION
     api._confirmation_awaiting_decision_timeout_s = 20.0
+    api._research_permission_awaiting_decision_timeout_s = 20.0
 
     transitions: list[tuple[object, str | None]] = []
     api.orchestration_state = type(
@@ -1744,3 +1755,102 @@ def test_tool_confirmation_token_closes_and_state_returns_idle_on_reject() -> No
     assert rejected == ["rejected"]
     assert api._pending_confirmation_token is None
     assert api._confirmation_state == ConfirmationState.IDLE
+
+
+def test_research_permission_yes_after_25s_still_approves_when_timeout_paused() -> None:
+    api = _make_api_stub()
+    request = type("Req", (), {"prompt": "status"})()
+    token = _build_confirmation_token(kind="research_permission", request=request)
+    api._pending_confirmation_token = token
+    api._confirmation_state = ConfirmationState.AWAITING_DECISION
+    api._confirmation_token_created_at = 0.0
+    api._research_permission_awaiting_decision_timeout_s = 20.0
+
+    dispatched: list[str] = []
+
+    async def _dispatch(_request, _ws):
+        dispatched.append("yes")
+
+    api._dispatch_research_request = _dispatch
+
+    with patch("ai.realtime_api.time.monotonic", return_value=25.0):
+        api._confirmation_speech_active = True
+        assert api._expire_confirmation_awaiting_decision_timeout() is None
+
+    api._confirmation_speech_active = False
+    api._confirmation_asr_pending = False
+    assert asyncio.run(api._maybe_handle_research_permission_response("yes", _Ws())) is True
+    assert dispatched == ["yes"]
+
+
+def test_late_yes_within_grace_applies_to_recently_timed_out_research_permission() -> None:
+    api = _make_api_stub()
+    request = type("Req", (), {"prompt": "status"})()
+    token = _build_confirmation_token(kind="research_permission", request=request, token_id="tok_late")
+    api._confirmation_last_closed_token = {
+        "token": token,
+        "kind": "research_permission",
+        "closed_at": 100.0,
+        "outcome": "awaiting_decision_timeout",
+    }
+
+    dispatched: list[str] = []
+
+    async def _dispatch(_request, _ws):
+        dispatched.append("yes")
+
+    api._dispatch_research_request = _dispatch
+
+    with patch("ai.realtime_api.time.monotonic", return_value=108.0):
+        assert asyncio.run(api._maybe_apply_late_confirmation_decision("yes", _Ws())) is True
+
+    assert dispatched == ["yes"]
+
+
+def test_research_permission_no_cancels_pending_request() -> None:
+    api = _make_api_stub()
+    api._pending_confirmation_token = _build_confirmation_token(
+        kind="research_permission",
+        request=type("Req", (), {"prompt": "status"})(),
+    )
+    denied: list[str] = []
+
+    async def _assistant(*args, **kwargs):
+        denied.append("no")
+
+    api.send_assistant_message = _assistant
+
+    assert asyncio.run(api._maybe_handle_research_permission_response("nope", _Ws())) is True
+    assert denied == ["no"]
+    assert api._pending_confirmation_token is None
+
+
+def test_confirmation_empty_transcript_reprompts_once_and_keeps_token_active() -> None:
+    api = _make_api_stub()
+    request = type("Req", (), {"prompt": "status"})()
+    token = _build_confirmation_token(kind="research_permission", request=request)
+    token.metadata = {"approval_flow": True}
+    api._pending_confirmation_token = token
+    api._confirmation_state = ConfirmationState.AWAITING_DECISION
+    api._confirmation_token_created_at = 1e12
+    api._extract_transcript = lambda _event: ""
+    api._log_user_transcript = lambda *args, **kwargs: None
+    api._log_utterance_envelope = lambda *_args, **_kwargs: None
+
+    messages: list[str] = []
+
+    async def _assistant(message, *_args, **_kwargs):
+        messages.append(message)
+
+    api.send_assistant_message = _assistant
+
+    asyncio.run(
+        api.handle_event(
+            {"type": "conversation.item.input_audio_transcription.completed", "transcript": ""},
+            _Ws(),
+        )
+    )
+
+    assert messages == ["Sorry—was that a yes or no?"]
+    assert api._pending_confirmation_token is not None
+    assert api._pending_confirmation_token.metadata.get("empty_transcript_reprompted") is True
