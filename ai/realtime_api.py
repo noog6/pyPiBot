@@ -780,6 +780,49 @@ class RealtimeAPI:
 
         future.add_done_callback(_on_complete)
 
+    def inject_system_context(self, payload: dict[str, Any]) -> None:
+        """Inject non-chat startup context into conversation state."""
+
+        if not self.loop:
+            logger.debug("Unable to send system context; event loop unavailable.")
+            return
+        future = asyncio.run_coroutine_threadsafe(
+            self.send_system_context(payload),
+            self.loop,
+        )
+
+        def _on_complete(task) -> None:
+            try:
+                task.result()
+            except Exception as exc:
+                logger.warning("Failed to inject system context: %s", exc)
+
+        future.add_done_callback(_on_complete)
+
+    async def send_system_context(self, payload: dict[str, Any]) -> None:
+        """Send system context JSON as a system-role message without requesting a response."""
+
+        if not self.websocket:
+            logger.debug("Unable to send system context; websocket unavailable.")
+            return
+        context_text = json.dumps(payload, sort_keys=True)
+        event = {
+            "type": "conversation.item.create",
+            "item": {
+                "type": "message",
+                "role": "system",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": context_text,
+                    }
+                ],
+            },
+        }
+        log_ws_event("Outgoing", event)
+        self._track_outgoing_event(event, origin="system_context")
+        await self.websocket.send(json.dumps(event))
+
     def _format_event_for_injection(self, event: Event) -> tuple[str, bool]:
         if event.content:
             return event.content, True
