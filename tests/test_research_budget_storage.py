@@ -121,22 +121,78 @@ def test_get_or_init_daily_state_resets_when_date_changes(monkeypatch, tmp_path)
         StorageController._instance = None
 
 
-def test_spend_budget_transaction_and_denials_are_non_mutating(monkeypatch, tmp_path) -> None:
+def test_spend_budget_resets_at_utc_day_rollover(monkeypatch, tmp_path) -> None:
     from storage.research_budget import UsageEvent
 
     store, StorageController = _init_store(monkeypatch, tmp_path)
 
     try:
-        success = store.spend_budget(
+        # 2025-01-10 23:59:59 UTC
+        first = store.spend_budget(
+            key="research_daily_fetch",
+            units=1,
+            daily_limit=3,
+            usage_event=UsageEvent(spent_at_ts=1736553599),
+        )
+        assert first.allowed is True
+        assert first.date_utc == "2025-01-10"
+        assert first.remaining == 2
+
+        # 2025-01-11 00:00:01 UTC should reset to full daily limit before spend.
+        second = store.spend_budget(
+            key="research_daily_fetch",
+            units=1,
+            daily_limit=3,
+            usage_event=UsageEvent(spent_at_ts=1736553601),
+        )
+        assert second.allowed is True
+        assert second.date_utc == "2025-01-11"
+        assert second.remaining == 2
+    finally:
+        controller = StorageController._instance
+        if controller is not None:
+            controller.close()
+        StorageController._instance = None
+
+
+def test_successful_spend_decrements_remaining(monkeypatch, tmp_path) -> None:
+    from storage.research_budget import UsageEvent
+
+    store, StorageController = _init_store(monkeypatch, tmp_path)
+
+    try:
+        result = store.spend_budget(
+            key="research_daily_fetch",
+            units=2,
+            daily_limit=5,
+            usage_event=UsageEvent(spent_at_ts=1736553999000),
+        )
+
+        assert result.allowed is True
+        assert result.remaining == 3
+
+        state = store.get_state("research_daily_fetch")
+        assert state is not None
+        assert state.remaining == 3
+    finally:
+        controller = StorageController._instance
+        if controller is not None:
+            controller.close()
+        StorageController._instance = None
+
+
+def test_denied_spend_does_not_decrement_remaining(monkeypatch, tmp_path) -> None:
+    from storage.research_budget import UsageEvent
+
+    store, StorageController = _init_store(monkeypatch, tmp_path)
+
+    try:
+        _ = store.spend_budget(
             key="research_daily_fetch",
             units=2,
             daily_limit=3,
-            usage_event=UsageEvent(spent_at_ts=1736553999000, metadata={"ok": True}),
+            usage_event=UsageEvent(spent_at_ts=1736553999000),
         )
-        assert success.allowed is True
-        assert success.remaining == 1
-        assert success.limit == 3
-        assert success.date_utc == "2025-01-11"
 
         denied = store.spend_budget(
             key="research_daily_fetch",
@@ -150,11 +206,48 @@ def test_spend_budget_transaction_and_denials_are_non_mutating(monkeypatch, tmp_
         state = store.get_state("research_daily_fetch")
         assert state is not None
         assert state.remaining == 1
+    finally:
+        controller = StorageController._instance
+        if controller is not None:
+            controller.close()
+        StorageController._instance = None
+
+
+def test_each_successful_spend_inserts_one_usage_row(monkeypatch, tmp_path) -> None:
+    from storage.research_budget import UsageEvent
+
+    store, StorageController = _init_store(monkeypatch, tmp_path)
+
+    try:
+        assert store.spend_budget(
+            key="research_daily_fetch",
+            units=1,
+            daily_limit=3,
+            usage_event=UsageEvent(spent_at_ts=1736553999000, metadata={"ok": True}),
+        ).allowed
+        assert store.spend_budget(
+            key="research_daily_fetch",
+            units=1,
+            daily_limit=3,
+            usage_event=UsageEvent(spent_at_ts=1736554999000, metadata={"ok": "second"}),
+        ).allowed
+
+        # Denied spend should not insert an audit row.
+        assert (
+            store.spend_budget(
+                key="research_daily_fetch",
+                units=2,
+                daily_limit=3,
+                usage_event=UsageEvent(spent_at_ts=1736555999000),
+            ).allowed
+            is False
+        )
 
         usage_rows = store.get_usage_for_date("2025-01-11")
-        assert len(usage_rows) == 1
-        assert usage_rows[0].units == 2
+        assert len(usage_rows) == 2
+        assert usage_rows[0].units == 1
         assert usage_rows[0].metadata == {"ok": True}
+        assert usage_rows[1].metadata == {"ok": "second"}
 
         conn = StorageController.get_instance().conn
         usage_count = conn.execute(
@@ -162,7 +255,7 @@ def test_spend_budget_transaction_and_denials_are_non_mutating(monkeypatch, tmp_
             ("2025-01-11",),
         ).fetchone()
         assert usage_count is not None
-        assert int(usage_count[0]) == 1
+        assert int(usage_count[0]) == 2
     finally:
         controller = StorageController._instance
         if controller is not None:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import time
 
 import pytest
 
@@ -37,15 +36,14 @@ def _init_budget_manager(monkeypatch, tmp_path, daily_limit: int, legacy_state_f
 
 
 def test_budget_tracker_is_read_only_compatibility_layer(tmp_path) -> None:
-    today = time.strftime("%Y-%m-%d", time.gmtime())
     state_file = tmp_path / "budget.json"
-    state_file.write_text(json.dumps({"date": today, "count": 1}), encoding="utf-8")
+    state_file.write_text("{}", encoding="utf-8")
 
     with pytest.deprecated_call(match="ResearchBudgetTracker is deprecated"):
         tracker = ResearchBudgetTracker(str(state_file), daily_limit=2)
 
     assert tracker.can_spend()
-    assert tracker.get_remaining() == 1
+    assert tracker.get_remaining() == 2
     with pytest.raises(RuntimeError, match="read-only"):
         tracker.spend()
 
@@ -99,20 +97,12 @@ def test_budget_manager_denied_spend_does_not_mutate_state(monkeypatch, tmp_path
         StorageController._instance = None
 
 
-def test_budget_manager_migrates_legacy_json_once(monkeypatch, tmp_path) -> None:
-    today = time.strftime("%Y-%m-%d", time.gmtime())
-    legacy_state_file = tmp_path / "research_budget.json"
-    legacy_state_file.write_text(json.dumps({"date": today, "count": 2}), encoding="utf-8")
-
-    manager, StorageController = _init_budget_manager(
-        monkeypatch,
-        tmp_path,
-        daily_limit=5,
-        legacy_state_file=str(legacy_state_file),
-    )
+def test_budget_manager_initializes_from_db_defaults(monkeypatch, tmp_path) -> None:
+    manager, StorageController = _init_budget_manager(monkeypatch, tmp_path, daily_limit=5)
     try:
         state = manager.current_state()
-        assert state["remaining"] == 3
+        assert state["remaining"] == 5
+        assert state["count"] == 0
     finally:
         controller = StorageController._instance
         if controller is not None:

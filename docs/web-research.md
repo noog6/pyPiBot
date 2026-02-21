@@ -64,8 +64,8 @@ All keys below are under the top-level `research:` block.
 
 ### Budgeting and cache
 
-- `budget.daily_limit`
-- `budget.state_file`
+- `budget.daily_limit` (default: `50`)
+- `budget.state_file` (legacy migration input only)
 - `cache.dir`
 - `cache.ttl_hours`
 
@@ -112,3 +112,35 @@ With this configuration, Theo still asks for permission first, then performs liv
 - Theo asks once for explicit over-budget approval via confirmation (`research_budget`).
 - Without approval, no provider dispatch, no content fetch attempt, and no Firecrawl escalation occurs.
 - To avoid prompts entirely, increase `research.budget.daily_limit` in config.
+
+## Research budget storage model (SQLite source of truth)
+
+Research budget tracking is now database-backed. The SQLite database is the source of truth for both remaining budget and spend audit history. Legacy JSON budget files are only read once for migration compatibility.
+
+### Tables
+
+- `research_budget_state`
+  - One row per logical budget key.
+  - Stores the current UTC date window, remaining units, configured limit, and last update timestamp.
+- `research_budget_usage`
+  - Append-only audit log of successful spend events.
+  - One inserted row per successful spend attempt.
+  - Includes `date_utc`, timestamp, units, and optional request context fields (`request_fingerprint`, `research_id`, `source`, `provider`).
+
+### Auditing today's budget consumers
+
+To inspect what consumed budget for the current UTC day:
+
+```sql
+SELECT
+  spent_at_ts,
+  units,
+  request_fingerprint,
+  research_id,
+  source,
+  provider,
+  prompt_preview
+FROM research_budget_usage
+WHERE date_utc = strftime('%Y-%m-%d', 'now')
+ORDER BY spent_at_ts ASC, id ASC;
+```
