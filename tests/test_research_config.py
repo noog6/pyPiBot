@@ -87,3 +87,61 @@ def test_build_openai_service_ignores_legacy_budget_state_file_config() -> None:
 
     assert isinstance(service, OpenAIResearchService)
     assert str(service._budget._legacy_state_file) == "var/research_budget.json"
+
+
+def test_build_openai_service_logs_budget_startup_info(monkeypatch) -> None:
+    info_calls: list[str] = []
+
+    def _fake_info(msg: str, *args) -> None:
+        info_calls.append(msg % args if args else msg)
+
+    monkeypatch.setattr("services.research.openai_service.LOGGER.info", _fake_info)
+
+    service = build_openai_service_or_null(
+        {
+            "research": {
+                "enabled": True,
+                "provider": "openai",
+                "openai": {"enabled": False},
+                "budget": {"daily_limit": 7},
+            }
+        }
+    )
+
+    assert isinstance(service, OpenAIResearchService)
+    assert any(
+        "[Research] startup daily_limit=7 authority=sqlite_storage_controller" in line
+        for line in info_calls
+    )
+
+
+def test_build_openai_service_logs_deprecated_budget_state_file_signal(monkeypatch) -> None:
+    info_calls: list[str] = []
+    warning_calls: list[str] = []
+
+    def _fake_info(msg: str, *args) -> None:
+        info_calls.append(msg % args if args else msg)
+
+    def _fake_warning(msg: str, *args) -> None:
+        warning_calls.append(msg % args if args else msg)
+
+    monkeypatch.setattr("services.research.openai_service.LOGGER.info", _fake_info)
+    monkeypatch.setattr("services.research.openai_service.LOGGER.warning", _fake_warning)
+
+    service = build_openai_service_or_null(
+        {
+            "research": {
+                "enabled": True,
+                "provider": "openai",
+                "openai": {"enabled": False},
+                "budget": {"daily_limit": 5, "state_file": "./var/legacy.json"},
+            }
+        }
+    )
+
+    assert isinstance(service, OpenAIResearchService)
+    assert any("Ignoring deprecated research.budget.state_file" in line for line in warning_calls)
+    assert any(
+        "[Research] startup daily_limit=5 authority=sqlite_storage_controller" in line
+        for line in info_calls
+    )
