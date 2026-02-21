@@ -89,6 +89,7 @@ def _make_api_stub() -> RealtimeAPI:
     api._research_permission_outcomes = {}
     api._research_suppressed_fingerprints = {}
     api._research_pending_call_ids = set()
+    api._deferred_research_tool_call = None
     api._research_mode = "auto"
     api._research_provider = "openai"
     api._research_firecrawl_enabled = False
@@ -1901,3 +1902,78 @@ def test_handle_function_call_suppresses_research_for_budget_confirmation() -> N
     assert len(sent_payloads) == 1
     output_payload = json.loads(sent_payloads[0]["item"]["output"])
     assert output_payload["status"] == "waiting_for_permission"
+
+
+def test_research_budget_approval_replays_deferred_tool_once() -> None:
+    api = _make_api_stub()
+    token = _build_confirmation_token(kind="research_budget")
+    request = type("ResearchRequest", (), {"prompt": "find board dimensions", "context": {"source": "user"}})()
+    token.request = request
+    api._pending_confirmation_token = token
+    api._pending_research_request = request
+    api.function_call = {"name": "perform_research", "call_id": "call_deferred_1"}
+    api.function_call_args = '{"query":"board dimensions"}'
+    api._governance = type(
+        "Gov",
+        (),
+        {
+            "build_action_packet": lambda *_args, **_kwargs: type(
+                "Action",
+                (),
+                {"id": "call_deferred_1", "tool_name": "perform_research", "tool_args": {"query": "board dimensions"}, "tier": 0},
+            )(),
+            "record_execution": lambda *_args, **_kwargs: None,
+        },
+    )()
+    api._stage_action = lambda *_args, **_kwargs: {"valid": True}
+
+    dispatched: list[str] = []
+
+    async def _execute_action(action, *_args, **_kwargs):
+        dispatched.append(action.id)
+
+    async def _dispatch_research_request(*_args, **_kwargs):
+        dispatched.append("fallback_request")
+
+    api._execute_action = _execute_action
+    api._dispatch_research_request = _dispatch_research_request
+
+    class _SendWs:
+        async def send(self, payload: str) -> None:
+            return None
+
+    asyncio.run(api.handle_function_call({}, _SendWs()))
+
+    assert api._deferred_research_tool_call is not None
+
+    asyncio.run(api._maybe_handle_research_budget_response("Yes, go ahead.", api.websocket))
+    asyncio.run(api._maybe_handle_research_budget_response("Yes.", api.websocket))
+
+    assert dispatched == ["call_deferred_1"]
+    assert api._deferred_research_tool_call is None
+
+
+def test_research_budget_rejection_clears_deferred_tool() -> None:
+    api = _make_api_stub()
+    token = _build_confirmation_token(kind="research_budget")
+    token.request = type("ResearchRequest", (), {"prompt": "find board dimensions", "context": {"source": "user"}})()
+    api._pending_confirmation_token = token
+    api._pending_research_request = token.request
+    api._deferred_research_tool_call = {
+        "token_id": token.id,
+        "tool_name": "perform_research",
+        "call_id": "call_cancel",
+        "args": {"query": "board dimensions"},
+    }
+
+    messages: list[str] = []
+
+    async def _assistant(message, *_args, **_kwargs):
+        messages.append(message)
+
+    api.send_assistant_message = _assistant
+
+    asyncio.run(api._maybe_handle_research_budget_response("no", api.websocket))
+
+    assert api._deferred_research_tool_call is None
+    assert messages

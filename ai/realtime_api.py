@@ -512,6 +512,7 @@ class RealtimeAPI:
         self._research_permission_outcomes: dict[str, dict[str, Any]] = {}
         self._research_suppressed_fingerprints: dict[str, str] = {}
         self._research_pending_call_ids: set[str] = set()
+        self._deferred_research_tool_call: dict[str, Any] | None = None
         self._tool_call_dedupe_ttl_s = float(research_cfg.get("tool_call_dedupe_ttl_s", 30.0))
         self._research_spoken_response_dedupe_ttl_s = float(
             research_cfg.get("spoken_response_dedupe_ttl_s", 60.0)
@@ -2270,6 +2271,28 @@ class RealtimeAPI:
             token.kind,
             outcome,
         )
+        pending_deferred_call = self._deferred_research_tool_call
+        deferred_call_id = None
+        deferred_action = "none"
+        if (
+            token.kind in {"research_permission", "research_budget"}
+            and isinstance(pending_deferred_call, dict)
+            and str(pending_deferred_call.get("token_id") or "") == token.id
+        ):
+            deferred_call_id = str(pending_deferred_call.get("call_id") or "") or "unknown"
+            if outcome in {"accepted", "approved"}:
+                deferred_action = "retain_for_dispatch"
+            else:
+                self._deferred_research_tool_call = None
+                deferred_action = "cleared"
+        logger.debug(
+            "CONFIRMATION_TOKEN_CLOSE_PENDING_TOOL token=%s kind=%s outcome=%s call_id=%s action=%s",
+            token.id,
+            token.kind,
+            outcome,
+            deferred_call_id or "none",
+            deferred_action,
+        )
         self._research_pending_call_ids.clear()
         self._confirmation_last_closed_token = {
             "token": token,
@@ -2689,10 +2712,13 @@ class RealtimeAPI:
                     logger.info("[Allowlist] domain_added domain=%s", normalized)
             logger.info("[Research] Permission granted by user")
             self._mark_prior_research_permission_granted(request)
+            token_id = token.id if token is not None else ""
             if token is not None:
                 self._close_confirmation_token(outcome="accepted")
             else:
                 self._pending_research_request = None
+            if token_id and await self._dispatch_deferred_research_tool_call(websocket, token_id=token_id):
+                return True
             await self._dispatch_research_request(request, websocket)
             return True
 
@@ -2764,8 +2790,11 @@ class RealtimeAPI:
         decision = self._parse_confirmation_decision(text)
         if decision in {"yes", "approve", "proceed"}:
             self._set_confirmation_state(ConfirmationState.RESOLVING, reason="research_budget_accepted")
+            token_id = token.id
             self._close_confirmation_token(outcome="approved")
             request.context = {**request.context, "over_budget_approved": True}
+            if await self._dispatch_deferred_research_tool_call(websocket, token_id=token_id):
+                return True
             await self._dispatch_research_request(request, websocket)
             return True
         if decision in {"no", "cancel", "reject", "deny"}:
@@ -3113,6 +3142,62 @@ class RealtimeAPI:
                 message = grounding_explanation
 
         await self.send_assistant_message(message, websocket)
+
+    async def _dispatch_deferred_research_tool_call(self, websocket: Any, *, token_id: str) -> bool:
+        pending = self._deferred_research_tool_call
+        if not isinstance(pending, dict):
+            logger.debug("research_dispatch_attempt outcome=skipped(reason=no_pending_tool token=%s)", token_id)
+            return False
+        pending_token = str(pending.get("token_id") or "")
+        if pending_token != token_id:
+            logger.debug(
+                "research_dispatch_attempt outcome=skipped(reason=token_mismatch pending_token=%s token=%s)",
+                pending_token or "none",
+                token_id,
+            )
+            return False
+
+        function_name = str(pending.get("tool_name") or "perform_research")
+        call_id = str(pending.get("call_id") or "") or f"deferred_{uuid.uuid4().hex}"
+        args = pending.get("args") if isinstance(pending.get("args"), dict) else {}
+        self._deferred_research_tool_call = None
+        logger.info("RESEARCH_DISPATCH token=%s call_id=%s source=deferred_tool", token_id, call_id)
+        logger.debug("research_dispatch_attempt outcome=dispatched token=%s call_id=%s", token_id, call_id)
+        try:
+            action = self._governance.build_action_packet(
+                function_name,
+                call_id,
+                args,
+                reason="deferred_research_confirmation_approved",
+            )
+            staging = self._stage_action(action)
+            if not staging.get("valid", True):
+                await self._reject_tool_call(
+                    action,
+                    "Argument validation failed.",
+                    websocket,
+                    staging=staging,
+                    status="invalid_arguments",
+                )
+                return True
+            self.orchestration_state.transition(
+                OrchestrationPhase.ACT,
+                reason="deferred perform_research approved",
+            )
+            await self._execute_action(action, staging, websocket)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "research_dispatch_attempt outcome=error token=%s call_id=%s error=%s",
+                token_id,
+                call_id,
+                exc,
+            )
+            await self.send_assistant_message(
+                "I got your approval, but I couldn't dispatch the deferred research call. Please try again.",
+                websocket,
+            )
+            return True
 
     def _build_response_done_prompt(self, trigger: str) -> str:
         tool_calls = self._clip_text(
@@ -3853,10 +3938,23 @@ class RealtimeAPI:
                     )
                 else:
                     self._research_pending_call_ids.add(str(call_id))
+                    deferred_token_id = token.id if token is not None else ""
+                    previous_call_id = None
+                    if isinstance(self._deferred_research_tool_call, dict):
+                        previous_call_id = str(self._deferred_research_tool_call.get("call_id") or "") or None
+                    self._deferred_research_tool_call = {
+                        "token_id": deferred_token_id,
+                        "tool_name": function_name,
+                        "call_id": str(call_id),
+                        "args": args,
+                        "stored_at": time.monotonic(),
+                    }
                     logger.info(
-                        "Function call outcome: suppressed pending research confirmation | tool=%s call_id=%s",
+                        "Function call outcome: suppressed pending research confirmation | tool=%s call_id=%s token=%s stored=latest replaced_call_id=%s",
                         function_name,
                         call_id,
+                        deferred_token_id or "legacy",
+                        previous_call_id or "none",
                     )
                 function_call_output = {
                     "type": "conversation.item.create",
