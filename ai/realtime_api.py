@@ -73,7 +73,12 @@ from services.memory_manager import (
     render_startup_memory_digest_item,
 )
 from services.research import ResearchRequest, build_openai_service_or_null, has_research_intent
-from services.research.grounding import build_research_grounding_explanation, get_content_fetch_state
+from services.research.grounding import (
+    build_research_grounding_explanation,
+    build_unverified_sources_only_response,
+    get_content_fetch_state,
+    requires_unverified_sources_only_response,
+)
 from services.research.research_transcript import write_research_transcript
 from storage import StorageController
 from storage.trusted_domains import TrustedDomainStore, merge_allowlists, normalize_trusted_domain
@@ -2803,11 +2808,14 @@ class RealtimeAPI:
             len(packet.sources),
         )
 
-        summary = (realtime_payload["answer_summary"] or "").strip()
-        if summary:
-            message = f"{summary}\n\n{grounding_explanation}"
+        if requires_unverified_sources_only_response(packet):
+            message = build_unverified_sources_only_response(packet)
         else:
-            message = grounding_explanation
+            summary = (realtime_payload["answer_summary"] or "").strip()
+            if summary:
+                message = f"{summary}\n\n{grounding_explanation}"
+            else:
+                message = grounding_explanation
 
         await self.send_assistant_message(message, websocket)
 

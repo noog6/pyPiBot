@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from services.research.grounding import build_research_grounding_explanation
+from services.research.grounding import (
+    build_research_grounding_explanation,
+    build_unverified_sources_only_response,
+    requires_unverified_sources_only_response,
+)
 from services.research.models import ResearchPacket
 
 
@@ -50,3 +54,31 @@ def test_grounding_explanation_for_ok_fetch_with_markdown_facts() -> None:
     explanation = build_research_grounding_explanation(packet)
 
     assert "From the fetched source content" in explanation
+
+
+def test_requires_unverified_sources_only_response_for_pdf_disabled() -> None:
+    packet = ResearchPacket(
+        status="ok",
+        answer_summary="The max PWM frequency is 1526 Hz.",
+        extracted_facts=[],
+        sources=[{"title": "NXP", "url": "https://www.nxp.com/docs/en/data-sheet/PCA9685.pdf"}],
+        metadata={"content_fetch_status": "skipped", "content_fetch_skip_reason": "pdf_disabled"},
+    )
+
+    assert requires_unverified_sources_only_response(packet) is True
+
+    response = build_unverified_sources_only_response(packet)
+    assert "couldn't fetch/parse the source content in this run" in response
+    assert "https://www.nxp.com/docs/en/data-sheet/PCA9685.pdf" in response
+    assert "1526" not in response
+
+
+def test_requires_unverified_sources_only_response_false_when_fetch_ok_with_facts() -> None:
+    packet = ResearchPacket(
+        status="ok",
+        answer_summary="summary",
+        extracted_facts=["Fact A"],
+        metadata={"content_fetch_status": "ok"},
+    )
+
+    assert requires_unverified_sources_only_response(packet) is False

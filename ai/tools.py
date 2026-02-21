@@ -30,7 +30,11 @@ from services.memory_manager import MemoryManager, MemoryScope
 from services.output_volume import OutputVolumeController
 from services.profile_manager import ProfileManager
 from services.research import ResearchRequest, build_openai_service_or_null
-from services.research.grounding import build_research_grounding_explanation
+from services.research.grounding import (
+    build_research_grounding_explanation,
+    build_unverified_sources_only_response,
+    requires_unverified_sources_only_response,
+)
 from services.research.research_transcript import write_research_transcript
 from services.research.service import ResearchService
 from storage import StorageController
@@ -368,13 +372,19 @@ async def perform_research(query: str, context: dict[str, Any] | None = None) ->
     )
 
     payload = packet.to_realtime_payload()
+    answer_summary = payload["answer_summary"]
+    extracted_facts = payload["extracted_facts"]
+    if requires_unverified_sources_only_response(packet):
+        answer_summary = build_unverified_sources_only_response(packet)
+        extracted_facts = []
+
     return {
         "research_id": research_id,
         "schema": packet.schema,
         "status": packet.status,
-        "answer_summary": payload["answer_summary"],
+        "answer_summary": answer_summary,
         "grounding_explanation": build_research_grounding_explanation(packet),
-        "extracted_facts": payload["extracted_facts"],
+        "extracted_facts": extracted_facts,
         "sources": payload["sources"],
         "safety_notes": payload["safety_notes"],
         "metadata": dict(packet.metadata),
