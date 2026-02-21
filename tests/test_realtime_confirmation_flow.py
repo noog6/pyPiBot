@@ -74,6 +74,9 @@ def _make_api_stub() -> RealtimeAPI:
     api._confirmation_asr_pending = False
     api._confirmation_pause_started_at = None
     api._confirmation_paused_accum_s = 0.0
+    api._confirmation_timeout_check_log_interval_s = 1.0
+    api._confirmation_timeout_check_last_logged_at = {}
+    api._confirmation_timeout_check_last_pause_reason = {}
     api._confirmation_last_closed_token = None
     api._awaiting_confirmation_completion = False
     api._last_user_input_text = None
@@ -85,6 +88,7 @@ def _make_api_stub() -> RealtimeAPI:
     api._research_permission_outcome_ttl_s = 20.0
     api._research_permission_outcomes = {}
     api._research_suppressed_fingerprints = {}
+    api._research_pending_call_ids = set()
     api._research_mode = "auto"
     api._research_provider = "openai"
     api._research_firecrawl_enabled = False
@@ -1854,3 +1858,46 @@ def test_confirmation_empty_transcript_reprompts_once_and_keeps_token_active() -
     assert messages == ["Sorry—was that a yes or no?"]
     assert api._pending_confirmation_token is not None
     assert api._pending_confirmation_token.metadata.get("empty_transcript_reprompted") is True
+
+def test_confirmation_timeout_check_logs_at_most_once_per_interval(monkeypatch) -> None:
+    api = _make_api_stub()
+    token = _build_confirmation_token(kind="research_permission")
+    api._pending_confirmation_token = token
+    api._confirmation_state = ConfirmationState.AWAITING_DECISION
+    api._confirmation_timeout_check_log_interval_s = 1.0
+    api._confirmation_remaining_seconds = lambda: 42.0
+    api._refresh_confirmation_pause = lambda: None
+    api._confirmation_pause_reason = lambda: None
+    api._get_confirmation_timeout_s = lambda _token: 60.0
+
+    ticks = iter([100.0, 100.4, 101.2])
+    monkeypatch.setattr("ai.realtime_api.time.monotonic", lambda: next(ticks))
+    logs: list[str] = []
+    monkeypatch.setattr("ai.realtime_api.logger.debug", lambda msg, *a: logs.append(msg % a if a else msg))
+
+    api._expire_confirmation_awaiting_decision_timeout()
+    api._expire_confirmation_awaiting_decision_timeout()
+    api._expire_confirmation_awaiting_decision_timeout()
+
+    assert len([line for line in logs if "CONFIRMATION_TIMEOUT_CHECK" in line]) == 2
+
+
+def test_handle_function_call_suppresses_research_for_budget_confirmation() -> None:
+    api = _make_api_stub()
+    api._pending_action = None
+    api._pending_confirmation_token = _build_confirmation_token(kind="research_budget")
+    api._pending_research_request = object()
+    api.function_call = {"name": "perform_research", "call_id": "call_budget_pending"}
+    api.function_call_args = '{"query":"status"}'
+
+    sent_payloads: list[dict[str, object]] = []
+
+    class _SendWs:
+        async def send(self, payload: str) -> None:
+            sent_payloads.append(json.loads(payload))
+
+    asyncio.run(api.handle_function_call({}, _SendWs()))
+
+    assert len(sent_payloads) == 1
+    output_payload = json.loads(sent_payloads[0]["item"]["output"])
+    assert output_payload["status"] == "waiting_for_permission"

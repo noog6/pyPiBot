@@ -19,9 +19,10 @@ At a high level:
 In `config/default.yaml`, research is enabled with the OpenAI provider, while live Firecrawl web scraping remains disabled by default:
 
 - `research.enabled: true`
-- `research.permission_required: true`
+- `research.permission_required: false`
 - `research.provider: openai`
 - `research.firecrawl.enabled: false`
+- `research.firecrawl.allowlist_domains` includes `files.waveshare.com` by default for manufacturer docs
 
 This means OpenAI-backed research can run in production when enabled, and optional Firecrawl scraping is opt-in.
 
@@ -103,3 +104,11 @@ research:
 ```
 
 With this configuration, Theo still asks for permission first, then performs live web retrieval when allowed.
+
+
+## Budget-gating behavior
+
+- When `research.budget.daily_limit` is exhausted (remaining=0), Theo now gates research before provider dispatch.
+- Theo asks once for explicit over-budget approval via confirmation (`research_budget`).
+- Without approval, no provider dispatch, no content fetch attempt, and no Firecrawl escalation occurs.
+- To avoid prompts entirely, increase `research.budget.daily_limit` in config.

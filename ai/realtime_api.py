@@ -388,6 +388,11 @@ class RealtimeAPI:
         self._confirmation_asr_pending = False
         self._confirmation_pause_started_at: float | None = None
         self._confirmation_paused_accum_s = 0.0
+        self._confirmation_timeout_check_log_interval_s = float(
+            realtime_cfg.get("confirmation_timeout_check_log_interval_s", 1.0)
+        )
+        self._confirmation_timeout_check_last_logged_at: dict[str, float] = {}
+        self._confirmation_timeout_check_last_pause_reason: dict[str, str] = {}
         self._confirmation_last_closed_token: dict[str, Any] | None = None
         self._confirmation_timeout_debounce_window_s = float(
             config.get("confirmation_timeout_debounce_window_s", 5.0)
@@ -506,6 +511,7 @@ class RealtimeAPI:
         )
         self._research_permission_outcomes: dict[str, dict[str, Any]] = {}
         self._research_suppressed_fingerprints: dict[str, str] = {}
+        self._research_pending_call_ids: set[str] = set()
         self._tool_call_dedupe_ttl_s = float(research_cfg.get("tool_call_dedupe_ttl_s", 30.0))
         self._research_spoken_response_dedupe_ttl_s = float(
             research_cfg.get("spoken_response_dedupe_ttl_s", 60.0)
@@ -1988,13 +1994,7 @@ class RealtimeAPI:
         self._refresh_confirmation_pause()
         pause_reason = self._confirmation_pause_reason()
         remaining_s = self._confirmation_remaining_seconds()
-        logger.info(
-            "CONFIRMATION_TIMEOUT_CHECK token=%s kind=%s remaining_s=%.1f paused_reason=%s",
-            token.id,
-            token.kind,
-            remaining_s,
-            pause_reason or "none",
-        )
+        self._log_confirmation_timeout_check(token, remaining_s=remaining_s, pause_reason=pause_reason)
         if pause_reason is not None:
             return None
         if remaining_s > 0.0:
@@ -2007,6 +2007,42 @@ class RealtimeAPI:
             reason="confirmation timeout",
         )
         return token
+
+    def _log_confirmation_timeout_check(
+        self,
+        token: PendingConfirmationToken,
+        *,
+        remaining_s: float,
+        pause_reason: str | None,
+    ) -> None:
+        now = time.monotonic()
+        interval = max(0.25, float(getattr(self, "_confirmation_timeout_check_log_interval_s", 1.0)))
+        token_id = token.id
+        last_logged = self._confirmation_timeout_check_last_logged_at.get(token_id)
+        normalized_reason = pause_reason or "none"
+        prior_reason = self._confirmation_timeout_check_last_pause_reason.get(token_id)
+        pause_reason_changed = prior_reason != normalized_reason
+        should_log = pause_reason_changed or last_logged is None or (now - last_logged) >= interval
+        if not should_log:
+            return
+        self._confirmation_timeout_check_last_logged_at[token_id] = now
+        self._confirmation_timeout_check_last_pause_reason[token_id] = normalized_reason
+        if pause_reason_changed and prior_reason is not None:
+            logger.info(
+                "CONFIRMATION_PAUSE_REASON_CHANGED token=%s kind=%s paused_reason=%s remaining_s=%.1f",
+                token.id,
+                token.kind,
+                normalized_reason,
+                remaining_s,
+            )
+            return
+        logger.debug(
+            "CONFIRMATION_TIMEOUT_CHECK token=%s kind=%s remaining_s=%.1f paused_reason=%s",
+            token.id,
+            token.kind,
+            remaining_s,
+            normalized_reason,
+        )
 
     async def _maybe_handle_confirmation_decision_timeout(
         self,
@@ -2220,7 +2256,7 @@ class RealtimeAPI:
                 self._set_confirmation_state(ConfirmationState.IDLE, reason="token_cleared")
             return
         self._pending_action = token.pending_action
-        self._pending_research_request = token.request if token.kind == "research_permission" else None
+        self._pending_research_request = token.request if token.kind in {"research_permission", "research_budget"} else None
 
     def _close_confirmation_token(self, *, outcome: str) -> None:
         token = getattr(self, "_pending_confirmation_token", None)
@@ -2234,6 +2270,7 @@ class RealtimeAPI:
             token.kind,
             outcome,
         )
+        self._research_pending_call_ids.clear()
         self._confirmation_last_closed_token = {
             "token": token,
             "kind": token.kind,
@@ -2242,6 +2279,8 @@ class RealtimeAPI:
         }
         if token.pending_action:
             self._presented_actions.discard(token.pending_action.action.id)
+        self._confirmation_timeout_check_last_logged_at.pop(token.id, None)
+        self._confirmation_timeout_check_last_pause_reason.pop(token.id, None)
         self._pending_confirmation_token = None
         self._confirmation_token_created_at = None
         self._confirmation_last_activity_at = None
@@ -2715,13 +2754,37 @@ class RealtimeAPI:
         )
         return True
 
+    async def _maybe_handle_research_budget_response(self, text: str, websocket: Any) -> bool:
+        token = getattr(self, "_pending_confirmation_token", None)
+        if token is None or token.kind != "research_budget":
+            return False
+        request = token.request
+        if request is None:
+            return False
+        decision = self._parse_confirmation_decision(text)
+        if decision in {"yes", "approve", "proceed"}:
+            self._set_confirmation_state(ConfirmationState.RESOLVING, reason="research_budget_accepted")
+            self._close_confirmation_token(outcome="approved")
+            request.context = {**request.context, "over_budget_approved": True}
+            await self._dispatch_research_request(request, websocket)
+            return True
+        if decision in {"no", "cancel", "reject", "deny"}:
+            self._set_confirmation_state(ConfirmationState.RESOLVING, reason="research_budget_rejected")
+            self._close_confirmation_token(outcome="rejected")
+            await self.send_assistant_message(
+                "Okay — I won't run web research while budget is 0. You can raise research.budget.daily_limit in config.",
+                websocket,
+            )
+            return True
+        return True
+
     async def _maybe_process_research_intent(self, text: str, websocket: Any, *, source: str) -> bool:
         if not has_research_intent(text):
             return False
 
         token = getattr(self, "_pending_confirmation_token", None)
-        if token is not None and token.kind == "research_permission":
-            logger.info("[Research] Duplicate intent ignored while permission prompt is pending")
+        if token is not None and token.kind in {"research_permission", "research_budget"}:
+            logger.info("[Research] Duplicate intent ignored while confirmation prompt is pending")
             return True
 
         if token is not None and token.kind == "tool_governance" and token.tool_name == "perform_research":
@@ -2749,6 +2812,32 @@ class RealtimeAPI:
             )
             return True
         logger.info("[Research] Requested from %s", source)
+
+        if not self._research_can_run_now():
+            existing_token = getattr(self, "_pending_confirmation_token", None)
+            if existing_token is not None and existing_token.kind == "research_budget":
+                logger.debug("[Research] Budget prompt already pending; duplicate intent ignored")
+                return True
+            budget_token = self._create_confirmation_token(
+                kind="research_budget",
+                tool_name="perform_research",
+                request=request,
+                max_retries=1,
+                metadata={"approval_flow": True, "budget_remaining": self._research_budget_remaining()},
+            )
+            self._sync_confirmation_legacy_fields()
+            await self.send_assistant_message(
+                "Research budget is currently 0, so I can't run web research yet. Approve one over-budget research attempt? (yes/no)",
+                websocket,
+                response_metadata={
+                    "trigger": "confirmation_prompt",
+                    "approval_flow": "true",
+                    "confirmation_token": budget_token.id,
+                },
+            )
+            budget_token.prompt_sent = True
+            self._set_confirmation_state(ConfirmationState.AWAITING_DECISION, reason="research_budget_prompt_sent")
+            return True
 
         domains = await self._discover_research_domains(request)
         domains_known = bool(domains) and all(self._is_research_domain_allowlisted(domain) for domain in domains)
@@ -2806,6 +2895,29 @@ class RealtimeAPI:
         await self._dispatch_research_request(request, websocket)
         return True
 
+    def _research_budget_remaining(self) -> int | None:
+        service = getattr(self, "_research_service", None)
+        getter = getattr(service, "get_budget_remaining", None)
+        if not callable(getter):
+            return None
+        try:
+            value = getter()
+        except Exception:  # pragma: no cover - defensive fallback
+            return None
+        if value is None:
+            return None
+        return int(value)
+
+    def _research_can_run_now(self) -> bool:
+        service = getattr(self, "_research_service", None)
+        checker = getattr(service, "can_run_research_now", None)
+        if not callable(checker):
+            return True
+        try:
+            return bool(checker())
+        except Exception:  # pragma: no cover - defensive fallback
+            return True
+
     def _classify_research_initiator(self, source: str | None) -> str:
         normalized = str(source or "").strip().lower()
         if normalized in {"input_audio_transcription", "text_message", "startup_prompt"}:
@@ -2838,7 +2950,7 @@ class RealtimeAPI:
             if parsed.path.lower().endswith(".pdf"):
                 return True, "pdf_ingestion"
 
-        if self._research_provider == "openai" and self._research_firecrawl_enabled:
+        if self._research_provider == "openai" and self._research_firecrawl_enabled and not domains_known:
             return True, "paid_provider_firecrawl"
 
         return False, "allowlisted_low_risk"
@@ -2945,6 +3057,7 @@ class RealtimeAPI:
             OrchestrationPhase.PLAN,
             reason="research dispatch",
         )
+        self._research_pending_call_ids.clear()
         logger.info("[Research] Dispatched")
         research_id = f"research_{uuid.uuid4().hex}"
         packet = None
@@ -3516,6 +3629,8 @@ class RealtimeAPI:
                     return
                 if await self._maybe_handle_research_permission_response(transcript, websocket):
                     return
+                if await self._maybe_handle_research_budget_response(transcript, websocket):
+                    return
                 if await self._maybe_apply_late_confirmation_decision(transcript, websocket):
                     return
                 if await self._maybe_process_research_intent(
@@ -3728,13 +3843,21 @@ class RealtimeAPI:
                     return
             if (
                 function_name == "perform_research"
-                and ((token is not None and token.kind == "research_permission") or self._pending_research_request is not None)
+                and ((token is not None and token.kind in {"research_permission", "research_budget"}) or self._pending_research_request is not None)
             ):
-                logger.info(
-                    "Function call outcome: suppressed pending research permission | tool=%s call_id=%s",
-                    function_name,
-                    call_id,
-                )
+                if call_id in self._research_pending_call_ids:
+                    logger.debug(
+                        "Function call outcome: repeated pending-research suppression | tool=%s call_id=%s",
+                        function_name,
+                        call_id,
+                    )
+                else:
+                    self._research_pending_call_ids.add(str(call_id))
+                    logger.info(
+                        "Function call outcome: suppressed pending research confirmation | tool=%s call_id=%s",
+                        function_name,
+                        call_id,
+                    )
                 function_call_output = {
                     "type": "conversation.item.create",
                     "item": {
@@ -4609,6 +4732,8 @@ class RealtimeAPI:
         if await self._maybe_handle_approval_response(text_message, self.websocket):
             return
         if await self._maybe_handle_research_permission_response(text_message, self.websocket):
+            return
+        if await self._maybe_handle_research_budget_response(text_message, self.websocket):
             return
         if await self._maybe_apply_late_confirmation_decision(text_message, self.websocket):
             return

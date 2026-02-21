@@ -204,6 +204,12 @@ class OpenAIResearchService(ResearchService):
         self._escalation_enabled = bool(escalation_enabled)
         self._max_rounds = min(2, max(1, int(max_rounds)))
 
+    def get_budget_remaining(self) -> int | None:
+        return int(self._budget.get_remaining())
+
+    def can_run_research_now(self) -> bool:
+        return bool(self._budget.can_spend(1))
+
     def request_research(self, request_packet: ResearchRequest) -> ResearchPacket:
         run_id = self._request_run_id(request_packet)
         self._log_firecrawl_enabled_banner(run_id)
@@ -224,14 +230,19 @@ class OpenAIResearchService(ResearchService):
                 schema=RESEARCH_PACKET_SCHEMA,
                 status="error",
                 answer_summary=(
-                    "I’m at today’s research budget limit. If you want, say: "
-                    "'approve over-budget research' and I’ll run one extra search."
+                    "Research is disabled for now because today's budget is 0. "
+                    "Approve extra budget or raise research.budget.daily_limit in config."
                 ),
                 extracted_facts=[],
                 sources=[],
-                safety_notes=["budget_exceeded", "awaiting_over_budget_approval"],
-                metadata={"provider": "openai_responses_web_search"},
+                safety_notes=["budget_exceeded", "awaiting_budget_confirmation"],
+                metadata={
+                    "provider": "openai_responses_web_search",
+                    "content_fetch_status": "skipped",
+                    "content_fetch_skip_reason": "budget_zero",
+                },
             )
+
 
         search_result = self._search_candidates(request_packet)
         if "error" in search_result:
@@ -591,12 +602,22 @@ class OpenAIResearchService(ResearchService):
         metadata_extra: dict[str, Any] | None = None,
     ) -> ResearchPacket:
         summary = _strip_html(str(search_result.get("search_summary") or "Found candidate sources only."))
+        candidate_sources = list(sources)
+        seen_urls = {str(item.get("url") or "").strip() for item in candidate_sources if isinstance(item, dict)}
+        for candidate in search_result.get("candidate_urls") or []:
+            url = str(candidate or "").strip()
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            candidate_sources.append({"title": "Candidate source", "url": _clip(url, 360)})
+            if len(candidate_sources) >= self._max_sources:
+                break
         return ResearchPacket(
             schema=RESEARCH_PACKET_SCHEMA,
             status="ok",
             answer_summary=_clip(summary, 900),
             extracted_facts=[],
-            sources=sources,
+            sources=candidate_sources,
             safety_notes=self._sanitize_notes(safety_notes),
             metadata={"provider": "openai_responses_web_search", **(metadata_extra or {})},
         )
