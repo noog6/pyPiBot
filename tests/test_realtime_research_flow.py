@@ -72,7 +72,12 @@ def test_dispatch_research_uses_worker_thread(monkeypatch) -> None:
 
     assert len(thread_calls) == 1
     assert service.calls and service.calls[0].prompt == "find sensor pinout"
-    assert sent == ["researched"]
+    assert len(sent) == 1
+    assert sent[0].startswith("researched\n\n")
+    assert (
+        "I found sources but did not fetch/parse their contents in this run"
+        in sent[0]
+    )
 
 
 def test_send_initial_prompt_routes_research_intent() -> None:
