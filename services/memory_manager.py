@@ -773,6 +773,15 @@ class MemoryManager:
         if self._embedding_worker is not None:
             try:
                 self._embedding_worker.enqueue_memory(memory_id=entry.memory_id)
+                scope_label = resolved_scope.value
+                session_label = resolved_session_id if resolved_session_id is not None else "none"
+                logger.info(
+                    "memory_embedding_audit event=enqueued memory_id=%s source=%s scope=%s session_id=%s mode=background",
+                    entry.memory_id,
+                    source,
+                    scope_label,
+                    session_label,
+                )
             except Exception as exc:  # noqa: BLE001
                 # Embedding scheduling is best-effort and must never block writes.
                 pass
@@ -786,6 +795,7 @@ class MemoryManager:
         if not should_try_inline_embedding:
             return entry
 
+        inline_started_monotonic = time.monotonic()
         try:
             embedding_result = self._embed_text_with_semantic_policy(text=normalized_content, operation="write")
         except Exception as exc:  # noqa: BLE001
@@ -798,8 +808,20 @@ class MemoryManager:
                 status="error",
                 error=f"inline_embedding_exception:{exc.__class__.__name__}",
             )
+            latency_ms = int((time.monotonic() - inline_started_monotonic) * 1000.0)
+            logger.info(
+                "memory_embedding_audit event=inline-attempted memory_id=%s source=%s scope=%s session_id=%s "
+                "mode=inline outcome=failure error_code=exception:%s latency_ms=%s",
+                entry.memory_id,
+                source,
+                resolved_scope.value,
+                resolved_session_id if resolved_session_id is not None else "none",
+                exc.__class__.__name__,
+                latency_ms,
+            )
             return entry
 
+        latency_ms = int((time.monotonic() - inline_started_monotonic) * 1000.0)
         if (
             embedding_result.status == "ready"
             and embedding_result.dimension > 0
@@ -814,6 +836,15 @@ class MemoryManager:
                 status="ready",
                 error=None,
             )
+            logger.info(
+                "memory_embedding_audit event=inline-attempted memory_id=%s source=%s scope=%s session_id=%s "
+                "mode=inline outcome=success error_code=none latency_ms=%s",
+                entry.memory_id,
+                source,
+                resolved_scope.value,
+                resolved_session_id if resolved_session_id is not None else "none",
+                latency_ms,
+            )
             return entry
 
         error_code = str(getattr(embedding_result, "error_code", "") or "unknown")
@@ -827,6 +858,16 @@ class MemoryManager:
             vector_norm=None,
             status=failure_status,
             error=f"inline_embedding_{error_code}",
+        )
+        logger.info(
+            "memory_embedding_audit event=inline-attempted memory_id=%s source=%s scope=%s session_id=%s "
+            "mode=inline outcome=failure error_code=%s latency_ms=%s",
+            entry.memory_id,
+            source,
+            resolved_scope.value,
+            resolved_session_id if resolved_session_id is not None else "none",
+            error_code,
+            latency_ms,
         )
         return entry
 

@@ -133,7 +133,7 @@ def test_worker_marks_embedding_error_after_retry_budget_exhausted(tmp_path: Pat
     assert failed.error == "terminal_retry_exhausted:boom"
     assert entry.memory_id not in worker._failures
     assert (
-        f"memory embedding retry exhausted memory_id={entry.memory_id} failures=2 last_error_code=boom"
+        f"memory embedding failure memory_id={entry.memory_id} classification=retry_exhausted failures=2 error_code=boom"
         in caplog.text
     )
 
@@ -222,7 +222,74 @@ def test_worker_metrics_reset_consecutive_failures_after_success(tmp_path: Path)
     assert metrics["consecutive_failures"] == 0
 
 
-def test_remember_memory_enqueues_pending_embedding_when_enabled(tmp_path: Path, monkeypatch) -> None:
+def test_worker_logs_batch_summary_and_metrics_on_success(tmp_path: Path, caplog) -> None:
+    _reset_singletons()
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    entry = store.append_memory(content="ok", tags=[], importance=3, user_id="default")
+
+    provider = _SequenceProvider(
+        results=[
+            EmbeddingResult(
+                vector=(1.0).hex().encode("utf-8"),
+                dimension=1,
+                model="test-model",
+                model_version="v1",
+                vector_norm=1.0,
+                provider="test",
+                status="ready",
+            )
+        ]
+    )
+    worker = MemoryEmbeddingWorker(store=store, provider=provider, batch_size=1)
+
+    caplog.set_level("INFO")
+    worker.enqueue_memory(memory_id=entry.memory_id)
+    assert worker.run_once() == 1
+
+    assert "memory embedding batch summary processed=1 succeeded=1 failed=0" in caplog.text
+    metrics = worker.get_metrics()
+    assert set(("pending_count", "retry_blocked_count", "consecutive_failures", "oldest_pending_age_ms")).issubset(metrics)
+
+
+def test_worker_logs_failure_classification_and_metrics_on_error(tmp_path: Path, caplog) -> None:
+    _reset_singletons()
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    entry = store.append_memory(content="bad", tags=[], importance=3, user_id="default")
+
+    provider = _SequenceProvider(
+        results=[
+            EmbeddingResult(
+                vector=b"",
+                dimension=0,
+                model="test-model",
+                model_version=None,
+                vector_norm=None,
+                provider="test",
+                status="error",
+                error_code="boom",
+                error_message="boom",
+            )
+        ]
+    )
+    worker = MemoryEmbeddingWorker(
+        store=store,
+        provider=provider,
+        batch_size=1,
+        base_backoff_s=30.0,
+    )
+
+    caplog.set_level("DEBUG")
+    worker.enqueue_memory(memory_id=entry.memory_id)
+    assert worker.run_once() == 0
+
+    assert "classification=retry_backoff" in caplog.text
+    assert "memory embedding batch summary processed=1 succeeded=0 failed=1" in caplog.text
+    metrics = worker.get_metrics()
+    assert metrics["pending_count"] == 1
+    assert metrics["retry_blocked_count"] == 1
+
+
+def test_remember_memory_enqueues_pending_embedding_when_enabled(tmp_path: Path, monkeypatch, caplog) -> None:
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "default.yaml").write_text(
@@ -248,10 +315,12 @@ def test_remember_memory_enqueues_pending_embedding_when_enabled(tmp_path: Path,
     manager._embedding_worker = MemoryEmbeddingWorker(store=manager._store)
     manager._default_scope = MemoryScope.USER_GLOBAL
 
+    caplog.set_level("INFO")
     entry = manager.remember_memory(content="queue this memory", importance=3)
 
     embedding = manager._store.fetch_embeddings_for_memories(memory_ids=[entry.memory_id])[entry.memory_id]
     assert embedding.status == "pending"
+    assert f"memory_embedding_audit event=enqueued memory_id={entry.memory_id}" in caplog.text
 
 
 def test_worker_run_loop_periodically_backfills_missing_rows(tmp_path: Path) -> None:
@@ -295,7 +364,7 @@ def test_worker_run_loop_periodically_backfills_missing_rows(tmp_path: Path) -> 
         worker.stop(timeout_s=0.5)
 
 
-def test_remember_memory_inline_embedding_ready_when_background_disabled(tmp_path: Path, monkeypatch) -> None:
+def test_remember_memory_inline_embedding_ready_when_background_disabled(tmp_path: Path, monkeypatch, caplog) -> None:
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "default.yaml").write_text(
@@ -334,14 +403,17 @@ def test_remember_memory_inline_embedding_ready_when_background_disabled(tmp_pat
         ]
     )
 
+    caplog.set_level("INFO")
     entry = manager.remember_memory(content="inline this memory", importance=3)
 
     embedding = manager._store.fetch_embeddings_for_memories(memory_ids=[entry.memory_id])[entry.memory_id]
     assert embedding.status == "ready"
     assert embedding.model_id == "inline-model"
+    assert f"memory_embedding_audit event=inline-attempted memory_id={entry.memory_id}" in caplog.text
+    assert "mode=inline outcome=success" in caplog.text
 
 
-def test_remember_memory_inline_embedding_records_failure_when_background_disabled(tmp_path: Path, monkeypatch) -> None:
+def test_remember_memory_inline_embedding_records_failure_when_background_disabled(tmp_path: Path, monkeypatch, caplog) -> None:
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "default.yaml").write_text(
@@ -382,6 +454,7 @@ def test_remember_memory_inline_embedding_records_failure_when_background_disabl
         ]
     )
 
+    caplog.set_level("INFO")
     entry = manager.remember_memory(content="still remember this", importance=3)
 
     stored_entry = manager._store.search_memories(limit=1)[0]
@@ -389,6 +462,7 @@ def test_remember_memory_inline_embedding_records_failure_when_background_disabl
     embedding = manager._store.fetch_embeddings_for_memories(memory_ids=[entry.memory_id])[entry.memory_id]
     assert embedding.status == "error"
     assert embedding.error == "inline_embedding_provider_request_failed"
+    assert "mode=inline outcome=failure error_code=provider_request_failed" in caplog.text
 
 
 def test_remember_memory_inline_embedding_remains_disabled_by_default(tmp_path: Path, monkeypatch) -> None:

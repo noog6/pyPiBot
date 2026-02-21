@@ -80,6 +80,13 @@ class MemoryEmbeddingWorker:
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop_event.clear()
+        queue_metrics = self.get_metrics()
+        logger.info(
+            "memory embedding worker start pending=%s retry_blocked=%s oldest_pending_age_ms=%s",
+            queue_metrics.get("pending_count", 0),
+            queue_metrics.get("retry_blocked_count", 0),
+            queue_metrics.get("oldest_pending_age_ms", 0),
+        )
         self._thread = threading.Thread(target=self._run_loop, name="memory-embedding-worker", daemon=True)
         self._thread.start()
 
@@ -87,10 +94,18 @@ class MemoryEmbeddingWorker:
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=max(0.1, float(timeout_s)))
+        queue_metrics = self.get_metrics()
+        logger.info(
+            "memory embedding worker stop pending=%s retry_blocked=%s oldest_pending_age_ms=%s",
+            queue_metrics.get("pending_count", 0),
+            queue_metrics.get("retry_blocked_count", 0),
+            queue_metrics.get("oldest_pending_age_ms", 0),
+        )
         self._thread = None
 
     def enqueue_memory(self, *, memory_id: int) -> None:
         self._store.enqueue_memory_embedding(memory_id=memory_id)
+        logger.debug("memory embedding enqueued memory_id=%s", memory_id)
 
     def backfill_recent_missing_embeddings(self, *, limit: int = 8) -> int:
         """Queue a small startup backfill batch for recent rows missing embeddings."""
@@ -113,6 +128,11 @@ class MemoryEmbeddingWorker:
         now = time.monotonic()
         ready_entries = [entry for entry in entries if self._is_retry_ready(entry.memory_id, now_monotonic=now)]
         if not ready_entries:
+            logger.debug(
+                "memory embedding batch summary processed=%s succeeded=0 failed=0 skipped_retry_blocked=%s",
+                len(entries),
+                len(entries),
+            )
             return 0
 
         try:
@@ -122,9 +142,16 @@ class MemoryEmbeddingWorker:
             for entry in ready_entries:
                 self._record_failure(entry=entry, error_message=error_code, error_code=error_code)
             self._consecutive_failures += 1
+            logger.warning(
+                "memory embedding batch summary processed=%s succeeded=0 failed=%s error_code=%s",
+                len(ready_entries),
+                len(ready_entries),
+                error_code,
+            )
             return 0
 
         success_count = 0
+        failure_count = 0
         for entry, result in zip(ready_entries, results):
             if result.status == "ready" and result.dimension > 0 and result.vector:
                 self._store.upsert_memory_embedding(
@@ -145,6 +172,7 @@ class MemoryEmbeddingWorker:
                 error_message=result.error_message or error_code,
                 error_code=error_code,
             )
+            failure_count += 1
         if len(results) < len(ready_entries):
             for entry in ready_entries[len(results) :]:
                 self._record_failure(
@@ -152,10 +180,17 @@ class MemoryEmbeddingWorker:
                     error_message="provider_returned_fewer_results",
                     error_code="provider_returned_fewer_results",
                 )
+                failure_count += 1
         if success_count > 0:
             self._consecutive_failures = 0
         elif ready_entries:
             self._consecutive_failures += 1
+        logger.info(
+            "memory embedding batch summary processed=%s succeeded=%s failed=%s",
+            len(ready_entries),
+            success_count,
+            failure_count,
+        )
         return success_count
 
     def _run_loop(self) -> None:
@@ -220,7 +255,7 @@ class MemoryEmbeddingWorker:
             )
             self._failures.pop(entry.memory_id, None)
             logger.info(
-                "memory embedding retry exhausted memory_id=%s failures=%s last_error_code=%s",
+                "memory embedding failure memory_id=%s classification=retry_exhausted failures=%s error_code=%s",
                 entry.memory_id,
                 failures,
                 error_code,
@@ -239,4 +274,11 @@ class MemoryEmbeddingWorker:
             vector_norm=None,
             status="pending",
             error=error_message,
+        )
+        logger.debug(
+            "memory embedding failure memory_id=%s classification=retry_backoff failures=%s error_code=%s next_retry_in_s=%.2f",
+            entry.memory_id,
+            failures,
+            error_code,
+            backoff_s,
         )
