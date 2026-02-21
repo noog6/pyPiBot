@@ -60,3 +60,41 @@ class DebouncedState:
     status: HealthStatus
     since: float
     last_update: float
+
+
+@dataclass(frozen=True)
+class OpsSnapshot:
+    """Canonical snapshot payload for parser-safe ops telemetry."""
+
+    schema_version: str
+    emitted_at: float
+    reason: str
+    mode: str
+    loop_phase: str
+    active_probe: str
+    ticks: int
+    heartbeats: int
+    errors: int
+    health_status: str
+    health_summary: str
+    loop_period_s: float
+    heartbeat_period_s: float
+
+    def to_metadata(self) -> Mapping[str, str | float | int]:
+        """Serialize the snapshot into event metadata-friendly primitives."""
+
+        return {
+            "schema_version": self.schema_version,
+            "emitted_at": self.emitted_at,
+            "reason": self.reason,
+            "mode": self.mode,
+            "loop_phase": self.loop_phase,
+            "active_probe": self.active_probe,
+            "ticks": self.ticks,
+            "heartbeats": self.heartbeats,
+            "errors": self.errors,
+            "health_status": self.health_status,
+            "health_summary": self.health_summary,
+            "loop_period_s": self.loop_period_s,
+            "heartbeat_period_s": self.heartbeat_period_s,
+        }
