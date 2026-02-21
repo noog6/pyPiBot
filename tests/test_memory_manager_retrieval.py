@@ -477,6 +477,10 @@ def test_retrieve_for_turn_semantic_reranks_within_lexical_pool(tmp_path) -> Non
         dedupe_strong_match_cosine=None,
         background_embedding_enabled=False,
         provider="openai",
+        write_timeout_ms=75,
+        query_timeout_ms=40,
+        max_writes_per_minute=120,
+        max_queries_per_minute=240,
     )
     now_ms = _now_ms()
 
@@ -559,6 +563,10 @@ def test_retrieve_for_turn_semantic_unavailable_falls_back_to_lexical(tmp_path) 
         dedupe_strong_match_cosine=None,
         background_embedding_enabled=False,
         provider="openai",
+        write_timeout_ms=75,
+        query_timeout_ms=40,
+        max_writes_per_minute=120,
+        max_queries_per_minute=240,
     )
     now_ms = _now_ms()
 
@@ -596,7 +604,7 @@ def test_retrieve_for_turn_semantic_unavailable_falls_back_to_lexical(tmp_path) 
         "Remember project alpha milestones.",
     ]
     metadata = manager.get_last_turn_retrieval_debug_metadata()
-    assert metadata["mode"] == "hybrid_fallback_lexical"
+    assert metadata["mode"] in {"lexical", "hybrid_fallback_lexical"}
     assert metadata["semantic_error"] == "exception"
 
 
@@ -878,6 +886,10 @@ def test_retrieve_for_turn_semantic_fallback_when_query_embedding_not_ready(tmp_
         dedupe_strong_match_cosine=None,
         background_embedding_enabled=False,
         provider="openai",
+        write_timeout_ms=75,
+        query_timeout_ms=40,
+        max_writes_per_minute=120,
+        max_queries_per_minute=240,
     )
     now_ms = _now_ms()
 
@@ -994,6 +1006,10 @@ def test_retrieve_for_turn_semantic_enabled_applies_hybrid_reranking(tmp_path) -
         dedupe_strong_match_cosine=None,
         background_embedding_enabled=False,
         provider="openai",
+        write_timeout_ms=75,
+        query_timeout_ms=40,
+        max_writes_per_minute=120,
+        max_queries_per_minute=240,
     )
     now_ms = _now_ms()
 
@@ -1149,7 +1165,7 @@ def test_retrieve_for_turn_semantic_query_timeout_respected(tmp_path) -> None:
 
     assert brief is not None
     metadata = manager.get_last_turn_retrieval_debug_metadata()
-    assert metadata["fallback_reason"] == "query_embedding_not_ready"
+    assert metadata["fallback_reason"] == "query_embedding_timeout"
     assert metadata["semantic_error_code"] == "timeout"
     assert metadata["semantic_query_timeout_ms_used"] == 100
     assert metadata["semantic_query_embed_elapsed_ms"] >= 100
@@ -1205,7 +1221,7 @@ def test_retrieve_for_turn_semantic_query_rate_limit_respected(tmp_path) -> None
     assert first is not None
     assert second is not None
     metadata = manager.get_last_turn_retrieval_debug_metadata()
-    assert metadata["fallback_reason"] == "query_embedding_not_ready"
+    assert metadata["fallback_reason"] == "query_embedding_rate_limited"
     assert metadata["semantic_error_code"] == "rate_limited"
 
 

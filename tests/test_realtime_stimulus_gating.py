@@ -15,7 +15,7 @@ class _StateManagerStub:
 
 def _make_api_stub() -> RealtimeAPI:
     api = RealtimeAPI.__new__(RealtimeAPI)
-    api._pending_action = object()
+    api._pending_confirmation_token = object()
     api.response_in_progress = False
     api.state_manager = _StateManagerStub(InteractionState.IDLE)
     api.orchestration_state = type("S", (), {"phase": OrchestrationPhase.AWAITING_CONFIRMATION})()

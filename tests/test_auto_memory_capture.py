@@ -21,7 +21,12 @@ def _make_memory_manager(store: MemoryStore) -> MemoryManager:
     manager._embedding_worker = None
     manager._last_turn_retrieval_at = {}
     manager._last_semantic_dedupe_debug = {}
-    manager._semantic_config = SimpleNamespace(enabled=False, dedupe_strong_match_cosine=None)
+    manager._semantic_config = SimpleNamespace(
+        enabled=False,
+        dedupe_strong_match_cosine=None,
+        background_embedding_enabled=False,
+        inline_embedding_on_write_when_background_disabled=False,
+    )
     manager._auto_pin_min_importance = 5
     manager._auto_pin_requires_review = True
     manager._auto_reflection_semantic_dedupe_enabled = False
@@ -108,7 +113,12 @@ def _encode_vector(values: list[float]) -> bytes:
 def test_auto_reflection_semantic_duplicate_skip_write_policy(tmp_path) -> None:
     store = MemoryStore(db_path=tmp_path / "memories.db")
     manager = _make_memory_manager(store)
-    manager._semantic_config = SimpleNamespace(enabled=True, dedupe_strong_match_cosine=0.85)
+    manager._semantic_config = SimpleNamespace(
+        enabled=True,
+        dedupe_strong_match_cosine=0.85,
+        background_embedding_enabled=False,
+        inline_embedding_on_write_when_background_disabled=False,
+    )
     manager._auto_reflection_semantic_dedupe_enabled = True
 
     existing = store.append_memory(
@@ -145,7 +155,12 @@ def test_auto_reflection_semantic_duplicate_skip_write_policy(tmp_path) -> None:
 def test_manual_tool_write_remains_authoritative_under_default_policy(tmp_path) -> None:
     store = MemoryStore(db_path=tmp_path / "memories.db")
     manager = _make_memory_manager(store)
-    manager._semantic_config = SimpleNamespace(enabled=True, dedupe_strong_match_cosine=0.85)
+    manager._semantic_config = SimpleNamespace(
+        enabled=True,
+        dedupe_strong_match_cosine=0.85,
+        background_embedding_enabled=False,
+        inline_embedding_on_write_when_background_disabled=False,
+    )
     manager._auto_reflection_semantic_dedupe_enabled = True
 
     existing = store.append_memory(
@@ -182,7 +197,12 @@ def test_manual_tool_write_remains_authoritative_under_default_policy(tmp_path) 
 def test_auto_reflection_write_survives_semantic_dedupe_embedding_exception(tmp_path) -> None:
     store = MemoryStore(db_path=tmp_path / "memories.db")
     manager = _make_memory_manager(store)
-    manager._semantic_config = SimpleNamespace(enabled=True, dedupe_strong_match_cosine=0.85)
+    manager._semantic_config = SimpleNamespace(
+        enabled=True,
+        dedupe_strong_match_cosine=0.85,
+        background_embedding_enabled=False,
+        inline_embedding_on_write_when_background_disabled=False,
+    )
     manager._auto_reflection_semantic_dedupe_enabled = True
 
     store.append_memory(
