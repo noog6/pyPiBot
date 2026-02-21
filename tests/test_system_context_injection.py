@@ -38,6 +38,9 @@ class _OpsStub:
     def get_latest_health(self) -> _Health | None:
         return self._health
 
+    def set_latest_health(self, health: _Health | None) -> None:
+        self._health = health
+
 
 class _BatteryMonitorStub:
     def __init__(self, voltage: float | None) -> None:
@@ -81,11 +84,39 @@ def test_system_context_payload_includes_run_id_and_startup_health() -> None:
         semantic_reason="startup_canary_timeout",
     )
 
-    payload = coordinator._build_payload()
+    payload = coordinator._build_startup_payload()
 
     assert payload["run_id"] == "run-777"
     assert payload["startup_health"]["status"] == "degraded"
     assert payload["startup_health"]["summary"] == "Degraded: audio unavailable"
+
+
+def test_system_context_coordinator_injects_second_update_on_transition_to_ok() -> None:
+    realtime = _RealtimeStub()
+    ops = _OpsStub(
+        startup_emitted=True,
+        health=_Health("degraded", "Degraded: audio unavailable"),
+    )
+    coordinator = SystemContextCoordinator(
+        realtime_api=realtime,
+        ops_orchestrator=ops,
+        run_id="run-abc",
+        boot_time="2026-01-01T00:00:00+00:00",
+        semantic_state="ready",
+        semantic_reason="provider_ready",
+        poll_interval_s=0.05,
+    )
+
+    coordinator.start()
+    time.sleep(0.1)
+    ops.set_latest_health(_Health("ok", "All systems nominal"))
+    time.sleep(0.2)
+    coordinator.stop()
+
+    assert len(realtime.calls) == 2
+    assert realtime.calls[0]["startup_health"]["status"] == "degraded"
+    assert realtime.calls[1]["update"] == "ops_transition_ok"
+    assert realtime.calls[1]["ops_health"]["status"] == "ok"
 
 
 class _Ws:
@@ -105,4 +136,3 @@ def test_send_system_context_enforces_no_response_create() -> None:
 
     event_types = [event["type"] for event in api.websocket.events]
     assert event_types == ["conversation.item.create"]
-
