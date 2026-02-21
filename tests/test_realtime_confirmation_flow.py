@@ -11,6 +11,7 @@ from unittest.mock import patch
 from ai.orchestration import OrchestrationPhase
 from ai.realtime_api import ConfirmationState, PendingConfirmationToken, RealtimeAPI
 from interaction import InteractionState
+from services.research import OpenAIResearchService
 from services.research import ResearchRequest
 
 
@@ -104,6 +105,46 @@ def _make_api_stub() -> RealtimeAPI:
     api._active_utterance = None
     api.mic = _Mic()
     return api
+
+
+def _configure_budget_storage(monkeypatch, tmp_path):
+    import config.controller as config_controller
+    from storage.controller import StorageController
+
+    var_dir = tmp_path / "var"
+    log_dir = tmp_path / "log"
+    monkeypatch.setattr(
+        config_controller.ConfigController,
+        "get_instance",
+        lambda: type("_Cfg", (), {"get_config": lambda self: {"var_dir": str(var_dir), "log_dir": str(log_dir)}})(),
+    )
+    StorageController._instance = None
+    return StorageController
+
+
+def _wire_real_research_budget(monkeypatch, tmp_path, api: RealtimeAPI, *, daily_budget: int = 3):
+    storage_controller_cls = _configure_budget_storage(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    service = OpenAIResearchService(
+        daily_budget=daily_budget,
+        budget_state_file=str(tmp_path / "research_budget.json"),
+        cache_dir=str(tmp_path / "research_cache"),
+        firecrawl_enabled=False,
+    )
+    service._search_candidates = lambda *_args, **_kwargs: {
+        "best_url": "",
+        "candidate_urls": [],
+        "sources": [],
+        "search_summary": "stub search summary",
+        "safety_notes": [],
+    }
+    api._research_service = service
+    return storage_controller_cls
+
+
+def _usage_count(storage_controller_cls) -> int:
+    conn = storage_controller_cls.get_instance().conn
+    return int(conn.execute("SELECT COUNT(*) FROM research_budget_usage").fetchone()[0])
 
 
 def test_parse_confirmation_decision_accepts_go_ahead_phrasing() -> None:
@@ -979,8 +1020,9 @@ def test_handle_function_call_suppresses_during_pending_confirmation_without_act
     assert api.function_call_args == ""
 
 
-def test_handle_function_call_suppresses_research_while_research_permission_pending() -> None:
+def test_handle_function_call_suppresses_research_while_research_permission_pending(monkeypatch, tmp_path) -> None:
     api = _make_api_stub()
+    storage_controller_cls = _wire_real_research_budget(monkeypatch, tmp_path, api)
     api._pending_action = None
     api._pending_research_request = object()
     api.function_call = {"name": "perform_research", "call_id": "call_research_permission"}
@@ -1021,16 +1063,30 @@ def test_handle_function_call_suppresses_research_while_research_permission_pend
         async def send(self, payload: str) -> None:
             sent_payloads.append(json.loads(payload))
 
-    asyncio.run(api.handle_function_call({}, _SendWs()))
+    try:
+        budget_before = api._research_budget_remaining()
+        usage_before = _usage_count(storage_controller_cls)
 
-    assert transitions == []
-    assert confirmation_prompts["count"] == 0
-    assert governance_calls == {"build": 0, "review": 0}
-    assert len(sent_payloads) == 1
-    output_payload = json.loads(sent_payloads[0]["item"]["output"])
-    assert output_payload["status"] == "waiting_for_permission"
-    assert api.function_call is None
-    assert api.function_call_args == ""
+        asyncio.run(api.handle_function_call({}, _SendWs()))
+
+        budget_after = api._research_budget_remaining()
+        usage_after = _usage_count(storage_controller_cls)
+
+        assert transitions == []
+        assert confirmation_prompts["count"] == 0
+        assert governance_calls == {"build": 0, "review": 0}
+        assert len(sent_payloads) == 1
+        output_payload = json.loads(sent_payloads[0]["item"]["output"])
+        assert output_payload["status"] == "waiting_for_permission"
+        assert budget_after == budget_before
+        assert usage_after == usage_before
+        assert api.function_call is None
+        assert api.function_call_args == ""
+    finally:
+        controller = storage_controller_cls._instance
+        if controller is not None:
+            controller.close()
+        storage_controller_cls._instance = None
 
 
 def test_handle_function_call_transitions_to_act_when_execution_approved() -> None:
@@ -1090,8 +1146,9 @@ def test_handle_function_call_transitions_to_act_when_execution_approved() -> No
     assert transitions == [(OrchestrationPhase.ACT, "function_call perform_research")]
 
 
-def test_handle_function_call_duplicate_logs_skip_without_execution(caplog) -> None:
+def test_handle_function_call_duplicate_logs_skip_without_execution(caplog, monkeypatch, tmp_path) -> None:
     api = _make_api_stub()
+    storage_controller_cls = _wire_real_research_budget(monkeypatch, tmp_path, api)
     api._pending_action = None
     api.function_call = {"name": "perform_research", "call_id": "call_duplicate"}
     api.function_call_args = '{"query":"status"}'
@@ -1111,13 +1168,80 @@ def test_handle_function_call_duplicate_logs_skip_without_execution(caplog) -> N
         async def send(self, payload: str) -> None:
             sent_payloads.append(json.loads(payload))
 
-    caplog.set_level(logging.INFO)
-    asyncio.run(api.handle_function_call({}, _SendWs()))
+    try:
+        budget_before = api._research_budget_remaining()
+        usage_before = _usage_count(storage_controller_cls)
 
-    assert len(sent_payloads) == 1
-    output_payload = json.loads(sent_payloads[0]["item"]["output"])
-    assert output_payload["status"] == "redundant"
-    assert executed == []
+        caplog.set_level(logging.INFO)
+        asyncio.run(api.handle_function_call({}, _SendWs()))
+
+        budget_after = api._research_budget_remaining()
+        usage_after = _usage_count(storage_controller_cls)
+
+        assert len(sent_payloads) == 1
+        output_payload = json.loads(sent_payloads[0]["item"]["output"])
+        assert output_payload["status"] == "redundant"
+        assert budget_after == budget_before
+        assert usage_after == usage_before
+        assert executed == []
+    finally:
+        controller = storage_controller_cls._instance
+        if controller is not None:
+            controller.close()
+        storage_controller_cls._instance = None
+
+
+def test_handle_function_call_executed_research_decrements_budget_and_records_usage(monkeypatch, tmp_path) -> None:
+    api = _make_api_stub()
+    storage_controller_cls = _wire_real_research_budget(monkeypatch, tmp_path, api)
+    api._pending_action = None
+    api.function_call = {"name": "perform_research", "call_id": "call_exec_budget"}
+    api.function_call_args = '{"query":"status"}'
+    api._extract_dry_run_flag = lambda _args: False
+    api._is_duplicate_tool_call = lambda *_args, **_kwargs: False
+    api._is_suppressed_after_confirmation_timeout = lambda *_args, **_kwargs: False
+    api._tool_execution_cooldown_remaining = lambda: 0.0
+    api._stage_action = lambda _action: {"valid": True}
+    api._governance = type(
+        "Gov",
+        (),
+        {
+            "build_action_packet": lambda *_args, **_kwargs: type(
+                "Action",
+                (),
+                {"id": "call_exec_budget", "tool_name": "perform_research", "tool_args": {"query": "status"}, "tier": 0},
+            )(),
+            "review": lambda *_args, **_kwargs: type(
+                "Decision",
+                (),
+                {"approved": True, "needs_confirmation": False, "status": "approved", "reason": "ok"},
+            )(),
+            "record_execution": lambda *_args, **_kwargs: None,
+        },
+    )()
+
+    async def _execute_action(action, *_args, **_kwargs):
+        request = ResearchRequest(prompt=action.tool_args["query"], context={"source": "text_message"})
+        api._research_service.request_research(request)
+
+    api._execute_action = _execute_action
+
+    try:
+        budget_before = api._research_budget_remaining()
+        usage_before = _usage_count(storage_controller_cls)
+
+        asyncio.run(api.handle_function_call({}, _Ws()))
+
+        budget_after = api._research_budget_remaining()
+        usage_after = _usage_count(storage_controller_cls)
+
+        assert budget_after == budget_before - 1
+        assert usage_after == usage_before + 1
+    finally:
+        controller = storage_controller_cls._instance
+        if controller is not None:
+            controller.close()
+        storage_controller_cls._instance = None
 
 
 def test_handle_function_call_logs_tool_and_call_id_with_parse_status(monkeypatch) -> None:
@@ -2074,8 +2198,9 @@ def test_research_budget_approval_fallback_dispatch_passes_over_budget_context()
     assert request.context == {"source": "user"}
 
 
-def test_research_budget_rejection_clears_deferred_tool() -> None:
+def test_research_budget_rejection_clears_deferred_tool(monkeypatch, tmp_path) -> None:
     api = _make_api_stub()
+    storage_controller_cls = _wire_real_research_budget(monkeypatch, tmp_path, api)
     token = _build_confirmation_token(kind="research_budget")
     token.request = type("ResearchRequest", (), {"prompt": "find board dimensions", "context": {"source": "user"}})()
     api._pending_confirmation_token = token
@@ -2094,7 +2219,21 @@ def test_research_budget_rejection_clears_deferred_tool() -> None:
 
     api.send_assistant_message = _assistant
 
-    asyncio.run(api._maybe_handle_research_budget_response("no", api.websocket))
+    try:
+        budget_before = api._research_budget_remaining()
+        usage_before = _usage_count(storage_controller_cls)
 
-    assert api._deferred_research_tool_call is None
-    assert messages
+        asyncio.run(api._maybe_handle_research_budget_response("no", api.websocket))
+
+        budget_after = api._research_budget_remaining()
+        usage_after = _usage_count(storage_controller_cls)
+
+        assert api._deferred_research_tool_call is None
+        assert messages
+        assert budget_after == budget_before
+        assert usage_after == usage_before
+    finally:
+        controller = storage_controller_cls._instance
+        if controller is not None:
+            controller.close()
+        storage_controller_cls._instance = None
