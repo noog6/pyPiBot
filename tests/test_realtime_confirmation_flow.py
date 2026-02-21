@@ -11,6 +11,7 @@ from unittest.mock import patch
 from ai.orchestration import OrchestrationPhase
 from ai.realtime_api import ConfirmationState, PendingConfirmationToken, RealtimeAPI
 from interaction import InteractionState
+from services.research import ResearchRequest
 
 
 class _Ws:
@@ -1907,7 +1908,7 @@ def test_handle_function_call_suppresses_research_for_budget_confirmation() -> N
 def test_research_budget_approval_replays_deferred_tool_once() -> None:
     api = _make_api_stub()
     token = _build_confirmation_token(kind="research_budget")
-    request = type("ResearchRequest", (), {"prompt": "find board dimensions", "context": {"source": "user"}})()
+    request = ResearchRequest(prompt="find board dimensions", context={"source": "user"})
     token.request = request
     api._pending_confirmation_token = token
     api._pending_research_request = request
@@ -1951,6 +1952,27 @@ def test_research_budget_approval_replays_deferred_tool_once() -> None:
 
     assert dispatched == ["call_deferred_1"]
     assert api._deferred_research_tool_call is None
+
+
+def test_research_budget_approval_fallback_dispatch_passes_over_budget_context() -> None:
+    api = _make_api_stub()
+    token = _build_confirmation_token(kind="research_budget")
+    request = ResearchRequest(prompt="find board dimensions", context={"source": "user"})
+    token.request = request
+    api._pending_confirmation_token = token
+    api._pending_research_request = request
+
+    fallback_contexts: list[dict[str, object]] = []
+
+    async def _dispatch_research_request(passed_request, *_args, **_kwargs):
+        fallback_contexts.append(dict(passed_request.context))
+
+    api._dispatch_research_request = _dispatch_research_request
+
+    assert asyncio.run(api._maybe_handle_research_budget_response("Yes.", api.websocket)) is True
+
+    assert fallback_contexts == [{"source": "user", "over_budget_approved": True}]
+    assert request.context == {"source": "user"}
 
 
 def test_research_budget_rejection_clears_deferred_tool() -> None:

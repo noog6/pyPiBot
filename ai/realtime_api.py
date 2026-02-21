@@ -6,7 +6,7 @@ import asyncio
 import audioop
 import base64
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import Enum
 import hashlib
@@ -2792,10 +2792,17 @@ class RealtimeAPI:
             self._set_confirmation_state(ConfirmationState.RESOLVING, reason="research_budget_accepted")
             token_id = token.id
             self._close_confirmation_token(outcome="approved")
-            request.context = {**request.context, "over_budget_approved": True}
+            approved_request = replace(
+                request,
+                context={**request.context, "over_budget_approved": True},
+            )
+            logger.info(
+                "RESEARCH_DISPATCH_PREP token=%s approved_context=true",
+                token_id,
+            )
             if await self._dispatch_deferred_research_tool_call(websocket, token_id=token_id):
                 return True
-            await self._dispatch_research_request(request, websocket)
+            await self._dispatch_research_request(approved_request, websocket)
             return True
         if decision in {"no", "cancel", "reject", "deny"}:
             self._set_confirmation_state(ConfirmationState.RESOLVING, reason="research_budget_rejected")
