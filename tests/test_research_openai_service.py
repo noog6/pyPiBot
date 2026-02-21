@@ -69,6 +69,28 @@ def test_query_cache_skips_repeat_search(tmp_path: Path) -> None:
     assert svc.search_calls == 1
 
 
+
+def test_budget_spend_only_on_actual_execution(tmp_path: Path) -> None:
+    svc = _FakeOpenAIResearchService(
+        search_result={"best_url": "", "sources": [], "search_summary": "summary", "safety_notes": []},
+        extract_result="{}",
+        daily_budget=2,
+        budget_state_file=str(tmp_path / "budget.json"),
+        cache_dir=str(tmp_path / "cache"),
+    )
+
+    _ = svc.request_research(ResearchRequest(prompt="find datasheet abc"))
+    # Cache hit should not spend budget.
+    _ = svc.request_research(ResearchRequest(prompt="find datasheet abc"))
+    # New execution should spend budget.
+    _ = svc.request_research(ResearchRequest(prompt="find datasheet def"))
+    blocked = svc.request_research(ResearchRequest(prompt="find datasheet ghi"))
+
+    assert blocked.status == "error"
+    assert svc.search_calls == 2
+    assert svc.get_budget_remaining() == 0
+
+
 def test_allowlist_blocks_localhost_target(tmp_path: Path) -> None:
     svc = _FakeOpenAIResearchService(
         search_result={
