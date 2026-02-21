@@ -2401,6 +2401,39 @@ class RealtimeAPI:
         if request is None:
             return False
 
+        token_metadata = token.metadata if token is not None and isinstance(token.metadata, dict) else {}
+        if (
+            self._is_domain_preview_request(text)
+            and token is not None
+            and not bool(token_metadata.get("domains_known"))
+        ):
+            domains = await self._discover_research_domains(request)
+            domains_known = bool(domains)
+            token_metadata["domains"] = domains
+            token_metadata["domains_known"] = domains_known
+            token.metadata = token_metadata
+            if domains_known:
+                await self.send_assistant_message(
+                    f"Preview complete: likely sources include {', '.join(domains)}. Proceed with web lookup? (yes/no)",
+                    websocket,
+                    response_metadata={
+                        "trigger": "confirmation_prompt",
+                        "approval_flow": "true",
+                        "confirmation_token": token.id,
+                    },
+                )
+            else:
+                await self.send_assistant_message(
+                    "I still couldn't determine domains from a lightweight preview. Proceed with web lookup anyway? (yes/no)",
+                    websocket,
+                    response_metadata={
+                        "trigger": "confirmation_prompt",
+                        "approval_flow": "true",
+                        "confirmation_token": token.id,
+                    },
+                )
+            return True
+
         decision = self._parse_confirmation_decision(text)
         logger.info(
             "CONFIRMATION_DECISION token=%s kind=%s decision=%s",
@@ -2518,30 +2551,30 @@ class RealtimeAPI:
         permission_needed, reason = self.should_request_research_permission(request)
         if permission_needed:
             provider = "firecrawl_fetch" if self._research_firecrawl_enabled else "openai_responses_web_search"
-            domain = self._extract_primary_research_domain(request.prompt)
-            if reason == "non_allowlisted_domain" and domain:
-                logger.info("[Allowlist] permission_required domain=%s", domain)
+            domains = await self._discover_research_domains(request)
+            domains_known = bool(domains)
+            if reason == "non_allowlisted_domain" and domains:
+                logger.info("[Allowlist] permission_required domain=%s", domains[0])
             logger.info(
-                "[Research] permission_required reason=%s provider=%s domain=%s",
+                "[Research] permission_required reason=%s provider=%s domains=%s domains_known=%s",
                 reason,
                 provider,
-                domain or "n/a",
+                domains,
+                domains_known,
             )
             token = self._create_confirmation_token(
                 kind="research_permission",
                 tool_name="perform_research",
                 request=request,
                 max_retries=2,
-                metadata={"approval_flow": True},
+                metadata={"approval_flow": True, "domains": domains, "domains_known": domains_known},
             )
             self._sync_confirmation_legacy_fields()
-            logger.info("[Research] Permission asked")
-            prompt_message = "I can do a web lookup for that. Do I have your permission to proceed? (yes/no)"
-            if reason == "non_allowlisted_domain" and domain:
-                prompt_message = (
-                    f"This domain is not currently allowed. May I add {domain} to your trusted list?"
-                    " (yes/no)"
-                )
+            logger.info(
+                "[Research] Permission asked",
+                extra={"event": "research_permission_prompt", "domains": domains, "domains_known": domains_known},
+            )
+            prompt_message = self._build_research_permission_prompt(domains=domains, domains_known=domains_known)
             await self.send_assistant_message(
                 prompt_message,
                 websocket,
@@ -2591,10 +2624,68 @@ class RealtimeAPI:
         return re.findall(r"https?://[^\s)\]>\"']+", str(prompt or ""), flags=re.IGNORECASE)
 
     def _extract_primary_research_domain(self, prompt: str) -> str | None:
-        urls = self._extract_research_urls(prompt)
-        if not urls:
-            return None
-        return (urlparse(urls[0]).hostname or "").lower().strip() or None
+        domains = self._extract_research_domains_from_prompt(prompt)
+        return domains[0] if domains else None
+
+    def _extract_research_domains_from_prompt(self, prompt: str) -> list[str]:
+        domains: list[str] = []
+        seen: set[str] = set()
+        for candidate_url in self._extract_research_urls(prompt):
+            host = normalize_trusted_domain((urlparse(candidate_url).hostname or "").lower().strip())
+            if not host or host in seen:
+                continue
+            seen.add(host)
+            domains.append(host)
+        return domains
+
+    async def _discover_research_domains(self, request: ResearchRequest) -> list[str]:
+        discovered = self._extract_research_domains_from_prompt(request.prompt)
+        if discovered:
+            return discovered[:2]
+
+        service = getattr(self, "_research_service", None)
+        discover_fn = getattr(service, "discover_domains", None)
+        if not callable(discover_fn):
+            return []
+
+        try:
+            raw_domains = await asyncio.to_thread(discover_fn, request)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Research] domain_discovery_failed error=%s", exc)
+            return []
+
+        domains: list[str] = []
+        seen: set[str] = set()
+        for raw_domain in raw_domains or []:
+            normalized = normalize_trusted_domain(str(raw_domain))
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            domains.append(normalized)
+            if len(domains) >= 2:
+                break
+        return domains
+
+    def _build_research_permission_prompt(self, *, domains: list[str], domains_known: bool) -> str:
+        if domains_known:
+            if len(domains) >= 2:
+                domain_summary = f"{domains[0]} and {domains[1]}"
+            else:
+                domain_summary = f"{domains[0]} (and possibly one other source)"
+            return (
+                "I need your permission before a web lookup due to research mode policy. "
+                f"I can look this up on {domain_summary}. Proceed? (yes/no)"
+            )
+
+        return (
+            "I need your permission before a web lookup due to research mode policy. "
+            "I can look this up on the web, but I don't know the source domains yet—"
+            "want me to preview domains first, or proceed? (preview/proceed/yes/no)"
+        )
+
+    def _is_domain_preview_request(self, text: str) -> bool:
+        lowered = str(text or "").strip().lower()
+        return "preview" in lowered and "domain" in lowered
 
     def _research_request_domains_allowlisted(self, request: ResearchRequest) -> bool:
         urls = self._extract_research_urls(request.prompt)

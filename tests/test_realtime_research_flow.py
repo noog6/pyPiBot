@@ -10,13 +10,17 @@ from storage.trusted_domains import TrustedDomainStore
 
 
 class _FakeService:
-    def __init__(self, packet: ResearchPacket) -> None:
+    def __init__(self, packet: ResearchPacket, *, discovered_domains: list[str] | None = None) -> None:
         self.packet = packet
         self.calls: list[ResearchRequest] = []
+        self.discovered_domains = discovered_domains or []
 
     def request_research(self, request: ResearchRequest) -> ResearchPacket:
         self.calls.append(request)
         return self.packet
+
+    def discover_domains(self, request: ResearchRequest) -> list[str]:
+        return list(self.discovered_domains)
 
 class _InMemoryTrustedDomainStore:
     def __init__(self) -> None:
@@ -51,6 +55,7 @@ def _make_api_stub() -> RealtimeAPI:
     api._tool_call_dedupe_ttl_s = 30.0
     api._trusted_domain_store = _InMemoryTrustedDomainStore()
     api._trusted_research_domains = set()
+    api._research_service = _FakeService(ResearchPacket(status="ok", answer_summary="ok"))
     api.send_assistant_message = lambda *args, **kwargs: None
     return api
 
@@ -200,7 +205,9 @@ def test_non_allowlisted_domain_requires_permission_token() -> None:
     assert handled is True
     assert api._pending_confirmation_token is not None
     assert api._pending_confirmation_token.kind == "research_permission"
-    assert prompts and "trusted list" in prompts[0]
+    assert api._pending_confirmation_token.metadata.get("domains") == ["example.com"]
+    assert api._pending_confirmation_token.metadata.get("domains_known") is True
+    assert prompts and "example.com" in prompts[0]
 
 
 def test_pdf_url_requires_permission_token() -> None:
@@ -229,16 +236,20 @@ def test_pdf_url_requires_permission_token() -> None:
     assert handled is True
     assert api._pending_confirmation_token is not None
     assert api._pending_confirmation_token.kind == "research_permission"
-    assert prompts and "Do I have your permission" in prompts[0]
+    assert prompts and "arxiv.org" in prompts[0]
 
 
-def test_non_allowlisted_domain_permission_prompt_requests_trusted_list() -> None:
+def test_search_preflight_domains_are_included_in_permission_prompt() -> None:
     api = _make_api_stub()
-    api._research_mode = "auto"
+    api._research_mode = "ask"
     api._research_provider = "openai"
     api._research_firecrawl_enabled = False
-    api._research_firecrawl_allowlist_mode = "explicit"
-    api._research_firecrawl_allowlist_domains = {"wikipedia.org"}
+    api._research_firecrawl_allowlist_mode = "public"
+    api._research_firecrawl_allowlist_domains = set()
+    api._research_service = _FakeService(
+        ResearchPacket(status="ok", answer_summary="ok"),
+        discovered_domains=["https://nxp.com/products", "slashdot.org/articles/1"],
+    )
 
     prompts: list[str] = []
 
@@ -249,7 +260,7 @@ def test_non_allowlisted_domain_permission_prompt_requests_trusted_list() -> Non
 
     handled = asyncio.run(
         api._maybe_process_research_intent(
-            "search the web for https://example.com/deep-dive",
+            "search the web for RP2040 errata",
             websocket=object(),
             source="text_message",
         )
@@ -257,7 +268,10 @@ def test_non_allowlisted_domain_permission_prompt_requests_trusted_list() -> Non
 
     assert handled is True
     assert prompts
-    assert "May I add example.com to your trusted list" in prompts[0]
+    assert "nxp.com" in prompts[0]
+    assert "slashdot.org" in prompts[0]
+    assert api._pending_confirmation_token is not None
+    assert api._pending_confirmation_token.metadata.get("domains_known") is True
 
 
 def test_permission_approval_adds_domain_and_dispatches() -> None:
@@ -321,6 +335,38 @@ def test_permission_decline_does_not_add_domain() -> None:
 
     assert handled is True
     assert "example.com" not in api._trusted_research_domains
+
+
+def test_unknown_domains_prompt_offers_preview_first() -> None:
+    api = _make_api_stub()
+    api._research_mode = "ask"
+    api._research_provider = "openai"
+    api._research_firecrawl_enabled = False
+    api._research_firecrawl_allowlist_mode = "public"
+    api._research_firecrawl_allowlist_domains = set()
+    api._research_service = _FakeService(ResearchPacket(status="ok", answer_summary="ok"), discovered_domains=[])
+
+    prompts: list[str] = []
+
+    async def _send_assistant_message(message: str, *args, **kwargs) -> None:
+        prompts.append(message)
+
+    api.send_assistant_message = _send_assistant_message
+
+    handled = asyncio.run(
+        api._maybe_process_research_intent(
+            "please look up the latest ai chip news",
+            websocket=object(),
+            source="text_message",
+        )
+    )
+
+    assert handled is True
+    assert prompts
+    assert "don't know the source domains yet" in prompts[0]
+    assert "preview domains first" in prompts[0]
+    assert api._pending_confirmation_token is not None
+    assert api._pending_confirmation_token.metadata.get("domains_known") is False
 
 
 def test_trusted_domain_store_persists_across_instances(tmp_path) -> None:

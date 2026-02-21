@@ -340,6 +340,39 @@ class OpenAIResearchService(ResearchService):
         LOGGER.info("[Research] rounds_used=%s budget_remaining=%s", rounds_used, remaining_after)
         return packet
 
+    def discover_domains(self, request_packet: ResearchRequest) -> list[str]:
+        """Run lightweight source discovery and return candidate hostnames."""
+
+        search_result = self._search_candidates(request_packet)
+        if not isinstance(search_result, dict) or search_result.get("error"):
+            return []
+
+        seen: set[str] = set()
+        domains: list[str] = []
+        url_candidates = list(search_result.get("candidate_urls") or [])
+        best_url = search_result.get("best_url")
+        if isinstance(best_url, str) and best_url.strip():
+            url_candidates.insert(0, best_url)
+
+        for source in search_result.get("sources") or []:
+            if isinstance(source, dict):
+                candidate = source.get("url")
+                if isinstance(candidate, str) and candidate.strip():
+                    url_candidates.append(candidate)
+
+        for candidate_url in url_candidates:
+            if not isinstance(candidate_url, str):
+                continue
+            hostname = (parse.urlparse(candidate_url).hostname or "").lower().strip()
+            if not hostname or hostname in seen:
+                continue
+            seen.add(hostname)
+            domains.append(hostname)
+            if len(domains) >= 3:
+                break
+
+        return domains
+
     def _finish_sources_only(
         self,
         request_packet: ResearchRequest,
