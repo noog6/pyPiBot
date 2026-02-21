@@ -188,6 +188,7 @@ class OpenAIResearchService(ResearchService):
 
         self._firecrawl_enabled = bool(firecrawl_enabled)
         self._firecrawl_client = firecrawl_client or FirecrawlClient(api_key=firecrawl_api_key, timeout_s=firecrawl_timeout_s)
+        self._firecrawl_timeout_s = max(5.0, float(firecrawl_timeout_s))
         self._firecrawl_max_pages = max(1, int(firecrawl_max_pages))
         self._firecrawl_max_markdown_chars = max(1000, int(firecrawl_max_markdown_chars))
         self._pdf_ingestion_enabled = bool(pdf_ingestion_enabled)
@@ -195,6 +196,7 @@ class OpenAIResearchService(ResearchService):
         self._firecrawl_allowlist_domains = {
             d.strip().lower() for d in (firecrawl_allowlist_domains or []) if d and d.strip()
         }
+        self._firecrawl_enabled_banner_seen: set[str] = set()
 
         self._cache = ResearchCacheStore(cache_dir, ttl_hours=cache_ttl_hours)
         self._budget = ResearchBudgetTracker(budget_state_file, daily_limit=daily_budget)
@@ -202,6 +204,8 @@ class OpenAIResearchService(ResearchService):
         self._max_rounds = min(2, max(1, int(max_rounds)))
 
     def request_research(self, request_packet: ResearchRequest) -> ResearchPacket:
+        run_id = self._request_run_id(request_packet)
+        self._log_firecrawl_enabled_banner(run_id)
         cached = self._cache.get("query", request_packet.prompt)
         if cached:
             LOGGER.info("[Research] cache hit scope=query")
@@ -255,6 +259,7 @@ class OpenAIResearchService(ResearchService):
             allowed, policy_reason = self._is_url_allowed(fetch_url)
             if not allowed:
                 LOGGER.warning("[Research] blocked URL by allowlist policy: %s", policy_reason)
+                LOGGER.info("[FIRECRAWL] skipped reason=domain_not_allowed")
                 fetch_meta["content_fetch_skip_reason"] = "domain_not_allowed"
                 safety_notes.append(f"blocked_by_domain_policy:{policy_reason}")
                 safety_notes.append("content_fetch_skipped:domain_not_allowed")
@@ -263,7 +268,7 @@ class OpenAIResearchService(ResearchService):
                 fetch_meta["content_fetch_url"] = fetch_url
                 started = time.perf_counter()
                 try:
-                    markdown, provider = self._fetch_markdown_for_url(fetch_url)
+                    markdown, provider = self._fetch_markdown_for_url(fetch_url, run_id=run_id)
                     fetch_meta["content_fetch_provider"] = provider
                     fetch_meta["content_fetch_status"] = "ok"
                     fetch_meta["content_fetch_markdown_chars"] = len(markdown)
@@ -615,7 +620,7 @@ class OpenAIResearchService(ResearchService):
             return pdf_candidates[0], None
         return "", "no_sources"
 
-    def _fetch_markdown_for_url(self, url: str) -> tuple[str, str]:
+    def _fetch_markdown_for_url(self, url: str, *, run_id: str) -> tuple[str, str]:
         cached = self._load_markdown(url) or ""
         if cached:
             provider = "firecrawl_pdf_to_markdown" if _is_pdf_url(url) else "simple_requests_html"
@@ -625,16 +630,39 @@ class OpenAIResearchService(ResearchService):
         is_pdf = _is_pdf_url(url) or content_type.startswith("application/pdf")
         if is_pdf:
             if not self._pdf_ingestion_enabled:
+                LOGGER.info("[FIRECRAWL] skipped reason=pdf_disabled")
                 raise RuntimeError("pdf_disabled")
             if not self._firecrawl_client.enabled:
+                LOGGER.info("[FIRECRAWL] skipped reason=missing_api_key")
                 raise RuntimeError("firecrawl_missing_key")
-            markdown = self._firecrawl_client.fetch_markdown(
-                url,
-                max_pages=self._firecrawl_max_pages,
-                max_markdown_chars=self._firecrawl_max_markdown_chars,
-            )
+            started = time.perf_counter()
+            LOGGER.info("[FIRECRAWL] dispatch url=%s run_id=%s pdf=true", self._redact_url(url), run_id)
+            try:
+                markdown = self._firecrawl_client.fetch_markdown(
+                    url,
+                    max_pages=self._firecrawl_max_pages,
+                    max_markdown_chars=self._firecrawl_max_markdown_chars,
+                )
+            except Exception as exc:
+                status_code = getattr(exc, "status_code", None)
+                status_label = str(status_code) if status_code is not None else "none"
+                LOGGER.warning(
+                    "[FIRECRAWL] failure url=%s error=%s status_code=%s",
+                    self._redact_url(url),
+                    type(exc).__name__,
+                    status_label,
+                )
+                raise
+            latency_ms = int((time.perf_counter() - started) * 1000)
             if not markdown.strip():
+                LOGGER.warning("[FIRECRAWL] failure url=%s error=RuntimeError status_code=none", self._redact_url(url))
                 raise RuntimeError("empty_markdown")
+            LOGGER.info(
+                "[FIRECRAWL] success url=%s markdown_chars=%s latency_ms=%s",
+                self._redact_url(url),
+                len(markdown),
+                latency_ms,
+            )
             self._cache.set("url_markdown", url, {"markdown": markdown})
             LOGGER.info("[Research] cache miss scope=url_markdown")
             return markdown, "firecrawl_pdf_to_markdown"
@@ -657,6 +685,18 @@ class OpenAIResearchService(ResearchService):
             else:
                 redacted.append((key, value))
         return parse.urlunparse(parsed._replace(query=parse.urlencode(redacted)))
+
+    def _request_run_id(self, request_packet: ResearchRequest) -> str:
+        raw = request_packet.context.get("run_id")
+        return str(raw) if raw is not None else "unknown"
+
+    def _log_firecrawl_enabled_banner(self, run_id: str) -> None:
+        if not self._firecrawl_enabled:
+            return
+        if run_id in self._firecrawl_enabled_banner_seen:
+            return
+        self._firecrawl_enabled_banner_seen.add(run_id)
+        LOGGER.info("[FIRECRAWL] provider enabled=True timeout_s=%s", self._firecrawl_timeout_s)
 
     def _probe_content_type(self, url: str) -> str:
         try:
