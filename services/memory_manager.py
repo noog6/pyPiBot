@@ -435,6 +435,8 @@ class MemoryManager:
         }
         self._semantic_canary_last_checked_monotonic = 0.0
         self._semantic_readiness_reason_last = "not_run"
+        self._semantic_readiness_last_transition_monotonic = time.monotonic()
+        self._semantic_readiness_transition_count = 0
         self._semantic_canary_refresh_interval_s = max(
             30.0,
             float(semantic_cfg.get("canary_refresh_interval_s", SEMANTIC_CANARY_REFRESH_INTERVAL_S)),
@@ -577,15 +579,19 @@ class MemoryManager:
         after_ready, after_reason = self._is_semantic_provider_ready()
         previous_reason = str(getattr(self, "_semantic_readiness_reason_last", "not_run") or "not_run")
         reason_changed = after_reason != previous_reason
-        transitioned_not_ready = before_ready and not after_ready
-        if transitioned_not_ready or reason_changed:
+        readiness_changed = before_ready != after_ready
+        if readiness_changed or reason_changed:
+            self._semantic_readiness_last_transition_monotonic = time.monotonic()
+            self._semantic_readiness_transition_count = (
+                max(0, int(getattr(self, "_semantic_readiness_transition_count", 0))) + 1
+            )
             logger.info(
-                "semantic_readiness_updated ready=%s previous_ready=%s reason=%s previous_reason=%s refresh_reason=%s",
-                after_ready,
-                before_ready,
-                after_reason,
-                previous_reason,
+                "semantic_readiness_transition event=%s previous_ready=%s ready=%s previous_reason=%s reason=%s",
                 reason,
+                before_ready,
+                after_ready,
+                previous_reason,
+                after_reason,
             )
         self._semantic_readiness_reason_last = after_reason
         return True
@@ -786,12 +792,23 @@ class MemoryManager:
         provider_ready, readiness_reason = self._is_semantic_provider_ready()
         last_checked = float(getattr(self, "_semantic_canary_last_checked_monotonic", 0.0) or 0.0)
         canary_age_ms = int(max(0.0, (time.monotonic() - last_checked) * 1000.0)) if last_checked > 0.0 else -1
+        readiness_last_transition = float(
+            getattr(self, "_semantic_readiness_last_transition_monotonic", 0.0) or 0.0
+        )
+        readiness_age_ms = (
+            int(max(0.0, (time.monotonic() - readiness_last_transition) * 1000.0))
+            if readiness_last_transition > 0.0
+            else -1
+        )
         return {
             "ready": bool(provider_ready and self._semantic_provider_ready_last),
             "query_embedding_not_ready_streak": int(self._semantic_query_embedding_not_ready_streak),
             "last_error_code": str(getattr(self, "_semantic_provider_last_error_code", "none") or "none"),
             "readiness_reason": str(readiness_reason),
             "last_canary_age_ms": canary_age_ms,
+            "readiness_last_transition_at": readiness_last_transition,
+            "readiness_age_ms": readiness_age_ms,
+            "readiness_transition_count": int(getattr(self, "_semantic_readiness_transition_count", 0)),
         }
 
     def remember_memory(

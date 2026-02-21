@@ -63,6 +63,8 @@ def _make_memory_manager(store: MemoryStore) -> MemoryManager:
     }
     manager._semantic_canary_last_checked_monotonic = 0.0
     manager._semantic_readiness_reason_last = "not_run"
+    manager._semantic_readiness_last_transition_monotonic = time.monotonic()
+    manager._semantic_readiness_transition_count = 0
     manager._semantic_canary_refresh_interval_s = 300.0
     manager._semantic_query_timeout_floor_warned = False
     manager._semantic_query_embedding_not_ready_streak = 0
@@ -1941,11 +1943,60 @@ def test_maybe_refresh_canary_updates_reason_without_duplicate_transition_logs(t
     manager._semantic_canary_last_checked_monotonic = time.monotonic() - 600.0
     manager._maybe_refresh_canary(reason="periodic")
     manager._semantic_canary_last_checked_monotonic = time.monotonic() - 600.0
-    manager._maybe_refresh_canary(reason="periodic")
+    manager._maybe_refresh_canary(reason="runtime_timeout_streak")
 
-    readiness_logs = [record.getMessage() for record in caplog.records if "semantic_readiness_updated" in record.getMessage()]
+    readiness_logs = [
+        record.getMessage() for record in caplog.records if "semantic_readiness_transition" in record.getMessage()
+    ]
     assert len(readiness_logs) == 2
+    assert "event=periodic" in readiness_logs[0]
+    assert "previous_reason=provider_ready" in readiness_logs[0]
+    assert "reason=canary_timeout" in readiness_logs[0]
+    assert "event=runtime_timeout_streak" in readiness_logs[1]
+    assert "previous_reason=canary_timeout" in readiness_logs[1]
+    assert "reason=provider_ready" in readiness_logs[1]
     assert manager._semantic_readiness_reason_last == "provider_ready"
+    assert manager._semantic_readiness_transition_count == 2
+
+
+def test_semantic_runtime_health_readiness_freshness_advances_after_transition(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._semantic_config.enabled = True
+    manager._semantic_config.rerank_enabled = True
+    manager._semantic_config.provider = "openai"
+    manager._semantic_provider_enabled = {"openai": True}
+    manager._semantic_canary_bypass = False
+    manager._embedding_provider = SimpleNamespace(embed_text=lambda text: None)
+    manager._semantic_canary_last_checked_monotonic = time.monotonic() - 600.0
+    manager._semantic_canary_last = {
+        "canary_success": False,
+        "latency_ms": 12,
+        "dimension": None,
+        "error_code": "timeout",
+    }
+    manager._semantic_readiness_reason_last = "canary_timeout"
+    manager._semantic_readiness_last_transition_monotonic = time.monotonic() - 1.0
+    manager._semantic_readiness_transition_count = 1
+
+    before = manager.get_semantic_runtime_health()
+    assert before["readiness_age_ms"] >= 900
+    assert before["readiness_transition_count"] == 1
+
+    manager._semantic_canary_last = {
+        "canary_success": True,
+        "latency_ms": 7,
+        "dimension": 2,
+        "error_code": "none",
+    }
+    manager._semantic_canary_last_checked_monotonic = time.monotonic() - 600.0
+
+    manager._maybe_refresh_canary(reason="runtime_timeout_streak")
+
+    after = manager.get_semantic_runtime_health()
+    assert after["readiness_transition_count"] == 2
+    assert after["readiness_last_transition_at"] >= before["readiness_last_transition_at"]
+    assert 0 <= after["readiness_age_ms"] < before["readiness_age_ms"]
 
 
 def test_embed_timeout_threshold_refreshes_canary_and_updates_readiness_reason(tmp_path) -> None:
