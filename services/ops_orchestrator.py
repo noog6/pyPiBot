@@ -19,6 +19,7 @@ from core.ops_models import (
     HealthStatus,
     ModeState,
     OpsEvent,
+    OpsSnapshot,
 )
 from services.health_probes import (
     HealthProbeResult,
@@ -38,6 +39,7 @@ class OpsOrchestrator:
 
     _instance: "OpsOrchestrator | None" = None
     _MAX_HEALTH_SUMMARY_CHARS = 220
+    _SNAPSHOT_SCHEMA_VERSION = "ops_snapshot.v1"
 
     def __init__(self) -> None:
         if OpsOrchestrator._instance is not None:
@@ -104,6 +106,7 @@ class OpsOrchestrator:
             self._shutdown_requested_at = None
             self._loop_thread = threading.Thread(target=self._loop, daemon=True)
             self._loop_thread.start()
+            self._emit_canonical_snapshot(time.time(), reason="startup")
 
     def stop_loop(self, timeout_s: float = 2.0, grace_period_s: float = 0.2) -> str:
         status = "stopped"
@@ -301,7 +304,7 @@ class OpsOrchestrator:
             self._emit_heartbeat(timestamp)
 
     def _emit_heartbeat(self, timestamp: float) -> None:
-        """Heartbeat log stub for future operational events."""
+        """Emit heartbeat counters and parser-safe canonical ops snapshot."""
 
         with self._lock:
             self._counters.heartbeats += 1
@@ -322,6 +325,44 @@ class OpsOrchestrator:
                 event.metadata["mode"],
                 event.metadata["ticks"],
                 event.metadata["heartbeats"],
+            )
+        self._emit_canonical_snapshot(timestamp, reason="heartbeat")
+
+    def _emit_canonical_snapshot(self, timestamp: float, reason: str) -> None:
+        with self._lock:
+            health = self._latest_health
+            snapshot = OpsSnapshot(
+                schema_version=self._SNAPSHOT_SCHEMA_VERSION,
+                emitted_at=timestamp,
+                reason=reason,
+                mode=self._mode.value,
+                loop_phase=self._loop_phase,
+                active_probe=self._active_probe_name or "none",
+                ticks=self._counters.ticks,
+                heartbeats=self._counters.heartbeats,
+                errors=self._counters.errors,
+                health_status=(health.status.value if health else "unknown"),
+                health_summary=(health.summary if health else "no health snapshot yet"),
+                loop_period_s=self._loop_period_s,
+                heartbeat_period_s=self._heartbeat_period_s,
+            )
+            event = OpsEvent(
+                timestamp=timestamp,
+                event_type="ops_snapshot",
+                message="Canonical ops snapshot",
+                metadata=snapshot.to_metadata(),
+            )
+            self._recent_events = (self._recent_events + [event])[-20:]
+        if self._should_log_event("ops_snapshot"):
+            LOGGER.info(
+                "[Ops] Snapshot[%s]: schema=%s mode=%s ticks=%s heartbeats=%s errors=%s health=%s",
+                reason,
+                snapshot.schema_version,
+                snapshot.mode,
+                snapshot.ticks,
+                snapshot.heartbeats,
+                snapshot.errors,
+                snapshot.health_status,
             )
 
     def _load_probe_config(self) -> None:

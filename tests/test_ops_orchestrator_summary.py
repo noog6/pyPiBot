@@ -98,3 +98,63 @@ def test_summarize_health_includes_semantic_runtime_probe_reason() -> None:
 
     assert summary.startswith("Degraded:")
     assert "memory_semantic_runtime (offline)" in summary
+
+
+
+def test_emit_canonical_snapshot_uses_versioned_stable_fields() -> None:
+    orchestrator = _new_orchestrator()
+
+    orchestrator._emit_canonical_snapshot(123.0, reason="startup")
+
+    event = orchestrator._recent_events[-1]
+    assert event.event_type == "ops_snapshot"
+    assert set(event.metadata.keys()) == {
+        "schema_version",
+        "emitted_at",
+        "reason",
+        "mode",
+        "loop_phase",
+        "active_probe",
+        "ticks",
+        "heartbeats",
+        "errors",
+        "health_status",
+        "health_summary",
+        "loop_period_s",
+        "heartbeat_period_s",
+    }
+    assert event.metadata["schema_version"] == "ops_snapshot.v1"
+    assert event.metadata["reason"] == "startup"
+
+
+def test_start_loop_emits_startup_snapshot(monkeypatch) -> None:
+    orchestrator = _new_orchestrator()
+
+    class FakeThread:
+        def __init__(self, target=None, daemon=None) -> None:
+            self._alive = False
+            self.name = "fake"
+            self.ident = 1
+
+        def start(self) -> None:
+            self._alive = True
+
+        def is_alive(self) -> bool:
+            return self._alive
+
+        def join(self, timeout=None) -> None:
+            self._alive = False
+
+    reasons: list[str] = []
+
+    monkeypatch.setattr("services.ops_orchestrator.threading.Thread", FakeThread)
+    monkeypatch.setattr(orchestrator, "_load_probe_config", lambda: None)
+    monkeypatch.setattr(
+        orchestrator,
+        "_emit_canonical_snapshot",
+        lambda timestamp, reason: reasons.append(reason),
+    )
+
+    orchestrator.start_loop(loop_period_s=0.1, heartbeat_period_s=0.2)
+
+    assert reasons == ["startup"]

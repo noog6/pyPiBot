@@ -77,6 +77,37 @@ Two levels of counters are tracked:
 These counters provide a running view of runtime stability and connectivity.
 【F:core/ops_models.py†L24-L32】【F:services/ops_orchestrator.py†L122-L200】【F:services/health_probes.py†L149-L199】
 
+## Ops Snapshot Runbook (Canonical Schema)
+
+The orchestrator emits a canonical `ops_snapshot` payload at **startup** and on
+regular **heartbeat intervals**. The payload is intentionally flat,
+version-tagged, and parser-safe so external tooling can decode it without
+runtime-specific assumptions.
+
+Expected fields (stable for `schema_version=ops_snapshot.v1`):
+
+- `schema_version` (string): Schema tag for compatibility checks.
+- `emitted_at` (float): Unix timestamp when the snapshot was emitted.
+- `reason` (string): Emission trigger (`startup`, `heartbeat`, etc.).
+- `mode` (string): Current orchestrator mode.
+- `loop_phase` (string): Current loop execution phase.
+- `active_probe` (string): Probe currently running, or `none`.
+- `ticks` (int): Total ops loop ticks.
+- `heartbeats` (int): Total heartbeat count.
+- `errors` (int): Total tick-loop error count.
+- `health_status` (string): Current overall health status.
+- `health_summary` (string): Current health summary text.
+- `loop_period_s` (float): Loop cadence in seconds.
+- `heartbeat_period_s` (float): Heartbeat cadence in seconds.
+
+Operator guidance:
+
+- Treat unknown `schema_version` values as forward-compatible and parse only the
+  fields recognized by your integration.
+- Do not infer semantics from field ordering; use keys only.
+- If `health_status=unknown`, the orchestrator has not yet emitted a health
+  snapshot for this runtime session.
+
 ## Alerts & Alert Policy
 
 The ops layer emits alerts for two main cases:
