@@ -11,6 +11,8 @@ import yaml
 MEMORY_SEMANTIC_QUERY_TIMEOUT_FLOOR_MS = 100
 MEMORY_SEMANTIC_QUERY_TIMEOUT_DEFAULT_MS = 2000
 MEMORY_SEMANTIC_OPENAI_TIMEOUT_DEFAULT_S = 10.0
+MEMORY_SEMANTIC_STARTUP_CANARY_TIMEOUT_FLOOR_MS = 500
+MEMORY_SEMANTIC_STARTUP_CANARY_TIMEOUT_DEFAULT_MS = 1500
 
 
 @dataclass(frozen=True)
@@ -266,9 +268,16 @@ class ConfigController:
             ),
         )
         memory_semantic_cfg["startup_canary_timeout_ms"] = max(
-            1,
-            int(memory_semantic_cfg.get("startup_canary_timeout_ms", 120)),
+            MEMORY_SEMANTIC_STARTUP_CANARY_TIMEOUT_FLOOR_MS,
+            int(
+                memory_semantic_cfg.get(
+                    "startup_canary_timeout_ms",
+                    MEMORY_SEMANTIC_STARTUP_CANARY_TIMEOUT_DEFAULT_MS,
+                )
+            ),
         )
+        # Keep canary timeout independent from write timeout: startup canary validates
+        # provider/network readiness and should tolerate cold-start jitter.
         memory_semantic_cfg["startup_canary_bypass"] = bool(
             memory_semantic_cfg.get("startup_canary_bypass", False)
         )
