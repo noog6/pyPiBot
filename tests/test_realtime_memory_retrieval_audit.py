@@ -47,6 +47,9 @@ class _FakeManager:
             "ready": False,
             "query_embedding_not_ready_streak": 5,
             "last_error_code": "timeout_backoff",
+            "readiness_last_transition_at": 123.45,
+            "readiness_age_ms": 987,
+            "readiness_transition_count": 4,
         }
 
 
@@ -76,6 +79,9 @@ def test_prepare_turn_memory_brief_logs_semantic_runtime_health_when_streak_non_
     message = captured["message"]
     assert "semantic_runtime_streak=5" in message
     assert "semantic_runtime_last_error=timeout_backoff" in message
+    assert "semantic_runtime_readiness_last_transition_at=123.45" in message
+    assert "semantic_runtime_readiness_age_ms=987" in message
+    assert "semantic_runtime_readiness_transition_count=4" in message
     assert "semantic_provider=openai" in message
     assert "semantic_model=text-embedding-3-small" in message
     assert "semantic_query_timeout_ms=40" in message
