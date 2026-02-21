@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from ai.realtime_api import RealtimeAPI
+from ai.realtime_api import ConfirmationState, RealtimeAPI
 from services.research.models import ResearchPacket, ResearchRequest
 
 
@@ -22,12 +22,28 @@ def _make_api_stub() -> RealtimeAPI:
     api = RealtimeAPI.__new__(RealtimeAPI)
     api.orchestration_state = type("S", (), {"transition": lambda *args, **kwargs: None})()
     api._research_enabled = True
+    api._pending_action = None
+    api._pending_research_request = None
+    api._pending_confirmation_token = None
+    api._confirmation_state = ConfirmationState.IDLE
+    api._prior_research_permission_marker = None
+    api._prior_research_permission_grace_s = 8.0
+    api._research_permission_outcome_ttl_s = 20.0
+    api._research_permission_outcomes = {}
+    api._research_suppressed_fingerprints = {}
+    api._presented_actions = set()
+    api._tool_call_dedupe_ttl_s = 30.0
+    api.send_assistant_message = lambda *args, **kwargs: None
     return api
 
 
 def test_auto_approved_research_intent_short_circuits_normal_flow() -> None:
     api = _make_api_stub()
-    api._research_permission_required = False
+    api._research_mode = "auto"
+    api._research_provider = "openai"
+    api._research_firecrawl_enabled = False
+    api._research_firecrawl_allowlist_mode = "public"
+    api._research_firecrawl_allowlist_domains = set()
 
     calls: list[str] = []
 
@@ -90,7 +106,11 @@ def test_send_initial_prompt_routes_research_intent() -> None:
         calls.append(request.prompt)
 
     api._dispatch_research_request = _dispatch
-    api._research_permission_required = False
+    api._research_mode = "auto"
+    api._research_provider = "openai"
+    api._research_firecrawl_enabled = False
+    api._research_firecrawl_allowlist_mode = "public"
+    api._research_firecrawl_allowlist_domains = set()
 
     class _FakeWebsocket:
         def __init__(self) -> None:
@@ -105,3 +125,90 @@ def test_send_initial_prompt_routes_research_intent() -> None:
 
     assert calls == [api.prompts[0]]
     assert ws.events == []
+
+
+def test_allowlisted_html_url_bypasses_permission_and_dispatches() -> None:
+    api = _make_api_stub()
+    api._research_mode = "auto"
+    api._research_provider = "openai"
+    api._research_firecrawl_enabled = False
+    api._research_firecrawl_allowlist_mode = "explicit"
+    api._research_firecrawl_allowlist_domains = {"wikipedia.org"}
+    api._pending_confirmation_token = None
+
+    calls: list[str] = []
+
+    async def _dispatch(request: ResearchRequest, websocket: object) -> None:
+        calls.append(request.prompt)
+
+    api._dispatch_research_request = _dispatch
+
+    handled = asyncio.run(
+        api._maybe_process_research_intent(
+            "search the web for https://en.wikipedia.org/wiki/Python_(programming_language)",
+            websocket=object(),
+            source="text_message",
+        )
+    )
+
+    assert handled is True
+    assert calls
+    assert api._pending_confirmation_token is None
+
+
+def test_non_allowlisted_domain_requires_permission_token() -> None:
+    api = _make_api_stub()
+    api._research_mode = "auto"
+    api._research_provider = "openai"
+    api._research_firecrawl_enabled = False
+    api._research_firecrawl_allowlist_mode = "explicit"
+    api._research_firecrawl_allowlist_domains = {"wikipedia.org"}
+
+    prompts: list[str] = []
+
+    async def _send_assistant_message(message: str, *args, **kwargs) -> None:
+        prompts.append(message)
+
+    api.send_assistant_message = _send_assistant_message
+
+    handled = asyncio.run(
+        api._maybe_process_research_intent(
+            "search the web for https://example.com/deep-dive",
+            websocket=object(),
+            source="text_message",
+        )
+    )
+
+    assert handled is True
+    assert api._pending_confirmation_token is not None
+    assert api._pending_confirmation_token.kind == "research_permission"
+    assert prompts and "Do I have your permission" in prompts[0]
+
+
+def test_pdf_url_requires_permission_token() -> None:
+    api = _make_api_stub()
+    api._research_mode = "auto"
+    api._research_provider = "openai"
+    api._research_firecrawl_enabled = False
+    api._research_firecrawl_allowlist_mode = "public"
+    api._research_firecrawl_allowlist_domains = set()
+
+    prompts: list[str] = []
+
+    async def _send_assistant_message(message: str, *args, **kwargs) -> None:
+        prompts.append(message)
+
+    api.send_assistant_message = _send_assistant_message
+
+    handled = asyncio.run(
+        api._maybe_process_research_intent(
+            "search the web for https://arxiv.org/pdf/1706.03762.pdf",
+            websocket=object(),
+            source="text_message",
+        )
+    )
+
+    assert handled is True
+    assert api._pending_confirmation_token is not None
+    assert api._pending_confirmation_token.kind == "research_permission"
+    assert prompts and "Do I have your permission" in prompts[0]
