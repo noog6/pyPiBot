@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 import hashlib
-import ipaddress
 from io import BytesIO
 import json
 import os
@@ -77,6 +76,7 @@ from services.research import ResearchRequest, build_openai_service_or_null, has
 from services.research.grounding import build_research_grounding_explanation, get_content_fetch_state
 from services.research.research_transcript import write_research_transcript
 from storage import StorageController
+from storage.trusted_domains import TrustedDomainStore, merge_allowlists, normalize_trusted_domain
 
 RESPONSE_DONE_REFLECTION_PROMPT = """Summarize what changed. Any anomalies? Should anything be remembered?
 Return ONLY valid JSON with keys: summary, remember_memory.
@@ -461,6 +461,12 @@ class RealtimeAPI:
             for domain in (firecrawl_cfg.get("allowlist_domains") or [])
             if isinstance(domain, str) and domain.strip()
         }
+        self._trusted_domain_store = TrustedDomainStore()
+        self._trusted_research_domains = self._trusted_domain_store.get_domain_set()
+        self._research_firecrawl_allowlist_domains = merge_allowlists(
+            self._research_firecrawl_allowlist_domains,
+            self._trusted_research_domains,
+        )
         self._research_service = build_openai_service_or_null(config)
         self._pending_research_request: ResearchRequest | None = None
         self._prior_research_permission_marker: dict[str, Any] | None = None
@@ -2406,6 +2412,16 @@ class RealtimeAPI:
         if decision == "yes":
             if token is not None:
                 self._set_confirmation_state(ConfirmationState.RESOLVING, reason="research_permission_accepted")
+            domain = self._extract_primary_research_domain(request.prompt)
+            if domain and not self._is_research_domain_allowlisted(domain):
+                normalized = self._trusted_domain_store.add_domain(domain, added_by="user")
+                if normalized:
+                    self._trusted_research_domains.add(normalized)
+                    self._research_firecrawl_allowlist_domains = merge_allowlists(
+                        self._research_firecrawl_allowlist_domains,
+                        self._trusted_research_domains,
+                    )
+                    logger.info("[Allowlist] domain_added domain=%s", normalized)
             logger.info("[Research] Permission granted by user")
             self._mark_prior_research_permission_granted(request)
             if token is not None:
@@ -2503,6 +2519,8 @@ class RealtimeAPI:
         if permission_needed:
             provider = "firecrawl_fetch" if self._research_firecrawl_enabled else "openai_responses_web_search"
             domain = self._extract_primary_research_domain(request.prompt)
+            if reason == "non_allowlisted_domain" and domain:
+                logger.info("[Allowlist] permission_required domain=%s", domain)
             logger.info(
                 "[Research] permission_required reason=%s provider=%s domain=%s",
                 reason,
@@ -2518,8 +2536,14 @@ class RealtimeAPI:
             )
             self._sync_confirmation_legacy_fields()
             logger.info("[Research] Permission asked")
+            prompt_message = "I can do a web lookup for that. Do I have your permission to proceed? (yes/no)"
+            if reason == "non_allowlisted_domain" and domain:
+                prompt_message = (
+                    f"This domain is not currently allowed. May I add {domain} to your trusted list?"
+                    " (yes/no)"
+                )
             await self.send_assistant_message(
-                "I can do a web lookup for that. Do I have your permission to proceed? (yes/no)",
+                prompt_message,
                 websocket,
                 response_metadata={
                     "trigger": "confirmation_prompt",
@@ -2584,21 +2608,14 @@ class RealtimeAPI:
 
     def _is_research_domain_allowlisted(self, host: str) -> bool:
         mode = getattr(self, "_research_firecrawl_allowlist_mode", "public")
-        normalized_host = host.lower().strip()
+        normalized_host = normalize_trusted_domain(host)
         if not normalized_host:
             return False
+        if normalized_host in getattr(self, "_trusted_research_domains", set()):
+            logger.info("[Allowlist] domain_trusted domain=%s", normalized_host)
+            return True
         if mode == "off":
             return True
-        if normalized_host in {"localhost", "127.0.0.1", "::1"} or normalized_host.endswith(".local"):
-            return False
-        try:
-            ip = ipaddress.ip_address(normalized_host)
-        except ValueError:
-            ip = None
-        if ip is not None and (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved):
-            return False
-        if normalized_host.endswith(".internal"):
-            return False
         if mode == "explicit":
             allowlist = getattr(self, "_research_firecrawl_allowlist_domains", set())
             if not allowlist:
