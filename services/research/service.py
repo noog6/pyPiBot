@@ -16,6 +16,11 @@ class ResearchService(ABC):
     def request_research(self, request: ResearchRequest) -> ResearchPacket:
         """Build a structured research packet from the provided request."""
 
+    def discover_domains(self, request: ResearchRequest) -> list[str]:
+        """Return likely source domains without performing full content retrieval."""
+
+        return []
+
 
 class NullResearchService(ResearchService):
     """Safe default implementation that does not perform any network activity."""
