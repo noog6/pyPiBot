@@ -1038,7 +1038,7 @@ class RealtimeAPI:
                         )
                     )
                 logger.info(
-                    "Turn memory retrieval audit source=%s mode=%s lexical_candidates=%s semantic_candidates=%s semantic_scored=%s candidates_without_ready_embedding=%s candidates_below_influence_threshold=%s candidates_semantic_applied=%s selected=%s fallback_reason=%s latency_ms=%s truncated=%s truncation_count=%s dedupe_count=%s semantic_provider=%s semantic_model=%s semantic_query_timeout_ms=%s semantic_query_duration_ms=%s semantic_error_code=%s semantic_error_class=%s semantic_scoring_skipped_reason=%s query_fingerprint_hash=%s query_fingerprint_length=%s%s",
+                    "Turn memory retrieval audit source=%s mode=%s lexical_candidates=%s semantic_candidates=%s semantic_scored=%s candidates_without_ready_embedding=%s candidates_below_influence_threshold=%s candidates_semantic_applied=%s selected=%s fallback_reason=%s latency_ms=%s truncated=%s truncation_count=%s dedupe_count=%s semantic_provider=%s semantic_model=%s semantic_query_timeout_ms=%s semantic_query_timeout_ms_used=%s semantic_query_duration_ms=%s semantic_query_embed_elapsed_ms=%s semantic_result_status=%s semantic_error_code=%s semantic_error_class=%s semantic_failure_class=%s semantic_scoring_skipped_reason=%s query_fingerprint_hash=%s query_fingerprint_length=%s%s",
                     source,
                     retrieval_debug.get("mode"),
                     retrieval_debug.get("lexical_candidate_count"),
@@ -1056,9 +1056,13 @@ class RealtimeAPI:
                     retrieval_debug.get("semantic_provider"),
                     retrieval_debug.get("semantic_model"),
                     retrieval_debug.get("semantic_query_timeout_ms"),
+                    retrieval_debug.get("semantic_query_timeout_ms_used"),
                     retrieval_debug.get("semantic_query_duration_ms"),
+                    retrieval_debug.get("semantic_query_embed_elapsed_ms"),
+                    retrieval_debug.get("semantic_result_status"),
                     retrieval_debug.get("semantic_error_code"),
                     retrieval_debug.get("semantic_error_class"),
+                    retrieval_debug.get("semantic_failure_class"),
                     retrieval_debug.get("semantic_scoring_skipped_reason"),
                     retrieval_debug.get("query_fingerprint_hash"),
                     retrieval_debug.get("query_fingerprint_length"),

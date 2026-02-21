@@ -56,6 +56,32 @@ def _sanitize_error_class_name(value: object) -> str | None:
     return class_name[:64]
 
 
+def _normalize_semantic_failure_class(*, error_code: object, error_class: object) -> str | None:
+    code = str(error_code or "").strip().lower()
+    klass = str(error_class or "").strip().lower()
+    haystack = f"{code} {klass}"
+
+    if "rate" in haystack and "limit" in haystack:
+        return "rate_limited"
+    if code == "rate_limited":
+        return "rate_limited"
+    if "timeout" in haystack:
+        return "timeout"
+    if "auth" in haystack or "forbidden" in haystack or "unauthorized" in haystack:
+        return "auth"
+    if "model" in haystack:
+        return "model"
+    if (
+        "connect" in haystack
+        or "network" in haystack
+        or "dns" in haystack
+        or "socket" in haystack
+        or "tls" in haystack
+    ):
+        return "connection"
+    return None
+
+
 class MemoryScope(str, Enum):
     """Supported memory scope modes."""
 
@@ -1230,9 +1256,13 @@ class MemoryManager:
             "semantic_provider": str(getattr(self._semantic_config, "provider", "none") or "none"),
             "semantic_model": None,
             "semantic_query_timeout_ms": int(getattr(self._semantic_config, "query_timeout_ms", 2000)),
+            "semantic_query_timeout_ms_used": None,
             "semantic_query_duration_ms": 0,
+            "semantic_query_embed_elapsed_ms": 0,
+            "semantic_result_status": None,
             "semantic_error_code": None,
             "semantic_error_class": None,
+            "semantic_failure_class": None,
             "semantic_scoring_skipped_reason": None,
             "query_fingerprint_hash": None,
             "query_fingerprint_length": 0,
@@ -1366,6 +1396,9 @@ class MemoryManager:
                 self._last_turn_retrieval_debug["semantic_query_embed_elapsed_ms"] = int(
                     getattr(query_embedding, "elapsed_ms", self._last_turn_retrieval_debug["semantic_query_duration_ms"])
                 )
+                self._last_turn_retrieval_debug["semantic_result_status"] = str(
+                    getattr(query_embedding, "status", "unknown") or "unknown"
+                )
                 self._last_turn_retrieval_debug["semantic_model"] = str(
                     getattr(query_embedding, "model", None)
                     or getattr(self._embedding_provider, "_model", None)
@@ -1423,25 +1456,51 @@ class MemoryManager:
                 else:
                     self._last_turn_retrieval_debug["fallback_reason"] = "query_embedding_not_ready"
                     error_code = str(getattr(query_embedding, "error_code", None) or getattr(query_embedding, "status", None) or "unknown")
-                    self._last_turn_retrieval_debug["semantic_error_code"] = error_code
-                    self._last_turn_retrieval_debug["semantic_error_class"] = _sanitize_error_class_name(
+                    error_class = _sanitize_error_class_name(
                         getattr(query_embedding, "error_class", None)
                     )
-                    self._last_turn_retrieval_debug["semantic_scoring_skipped_reason"] = (
-                        "query_embedding_timeout"
-                        if error_code in {"timeout", "timeout_backoff"}
-                        else "query_embedding_not_ready"
+                    failure_class = _normalize_semantic_failure_class(
+                        error_code=error_code,
+                        error_class=error_class,
                     )
+                    self._last_turn_retrieval_debug["semantic_error_code"] = error_code
+                    self._last_turn_retrieval_debug["semantic_error_class"] = error_class
+                    self._last_turn_retrieval_debug["semantic_failure_class"] = failure_class
+                    self._last_turn_retrieval_debug["semantic_scoring_skipped_reason"] = (
+                        "query_embedding_backoff"
+                        if error_code == "timeout_backoff"
+                        else (
+                            "query_embedding_timeout"
+                            if failure_class == "timeout"
+                            else (
+                                "query_embedding_rate_limited"
+                                if failure_class == "rate_limited"
+                                else "query_embedding_not_ready"
+                            )
+                        )
+                    )
+                    if self._last_turn_retrieval_debug["semantic_scoring_skipped_reason"] == "query_embedding_backoff":
+                        self._last_turn_retrieval_debug["fallback_reason"] = "query_embedding_backoff"
+                    elif self._last_turn_retrieval_debug["semantic_scoring_skipped_reason"] == "query_embedding_rate_limited":
+                        self._last_turn_retrieval_debug["fallback_reason"] = "query_embedding_rate_limited"
+                    elif self._last_turn_retrieval_debug["semantic_scoring_skipped_reason"] == "query_embedding_timeout":
+                        self._last_turn_retrieval_debug["fallback_reason"] = "query_embedding_timeout"
             except Exception as exc:  # noqa: BLE001
                 # Semantic reranking is best-effort and must never degrade lexical retrieval.
                 ordered = [item[1] for item in lexical_ordered]
                 self._retrieval_semantic_error_count += 1
+                exception_error_class = _sanitize_error_class_name(exc.__class__.__name__)
                 self._last_turn_retrieval_debug.update(
                     {
                         "mode": "hybrid_fallback_lexical",
                         "semantic_error": "exception",
+                        "semantic_result_status": "exception",
                         "semantic_error_code": "semantic_provider_exception",
-                        "semantic_error_class": _sanitize_error_class_name(exc.__class__.__name__),
+                        "semantic_error_class": exception_error_class,
+                        "semantic_failure_class": _normalize_semantic_failure_class(
+                            error_code="semantic_provider_exception",
+                            error_class=exception_error_class,
+                        ),
                         "semantic_scoring_skipped_reason": "semantic_provider_error",
                         "fallback_reason": "semantic_provider_error",
                     }
@@ -1453,7 +1512,12 @@ class MemoryManager:
             self._last_turn_retrieval_debug["fallback_reason"] = semantic_readiness_reason
             self._last_turn_retrieval_debug["semantic_scoring_skipped_reason"] = "semantic_not_ready"
 
-        if self._last_turn_retrieval_debug.get("fallback_reason") == "query_embedding_not_ready":
+        if self._last_turn_retrieval_debug.get("semantic_scoring_skipped_reason") in {
+            "query_embedding_not_ready",
+            "query_embedding_timeout",
+            "query_embedding_rate_limited",
+            "query_embedding_backoff",
+        }:
             self._semantic_query_embedding_not_ready_streak = (
                 max(0, int(getattr(self, "_semantic_query_embedding_not_ready_streak", 0))) + 1
             )
