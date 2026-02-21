@@ -115,6 +115,56 @@ def _normalize_canary_error_code(raw_error_code: str | None, *, exc: Exception |
     return "connection"
 
 
+def _is_provider_outage_reason(reason: object) -> bool:
+    value = str(reason or "").strip().lower()
+    if not value:
+        return False
+    if value in {"provider_ready", "canary_bypassed", "provider_not_configured"}:
+        return False
+    return (
+        value.endswith("_provider_disabled")
+        or value.startswith("canary_")
+        or value in {"provider_missing", "provider_unavailable", "provider_missing_embed_text"}
+    )
+
+
+def _resolve_semantic_pipeline_parity(
+    *,
+    semantic_enabled: bool,
+    semantic_provider_ready: bool,
+    readiness_reason: object,
+    background_embedding_enabled: bool,
+    candidates_without_ready_embedding: int,
+    pending_embeddings: int,
+    fallback_reason: object,
+) -> tuple[str, str, str]:
+    provider_outage = _is_provider_outage_reason(readiness_reason) or _is_provider_outage_reason(fallback_reason)
+    backlog_present = (int(candidates_without_ready_embedding) > 0) or (int(pending_embeddings) > 0)
+
+    if not semantic_enabled:
+        read_pipeline_status = "disabled"
+    elif semantic_provider_ready:
+        read_pipeline_status = "ready"
+    else:
+        read_pipeline_status = "provider_outage" if provider_outage else "degraded"
+
+    if not background_embedding_enabled:
+        write_pipeline_status = "disabled"
+    elif semantic_provider_ready:
+        write_pipeline_status = "ready"
+    else:
+        write_pipeline_status = "provider_outage" if provider_outage else "degraded"
+
+    if provider_outage:
+        embedding_coverage_cause = "provider_outage"
+    elif backlog_present:
+        embedding_coverage_cause = "embedding_backlog"
+    else:
+        embedding_coverage_cause = "none"
+
+    return write_pipeline_status, read_pipeline_status, embedding_coverage_cause
+
+
 class MemoryScope(str, Enum):
     """Supported memory scope modes."""
 
@@ -763,6 +813,16 @@ class MemoryManager:
         """Return semantic memory startup diagnostics for one-line logging."""
 
         provider_ready, readiness_reason = self._is_semantic_provider_ready()
+        retrieval_metrics = self.get_retrieval_health_metrics()
+        write_pipeline_status, read_pipeline_status, embedding_coverage_cause = _resolve_semantic_pipeline_parity(
+            semantic_enabled=bool(self._semantic_config.enabled and self._semantic_config.rerank_enabled),
+            semantic_provider_ready=bool(provider_ready),
+            readiness_reason=readiness_reason,
+            background_embedding_enabled=bool(self._semantic_config.background_embedding_enabled),
+            candidates_without_ready_embedding=0,
+            pending_embeddings=int(retrieval_metrics.get("pending_count", 0)),
+            fallback_reason=readiness_reason,
+        )
         canary_state = getattr(self, "_semantic_canary_last", {}) or {}
         provider_timeout_ms = int(max(1.0, float(getattr(self._semantic_config, "provider_timeout_s", 0.0)) * 1000.0))
         effective_timeout_budget_ms = min(
@@ -781,6 +841,9 @@ class MemoryManager:
             "background_embedding_enabled": bool(self._semantic_config.background_embedding_enabled),
             "provider_ready": bool(provider_ready),
             "provider_readiness_reason": str(readiness_reason),
+            "write_pipeline_status": write_pipeline_status,
+            "read_pipeline_status": read_pipeline_status,
+            "embedding_coverage_cause": embedding_coverage_cause,
             "canary_success": bool(canary_state.get("canary_success", False)),
             "canary_latency_ms": int(canary_state.get("latency_ms", 0) or 0),
             "canary_dimension": int(canary_state.get("dimension", 0) or 0),
@@ -1347,6 +1410,9 @@ class MemoryManager:
             "semantic_scoring_skipped_reason": None,
             "query_fingerprint_hash": None,
             "query_fingerprint_length": 0,
+            "write_pipeline_status": None,
+            "read_pipeline_status": None,
+            "embedding_coverage_cause": None,
         }
 
         now_for_backoff = time.monotonic()
@@ -1608,6 +1674,21 @@ class MemoryManager:
         self._last_turn_retrieval_debug["semantic_query_embedding_not_ready_streak"] = int(
             self._semantic_query_embedding_not_ready_streak
         )
+
+        write_pipeline_status, read_pipeline_status, embedding_coverage_cause = _resolve_semantic_pipeline_parity(
+            semantic_enabled=bool(self._semantic_config.enabled and self._semantic_config.rerank_enabled),
+            semantic_provider_ready=bool(semantic_provider_ready),
+            readiness_reason=semantic_readiness_reason,
+            background_embedding_enabled=bool(self._semantic_config.background_embedding_enabled),
+            candidates_without_ready_embedding=int(
+                self._last_turn_retrieval_debug.get("candidates_without_ready_embedding", 0)
+            ),
+            pending_embeddings=0,
+            fallback_reason=self._last_turn_retrieval_debug.get("fallback_reason"),
+        )
+        self._last_turn_retrieval_debug["write_pipeline_status"] = write_pipeline_status
+        self._last_turn_retrieval_debug["read_pipeline_status"] = read_pipeline_status
+        self._last_turn_retrieval_debug["embedding_coverage_cause"] = embedding_coverage_cause
 
         if self._last_turn_retrieval_debug.get("mode") == "none":
             self._last_turn_retrieval_debug["mode"] = "lexical"

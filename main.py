@@ -125,6 +125,7 @@ def main(argv: list[str] | None = None) -> int:
     logger.info(
         "Semantic startup summary enabled=%s provider=%s model=%s rerank_enabled=%s "
         "background_embedding_enabled=%s provider_ready=%s readiness_reason=%s "
+        "write_pipeline_status=%s read_pipeline_status=%s embedding_coverage_cause=%s "
         "provider_timeout_s=%s startup_canary_timeout_ms=%s query_timeout_ms=%s write_timeout_ms=%s "
         "effective_timeout_budget_ms=%s max_queries_per_minute=%s max_writes_per_minute=%s",
         semantic_startup_summary["enabled"],
@@ -134,6 +135,9 @@ def main(argv: list[str] | None = None) -> int:
         semantic_startup_summary["background_embedding_enabled"],
         semantic_startup_summary["provider_ready"],
         semantic_startup_summary["provider_readiness_reason"],
+        semantic_startup_summary["write_pipeline_status"],
+        semantic_startup_summary["read_pipeline_status"],
+        semantic_startup_summary["embedding_coverage_cause"],
         semantic_startup_summary["provider_timeout_s"],
         semantic_startup_summary["startup_canary_timeout_ms"],
         semantic_startup_summary["query_timeout_ms"],

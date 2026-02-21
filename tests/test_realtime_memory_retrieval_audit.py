@@ -38,6 +38,9 @@ class _FakeManager:
             "semantic_error_code": "timeout",
             "semantic_error_class": "TimeoutError",
             "semantic_scoring_skipped_reason": "query_embedding_timeout",
+            "write_pipeline_status": "provider_outage",
+            "read_pipeline_status": "provider_outage",
+            "embedding_coverage_cause": "provider_outage",
             "query_fingerprint_hash": "abcdef0123456789",
             "query_fingerprint_length": 19,
         }
@@ -89,5 +92,8 @@ def test_prepare_turn_memory_brief_logs_semantic_runtime_health_when_streak_non_
     assert "semantic_error_code=timeout" in message
     assert "semantic_error_class=TimeoutError" in message
     assert "semantic_scoring_skipped_reason=query_embedding_timeout" in message
+    assert "write_pipeline_status=provider_outage" in message
+    assert "read_pipeline_status=provider_outage" in message
+    assert "embedding_coverage_cause=provider_outage" in message
     assert "query_fingerprint_hash=abcdef0123456789" in message
     assert "query_fingerprint_length=19" in message

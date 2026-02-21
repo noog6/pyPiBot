@@ -32,6 +32,9 @@ class _FakeMemoryManager:
             "background_embedding_enabled": True,
             "provider_ready": False,
             "provider_readiness_reason": "openai_provider_disabled",
+            "write_pipeline_status": "provider_outage",
+            "read_pipeline_status": "provider_outage",
+            "embedding_coverage_cause": "provider_outage",
             "canary_success": False,
             "canary_latency_ms": 12,
             "canary_dimension": 0,
@@ -251,6 +254,7 @@ def test_main_logs_semantic_memory_state_at_startup(monkeypatch) -> None:
     assert (
         "Semantic startup summary enabled=True provider=openai model=text-embedding-3-small rerank_enabled=True "
         "background_embedding_enabled=True provider_ready=False readiness_reason=openai_provider_disabled "
+        "write_pipeline_status=provider_outage read_pipeline_status=provider_outage embedding_coverage_cause=provider_outage "
         "provider_timeout_s=10.0 startup_canary_timeout_ms=60 query_timeout_ms=40 write_timeout_ms=75 "
         "effective_timeout_budget_ms=40 max_queries_per_minute=240 max_writes_per_minute=120"
     ) in infos
