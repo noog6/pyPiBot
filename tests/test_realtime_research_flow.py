@@ -46,11 +46,15 @@ def _make_api_stub() -> RealtimeAPI:
     api._pending_research_request = None
     api._pending_confirmation_token = None
     api._confirmation_state = ConfirmationState.IDLE
+    api._confirmation_timeout_check_last_logged_at = {}
+    api._confirmation_timeout_check_last_pause_reason = {}
     api._prior_research_permission_marker = None
     api._prior_research_permission_grace_s = 8.0
     api._research_permission_outcome_ttl_s = 20.0
     api._research_permission_outcomes = {}
     api._research_suppressed_fingerprints = {}
+    api._research_pending_call_ids = set()
+    api._deferred_research_tool_call = None
     api._presented_actions = set()
     api._tool_call_dedupe_ttl_s = 30.0
     api._trusted_domain_store = _InMemoryTrustedDomainStore()
