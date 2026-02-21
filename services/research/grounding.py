@@ -44,3 +44,34 @@ def build_research_grounding_explanation(packet: ResearchPacket) -> str:
     if human_reason is None:
         human_reason = "content fetching was skipped for this run"
     return f"I found sources but did not fetch/parse their contents in this run: {human_reason}."
+
+
+def requires_unverified_sources_only_response(packet: ResearchPacket) -> bool:
+    """Return True when narration must avoid presenting extracted values as confirmed."""
+
+    status, skip_reason, _failure_name = get_content_fetch_state(packet)
+    if status != "ok":
+        return True
+    return bool(skip_reason) and not packet.extracted_facts
+
+
+def build_unverified_sources_only_response(packet: ResearchPacket) -> str:
+    """Build a strict response when source contents were not fetched/parsed."""
+
+    urls = [
+        str(source.get("url") or "").strip()
+        for source in packet.sources
+        if isinstance(source, dict)
+    ]
+    urls = [url for url in urls if url]
+    lines = [
+        "I couldn't fetch/parse the source content in this run, so I can't verify specific values.",
+    ]
+    if urls:
+        lines.append(f"Sources found: {', '.join(urls[:3])}.")
+    else:
+        lines.append("I found candidate sources, but no source links were captured in the packet.")
+    lines.append(
+        "To verify details, I need fetched page/PDF content (or quoted source text) and then can extract grounded facts with citations."
+    )
+    return "\n".join(lines)

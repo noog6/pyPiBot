@@ -112,11 +112,9 @@ def test_dispatch_research_uses_worker_thread(monkeypatch) -> None:
     assert len(thread_calls) == 1
     assert service.calls and service.calls[0].prompt == "find sensor pinout"
     assert len(sent) == 1
-    assert sent[0].startswith("researched\n\n")
-    assert (
-        "I found sources but did not fetch/parse their contents in this run"
-        in sent[0]
-    )
+    assert "couldn't fetch/parse the source content in this run" in sent[0]
+    assert "To verify details" in sent[0]
+    assert "researched" not in sent[0]
 
 
 def test_send_initial_prompt_routes_research_intent() -> None:
@@ -380,3 +378,52 @@ def test_trusted_domain_store_persists_across_instances(tmp_path) -> None:
 
     assert added == "example.com"
     assert "example.com" in domains
+
+
+def test_dispatch_research_pdf_disabled_omits_unverified_numeric_claims() -> None:
+    api = _make_api_stub()
+    sent: list[str] = []
+
+    async def _send_assistant_message(message: str, websocket: object) -> None:
+        sent.append(message)
+
+    packet = ResearchPacket(
+        status="ok",
+        answer_summary="The max PWM frequency is 1526 Hz.",
+        extracted_facts=[],
+        sources=[{"title": "NXP Datasheet", "url": "https://www.nxp.com/docs/en/data-sheet/PCA9685.pdf"}],
+        metadata={"content_fetch_status": "skipped", "content_fetch_skip_reason": "pdf_disabled"},
+    )
+    api._research_service = _FakeService(packet)
+    api.send_assistant_message = _send_assistant_message
+
+    asyncio.run(api._dispatch_research_request(ResearchRequest(prompt="max pwm frequency"), object()))
+
+    assert len(sent) == 1
+    assert "couldn't fetch/parse the source content in this run" in sent[0]
+    assert "https://www.nxp.com/docs/en/data-sheet/PCA9685.pdf" in sent[0]
+    assert "1526" not in sent[0]
+
+
+def test_dispatch_research_fetch_ok_can_include_grounded_summary() -> None:
+    api = _make_api_stub()
+    sent: list[str] = []
+
+    async def _send_assistant_message(message: str, websocket: object) -> None:
+        sent.append(message)
+
+    packet = ResearchPacket(
+        status="ok",
+        answer_summary="The board supports 400 kHz I2C.",
+        extracted_facts=["I2C speed: 400 kHz (datasheet section 6)"],
+        sources=[{"title": "Vendor page", "url": "https://example.com/specs"}],
+        metadata={"content_fetch_status": "ok"},
+    )
+    api._research_service = _FakeService(packet)
+    api.send_assistant_message = _send_assistant_message
+
+    asyncio.run(api._dispatch_research_request(ResearchRequest(prompt="i2c speed"), object()))
+
+    assert len(sent) == 1
+    assert sent[0].startswith("The board supports 400 kHz I2C.")
+    assert "From the fetched source content" in sent[0]
