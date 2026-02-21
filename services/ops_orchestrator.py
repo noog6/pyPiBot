@@ -87,6 +87,7 @@ class OpsOrchestrator:
         self._memory_maintenance_next_ts = time.monotonic()
         self._memory_maintenance_run_count = 0
         self._semantic_offline_streak_threshold = 20
+        self._startup_snapshot_emitted = False
         OpsOrchestrator._instance = self
 
     @classmethod
@@ -230,6 +231,12 @@ class OpsOrchestrator:
         with self._lock:
             return self._latest_health
 
+    def has_startup_snapshot_emitted(self) -> bool:
+        """Return whether the startup canonical snapshot has been emitted."""
+
+        with self._lock:
+            return self._startup_snapshot_emitted
+
     def get_counters(self) -> BudgetCounters:
         with self._lock:
             return replace(self._counters)
@@ -330,6 +337,8 @@ class OpsOrchestrator:
 
     def _emit_canonical_snapshot(self, timestamp: float, reason: str) -> None:
         with self._lock:
+            if reason == "startup":
+                self._startup_snapshot_emitted = True
             health = self._latest_health
             snapshot = OpsSnapshot(
                 schema_version=self._SNAPSHOT_SCHEMA_VERSION,

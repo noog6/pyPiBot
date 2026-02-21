@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from datetime import datetime, timezone
 import logging
 import sys
 
@@ -20,6 +21,7 @@ from services.imu_monitor import ImuMonitor
 from services.memory_manager import MemoryManager
 from services.ops_orchestrator import OpsOrchestrator
 from services.profile_manager import ProfileManager
+from services.system_context_coordinator import SystemContextCoordinator
 
 
 def configure_logging(level_name: str) -> None:
@@ -120,6 +122,7 @@ def main(argv: list[str] | None = None) -> int:
         semantic_state["table_exists"],
     )
     runtime_session_id = f"run-{storage_controller.get_current_run_number()}"
+    boot_time = datetime.now(timezone.utc).isoformat()
     memory_manager = MemoryManager.get_instance()
     semantic_startup_summary = memory_manager.get_semantic_startup_summary()
     logger.info(
@@ -241,12 +244,25 @@ def main(argv: list[str] | None = None) -> int:
         logger.warning("Battery monitor unavailable: %s", exc)
 
     ops_orchestrator = None
+    system_context_coordinator = None
     try:
         logger.info("Starting ops orchestrator...")
         ops_orchestrator = OpsOrchestrator.get_instance()
         ops_orchestrator.set_realtime_api(realtime_api_instance)
         ops_orchestrator.set_event_bus(event_bus)
         ops_orchestrator.start_loop()
+        semantic_state = "ready" if semantic_startup_summary.get("provider_ready") else "timeout"
+        semantic_reason = str(semantic_startup_summary.get("provider_readiness_reason") or "unknown")
+        system_context_coordinator = SystemContextCoordinator(
+            realtime_api=realtime_api_instance,
+            ops_orchestrator=ops_orchestrator,
+            battery_monitor=battery_monitor,
+            run_id=runtime_session_id,
+            boot_time=boot_time,
+            semantic_state=semantic_state,
+            semantic_reason=semantic_reason,
+        )
+        system_context_coordinator.start()
     except Exception as exc:
         logger.warning("Ops orchestrator unavailable: %s", exc)
 
@@ -257,6 +273,8 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         logger.exception("An unexpected error occurred: %s", exc)
     finally:
+        if system_context_coordinator is not None:
+            system_context_coordinator.stop()
         if embedding_worker is not None:
             try:
                 embedding_worker.stop(timeout_s=0.5)
