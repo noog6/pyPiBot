@@ -181,6 +181,39 @@ def test_fetch_pass_skipped_when_firecrawl_disabled(tmp_path: Path) -> None:
     assert packet.metadata["content_fetch_skip_reason"] == "firecrawl_disabled"
 
 
+
+def test_firecrawl_success_signature_logged(tmp_path: Path, monkeypatch) -> None:
+    from services.research import openai_service as openai_module
+
+    firecrawl_client = _FakeFirecrawlClient(markdown="# PDF Datasheet\nVoltage: 5V")
+    svc = _FakeOpenAIResearchService(
+        search_result={
+            "best_url": "https://vendor.com/datasheet.pdf",
+            "sources": [{"title": "Vendor", "url": "https://vendor.com/datasheet.pdf"}],
+            "search_summary": "Found candidate sources",
+            "safety_notes": [],
+        },
+        extract_result='{"schema":"research_packet_v1","status":"ok","answer_summary":"ok","extracted_facts":["Voltage: 5V"],"sources":[],"safety_notes":[]}',
+        firecrawl_enabled=True,
+        pdf_ingestion_enabled=True,
+        firecrawl_client=firecrawl_client,
+        budget_state_file=str(tmp_path / "budget.json"),
+        cache_dir=str(tmp_path / "cache"),
+    )
+
+    info_logs: list[str] = []
+    original_info = openai_module.LOGGER.info
+
+    def _capture_info(message: str, *args) -> None:
+        rendered = message % args if args else message
+        info_logs.append(rendered)
+        original_info(message, *args)
+
+    monkeypatch.setattr(openai_module.LOGGER, "info", _capture_info)
+    _ = svc.request_research(ResearchRequest(prompt="find datasheet pdf", context={"run_id": "run-42"}))
+
+    assert any(line.startswith("[FIRECRAWL] success url=https://vendor.com/datasheet.pdf") for line in info_logs)
+
 def test_pdf_url_uses_firecrawl_provider_when_enabled(tmp_path: Path) -> None:
     firecrawl_client = _FakeFirecrawlClient(markdown="# PDF Datasheet\nVoltage: 5V")
     svc = _FakeOpenAIResearchService(
