@@ -64,6 +64,8 @@ def _make_api_stub() -> RealtimeAPI:
     api._confirmation_timeout_causes = {}
     api._confirmation_timeout_debounce_window_s = 5.0
     api._approval_timeout_s = 30.0
+    api._confirmation_awaiting_decision_timeout_s = 20.0
+    api._confirmation_unclear_max_reprompts = 1
     api._awaiting_confirmation_completion = False
     api._last_user_input_text = None
     api._stop_words = []
@@ -1352,6 +1354,82 @@ def test_handle_response_done_fallback_reminder_without_transcript_callback() ->
     asyncio.run(api.handle_response_done({"type": "response.done"}))
 
     assert reminders == ["response_done_fallback"]
+
+
+def test_parse_confirmation_decision_supports_explicit_cancel_terms() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+
+    assert api._parse_confirmation_decision("cancel") == "cancel"
+    assert api._parse_confirmation_decision("never mind") == "cancel"
+    assert api._parse_confirmation_decision("ignore that") == "cancel"
+
+
+def test_research_permission_unclear_reprompts_once_then_cancels() -> None:
+    api = _make_api_stub()
+    request = type("Req", (), {"prompt": "status"})()
+    token = _build_confirmation_token(kind="research_permission", request=request)
+    token.metadata = {"approval_flow": True, "domains": ["example.com"], "domains_known": True}
+    api._pending_confirmation_token = token
+
+    messages: list[str] = []
+
+    async def _assistant(message, *_args, **_kwargs):
+        messages.append(message)
+
+    transitions: list[tuple[object, str | None]] = []
+    api.orchestration_state = type(
+        "S",
+        (),
+        {
+            "phase": OrchestrationPhase.AWAITING_CONFIRMATION,
+            "transition": lambda *args, **kwargs: transitions.append((args[1], kwargs.get("reason"))),
+        },
+    )()
+    api.send_assistant_message = _assistant
+
+    assert asyncio.run(api._maybe_handle_research_permission_response("Thanks.", _Ws())) is True
+    assert messages == ["Please reply yes, no, or cancel for example.com."]
+    assert api._pending_confirmation_token is not None
+
+    assert asyncio.run(api._maybe_handle_research_permission_response("Thanks.", _Ws())) is True
+    assert api._pending_confirmation_token is None
+    assert messages[-1].startswith("I couldn't confirm research permission")
+    assert transitions == [(OrchestrationPhase.IDLE, "research permission unclear cancel")]
+
+
+def test_awaiting_confirmation_timeout_clears_token_and_transitions_idle() -> None:
+    api = _make_api_stub()
+    request = type("Req", (), {"prompt": "status"})()
+    token = _build_confirmation_token(kind="research_permission", request=request)
+    token.metadata = {"approval_flow": True, "awaiting_decision_since": 0.0}
+    api._pending_confirmation_token = token
+    api._confirmation_state = ConfirmationState.AWAITING_DECISION
+    api._confirmation_awaiting_decision_timeout_s = 20.0
+
+    transitions: list[tuple[object, str | None]] = []
+    api.orchestration_state = type(
+        "S",
+        (),
+        {
+            "phase": OrchestrationPhase.AWAITING_CONFIRMATION,
+            "transition": lambda *args, **kwargs: transitions.append((args[1], kwargs.get("reason"))),
+        },
+    )()
+
+    messages: list[str] = []
+
+    async def _assistant(message, *_args, **_kwargs):
+        messages.append(message)
+
+    api.send_assistant_message = _assistant
+
+    with patch("ai.realtime_api.time.monotonic", return_value=25.0):
+        asyncio.run(api.handle_event({"type": "rate_limits.updated", "rate_limits": []}, _Ws()))
+
+    assert api._pending_confirmation_token is None
+    assert api._confirmation_state == ConfirmationState.IDLE
+    assert transitions == [(OrchestrationPhase.IDLE, "confirmation timeout")]
+    assert messages == ["I didn't get a clear yes/no in time, so I cancelled that request."]
 
 
 def test_research_permission_parser_accepts_natural_language_yes_no_variants() -> None:

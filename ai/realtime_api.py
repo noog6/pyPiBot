@@ -363,6 +363,14 @@ class RealtimeAPI:
         self._pending_confirmation_token: PendingConfirmationToken | None = None
         self._awaiting_confirmation_completion = False
         self._approval_timeout_s = float(config.get("approval_timeout_s", 30.0))
+        realtime_cfg = config.get("realtime") or {}
+        self._confirmation_awaiting_decision_timeout_s = float(
+            realtime_cfg.get("confirmation_awaiting_decision_timeout_s", 20.0)
+        )
+        self._confirmation_unclear_max_reprompts = max(
+            0,
+            int(realtime_cfg.get("confirmation_unclear_max_reprompts", 1)),
+        )
         self._confirmation_timeout_debounce_window_s = float(
             config.get("confirmation_timeout_debounce_window_s", 5.0)
         )
@@ -616,6 +624,7 @@ class RealtimeAPI:
         priority: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> tuple[bool, str]:
+        self._expire_confirmation_awaiting_decision_timeout()
         phase = getattr(self.orchestration_state, "phase", None)
         phase_name = getattr(phase, "value", str(phase))
         normalized_source = str(source).lower()
@@ -1937,7 +1946,7 @@ class RealtimeAPI:
         for key in decision_keys:
             decision_value = metadata.get(key)
             if isinstance(decision_value, str):
-                if self._parse_confirmation_decision(decision_value) in {"yes", "no"}:
+                if self._parse_confirmation_decision(decision_value) in {"yes", "no", "cancel"}:
                     return True
         if self._is_truthy_metadata_value(metadata.get("confirmation_accepted")):
             return True
@@ -1945,7 +1954,52 @@ class RealtimeAPI:
             return True
         last_user_input_text = getattr(self, "_last_user_input_text", "") or ""
         decision = self._parse_confirmation_decision(last_user_input_text)
-        return decision in {"yes", "no"}
+        return decision in {"yes", "no", "cancel"}
+
+    def _expire_confirmation_awaiting_decision_timeout(self) -> PendingConfirmationToken | None:
+        token = getattr(self, "_pending_confirmation_token", None)
+        if token is None:
+            return None
+        if getattr(self, "_confirmation_state", ConfirmationState.IDLE) != ConfirmationState.AWAITING_DECISION:
+            return None
+        timeout_s = max(0.0, float(getattr(self, "_confirmation_awaiting_decision_timeout_s", 20.0)))
+        if timeout_s <= 0.0:
+            return None
+        metadata = token.metadata if isinstance(token.metadata, dict) else {}
+        since = metadata.get("awaiting_decision_since", token.created_at)
+        if not isinstance(since, (int, float)):
+            since = token.created_at
+        if (time.monotonic() - float(since)) < timeout_s:
+            return None
+        self._set_confirmation_state(ConfirmationState.RESOLVING, reason="awaiting_decision_timeout")
+        self._close_confirmation_token(outcome="awaiting_decision_timeout")
+        self._awaiting_confirmation_completion = False
+        self.orchestration_state.transition(
+            OrchestrationPhase.IDLE,
+            reason="confirmation timeout",
+        )
+        return token
+
+    async def _maybe_handle_confirmation_decision_timeout(
+        self,
+        websocket: Any,
+        *,
+        source_event: str,
+    ) -> bool:
+        expired_token = self._expire_confirmation_awaiting_decision_timeout()
+        if expired_token is None:
+            return False
+        logger.info(
+            "CONFIRMATION_TIMEOUT token=%s kind=%s cause=awaiting_decision_timeout source_event=%s",
+            expired_token.id,
+            expired_token.kind,
+            source_event,
+        )
+        await self.send_assistant_message(
+            "I didn't get a clear yes/no in time, so I cancelled that request.",
+            websocket,
+        )
+        return True
 
     def _should_guard_confirmation_response(self, origin: str, response_payload: dict[str, Any]) -> bool:
         if not self._has_active_confirmation_token() and not self._is_awaiting_confirmation_phase():
@@ -2020,6 +2074,10 @@ class RealtimeAPI:
         if previous != state:
             self._log_confirmation_transition(previous, state, reason=reason, token=token)
         self._confirmation_state = state
+        if state == ConfirmationState.AWAITING_DECISION and token is not None:
+            metadata = token.metadata if isinstance(token.metadata, dict) else {}
+            metadata.setdefault("awaiting_decision_since", time.monotonic())
+            token.metadata = metadata
 
     def _create_confirmation_token(
         self,
@@ -2133,48 +2191,17 @@ class RealtimeAPI:
         normalized = " ".join(re.sub(r"[^\w\s]", " ", text.lower()).split())
         if not normalized:
             return "unclear"
-        yes_tokens = {
-            "yes",
-            "y",
-            "yeah",
-            "yep",
-            "sure",
-            "ok",
-            "okay",
-            "approve",
-            "do it",
-            "go ahead",
-            "proceed",
-            "please do",
-            "please go ahead",
-        }
-        no_tokens = {
-            "no",
-            "n",
-            "nope",
-            "nah",
-            "deny",
-            "cancel",
-            "stop",
-            "do not",
-            "dont",
-            "don't",
-        }
-        yes_prefixes = (
-            "yes ",
-            "yeah ",
-            "yep ",
-            "sure ",
-            "do it ",
-            "go ahead",
-            "please go ahead",
-            "proceed",
+        yes_pattern = re.compile(
+            r"^(yes|y|yeah|yep|sure|ok|okay|approve|proceed|go ahead|go ahead and do it|do it|please do|please go ahead)( please| thanks| thank you)?$"
         )
-        no_prefixes = ("no ", "nope ", "nah ", "cancel ", "stop ")
-        if normalized in yes_tokens or normalized.startswith(yes_prefixes):
+        no_pattern = re.compile(r"^(no|n|nope|nah|deny|do not|dont|don t)( please| thanks| thank you)?$")
+        cancel_pattern = re.compile(r"^(cancel|cancel that|never mind|nevermind|stop|ignore that|ignore it)( please)?$")
+        if yes_pattern.fullmatch(normalized):
             return "yes"
-        if normalized in no_tokens or normalized.startswith(no_prefixes):
+        if no_pattern.fullmatch(normalized):
             return "no"
+        if cancel_pattern.fullmatch(normalized):
+            return "cancel"
         return "unclear"
 
     def _sample_audio_levels(self, audio_bytes: bytes) -> tuple[float | None, float | None]:
@@ -2233,7 +2260,7 @@ class RealtimeAPI:
         duration = float(duration_ms) if duration_ms is not None else 0.0
         text = transcript or ""
         decision = self._parse_confirmation_decision(text)
-        if decision in {"yes", "no"}:
+        if decision in {"yes", "no", "cancel"}:
             return False
         if duration >= self._minimum_non_confirmation_duration_ms:
             return False
@@ -2337,7 +2364,7 @@ class RealtimeAPI:
                 self._clear_pending_action()
             return True
 
-        if decision == "no":
+        if decision in {"no", "cancel"}:
             if token is not None:
                 self._set_confirmation_state(ConfirmationState.RESOLVING, reason="tool_confirmation_rejected")
             logger.info("CONFIRMATION_REJECTED tool=%s", action.tool_name)
@@ -2464,7 +2491,7 @@ class RealtimeAPI:
             await self._dispatch_research_request(request, websocket)
             return True
 
-        if decision == "no":
+        if decision in {"no", "cancel"}:
             fingerprint = self._build_research_request_fingerprint(request)
             self._record_research_permission_outcome(fingerprint, approved=False)
             if token is not None:
@@ -2478,32 +2505,41 @@ class RealtimeAPI:
                 "Understood — I won't perform web research right now.",
                 websocket,
             )
-            return True
-
-        if token is not None:
-            token.retry_count += 1
-            retry_count = token.retry_count
-            max_retries = token.max_retries
-        else:
-            retry_count = 1
-            max_retries = 0
-
-        if retry_count > max_retries:
-            if token is not None:
-                self._set_confirmation_state(ConfirmationState.RESOLVING, reason="research_permission_timeout")
-            logger.info("[Research] Permission timed out after retries")
-            if token is not None:
-                self._close_confirmation_token(outcome="retry_exhausted")
-            else:
-                self._pending_research_request = None
-            await self.send_assistant_message(
-                "I couldn't confirm research permission. Please ask again if you still want web lookup.",
-                websocket,
+            self.orchestration_state.transition(
+                OrchestrationPhase.IDLE,
+                reason="research permission rejected",
             )
             return True
 
+        metadata = token.metadata if token is not None and isinstance(token.metadata, dict) else {}
+        reprompt_count = int(metadata.get("unclear_reprompt_count", 0))
+        max_reprompts = self._confirmation_unclear_max_reprompts
+        if reprompt_count >= max_reprompts:
+            if token is not None:
+                self._set_confirmation_state(ConfirmationState.RESOLVING, reason="research_permission_timeout")
+            logger.info("[Research] Permission cancelled after unclear decision")
+            if token is not None:
+                self._close_confirmation_token(outcome="unclear_cancelled")
+            else:
+                self._pending_research_request = None
+            await self.send_assistant_message(
+                "I couldn't confirm research permission, so I cancelled it. Ask again if you still want web lookup.",
+                websocket,
+            )
+            self.orchestration_state.transition(
+                OrchestrationPhase.IDLE,
+                reason="research permission unclear cancel",
+            )
+            return True
+
+        if token is not None:
+            metadata["unclear_reprompt_count"] = reprompt_count + 1
+            token.metadata = metadata
+
+        domains = metadata.get("domains") if isinstance(metadata.get("domains"), list) else []
+        domain_hint = f" for {', '.join(domains)}" if domains else ""
         await self.send_assistant_message(
-            "Please reply with: yes or no.",
+            f"Please reply yes, no, or cancel{domain_hint}.",
             websocket,
             response_metadata={
                 "trigger": "confirmation_reminder",
@@ -3143,6 +3179,10 @@ class RealtimeAPI:
 
     async def handle_event(self, event: dict[str, Any], websocket: Any) -> None:
         event_type = event.get("type")
+        await self._maybe_handle_confirmation_decision_timeout(
+            websocket,
+            source_event=str(event_type or "unknown"),
+        )
         if event_type == "response.created":
             origin = self._consume_response_origin()
             log_info(f"response.created: origin={origin}")
