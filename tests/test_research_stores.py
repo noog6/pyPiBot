@@ -124,3 +124,42 @@ def test_budget_manager_initializes_from_db_defaults(monkeypatch, tmp_path) -> N
         if controller is not None:
             controller.close()
         StorageController._instance = None
+
+
+def test_budget_manager_persists_state_and_usage_across_reinstantiation(monkeypatch, tmp_path) -> None:
+    manager, StorageController = _init_budget_manager(monkeypatch, tmp_path, daily_limit=3)
+    audit_payload = {
+        "request_fingerprint": "fp-persist-1",
+        "research_id": "research-persist-1",
+        "source": "scheduler",
+        "prompt_preview": "find power budget",
+        "provider": "openai_responses_web_search",
+    }
+    try:
+        assert manager.spend_if_allowed(1, audit_payload=audit_payload)
+        first_state = manager.current_state()
+        assert first_state["remaining"] == 2
+        assert first_state["last_audit"] == audit_payload
+
+        manager_reloaded = ResearchBudgetManager("unused.json", daily_limit=3)
+        reloaded_state = manager_reloaded.current_state()
+        assert reloaded_state["remaining"] == 2
+        assert reloaded_state["count"] == 1
+        assert reloaded_state["last_audit"] == audit_payload
+
+        persisted_state_row = manager_reloaded._storage.get_state(manager_reloaded._budget_key)
+        assert persisted_state_row is not None
+        assert persisted_state_row.remaining == 2
+
+        usage_rows = manager_reloaded._storage.get_usage_for_date(reloaded_state["date"])
+        assert len(usage_rows) == 1
+        assert usage_rows[0].units == 1
+        assert usage_rows[0].request_fingerprint == "fp-persist-1"
+        assert usage_rows[0].research_id == "research-persist-1"
+        assert usage_rows[0].source == "scheduler"
+        assert usage_rows[0].provider == "openai_responses_web_search"
+    finally:
+        controller = StorageController._instance
+        if controller is not None:
+            controller.close()
+        StorageController._instance = None

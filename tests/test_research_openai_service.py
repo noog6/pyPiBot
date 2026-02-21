@@ -38,6 +38,29 @@ class _FakeOpenAIResearchService(OpenAIResearchService):
         return ""
 
 
+class _FakeConfigController:
+    def __init__(self, config: dict[str, object]) -> None:
+        self._config = config
+
+    def get_config(self) -> dict[str, object]:
+        return dict(self._config)
+
+
+def _configure_storage(monkeypatch, tmp_path: Path):
+    import config.controller as config_controller
+    from storage.controller import StorageController
+
+    var_dir = tmp_path / "var"
+    log_dir = tmp_path / "log"
+    monkeypatch.setattr(
+        config_controller.ConfigController,
+        "get_instance",
+        lambda: _FakeConfigController({"var_dir": str(var_dir), "log_dir": str(log_dir)}),
+    )
+    StorageController._instance = None
+    return StorageController
+
+
 def test_budget_exceeded_returns_approval_prompt(tmp_path: Path) -> None:
     svc = _FakeOpenAIResearchService(
         search_result={"best_url": "", "sources": [], "search_summary": "none", "safety_notes": []},
@@ -531,3 +554,53 @@ def test_budget_compat_methods_reflect_manager_state(tmp_path: Path) -> None:
 
     assert svc.can_run_research_now() is False
     assert svc.get_budget_remaining() == 0
+
+
+def test_budget_remaining_persists_across_service_recreation(monkeypatch, tmp_path: Path) -> None:
+    from storage.controller import StorageController
+
+    _configure_storage(monkeypatch, tmp_path)
+    service_kwargs = {
+        "search_result": {"best_url": "", "sources": [], "search_summary": "summary", "safety_notes": []},
+        "extract_result": "{}",
+        "daily_budget": 2,
+        "budget_state_file": str(tmp_path / "budget.json"),
+        "cache_dir": str(tmp_path / "cache"),
+    }
+
+    try:
+        svc = _FakeOpenAIResearchService(**service_kwargs)
+        _ = svc.request_research(
+            ResearchRequest(
+                prompt="find one datasheet",
+                context={
+                    "request_fingerprint": "fp-service-persist-1",
+                    "research_id": "research-service-persist-1",
+                    "source": "service-test",
+                },
+            )
+        )
+        assert svc.get_budget_remaining() == 1
+
+        svc_reloaded = _FakeOpenAIResearchService(**service_kwargs)
+        assert svc_reloaded.get_budget_remaining() == 1
+
+        state = svc_reloaded._budget.current_state()
+        assert state["remaining"] == 1
+        assert state["count"] == 1
+        assert state["last_audit"]["request_fingerprint"] == "fp-service-persist-1"
+
+        persisted_state_row = svc_reloaded._budget._storage.get_state(svc_reloaded._budget._budget_key)
+        assert persisted_state_row is not None
+        assert persisted_state_row.remaining == 1
+
+        usage_rows = svc_reloaded._budget._storage.get_usage_for_date(state["date"])
+        assert len(usage_rows) == 1
+        assert usage_rows[0].request_fingerprint == "fp-service-persist-1"
+        assert usage_rows[0].research_id == "research-service-persist-1"
+        assert usage_rows[0].source == "service-test"
+    finally:
+        controller = StorageController._instance
+        if controller is not None:
+            controller.close()
+        StorageController._instance = None
