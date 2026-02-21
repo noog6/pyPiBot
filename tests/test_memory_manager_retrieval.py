@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from services.memory_manager import (
     MemoryManager,
     MemoryScope,
+    _LatencyWindowSampler,
     estimate_realtime_memory_brief_item_chars,
     render_realtime_memory_brief_item,
 )
@@ -68,6 +69,8 @@ def _make_memory_manager(store: MemoryStore) -> MemoryManager:
     manager._semantic_canary_refresh_interval_s = 300.0
     manager._semantic_query_timeout_floor_warned = False
     manager._semantic_query_embedding_not_ready_streak = 0
+    manager._query_embedding_latency_samples = _LatencyWindowSampler()
+    manager._canary_refresh_latency_samples = _LatencyWindowSampler()
     manager._embedding_coverage_cache_ttl_s = 60.0
     manager._embedding_coverage_cache = {}
     manager._embedding_backlog_last = {}
@@ -2052,3 +2055,64 @@ def test_embed_timeout_threshold_refreshes_canary_and_updates_readiness_reason(t
     runtime = manager.get_semantic_runtime_health()
     assert runtime["readiness_reason"] == "canary_timeout"
     assert runtime["last_canary_age_ms"] >= 0
+
+
+def test_latency_sampler_computes_percentiles_and_buckets() -> None:
+    sampler = _LatencyWindowSampler(max_samples=8)
+    for latency in (5, 20, 25, 50, 90, 120, 510, 1500):
+        sampler.add_sample(latency)
+
+    summary = sampler.summary()
+
+    assert summary["samples"] == 8
+    assert summary["p50_ms"] == 50
+    assert summary["p90_ms"] == 1500
+    assert summary["p99_ms"] == 1500
+    assert summary["bucket_le_25ms"] == 3
+    assert summary["bucket_le_50ms"] == 1
+    assert summary["bucket_le_100ms"] == 1
+    assert summary["bucket_le_250ms"] == 1
+    assert summary["bucket_le_500ms"] == 0
+    assert summary["bucket_le_1000ms"] == 1
+    assert summary["bucket_gt_1000ms"] == 1
+
+
+def test_latency_sampler_rolls_over_bounded_window() -> None:
+    sampler = _LatencyWindowSampler(max_samples=3)
+    for latency in (10, 20, 30, 40, 50):
+        sampler.add_sample(latency)
+
+    summary = sampler.summary()
+
+    assert summary["samples"] == 3
+    assert summary["p50_ms"] == 40
+    assert summary["p90_ms"] == 50
+    assert summary["bucket_le_50ms"] == 3
+    assert summary["bucket_le_25ms"] == 0
+
+
+def test_retrieval_health_metrics_include_query_and_canary_latency_windows(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._query_embedding_latency_samples = _LatencyWindowSampler(max_samples=4)
+    manager._canary_refresh_latency_samples = _LatencyWindowSampler(max_samples=4)
+
+    for latency in (18, 40, 140, 1200):
+        manager._query_embedding_latency_samples.add_sample(latency)
+    for latency in (8, 80, 240, 600):
+        manager._canary_refresh_latency_samples.add_sample(latency)
+
+    metrics = manager.get_retrieval_health_metrics()
+
+    assert metrics["query_embedding_latency_samples"] == 4
+    assert metrics["query_embedding_latency_p50_ms"] == 40
+    assert metrics["query_embedding_latency_p90_ms"] == 1200
+    assert metrics["query_embedding_latency_bucket_le_25ms"] == 1
+    assert metrics["query_embedding_latency_bucket_gt_1000ms"] == 1
+    assert metrics["canary_refresh_latency_samples"] == 4
+    assert metrics["canary_refresh_latency_p50_ms"] == 80
+    assert metrics["canary_refresh_latency_p90_ms"] == 600
+    assert metrics["canary_refresh_latency_bucket_le_25ms"] == 1
+    assert metrics["canary_refresh_latency_bucket_le_100ms"] == 1
+    assert metrics["canary_refresh_latency_bucket_le_250ms"] == 1
+    assert metrics["canary_refresh_latency_bucket_le_1000ms"] == 1
