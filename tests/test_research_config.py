@@ -24,7 +24,7 @@ def test_config_controller_sets_safe_research_defaults(tmp_path: Path, monkeypat
     assert research_cfg["provider"] == "null"
     assert research_cfg["packet_schema"] == "research_packet_v1"
     assert research_cfg["permission_required"] is True
-    assert research_cfg["research_mode"] == "ask"
+    assert research_cfg["research_mode"] == "ask_on_assistant_or_unknown"
     assert research_cfg["openai"]["enabled"] is False
     assert research_cfg["openai"]["model"] == "gpt-4.1-mini"
     assert research_cfg["firecrawl"]["enabled"] is False
