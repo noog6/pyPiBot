@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import time
 from typing import Any
+import warnings
 
 
 class ResearchCacheStore:
@@ -43,9 +44,18 @@ class ResearchCacheStore:
 
 
 class ResearchBudgetTracker:
-    """Daily research budget tracker with simple persistent JSON state."""
+    """Deprecated read-only compatibility shim for the retired JSON budget tracker.
+
+    This helper only reads legacy JSON budget files. Runtime budget writes are handled
+    by ``ResearchBudgetManager`` via SQLite storage.
+    """
 
     def __init__(self, state_file: str, daily_limit: int) -> None:
+        warnings.warn(
+            "ResearchBudgetTracker is deprecated and read-only; use ResearchBudgetManager instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self._state_file = Path(state_file)
         self._daily_limit = max(0, int(daily_limit))
 
@@ -59,11 +69,7 @@ class ResearchBudgetTracker:
         return self.get_remaining() >= max(1, int(units))
 
     def spend(self, units: int = 1) -> int:
-        amount = max(1, int(units))
-        state = self._load_state()
-        state["count"] = int(state.get("count", 0)) + amount
-        self._save_state(state)
-        return max(0, self._daily_limit - state["count"]) if self._daily_limit > 0 else 999999
+        raise RuntimeError("ResearchBudgetTracker is read-only and no longer supports writes.")
 
     def _load_state(self) -> dict[str, Any]:
         today = time.strftime("%Y-%m-%d", time.gmtime())
@@ -76,7 +82,3 @@ class ResearchBudgetTracker:
             return {"date": today, "count": int(payload.get("count", 0))}
         except Exception:
             return {"date": today, "count": 0}
-
-    def _save_state(self, state: dict[str, Any]) -> None:
-        self._state_file.parent.mkdir(parents=True, exist_ok=True)
-        self._state_file.write_text(json.dumps(state), encoding="utf-8")

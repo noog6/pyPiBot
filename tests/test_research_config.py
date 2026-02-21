@@ -86,4 +86,4 @@ def test_build_openai_service_ignores_legacy_budget_state_file_config() -> None:
     )
 
     assert isinstance(service, OpenAIResearchService)
-    assert str(service._budget._state_file) == "var/research_budget.json"
+    assert str(service._budget._legacy_state_file) == "var/research_budget.json"
