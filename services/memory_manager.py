@@ -8,6 +8,7 @@ from difflib import SequenceMatcher
 from enum import Enum
 import logging
 import math
+import os
 import re
 import struct
 import threading
@@ -233,6 +234,8 @@ class MemorySemanticConfig:
 
     enabled: bool
     provider: str
+    provider_model: str
+    provider_timeout_s: float
     rerank_enabled: bool
     max_candidates_for_semantic: int
     min_similarity: float
@@ -244,6 +247,8 @@ class MemorySemanticConfig:
     rolling_backfill_interval_idle_cycles: int
     write_timeout_ms: int
     query_timeout_ms: int
+    startup_canary_timeout_ms: int
+    startup_canary_bypass: bool
     max_writes_per_minute: int
     max_queries_per_minute: int
 
@@ -277,9 +282,12 @@ class MemoryManager:
         self._auto_reflection_dedupe_needs_review = bool(auto_dedupe_cfg.get("downgrade_mark_needs_review", True))
         self._auto_reflection_dedupe_apply_to_manual_tool = bool(auto_dedupe_cfg.get("apply_to_manual_tool", False))
         semantic_cfg = config.get("memory_semantic") or {}
+        openai_cfg = semantic_cfg.get("openai") or {}
         self._semantic_config = MemorySemanticConfig(
             enabled=bool(semantic_cfg.get("enabled", False)),
             provider=str(semantic_cfg.get("provider", "none")),
+            provider_model=str(openai_cfg.get("model", "text-embedding-3-small")),
+            provider_timeout_s=float(openai_cfg.get("timeout_s", 10.0)),
             rerank_enabled=bool(semantic_cfg.get("rerank_enabled", False)),
             max_candidates_for_semantic=int(semantic_cfg.get("max_candidates_for_semantic", 64)),
             min_similarity=float(semantic_cfg.get("min_similarity", 0.25)),
@@ -297,6 +305,8 @@ class MemoryManager:
             rolling_backfill_interval_idle_cycles=max(1, int(semantic_cfg.get("rolling_backfill_interval_idle_cycles", 15))),
             write_timeout_ms=int(semantic_cfg.get("write_timeout_ms", 75)),
             query_timeout_ms=int(semantic_cfg.get("query_timeout_ms", 40)),
+            startup_canary_timeout_ms=int(semantic_cfg.get("startup_canary_timeout_ms", 120)),
+            startup_canary_bypass=bool(semantic_cfg.get("startup_canary_bypass", False)),
             max_writes_per_minute=int(semantic_cfg.get("max_writes_per_minute", 120)),
             max_queries_per_minute=int(semantic_cfg.get("max_queries_per_minute", 240)),
         )
@@ -307,7 +317,6 @@ class MemoryManager:
         self._embedding_executor: ThreadPoolExecutor | None = None
         self._embedding_executor_lock = threading.Lock()
         self._embedding_provider: EmbeddingProvider = build_embedding_provider(config)
-        openai_cfg = semantic_cfg.get("openai") or {}
         self._semantic_provider_enabled = {
             "openai": bool(openai_cfg.get("enabled", False)),
         }
@@ -332,6 +341,19 @@ class MemoryManager:
         self._semantic_timeout_backoff_window_s = 5.0
         self._semantic_provider_last_error_code = "none"
         self._semantic_provider_ready_last = False
+        self._semantic_canary_bypass = bool(
+            self._semantic_config.startup_canary_bypass
+            or semantic_cfg.get("test_mode_bypass_canary", False)
+            or semantic_cfg.get("offline_mode", False)
+            or os.getenv("PYPIBOT_SEMANTIC_CANARY_BYPASS", "").strip().lower() in {"1", "true", "yes", "on"}
+        )
+        self._semantic_canary_last: dict[str, bool | int | float | str | None] = {
+            "canary_success": False,
+            "latency_ms": None,
+            "dimension": None,
+            "error_code": "not_run",
+        }
+        self._run_embedding_canary()
         self._semantic_query_embedding_not_ready_streak = 0
         self._embedding_coverage_cache_ttl_s = 60.0
         self._embedding_coverage_cache: dict[tuple[str, MemoryScope, str | None], dict[str, float | int]] = {}
@@ -394,7 +416,84 @@ class MemoryManager:
             return False, "provider_unavailable"
         if not hasattr(provider, "embed_text"):
             return False, "provider_missing_embed_text"
-        return True, "provider_ready"
+        if bool(getattr(self, "_semantic_canary_bypass", False)):
+            return True, "canary_bypassed"
+
+        canary_state = getattr(self, "_semantic_canary_last", {}) or {}
+        if bool(canary_state.get("canary_success", False)):
+            return True, "provider_ready"
+        canary_error = str(canary_state.get("error_code", "not_run") or "not_run")
+        return False, f"canary_{canary_error}"
+
+    def _map_canary_error_code(self, raw_error_code: str | None, *, exc: Exception | None = None) -> str:
+        code = str(raw_error_code or "").strip().lower()
+        if code in {"timeout", "timeout_backoff"}:
+            return "timeout"
+        if code in {"missing_api_key", "auth", "unauthorized", "forbidden", "invalid_api_key"}:
+            return "auth"
+        if code in {"model_not_found", "unknown_model", "invalid_model"}:
+            return "model"
+        if code in {"not_found", "provider_not_found"}:
+            return "not_found"
+        if code in {"provider_request_failed", "connection_error", "network_error", "connection"}:
+            return "connection"
+
+        exc_name = type(exc).__name__ if exc is not None else ""
+        exc_message = str(exc) if exc is not None else ""
+        raw = f"{code} {exc_name} {exc_message}".lower()
+        if "timeout" in raw:
+            return "timeout"
+        if any(token in raw for token in ["auth", "unauthor", "forbidden", "api key"]):
+            return "auth"
+        if "model" in raw:
+            return "model"
+        if "not found" in raw:
+            return "not_found"
+        if any(token in raw for token in ["connection", "network", "dns", "refused"]):
+            return "connection"
+        return "connection"
+
+    def _run_embedding_canary(self) -> dict[str, bool | int | float | str | None]:
+        canary_state: dict[str, bool | int | float | str | None] = {
+            "canary_success": False,
+            "latency_ms": 0,
+            "dimension": None,
+            "error_code": "skipped",
+        }
+        if not bool(getattr(self._semantic_config, "enabled", False)):
+            canary_state["error_code"] = "disabled"
+        elif bool(getattr(self, "_semantic_canary_bypass", False)):
+            canary_state["canary_success"] = True
+            canary_state["error_code"] = "bypassed"
+        else:
+            started = time.perf_counter()
+            try:
+                result = self._embed_text_with_semantic_policy(
+                    text="ping",
+                    operation="query",
+                    enforce_budget=False,
+                    timeout_override_ms=max(1, int(getattr(self._semantic_config, "startup_canary_timeout_ms", 120))),
+                )
+                latency_ms = int((time.perf_counter() - started) * 1000.0)
+                canary_state["latency_ms"] = latency_ms
+                dimension = int(getattr(result, "dimension", 0) or 0)
+                canary_state["dimension"] = dimension if dimension > 0 else None
+
+                status = str(getattr(result, "status", "") or "")
+                vector = getattr(result, "vector", b"")
+                if status == "ready" and bool(vector):
+                    canary_state["canary_success"] = True
+                    canary_state["error_code"] = "none"
+                else:
+                    raw_error = str(getattr(result, "error_code", "") or status or "unknown")
+                    canary_state["error_code"] = self._map_canary_error_code(raw_error)
+            except Exception as exc:  # noqa: BLE001
+                latency_ms = int((time.perf_counter() - started) * 1000.0)
+                canary_state["latency_ms"] = latency_ms
+                canary_state["error_code"] = self._map_canary_error_code(None, exc=exc)
+
+        self._semantic_canary_last = canary_state
+        return dict(canary_state)
 
     def _semantic_rerank_readiness(self) -> tuple[bool, str]:
         if not getattr(self._semantic_config, "enabled", False):
@@ -563,13 +662,24 @@ class MemoryManager:
         """Return semantic memory startup diagnostics for one-line logging."""
 
         provider_ready, readiness_reason = self._is_semantic_provider_ready()
+        canary_state = getattr(self, "_semantic_canary_last", {}) or {}
         return {
             "enabled": bool(self._semantic_config.enabled),
             "provider": str(self._semantic_config.provider),
+            "provider_model": str(getattr(self._semantic_config, "provider_model", "")),
+            "provider_timeout_s": float(getattr(self._semantic_config, "provider_timeout_s", 0.0)),
+            "query_timeout_ms": int(self._semantic_config.query_timeout_ms),
+            "write_timeout_ms": int(self._semantic_config.write_timeout_ms),
             "rerank_enabled": bool(self._semantic_config.rerank_enabled),
             "background_embedding_enabled": bool(self._semantic_config.background_embedding_enabled),
             "provider_ready": bool(provider_ready),
             "provider_readiness_reason": str(readiness_reason),
+            "canary_success": bool(canary_state.get("canary_success", False)),
+            "canary_latency_ms": int(canary_state.get("latency_ms", 0) or 0),
+            "canary_dimension": int(canary_state.get("dimension", 0) or 0),
+            "canary_error_code": str(canary_state.get("error_code", "not_run") or "not_run"),
+            "startup_canary_timeout_ms": int(getattr(self._semantic_config, "startup_canary_timeout_ms", 0)),
+            "startup_canary_bypass": bool(getattr(self, "_semantic_canary_bypass", False)),
             "max_queries_per_minute": int(self._semantic_config.max_queries_per_minute),
             "max_writes_per_minute": int(self._semantic_config.max_writes_per_minute),
         }
@@ -726,7 +836,14 @@ class MemoryManager:
         timestamps.append(now)
         return True
 
-    def _embed_text_with_semantic_policy(self, *, text: str, operation: str):
+    def _embed_text_with_semantic_policy(
+        self,
+        *,
+        text: str,
+        operation: str,
+        enforce_budget: bool = True,
+        timeout_override_ms: int | None = None,
+    ):
         provider = getattr(self, "_embedding_provider", None)
         if provider is None:
             provider = build_embedding_provider(ConfigController.get_instance().get_config())
@@ -745,7 +862,7 @@ class MemoryManager:
             self._semantic_provider_last_error_code = "timeout_backoff"
             return result
 
-        if not self._reserve_semantic_budget(operation=operation):
+        if enforce_budget and not self._reserve_semantic_budget(operation=operation):
             result = SimpleNamespace(
                 status="unavailable",
                 dimension=0,
@@ -758,7 +875,9 @@ class MemoryManager:
             return result
 
         timeout_ms = int(
-            getattr(
+            timeout_override_ms
+            if timeout_override_ms is not None
+            else getattr(
                 self._semantic_config,
                 "write_timeout_ms" if operation == "write" else "query_timeout_ms",
                 75 if operation == "write" else 40,

@@ -140,3 +140,24 @@ memory_semantic:
 This path is **fail-open**: memory rows are still written even if embedding calls time out or fail, and embedding status is recorded as pending/error for observability.
 
 Tradeoff: inline embedding increases per-write CPU and can add write latency on constrained hardware, so the flag remains opt-in.
+
+## Semantic startup canary and readiness
+
+At startup, semantic memory now runs a bounded embedding canary (`text="ping"`, query path) before marking semantic reranking provider-ready.
+
+- If the canary succeeds, semantic reranking can proceed.
+- If it fails, semantic reranking stays disabled and reports a readiness reason like `canary_timeout`, `canary_auth`, or `canary_connection`.
+
+Configuration knobs:
+
+```yaml
+memory_semantic:
+  startup_canary_timeout_ms: 120
+  startup_canary_bypass: false
+```
+
+Operational/testing override:
+
+- Set `PYPIBOT_SEMANTIC_CANARY_BYPASS=1` to bypass canary gating explicitly (useful for offline test rigs).
+- Keep this unset in production unless you intentionally want semantic reranking to ignore startup canary health.
+
