@@ -10,11 +10,14 @@ import hashlib
 import logging
 import math
 import os
+import argparse
 import re
 import struct
+import sys
 import threading
 import time
 from types import SimpleNamespace
+from typing import Callable
 
 from config import ConfigController
 from services.embedding_provider import EmbeddingProvider, NoopEmbeddingProvider, build_embedding_provider
@@ -80,6 +83,35 @@ def _normalize_semantic_failure_class(*, error_code: object, error_class: object
     ):
         return "connection"
     return None
+
+
+def _normalize_canary_error_code(raw_error_code: str | None, *, exc: Exception | None = None) -> str:
+    code = str(raw_error_code or "").strip().lower()
+    if code in {"timeout", "timeout_backoff"}:
+        return "timeout"
+    if code in {"missing_api_key", "auth", "unauthorized", "forbidden", "invalid_api_key"}:
+        return "auth"
+    if code in {"model_not_found", "unknown_model", "invalid_model"}:
+        return "model"
+    if code in {"not_found", "provider_not_found"}:
+        return "not_found"
+    if code in {"provider_request_failed", "connection_error", "network_error", "connection"}:
+        return "connection"
+
+    exc_name = type(exc).__name__ if exc is not None else ""
+    exc_message = str(exc) if exc is not None else ""
+    raw = f"{code} {exc_name} {exc_message}".lower()
+    if "timeout" in raw:
+        return "timeout"
+    if any(token in raw for token in ["auth", "unauthor", "forbidden", "api key"]):
+        return "auth"
+    if "model" in raw:
+        return "model"
+    if "not found" in raw:
+        return "not_found"
+    if any(token in raw for token in ["connection", "network", "dns", "refused"]):
+        return "connection"
+    return "connection"
 
 
 class MemoryScope(str, Enum):
@@ -474,32 +506,7 @@ class MemoryManager:
         return False, f"canary_{canary_error}"
 
     def _map_canary_error_code(self, raw_error_code: str | None, *, exc: Exception | None = None) -> str:
-        code = str(raw_error_code or "").strip().lower()
-        if code in {"timeout", "timeout_backoff"}:
-            return "timeout"
-        if code in {"missing_api_key", "auth", "unauthorized", "forbidden", "invalid_api_key"}:
-            return "auth"
-        if code in {"model_not_found", "unknown_model", "invalid_model"}:
-            return "model"
-        if code in {"not_found", "provider_not_found"}:
-            return "not_found"
-        if code in {"provider_request_failed", "connection_error", "network_error", "connection"}:
-            return "connection"
-
-        exc_name = type(exc).__name__ if exc is not None else ""
-        exc_message = str(exc) if exc is not None else ""
-        raw = f"{code} {exc_name} {exc_message}".lower()
-        if "timeout" in raw:
-            return "timeout"
-        if any(token in raw for token in ["auth", "unauthor", "forbidden", "api key"]):
-            return "auth"
-        if "model" in raw:
-            return "model"
-        if "not found" in raw:
-            return "not_found"
-        if any(token in raw for token in ["connection", "network", "dns", "refused"]):
-            return "connection"
-        return "connection"
+        return _normalize_canary_error_code(raw_error_code, exc=exc)
 
     def _run_embedding_canary(self) -> dict[str, bool | int | float | str | None]:
         canary_state: dict[str, bool | int | float | str | None] = {
@@ -1632,3 +1639,127 @@ class MemoryManager:
         if strict and not resolved:
             raise ValueError("session_local memory scope requires an active session id")
         return resolved
+
+
+def _semantic_api_key_present(config: dict[str, object]) -> bool:
+    semantic_cfg = dict(config.get("memory_semantic") or {})
+    provider = str(semantic_cfg.get("provider", "none")).strip().lower()
+    if provider != "openai":
+        return False
+    openai_cfg = dict(semantic_cfg.get("openai") or {})
+    configured_key = str(openai_cfg.get("api_key") or "").strip()
+    env_key = str(os.getenv("OPENAI_API_KEY", "")).strip()
+    return bool(configured_key or env_key)
+
+
+def _semantic_canary_bypass_enabled(config: dict[str, object]) -> bool:
+    semantic_cfg = dict(config.get("memory_semantic") or {})
+    return bool(
+        semantic_cfg.get("startup_canary_bypass", False)
+        or semantic_cfg.get("test_mode_bypass_canary", False)
+        or semantic_cfg.get("offline_mode", False)
+        or os.getenv("PYPIBOT_SEMANTIC_CANARY_BYPASS", "").strip().lower() in {"1", "true", "yes", "on"}
+    )
+
+
+def _run_embed_canary_once(
+    *,
+    provider: EmbeddingProvider,
+    enabled: bool,
+    bypass: bool,
+    startup_canary_timeout_ms: int,
+) -> dict[str, bool | int | None | str]:
+    result: dict[str, bool | int | None | str] = {
+        "canary_success": False,
+        "latency_ms": 0,
+        "dimension": None,
+        "error_code": "skipped",
+    }
+    if not enabled:
+        result["error_code"] = "disabled"
+        return result
+    if bypass:
+        result["canary_success"] = True
+        result["error_code"] = "bypassed"
+        return result
+
+    started = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(provider.embed_text, "ping")
+        try:
+            response = future.result(timeout=max(0.001, startup_canary_timeout_ms / 1000.0))
+        except FutureTimeoutError:
+            future.cancel()
+            result["latency_ms"] = int((time.perf_counter() - started) * 1000.0)
+            result["error_code"] = "timeout"
+            return result
+        except Exception as exc:  # noqa: BLE001
+            result["latency_ms"] = int((time.perf_counter() - started) * 1000.0)
+            result["error_code"] = _normalize_canary_error_code(None, exc=exc)
+            return result
+
+    result["latency_ms"] = int((time.perf_counter() - started) * 1000.0)
+    dimension = int(getattr(response, "dimension", 0) or 0)
+    result["dimension"] = dimension if dimension > 0 else 0
+    status = str(getattr(response, "status", "") or "")
+    vector = getattr(response, "vector", b"")
+    if status == "ready" and bool(vector):
+        result["canary_success"] = True
+        result["error_code"] = "none"
+        return result
+
+    raw_error = str(getattr(response, "error_code", "") or status or "unknown")
+    result["error_code"] = _normalize_canary_error_code(raw_error)
+    return result
+
+
+def run_embed_canary_cli(
+    argv: list[str] | None = None,
+    *,
+    provider_factory: Callable[[dict[str, object]], EmbeddingProvider] | None = None,
+) -> int:
+    parser = argparse.ArgumentParser(description="Run memory semantic startup canary diagnostics.")
+    parser.add_argument("--embed-canary", action="store_true", help="Run semantic embedding startup canary checks.")
+    args = parser.parse_args(argv)
+    if not args.embed_canary:
+        parser.print_help()
+        return 2
+
+    ConfigController._instance = None
+    config = ConfigController.get_instance().get_config()
+    semantic_cfg = dict(config.get("memory_semantic") or {})
+    openai_cfg = dict(semantic_cfg.get("openai") or {})
+
+    provider_name = str(semantic_cfg.get("provider", "none"))
+    provider_model = str(openai_cfg.get("model", "text-embedding-3-small"))
+    provider_timeout_s = float(openai_cfg.get("timeout_s", 10.0))
+    startup_canary_timeout_ms = int(semantic_cfg.get("startup_canary_timeout_ms", 0))
+    enabled = bool(semantic_cfg.get("enabled", False))
+    bypass = _semantic_canary_bypass_enabled(config)
+
+    provider = provider_factory(config) if provider_factory is not None else build_embedding_provider(config)
+    canary = _run_embed_canary_once(
+        provider=provider,
+        enabled=enabled,
+        bypass=bypass,
+        startup_canary_timeout_ms=startup_canary_timeout_ms,
+    )
+
+    print(
+        f"provider={provider_name} model={provider_model} timeout_s={provider_timeout_s} "
+        f"startup_canary_timeout_ms={startup_canary_timeout_ms}"
+    )
+    print(f"api_key_present={_semantic_api_key_present(config)}")
+    print(
+        f"canary_success={canary['canary_success']} latency_ms={canary['latency_ms']} "
+        f"dimension={canary['dimension']} error_code={canary['error_code']}"
+    )
+    return 0 if bool(canary["canary_success"]) else 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    return run_embed_canary_cli(argv)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
