@@ -17,6 +17,11 @@ class ToolSpec:
     reversible: bool
     cost_hint: str
     safety_tags: tuple[str, ...] = ()
+    confirm_required: bool | None = None
+    confirm_reason: str | None = None
+    confirm_prompt: str | None = None
+    cooldown_seconds: float = 0.0
+    dry_run_supported: bool = False
 
 
 @dataclass
@@ -65,6 +70,12 @@ class ActionPacket:
 class GovernanceDecision:
     status: str
     reason: str
+    confirm_required: bool = False
+    confirm_reason: str | None = None
+    confirm_prompt: str | None = None
+    idempotency_key: str | None = None
+    cooldown_seconds: float = 0.0
+    dry_run_supported: bool = False
 
     @property
     def approved(self) -> bool:
@@ -72,7 +83,7 @@ class GovernanceDecision:
 
     @property
     def needs_confirmation(self) -> bool:
-        return self.status == "needs_confirmation"
+        return self.status == "needs_confirmation" or self.confirm_required
 
     @property
     def denied(self) -> bool:
@@ -154,6 +165,91 @@ class GovernanceLayer:
             reversible=False,
             cost_hint="med",
             safety_tags=("unclassified",),
+            confirm_required=None,
+            confirm_reason=None,
+            confirm_prompt=None,
+            cooldown_seconds=0.0,
+            dry_run_supported=False,
+        )
+
+    def _idempotency_key(self, action: ActionPacket) -> str:
+        ordered = sorted((str(key), repr(value)) for key, value in action.tool_args.items())
+        return f"{action.tool_name}:{ordered}"
+
+    def decide_tool_call(
+        self,
+        action: ActionPacket,
+        *,
+        dry_run_requested: bool = False,
+        runtime_cooldown_seconds: float = 0.0,
+    ) -> GovernanceDecision:
+        decision = self.review(action)
+        spec = self._tool_specs.get(action.tool_name, self._default_spec())
+        confirm_required = (
+            bool(spec.confirm_required)
+            if spec.confirm_required is not None
+            else decision.needs_confirmation
+        )
+        confirm_reason = spec.confirm_reason or (decision.reason if confirm_required else None)
+        confirm_prompt = spec.confirm_prompt
+        cooldown_seconds = max(0.0, float(runtime_cooldown_seconds), float(spec.cooldown_seconds))
+        dry_run_supported = bool(spec.dry_run_supported)
+
+        if dry_run_requested and not dry_run_supported:
+            return GovernanceDecision(
+                status="denied",
+                reason="dry-run not supported for this tool",
+                confirm_required=False,
+                idempotency_key=self._idempotency_key(action),
+                cooldown_seconds=cooldown_seconds,
+                dry_run_supported=dry_run_supported,
+            )
+
+        if cooldown_seconds > 0:
+            return GovernanceDecision(
+                status="denied",
+                reason=f"tool execution paused for {cooldown_seconds:.0f}s",
+                confirm_required=False,
+                idempotency_key=self._idempotency_key(action),
+                cooldown_seconds=cooldown_seconds,
+                dry_run_supported=dry_run_supported,
+            )
+
+        if decision.status == "needs_confirmation":
+            confirm_required = True
+
+        return GovernanceDecision(
+            status=decision.status,
+            reason=decision.reason,
+            confirm_required=confirm_required,
+            confirm_reason=confirm_reason,
+            confirm_prompt=confirm_prompt,
+            idempotency_key=self._idempotency_key(action),
+            cooldown_seconds=cooldown_seconds,
+            dry_run_supported=dry_run_supported,
+        )
+
+    @staticmethod
+    def coerce_decision_payload(decision: Any, action: ActionPacket | None = None) -> GovernanceDecision:
+        if isinstance(decision, GovernanceDecision):
+            return decision
+        status = str(getattr(decision, "status", "denied"))
+        reason = str(getattr(decision, "reason", "policy denied"))
+        confirm_required = bool(
+            getattr(decision, "confirm_required", False)
+            or getattr(decision, "needs_confirmation", False)
+            or status == "needs_confirmation"
+        )
+        return GovernanceDecision(
+            status=status,
+            reason=reason,
+            confirm_required=confirm_required,
+            confirm_reason=getattr(decision, "confirm_reason", None),
+            confirm_prompt=getattr(decision, "confirm_prompt", None),
+            idempotency_key=getattr(decision, "idempotency_key", None)
+            or (f"{action.tool_name}:{action.id}" if action is not None else None),
+            cooldown_seconds=float(getattr(decision, "cooldown_seconds", 0.0) or 0.0),
+            dry_run_supported=bool(getattr(decision, "dry_run_supported", False)),
         )
 
     def build_action_packet(
@@ -303,6 +399,11 @@ class GovernanceLayer:
             "reversible": spec.reversible,
             "cost_hint": spec.cost_hint,
             "safety_tags": list(spec.safety_tags),
+            "confirm_required": spec.confirm_required,
+            "confirm_reason": spec.confirm_reason,
+            "confirm_prompt": spec.confirm_prompt,
+            "cooldown_seconds": spec.cooldown_seconds,
+            "dry_run_supported": spec.dry_run_supported,
         }
 
     def _load_autonomy_windows(self, raw_windows: Iterable[dict[str, Any]]) -> list[AutonomyWindowSpec]:
@@ -430,6 +531,17 @@ def build_tool_specs(raw: dict[str, dict[str, Any]]) -> dict[str, ToolSpec]:
             reversible=bool(payload.get("reversible", False)),
             cost_hint=str(payload.get("cost_hint", "med")),
             safety_tags=tuple(payload.get("safety_tags", []) or []),
+            confirm_required=(
+                None if payload.get("confirm_required") is None else bool(payload.get("confirm_required"))
+            ),
+            confirm_reason=(
+                str(payload.get("confirm_reason")) if payload.get("confirm_reason") is not None else None
+            ),
+            confirm_prompt=(
+                str(payload.get("confirm_prompt")) if payload.get("confirm_prompt") is not None else None
+            ),
+            cooldown_seconds=float(payload.get("cooldown_seconds", 0.0) or 0.0),
+            dry_run_supported=bool(payload.get("dry_run_supported", False)),
         )
     return specs
 

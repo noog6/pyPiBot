@@ -212,7 +212,17 @@ def base64_encode_audio(audio_bytes: bytes) -> str:
 
 
 def _validate_tool_specs(tool_specs: dict[str, Any], tool_defs: list[dict[str, Any]]) -> None:
-    required_fields = ("tier", "reversible", "cost_hint", "safety_tags")
+    required_fields = (
+        "tier",
+        "reversible",
+        "cost_hint",
+        "safety_tags",
+        "confirm_required",
+        "confirm_reason",
+        "confirm_prompt",
+        "cooldown_seconds",
+        "dry_run_supported",
+    )
     tool_names = {tool.get("name") for tool in tool_defs}
     missing_specs = sorted(tool_names - set(tool_specs.keys()))
     if missing_specs:
@@ -4099,19 +4109,7 @@ class RealtimeAPI:
                 args,
                 reason=f"function_call {function_name}",
             )
-            cooldown_remaining = self._tool_execution_cooldown_remaining()
-            if cooldown_remaining > 0:
-                await self._reject_tool_call(
-                    action,
-                    f"Tool execution paused for {cooldown_remaining:.0f}s due to stop word.",
-                    websocket,
-                    status="cancelled",
-                )
-                return
             staging = self._stage_action(action)
-            if dry_run_requested:
-                await self._send_dry_run_output(action, staging, websocket)
-                return
             if not staging["valid"]:
                 await self._reject_tool_call(
                     action,
@@ -4121,7 +4119,35 @@ class RealtimeAPI:
                     status="invalid_arguments",
                 )
                 return
-            decision = self._governance.review(action)
+            if hasattr(self._governance, "decide_tool_call"):
+                decision = self._governance.decide_tool_call(
+                    action,
+                    dry_run_requested=dry_run_requested,
+                    runtime_cooldown_seconds=self._tool_execution_cooldown_remaining(),
+                )
+            else:
+                decision = self._governance.review(action)
+            decision = GovernanceLayer.coerce_decision_payload(decision, action)
+            if decision.cooldown_seconds > 0:
+                await self._reject_tool_call(
+                    action,
+                    f"Tool execution paused for {decision.cooldown_seconds:.0f}s due to stop word.",
+                    websocket,
+                    status="cancelled",
+                )
+                return
+            if dry_run_requested:
+                if not decision.dry_run_supported:
+                    await self._reject_tool_call(
+                        action,
+                        decision.reason,
+                        websocket,
+                        staging=staging,
+                        status="denied",
+                    )
+                    return
+                await self._send_dry_run_output(action, staging, websocket)
+                return
             approved_via_prior_permission = (
                 decision.needs_confirmation
                 and self._consume_prior_research_permission_marker_if_fresh(action)
@@ -4179,7 +4205,12 @@ class RealtimeAPI:
                 )
                 self._pending_action = pending_action
                 self._sync_confirmation_legacy_fields()
-                await self._request_tool_confirmation(action, decision.reason, websocket, staging)
+                await self._request_tool_confirmation(
+                    action,
+                    decision.confirm_reason or decision.reason,
+                    websocket,
+                    staging,
+                )
                 token.prompt_sent = True
                 self._set_confirmation_state(ConfirmationState.AWAITING_DECISION, reason="tool_prompt_sent")
             else:
