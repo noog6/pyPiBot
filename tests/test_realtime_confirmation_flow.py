@@ -554,8 +554,9 @@ def test_handle_response_completed_token_active_with_idle_phase_skips_reflect_tr
 
 
 
-def test_maybe_process_research_intent_emits_single_permission_prompt_for_duplicate_request() -> None:
+def test_maybe_process_research_intent_emits_single_permission_prompt_for_duplicate_request(monkeypatch, tmp_path) -> None:
     api = RealtimeAPI.__new__(RealtimeAPI)
+    storage_controller_cls = _wire_real_research_budget(monkeypatch, tmp_path, api)
     api._pending_research_request = None
     api._pending_action = None
     api._research_mode = "ask"
@@ -572,24 +573,83 @@ def test_maybe_process_research_intent_emits_single_permission_prompt_for_duplic
 
     api.send_assistant_message = _send_assistant_message
 
-    first = asyncio.run(
-        api._maybe_process_research_intent(
-            "search the web for market updates",
-            _Ws(),
-            source="input_audio_transcription",
+    try:
+        usage_before = _usage_count(storage_controller_cls)
+
+        first = asyncio.run(
+            api._maybe_process_research_intent(
+                "search the web for market updates",
+                _Ws(),
+                source="input_audio_transcription",
+            )
         )
-    )
-    second = asyncio.run(
-        api._maybe_process_research_intent(
-            "search the web for market updates",
-            _Ws(),
-            source="input_audio_transcription",
+        second = asyncio.run(
+            api._maybe_process_research_intent(
+                "search the web for market updates",
+                _Ws(),
+                source="input_audio_transcription",
+            )
         )
+        usage_after = _usage_count(storage_controller_cls)
+
+        assert first is True
+        assert second is True
+        assert len(prompted) == 1
+        assert usage_after == usage_before
+    finally:
+        controller = storage_controller_cls._instance
+        if controller is not None:
+            controller.close()
+        storage_controller_cls._instance = None
+
+
+def test_maybe_process_research_intent_ignores_duplicate_when_confirmation_token_pending_without_usage_change(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    storage_controller_cls = _wire_real_research_budget(monkeypatch, tmp_path, api)
+    api._pending_research_request = None
+    api._pending_action = None
+    api._research_mode = "ask"
+    api._research_provider = "openai"
+    api._research_firecrawl_enabled = False
+    api._research_firecrawl_allowlist_mode = "public"
+    api._research_firecrawl_allowlist_domains = set()
+    api._clip_text = lambda value, limit=80: value[:limit]
+    api._pending_confirmation_token = _build_confirmation_token(
+        kind="research_permission",
+        request=ResearchRequest(prompt="search the web for market updates", context={"source": "input_audio_transcription"}),
     )
 
-    assert first is True
-    assert second is True
-    assert len(prompted) == 1
+    prompted: list[str] = []
+
+    async def _send_assistant_message(message, *args, **kwargs):
+        prompted.append(message)
+
+    api.send_assistant_message = _send_assistant_message
+
+    try:
+        usage_before = _usage_count(storage_controller_cls)
+
+        result = asyncio.run(
+            api._maybe_process_research_intent(
+                "search the web for market updates",
+                _Ws(),
+                source="input_audio_transcription",
+            )
+        )
+
+        usage_after = _usage_count(storage_controller_cls)
+
+        assert result is True
+        assert prompted == []
+        assert usage_after == usage_before
+    finally:
+        controller = storage_controller_cls._instance
+        if controller is not None:
+            controller.close()
+        storage_controller_cls._instance = None
 
 
 def test_request_tool_confirmation_sends_single_spoken_prompt() -> None:
@@ -1936,8 +1996,12 @@ def test_accepted_research_permission_short_circuits_governance_confirmation_whe
     )
 
 
-def test_handle_function_call_replays_stable_blocked_research_permission_output_for_same_fingerprint() -> None:
+def test_handle_function_call_replays_stable_blocked_research_permission_output_for_same_fingerprint(
+    monkeypatch,
+    tmp_path,
+) -> None:
     api = _make_api_stub()
+    storage_controller_cls = _wire_real_research_budget(monkeypatch, tmp_path, api)
     fingerprint = api._build_research_fingerprint(query="status", source="user_text")
     api._record_research_permission_outcome(fingerprint, approved=False)
     api._pending_action = None
@@ -1950,18 +2014,32 @@ def test_handle_function_call_replays_stable_blocked_research_permission_output_
         async def send(self, payload: str) -> None:
             sent_payloads.append(json.loads(payload))
 
-    asyncio.run(api.handle_function_call({}, _SendWs()))
+    try:
+        budget_before = api._research_budget_remaining()
+        usage_before = _usage_count(storage_controller_cls)
 
-    api.function_call = {"name": "perform_research", "call_id": "call_blocked_two"}
-    api.function_call_args = '{"query":"status", "context": {"source": "user_text"}}'
-    asyncio.run(api.handle_function_call({}, _SendWs()))
+        asyncio.run(api.handle_function_call({}, _SendWs()))
 
-    assert len(sent_payloads) == 2
-    first_output = json.loads(sent_payloads[0]["item"]["output"])
-    second_output = json.loads(sent_payloads[1]["item"]["output"])
-    assert first_output["status"] == "blocked_by_research_permission"
-    assert second_output["status"] == "blocked_by_research_permission"
-    assert first_output == second_output
+        api.function_call = {"name": "perform_research", "call_id": "call_blocked_two"}
+        api.function_call_args = '{"query":"status", "context": {"source": "user_text"}}'
+        asyncio.run(api.handle_function_call({}, _SendWs()))
+
+        budget_after = api._research_budget_remaining()
+        usage_after = _usage_count(storage_controller_cls)
+
+        assert len(sent_payloads) == 2
+        first_output = json.loads(sent_payloads[0]["item"]["output"])
+        second_output = json.loads(sent_payloads[1]["item"]["output"])
+        assert first_output["status"] == "blocked_by_research_permission"
+        assert second_output["status"] == "blocked_by_research_permission"
+        assert first_output == second_output
+        assert budget_after == budget_before
+        assert usage_after == usage_before
+    finally:
+        controller = storage_controller_cls._instance
+        if controller is not None:
+            controller.close()
+        storage_controller_cls._instance = None
 
 
 def test_tool_confirmation_token_closes_and_state_returns_idle_on_reject() -> None:
