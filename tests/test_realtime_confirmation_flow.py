@@ -8,6 +8,7 @@ import logging
 from collections import deque
 from unittest.mock import patch
 
+from ai.governance import ActionPacket
 from ai.orchestration import OrchestrationPhase
 from ai.realtime_api import ConfirmationState, PendingConfirmationToken, RealtimeAPI
 from interaction import InteractionState
@@ -101,6 +102,8 @@ def _make_api_stub() -> RealtimeAPI:
     api._pending_confirmation_token = None
     api._confirmation_state = ConfirmationState.IDLE
     api._last_executed_tool_call = None
+    api._intent_ledger = {}
+    api._intent_state_ttl_s = 300.0
     api._debug_governance_decisions = False
     api._active_utterance = None
     api.mic = _Mic()
@@ -153,6 +156,32 @@ def test_parse_confirmation_decision_accepts_go_ahead_phrasing() -> None:
     assert api._parse_confirmation_decision("Please go ahead.") == "yes"
     assert api._parse_confirmation_decision("go ahead and do it") == "yes"
     assert api._parse_confirmation_decision("proceed") == "yes"
+
+
+def test_build_approval_prompt_uses_summary_reason_and_standard_options() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    action = ActionPacket(
+        id="call_1",
+        tool_name="perform_research",
+        tool_args={"query": "weather"},
+        tier=2,
+        what="Run research",
+        why="Need latest weather summary\nfor planning",
+        impact="Read only",
+        rollback="None",
+        alternatives=["skip"],
+        confidence=0.91,
+        cost="low",
+        risk_flags=[],
+        requires_confirmation=True,
+    )
+
+    assert api._build_approval_prompt(action) == (
+        "Approval required for this action.\n"
+        "Action summary: tool=perform_research tier=2 cost=low confidence=0.91 requires_confirmation=True\n"
+        "Reason: Need latest weather summary for planning\n"
+        "Options: Approve / Deny / Dry-run"
+    )
 
 
 def test_maybe_request_response_blocks_image_trigger_during_confirmation() -> None:
@@ -1171,15 +1200,16 @@ def test_handle_function_call_transitions_to_act_when_execution_approved() -> No
         "Gov",
         (),
         {
-            "build_action_packet": lambda *args, **kwargs: type(
-                "Action",
-                (),
-                {
-                    "id": "call_exec",
-                    "tool_name": "perform_research",
-                    "summary": lambda self: "summary",
-                },
-            )(),
+                "build_action_packet": lambda *args, **kwargs: type(
+                    "Action",
+                    (),
+                    {
+                        "id": "call_exec",
+                        "tool_name": "perform_research",
+                        "tool_args": {"query": "status"},
+                        "summary": lambda self: "summary",
+                    },
+                )(),
             "review": lambda *args, **kwargs: type(
                 "Decision",
                 (),
@@ -2062,6 +2092,48 @@ def test_tool_confirmation_token_closes_and_state_returns_idle_on_reject() -> No
     assert rejected == ["rejected"]
     assert api._pending_confirmation_token is None
     assert api._confirmation_state == ConfirmationState.IDLE
+
+
+def test_tool_confirmation_deny_does_not_execute_tool_and_emits_noop_payload() -> None:
+    api = _make_api_stub()
+    pending = _build_pending_action()
+    token = _build_confirmation_token(kind="tool_governance", pending_action=pending)
+    api._pending_confirmation_token = token
+    api._pending_action = pending
+    api._confirmation_state = ConfirmationState.AWAITING_DECISION
+    api._awaiting_confirmation_completion = False
+    api.orchestration_state = type(
+        "S",
+        (),
+        {"phase": OrchestrationPhase.AWAITING_CONFIRMATION, "transition": lambda *args, **kwargs: None},
+    )()
+    api._governance = type("Gov", (), {"describe_tool": lambda *_args, **_kwargs: {}})()
+    api._intent_ledger = {}
+    api._intent_state_ttl_s = 300.0
+
+    executed: list[str] = []
+
+    async def _execute(*_args, **_kwargs):
+        executed.append("executed")
+
+    api._execute_action = _execute
+    api._send_response_create = lambda *_args, **_kwargs: asyncio.sleep(0)
+    api.send_assistant_message = lambda *_args, **_kwargs: asyncio.sleep(0)
+
+    sent_payloads: list[dict[str, object]] = []
+
+    class _SendWs:
+        async def send(self, payload: str) -> None:
+            sent_payloads.append(json.loads(payload))
+
+    assert asyncio.run(api._maybe_handle_approval_response("deny", _SendWs())) is True
+
+    assert executed == []
+    function_outputs = [p for p in sent_payloads if p.get("item", {}).get("type") == "function_call_output"]
+    assert len(function_outputs) == 1
+    output_payload = json.loads(function_outputs[0]["item"]["output"])
+    assert output_payload["status"] == "cancelled"
+    assert output_payload["no_op"] == {"executed": False, "category": "rejection"}
 
 
 def test_research_permission_yes_after_25s_still_approves_when_timeout_paused() -> None:

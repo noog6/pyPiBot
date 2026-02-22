@@ -1582,14 +1582,70 @@ class RealtimeAPI:
         return f"Would call {action.tool_name} with the proposed arguments."
 
     def _build_approval_prompt(self, action: ActionPacket) -> str:
-        packet = self._format_action_packet(action)
-        if action.tier >= 3:
-            return (
-                "Approval required for this action.\n"
-                f"{packet}\n"
-                "Approve? Reply exactly: 'Yes, do it now' / no / modify."
+        one_line_reason = " ".join(str(action.why).split())
+        return (
+            "Approval required for this action.\n"
+            f"Action summary: {action.summary()}\n"
+            f"Reason: {one_line_reason}\n"
+            "Options: Approve / Deny / Dry-run"
+        )
+
+    async def _send_noop_tool_output(
+        self,
+        websocket: Any,
+        *,
+        call_id: str,
+        status: str,
+        message: str,
+        tool_name: str,
+        reason: str,
+        category: str,
+        action: ActionPacket | None = None,
+        staging: dict[str, Any] | None = None,
+        extra_fields: dict[str, Any] | None = None,
+        include_response_create: bool = False,
+        response_origin: str = "tool_output",
+    ) -> None:
+        payload: dict[str, Any] = {
+            "status": status,
+            "message": message,
+            "tool": tool_name,
+            "reason": reason,
+            "no_op": {
+                "executed": False,
+                "category": category,
+            },
+            "confirmation": {
+                "pending": self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase(),
+                "token": getattr(getattr(self, "_pending_confirmation_token", None), "id", ""),
+            },
+        }
+        if action is not None:
+            governance = getattr(self, "_governance", None)
+            payload["tool_metadata"] = (
+                governance.describe_tool(action.tool_name)
+                if governance is not None and hasattr(governance, "describe_tool")
+                else {}
             )
-        return f"Approval required for this action.\n{packet}\nApprove? (yes / no / modify)"
+            payload["action_packet"] = action.to_payload()
+            payload["staging"] = staging
+            payload["summary"] = action.summary()
+        if extra_fields:
+            payload.update(extra_fields)
+        function_call_output = {
+            "type": "conversation.item.create",
+            "item": {
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": json.dumps(payload),
+            },
+        }
+        log_ws_event("Outgoing", function_call_output)
+        self._track_outgoing_event(function_call_output)
+        await websocket.send(json.dumps(function_call_output))
+        if include_response_create:
+            response_create_event = {"type": "response.create"}
+            await self._send_response_create(websocket, response_create_event, origin=response_origin)
 
     def _format_action_packet(self, action: ActionPacket) -> str:
         alternatives = ", ".join(action.alternatives) if action.alternatives else "(none)"
@@ -2489,6 +2545,9 @@ class RealtimeAPI:
             response_metadata={
                 "trigger": "confirmation_reminder",
                 "approval_flow": "true",
+                "confirmation_pending": "true",
+                "confirmation_reason": reason,
+                "confirmation_options": "yes,no",
                 "confirmation_token": token.id if token is not None else "",
             },
         )
@@ -4091,23 +4150,15 @@ class RealtimeAPI:
                             function_name,
                             call_id,
                         )
-                    function_call_output = {
-                        "type": "conversation.item.create",
-                        "item": {
-                            "type": "function_call_output",
-                            "call_id": call_id,
-                            "output": json.dumps(
-                                {
-                                    "status": "blocked_by_research_permission",
-                                    "message": "Research request was denied for this query; do not retry until user re-approves.",
-                                    "tool": function_name,
-                                }
-                            ),
-                        },
-                    }
-                    log_ws_event("Outgoing", function_call_output)
-                    self._track_outgoing_event(function_call_output)
-                    await websocket.send(json.dumps(function_call_output))
+                    await self._send_noop_tool_output(
+                        websocket,
+                        call_id=call_id,
+                        status="blocked_by_research_permission",
+                        message="Research request was denied for this query; do not retry until user re-approves.",
+                        tool_name=function_name,
+                        reason="research_permission_denied",
+                        category="suppression",
+                    )
                     self.function_call = None
                     self.function_call_args = ""
                     return
@@ -4141,24 +4192,16 @@ class RealtimeAPI:
                         deferred_token_id or "legacy",
                         previous_call_id or "none",
                     )
-                function_call_output = {
-                    "type": "conversation.item.create",
-                    "item": {
-                        "type": "function_call_output",
-                        "call_id": call_id,
-                        "output": json.dumps(
-                            {
-                                "status": "waiting_for_permission",
-                                "token": token.id if token is not None else "",
-                                "message": "Permission required; ask user first.",
-                                "tool": function_name,
-                            }
-                        ),
-                    },
-                }
-                log_ws_event("Outgoing", function_call_output)
-                self._track_outgoing_event(function_call_output)
-                await websocket.send(json.dumps(function_call_output))
+                await self._send_noop_tool_output(
+                    websocket,
+                    call_id=call_id,
+                    status="waiting_for_permission",
+                    message="Permission required; ask user first.",
+                    tool_name=function_name,
+                    reason="permission_pending",
+                    category="suppression",
+                    extra_fields={"token": token.id if token is not None else ""},
+                )
                 self.function_call = None
                 self.function_call_args = ""
                 return
@@ -4179,23 +4222,15 @@ class RealtimeAPI:
                     function_name,
                     call_id,
                 )
-                function_call_output = {
-                    "type": "conversation.item.create",
-                    "item": {
-                        "type": "function_call_output",
-                        "call_id": call_id,
-                        "output": json.dumps(
-                            {
-                                "status": "redundant",
-                                "message": "Duplicate tool call ignored; use previous tool results.",
-                                "tool": function_name,
-                            }
-                        ),
-                    },
-                }
-                log_ws_event("Outgoing", function_call_output)
-                self._track_outgoing_event(function_call_output)
-                await websocket.send(json.dumps(function_call_output))
+                await self._send_noop_tool_output(
+                    websocket,
+                    call_id=call_id,
+                    status="redundant",
+                    message="Duplicate tool call ignored; use previous tool results.",
+                    tool_name=function_name,
+                    reason="duplicate_tool_call",
+                    category="suppression",
+                )
                 self.function_call = None
                 self.function_call_args = ""
                 return
@@ -4205,23 +4240,15 @@ class RealtimeAPI:
                     function_name,
                     call_id,
                 )
-                function_call_output = {
-                    "type": "conversation.item.create",
-                    "item": {
-                        "type": "function_call_output",
-                        "call_id": call_id,
-                        "output": json.dumps(
-                            {
-                                "status": "suppressed_after_confirmation_timeout",
-                                "message": "Tool call suppressed after confirmation timeout; retry shortly.",
-                                "tool": function_name,
-                            }
-                        ),
-                    },
-                }
-                log_ws_event("Outgoing", function_call_output)
-                self._track_outgoing_event(function_call_output)
-                await websocket.send(json.dumps(function_call_output))
+                await self._send_noop_tool_output(
+                    websocket,
+                    call_id=call_id,
+                    status="suppressed_after_confirmation_timeout",
+                    message="Tool call suppressed after confirmation timeout; retry shortly.",
+                    tool_name=function_name,
+                    reason="confirmation_timeout_debounce",
+                    category="suppression",
+                )
                 self.function_call = None
                 self.function_call_args = ""
                 return
@@ -4610,23 +4637,17 @@ class RealtimeAPI:
             return
         pending = self._pending_action
         action = pending.action
-        payload = {
-            "status": "awaiting_confirmation",
-            "tool": action.tool_name,
-            "message": "Awaiting explicit yes/no confirmation for pending action.",
-            "action_packet": action.to_payload(),
-        }
-        function_call_output = {
-            "type": "conversation.item.create",
-            "item": {
-                "type": "function_call_output",
-                "call_id": call_id,
-                "output": json.dumps(payload),
-            },
-        }
-        log_ws_event("Outgoing", function_call_output)
-        self._track_outgoing_event(function_call_output)
-        await websocket.send(json.dumps(function_call_output))
+        await self._send_noop_tool_output(
+            websocket,
+            call_id=call_id,
+            status="awaiting_confirmation",
+            message="Awaiting explicit yes/no confirmation for pending action.",
+            tool_name=action.tool_name,
+            reason="pending_confirmation",
+            category="suppression",
+            action=action,
+            staging=pending.staging,
+        )
 
     async def _present_action(
         self,
@@ -4714,28 +4735,18 @@ class RealtimeAPI:
         packet = self._format_action_packet(action)
         message = f"Tool execution not run.\n{packet}\nReason: {reason}."
         await self.send_assistant_message(message, websocket)
-        function_call_output = {
-            "type": "conversation.item.create",
-            "item": {
-                "type": "function_call_output",
-                "call_id": action.id,
-                "output": json.dumps(
-                    {
-                        "status": status,
-                        "message": message,
-                        "tool": action.tool_name,
-                        "tool_metadata": self._governance.describe_tool(action.tool_name),
-                        "action_packet": action.to_payload(),
-                        "staging": staging,
-                    }
-                ),
-            },
-        }
-        log_ws_event("Outgoing", function_call_output)
-        self._track_outgoing_event(function_call_output)
-        await websocket.send(json.dumps(function_call_output))
-        response_create_event = {"type": "response.create"}
-        await self._send_response_create(websocket, response_create_event, origin="tool_output")
+        await self._send_noop_tool_output(
+            websocket,
+            call_id=action.id,
+            status=status,
+            message=message,
+            tool_name=action.tool_name,
+            reason=reason,
+            category="rejection",
+            action=action,
+            staging=staging,
+            include_response_create=True,
+        )
         self._presented_actions.discard(action.id)
         self.function_call = None
         self.function_call_args = ""
