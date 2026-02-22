@@ -9,7 +9,7 @@ import time
 from typing import Any
 
 from core.logging import logger as LOGGER
-from storage.research_budget import ResearchBudgetStorage, UsageEvent
+from storage.research_budget import ResearchBudgetStorage, UsageEvent, UsageReservation
 
 
 class ResearchBudgetManager:
@@ -136,6 +136,104 @@ class ResearchBudgetManager:
         )
         self._record_rate_limit_spend()
         return True
+
+    def reserve_execution(
+        self,
+        units: int = 1,
+        *,
+        audit_payload: dict[str, Any] | None = None,
+        over_budget_approved: bool = False,
+        decision_source: str | None = None,
+    ) -> UsageReservation | None:
+        """Reserve budget before provider work and persist a started audit row."""
+
+        amount = max(1, int(units))
+        if not self._within_rate_limit():
+            return None
+
+        started_at_ts = int(time.time())
+        metadata = self._storage.build_usage_metadata(
+            {"execution_status": "started"},
+            over_budget_approved=over_budget_approved,
+            decision_source=decision_source,
+        )
+        usage_event = UsageEvent(
+            spent_at_ts=started_at_ts,
+            request_fingerprint=self._audit_field(audit_payload, "request_fingerprint"),
+            research_id=self._audit_field(audit_payload, "research_id"),
+            source=self._audit_field(audit_payload, "source"),
+            prompt_preview=self._audit_field(audit_payload, "prompt_preview"),
+            provider=self._audit_field(audit_payload, "provider"),
+            metadata=metadata,
+        )
+
+        if over_budget_approved:
+            usage_id = self._storage.append_usage(
+                date_utc=self._today_utc(),
+                spent_at_ts=started_at_ts,
+                units=amount,
+                request_fingerprint=usage_event.request_fingerprint,
+                research_id=usage_event.research_id,
+                source=usage_event.source,
+                prompt_preview=usage_event.prompt_preview,
+                provider=usage_event.provider,
+                metadata=usage_event.metadata,
+            )
+            self._record_rate_limit_spend()
+            return UsageReservation(
+                usage_id=usage_id,
+                date_utc=self._today_utc(),
+                spent_at_ts=started_at_ts,
+                units=amount,
+                key=self._budget_key,
+                charged_to_budget=False,
+            )
+
+        if self._daily_limit <= 0:
+            usage_id = self._storage.append_usage(
+                date_utc=self._today_utc(),
+                spent_at_ts=started_at_ts,
+                units=amount,
+                request_fingerprint=usage_event.request_fingerprint,
+                research_id=usage_event.research_id,
+                source=usage_event.source,
+                prompt_preview=usage_event.prompt_preview,
+                provider=usage_event.provider,
+                metadata=usage_event.metadata,
+            )
+            self._record_rate_limit_spend()
+            return UsageReservation(
+                usage_id=usage_id,
+                date_utc=self._today_utc(),
+                spent_at_ts=started_at_ts,
+                units=amount,
+                key=self._budget_key,
+                charged_to_budget=False,
+            )
+
+        reservation = self._storage.reserve_budget_usage(
+            key=self._budget_key,
+            units=amount,
+            daily_limit=self._daily_limit,
+            usage_event=usage_event,
+        )
+        if reservation is None:
+            return None
+        self._record_rate_limit_spend()
+        return reservation
+
+    def finalize_execution(
+        self,
+        reservation: UsageReservation,
+        *,
+        execution_status: str,
+        refund: bool,
+    ) -> bool:
+        return self._storage.finalize_budget_usage(
+            reservation=reservation,
+            status=execution_status,
+            refund=refund and self._daily_limit > 0,
+        )
 
     def current_state(self) -> dict[str, Any]:
         date_utc = self._today_utc()
