@@ -210,112 +210,222 @@ governance:
   #   reversible: true/false
   #   cost_hint: cheap | med | expensive
   #   safety_tags: list of risk tags
+  #   confirm_required: explicit confirmation gate for the tool
+  #   confirm_reason: short policy reason surfaced in approval flow
+  #   confirm_prompt: optional custom confirmation wording
+  #   cooldown_seconds: per-tool cooldown gate before execution
+  #   dry_run_supported: allows no-op simulation output
   tool_specs:
     read_battery_voltage:
       tier: 0
       reversible: true
       cost_hint: "cheap"
       safety_tags: ["battery", "sensor"]
+      confirm_required: false
+      confirm_reason: "read-only sensor query"
+      confirm_prompt: null
+      cooldown_seconds: 0
+      dry_run_supported: true
     read_environment:
       tier: 0
       reversible: true
       cost_hint: "cheap"
       safety_tags: ["sensor"]
+      confirm_required: false
+      confirm_reason: "read-only sensor query"
+      confirm_prompt: null
+      cooldown_seconds: 0
+      dry_run_supported: true
     read_imu_data:
       tier: 0
       reversible: true
       cost_hint: "cheap"
       safety_tags: ["sensor", "motion"]
+      confirm_required: false
+      confirm_reason: "read-only sensor query"
+      confirm_prompt: null
+      cooldown_seconds: 0
+      dry_run_supported: true
     gesture_idle:
       tier: 1
       reversible: true
       cost_hint: "cheap"
       safety_tags: ["motion"]
+      confirm_required: false
+      confirm_reason: "low-risk reversible motion"
+      confirm_prompt: null
+      cooldown_seconds: 0
+      dry_run_supported: true
     gesture_nod:
       tier: 1
       reversible: true
       cost_hint: "cheap"
       safety_tags: ["motion"]
+      confirm_required: false
+      confirm_reason: "low-risk reversible motion"
+      confirm_prompt: null
+      cooldown_seconds: 0
+      dry_run_supported: true
     gesture_no:
       tier: 1
       reversible: true
       cost_hint: "cheap"
       safety_tags: ["motion"]
+      confirm_required: false
+      confirm_reason: "low-risk reversible motion"
+      confirm_prompt: null
+      cooldown_seconds: 0
+      dry_run_supported: true
     gesture_look_around:
       tier: 1
       reversible: true
       cost_hint: "cheap"
       safety_tags: ["motion"]
+      confirm_required: false
+      confirm_reason: "low-risk reversible motion"
+      confirm_prompt: null
+      cooldown_seconds: 0
+      dry_run_supported: true
     gesture_look_up:
       tier: 1
       reversible: true
       cost_hint: "cheap"
       safety_tags: ["motion"]
+      confirm_required: false
+      confirm_reason: "low-risk reversible motion"
+      confirm_prompt: null
+      cooldown_seconds: 0
+      dry_run_supported: true
     gesture_look_left:
       tier: 1
       reversible: true
       cost_hint: "cheap"
       safety_tags: ["motion"]
+      confirm_required: false
+      confirm_reason: "low-risk reversible motion"
+      confirm_prompt: null
+      cooldown_seconds: 0
+      dry_run_supported: true
     gesture_look_right:
       tier: 1
       reversible: true
       cost_hint: "cheap"
       safety_tags: ["motion"]
+      confirm_required: false
+      confirm_reason: "low-risk reversible motion"
+      confirm_prompt: null
+      cooldown_seconds: 0
+      dry_run_supported: true
     gesture_look_down:
       tier: 1
       reversible: true
       cost_hint: "cheap"
       safety_tags: ["motion"]
+      confirm_required: false
+      confirm_reason: "low-risk reversible motion"
+      confirm_prompt: null
+      cooldown_seconds: 0
+      dry_run_supported: true
     gesture_look_center:
       tier: 1
       reversible: true
       cost_hint: "cheap"
       safety_tags: ["motion"]
+      confirm_required: false
+      confirm_reason: "low-risk reversible motion"
+      confirm_prompt: null
+      cooldown_seconds: 0
+      dry_run_supported: true
     gesture_curious_tilt:
       tier: 1
       reversible: true
       cost_hint: "cheap"
       safety_tags: ["motion"]
+      confirm_required: false
+      confirm_reason: "low-risk reversible motion"
+      confirm_prompt: null
+      cooldown_seconds: 0
+      dry_run_supported: true
     gesture_attention_snap:
       tier: 1
       reversible: true
       cost_hint: "cheap"
       safety_tags: ["motion"]
+      confirm_required: false
+      confirm_reason: "low-risk reversible motion"
+      confirm_prompt: null
+      cooldown_seconds: 0
+      dry_run_supported: true
     update_user_profile:
       tier: 2
       reversible: false
       cost_hint: "med"
       safety_tags: ["storage"]
+      confirm_required: true
+      confirm_reason: "persists user profile changes"
+      confirm_prompt: "Do you want me to update your profile with these changes?"
+      cooldown_seconds: 0
+      dry_run_supported: false
     get_output_volume:
       tier: 0
       reversible: true
       cost_hint: "cheap"
       safety_tags: ["audio"]
+      confirm_required: false
+      confirm_reason: "read-only audio query"
+      confirm_prompt: null
+      cooldown_seconds: 0
+      dry_run_supported: true
     set_output_volume:
       tier: 1
       reversible: true
       cost_hint: "cheap"
       safety_tags: ["audio"]
+      confirm_required: false
+      confirm_reason: "reversible audio control"
+      confirm_prompt: null
+      cooldown_seconds: 0
+      dry_run_supported: true
     remember_memory:
       tier: 1
       reversible: true
       cost_hint: "med"
       safety_tags: ["storage"]
+      confirm_required: false
+      confirm_reason: "stores user memory"
+      confirm_prompt: null
+      cooldown_seconds: 0
+      dry_run_supported: true
     recall_memories:
       tier: 1
       reversible: true
       cost_hint: "cheap"
       safety_tags: ["storage"]
+      confirm_required: false
+      confirm_reason: "read-only memory lookup"
+      confirm_prompt: null
+      cooldown_seconds: 0
+      dry_run_supported: true
     forget_memory:
       tier: 1
       reversible: false
       cost_hint: "med"
       safety_tags: ["storage"]
+      confirm_required: true
+      confirm_reason: "deletes stored memory"
+      confirm_prompt: "This will delete memory records. Should I continue?"
+      cooldown_seconds: 0
+      dry_run_supported: false
     perform_research:
       tier: 1
       reversible: false
       cost_hint: "med"
       safety_tags: ["network", "research"]
+      confirm_required: false
+      confirm_reason: "network-backed research action"
+      confirm_prompt: null
+      cooldown_seconds: 0
+      dry_run_supported: true
 # Image response injection mode ("respond" or "catalog_only")
 image_response_mode: "catalog_only"
 injection_response_triggers:
