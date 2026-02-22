@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import threading
+import time
 
 from services.research.models import RESEARCH_PACKET_SCHEMA, ResearchRequest
 from services.research.openai_service import OpenAIResearchService
@@ -92,6 +94,73 @@ def test_query_cache_skips_repeat_search(tmp_path: Path) -> None:
     assert svc.search_calls == 1
 
 
+
+
+
+def test_near_concurrent_requests_commit_exactly_one_usage_row(tmp_path: Path, monkeypatch) -> None:
+    _configure_storage(monkeypatch, tmp_path)
+    class _SlowSearchService(_FakeOpenAIResearchService):
+        def _search_candidates(self, req: ResearchRequest) -> dict:
+            time.sleep(0.1)
+            return super()._search_candidates(req)
+
+    svc = _SlowSearchService(
+        search_result={"best_url": "", "sources": [], "search_summary": "summary", "safety_notes": []},
+        extract_result="{}",
+        daily_budget=1,
+        budget_state_file=str(tmp_path / "budget.json"),
+        cache_dir=str(tmp_path / "cache"),
+    )
+
+    packets = [None, None]
+
+    def _run(idx: int, prompt: str) -> None:
+        packets[idx] = svc.request_research(ResearchRequest(prompt=prompt, context={"request_fingerprint": f"fp-{idx}"}))
+
+    threads = [
+        threading.Thread(target=_run, args=(0, "find datasheet A")),
+        threading.Thread(target=_run, args=(1, "find datasheet B")),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert packets[0] is not None and packets[1] is not None
+    success_packets = [packet for packet in packets if packet.status != "error"]
+    assert len(success_packets) == 1
+
+    usage_rows = svc._budget._storage.get_usage_for_date(svc._budget.current_state()["date"])
+    committed_rows = [row for row in usage_rows if (row.metadata or {}).get("execution_status") == "committed"]
+    aborted_rows = [row for row in usage_rows if (row.metadata or {}).get("execution_status") == "aborted"]
+
+    assert len(committed_rows) == 1
+    assert len(aborted_rows) == 0
+
+
+def test_failed_execution_marks_aborted_and_refunds_budget(tmp_path: Path, monkeypatch) -> None:
+    _configure_storage(monkeypatch, tmp_path)
+    class _FailingSearchService(_FakeOpenAIResearchService):
+        def _search_candidates(self, req: ResearchRequest) -> dict:
+            return {"error": "provider_failure"}
+
+    svc = _FailingSearchService(
+        search_result={"best_url": "", "sources": [], "search_summary": "summary", "safety_notes": []},
+        extract_result="{}",
+        daily_budget=1,
+        budget_state_file=str(tmp_path / "budget.json"),
+        cache_dir=str(tmp_path / "cache"),
+    )
+
+    packet = svc.request_research(ResearchRequest(prompt="find datasheet fail", context={"request_fingerprint": "fp-fail"}))
+
+    assert packet.status == "error"
+    assert svc.get_budget_remaining() == 1
+
+    usage_rows = svc._budget._storage.get_usage_for_date(svc._budget.current_state()["date"])
+    assert len(usage_rows) == 1
+    assert usage_rows[0].metadata is not None
+    assert usage_rows[0].metadata.get("execution_status") == "aborted"
 
 def test_budget_spend_only_on_actual_execution(tmp_path: Path) -> None:
     svc = _FakeOpenAIResearchService(
@@ -472,6 +541,7 @@ def test_over_budget_approved_executes_and_writes_single_override_usage_row(tmp_
     assert override_row.metadata == {
         "over_budget_approved": True,
         "over_budget_decision_source": "operator_ui",
+        "execution_status": "committed",
     }
 
 

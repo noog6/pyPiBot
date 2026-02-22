@@ -63,6 +63,18 @@ class UsageRow:
     metadata: dict[str, object] | None
 
 
+@dataclass(frozen=True)
+class UsageReservation:
+    """Two-phase reservation handle for an in-flight execution."""
+
+    usage_id: int
+    date_utc: str
+    spent_at_ts: int
+    units: int
+    key: str
+    charged_to_budget: bool
+
+
 class ResearchBudgetStorage:
     """Persist research budget state and daily spend audit rows."""
 
@@ -369,6 +381,120 @@ class ResearchBudgetStorage:
                     limit=state.limit,
                     date_utc=state.date_utc,
                 )
+
+    def reserve_budget_usage(
+        self,
+        *,
+        key: str,
+        units: int,
+        daily_limit: int,
+        usage_event: UsageEvent,
+    ) -> UsageReservation | None:
+        """Atomically reserve units and write a started usage row."""
+
+        reserved_at_ts = int(usage_event.spent_at_ts)
+        current_date_utc = self._date_utc_from_ts(reserved_at_ts)
+        with self._lock:
+            with self._conn:
+                state = self._get_or_init_daily_state_txn(
+                    key=key,
+                    daily_limit=daily_limit,
+                    now_ts=reserved_at_ts,
+                    date_utc=current_date_utc,
+                )
+                amount = max(1, int(units))
+                if state.remaining < amount:
+                    return None
+                new_remaining = state.remaining - amount
+                self._conn.execute(
+                    """
+                    UPDATE research_budget_state
+                    SET remaining = ?, updated_at_ts = ?
+                    WHERE key = ?
+                    """,
+                    (new_remaining, reserved_at_ts, key),
+                )
+                metadata_json = json.dumps(self.build_usage_metadata(usage_event.metadata))
+                cursor = self._conn.execute(
+                    """
+                    INSERT INTO research_budget_usage (
+                        date_utc,
+                        spent_at_ts,
+                        units,
+                        request_fingerprint,
+                        research_id,
+                        source,
+                        prompt_preview,
+                        provider,
+                        metadata_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        state.date_utc,
+                        reserved_at_ts,
+                        amount,
+                        usage_event.request_fingerprint,
+                        usage_event.research_id,
+                        usage_event.source,
+                        usage_event.prompt_preview,
+                        usage_event.provider,
+                        metadata_json,
+                    ),
+                )
+                return UsageReservation(
+                    usage_id=int(cursor.lastrowid),
+                    date_utc=state.date_utc,
+                    spent_at_ts=reserved_at_ts,
+                    units=amount,
+                    key=key,
+                    charged_to_budget=True,
+                )
+
+    def finalize_budget_usage(
+        self,
+        *,
+        reservation: UsageReservation,
+        status: str,
+        refund: bool,
+    ) -> bool:
+        """Finalize reservation status and optionally refund reserved units."""
+
+        normalized_status = str(status).strip().lower() or "committed"
+        with self._lock:
+            with self._conn:
+                row = self._conn.execute(
+                    """
+                    SELECT metadata_json
+                    FROM research_budget_usage
+                    WHERE id = ?
+                    """,
+                    (reservation.usage_id,),
+                ).fetchone()
+                if row is None:
+                    return False
+                metadata = json.loads(row[0]) if row[0] else {}
+                metadata = self.build_usage_metadata(metadata) or {}
+                metadata["execution_status"] = normalized_status
+                self._conn.execute(
+                    """
+                    UPDATE research_budget_usage
+                    SET metadata_json = ?
+                    WHERE id = ?
+                    """,
+                    (json.dumps(metadata), reservation.usage_id),
+                )
+
+                if refund and reservation.charged_to_budget:
+                    self._conn.execute(
+                        """
+                        UPDATE research_budget_state
+                        SET remaining = remaining + ?, updated_at_ts = ?
+                        WHERE key = ? AND date_utc = ?
+                        """,
+                        (int(reservation.units), int(time.time()), reservation.key, reservation.date_utc),
+                    )
+                return True
 
     def get_usage_for_date(self, date_utc: str) -> list[UsageRow]:
         """Fetch usage audit rows for a UTC day, ordered by event timestamp."""

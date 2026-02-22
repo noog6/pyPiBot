@@ -255,114 +255,126 @@ class OpenAIResearchService(ResearchService):
                 },
             )
 
+        reservation = self._reserve_budget_spend(request_packet, use_override_spend=use_override_spend)
+        if reservation is None:
+            return self._safe_error_packet("budget_reservation_failed")
 
-        search_result = self._search_candidates(request_packet)
-        if "error" in search_result:
-            return self._safe_error_packet(str(search_result["error"]))
+        try:
+            search_result = self._search_candidates(request_packet)
+            if "error" in search_result:
+                if not self._record_budget_spend(reservation, execution_success=False):
+                    return self._safe_error_packet("budget_finalize_failed")
+                return self._safe_error_packet(str(search_result["error"]))
 
-        best_url = str(search_result.get("best_url") or "").strip()
-        sources = self._sanitize_sources(search_result.get("sources") or [])
-        safety_notes = self._sanitize_notes(search_result.get("safety_notes") or [])
+            best_url = str(search_result.get("best_url") or "").strip()
+            sources = self._sanitize_sources(search_result.get("sources") or [])
+            safety_notes = self._sanitize_notes(search_result.get("safety_notes") or [])
 
-        fetch_url, url_skip_reason = self._choose_fetch_url(
-            search_result,
-            sources,
-            best_url,
-            prefer_pdf=_query_prefers_pdf(request_packet.prompt),
-        )
-        fetch_meta = self._default_fetch_metadata()
-        markdown = ""
-
-        if not fetch_url:
-            fetch_meta["content_fetch_skip_reason"] = url_skip_reason or "no_sources"
-            safety_notes.append(f"content_fetch_skipped:{fetch_meta['content_fetch_skip_reason']}")
-        elif not self._firecrawl_enabled:
-            fetch_meta["content_fetch_skip_reason"] = "firecrawl_disabled"
-            safety_notes.append("content_fetch_skipped:firecrawl_disabled")
-        else:
-            allowed, policy_reason = self._is_url_allowed(fetch_url)
-            if not allowed:
-                LOGGER.warning("[Research] blocked URL by allowlist policy: %s", policy_reason)
-                LOGGER.info("[FIRECRAWL] skipped reason=domain_not_allowed")
-                fetch_meta["content_fetch_skip_reason"] = "domain_not_allowed"
-                safety_notes.append(f"blocked_by_domain_policy:{policy_reason}")
-                safety_notes.append("content_fetch_skipped:domain_not_allowed")
-            else:
-                fetch_meta["content_fetch_attempted"] = True
-                fetch_meta["content_fetch_url"] = fetch_url
-                started = time.perf_counter()
-                try:
-                    markdown, provider = self._fetch_markdown_for_url(fetch_url, run_id=run_id)
-                    fetch_meta["content_fetch_provider"] = provider
-                    fetch_meta["content_fetch_status"] = "ok"
-                    fetch_meta["content_fetch_markdown_chars"] = len(markdown)
-                    fetch_meta["content_fetch_latency_ms"] = int((time.perf_counter() - started) * 1000)
-                except Exception as exc:  # noqa: BLE001
-                    fetch_meta["content_fetch_latency_ms"] = int((time.perf_counter() - started) * 1000)
-                    reason = str(exc).strip().lower()
-                    if reason in {"pdf_disabled", "firecrawl_missing_key"}:
-                        fetch_meta["content_fetch_status"] = "skipped"
-                        fetch_meta["content_fetch_skip_reason"] = reason
-                        safety_notes.append(f"content_fetch_skipped:{reason}")
-                    else:
-                        fetch_meta["content_fetch_status"] = "failed"
-                        fetch_meta["content_fetch_error"] = type(exc).__name__
-                        if isinstance(exc, FirecrawlHTTPError):
-                            LOGGER.warning(
-                                "[Research] firecrawl_fetch_failed error=%s status_code=%s url=%s",
-                                type(exc).__name__,
-                                exc.status_code,
-                                self._redact_url(fetch_url),
-                            )
-                        else:
-                            LOGGER.warning("[Research] content fetch failed: %s", exc)
-                        safety_notes.append(f"content_fetch_failed:{type(exc).__name__}")
-
-        url_domain = parse.urlparse(fetch_url).hostname or ""
-        LOGGER.info(
-            "[Research] content_fetch attempted=%s provider=%s status=%s domain=%s markdown_chars=%s latency_ms=%s",
-            fetch_meta["content_fetch_attempted"],
-            fetch_meta["content_fetch_provider"],
-            fetch_meta["content_fetch_status"],
-            url_domain,
-            fetch_meta["content_fetch_markdown_chars"],
-            fetch_meta.get("content_fetch_latency_ms", 0),
-        )
-
-        if not markdown:
-            packet = self._sources_only_packet(search_result, sources, safety_notes, metadata_extra=fetch_meta)
-            self._cache.set("query", request_packet.prompt, self._packet_to_payload(packet))
-            self._record_budget_spend(request_packet, use_override_spend=use_override_spend)
-            LOGGER.info("[Research] rounds_used=1")
-            return packet
-
-        rounds_used = 2 if self._max_rounds >= 2 else 1
-        packet = self._extract_from_markdown(request_packet, fetch_url, markdown, sources, safety_notes)
-        packet = ResearchPacket(
-            schema=packet.schema,
-            status=packet.status,
-            answer_summary=packet.answer_summary,
-            extracted_facts=packet.extracted_facts,
-            sources=packet.sources,
-            safety_notes=packet.safety_notes,
-            metadata={**packet.metadata, **fetch_meta, "content_fetch_markdown": _clip(markdown, self._firecrawl_max_markdown_chars)},
-        )
-
-        if rounds_used == 2 and self._escalation_enabled and self._should_escalate(packet):
-            LOGGER.info("[Research] escalation triggered for second pass")
-            packet = self._extract_from_markdown(
-                request_packet,
-                best_url,
-                markdown,
+            fetch_url, url_skip_reason = self._choose_fetch_url(
+                search_result,
                 sources,
-                packet.safety_notes,
+                best_url,
+                prefer_pdf=_query_prefers_pdf(request_packet.prompt),
+            )
+            fetch_meta = self._default_fetch_metadata()
+            markdown = ""
+
+            if not fetch_url:
+                fetch_meta["content_fetch_skip_reason"] = url_skip_reason or "no_sources"
+                safety_notes.append(f"content_fetch_skipped:{fetch_meta['content_fetch_skip_reason']}")
+            elif not self._firecrawl_enabled:
+                fetch_meta["content_fetch_skip_reason"] = "firecrawl_disabled"
+                safety_notes.append("content_fetch_skipped:firecrawl_disabled")
+            else:
+                allowed, policy_reason = self._is_url_allowed(fetch_url)
+                if not allowed:
+                    LOGGER.warning("[Research] blocked URL by allowlist policy: %s", policy_reason)
+                    LOGGER.info("[FIRECRAWL] skipped reason=domain_not_allowed")
+                    fetch_meta["content_fetch_skip_reason"] = "domain_not_allowed"
+                    safety_notes.append(f"blocked_by_domain_policy:{policy_reason}")
+                    safety_notes.append("content_fetch_skipped:domain_not_allowed")
+                else:
+                    fetch_meta["content_fetch_attempted"] = True
+                    fetch_meta["content_fetch_url"] = fetch_url
+                    started = time.perf_counter()
+                    try:
+                        markdown, provider = self._fetch_markdown_for_url(fetch_url, run_id=run_id)
+                        fetch_meta["content_fetch_provider"] = provider
+                        fetch_meta["content_fetch_status"] = "ok"
+                        fetch_meta["content_fetch_markdown_chars"] = len(markdown)
+                        fetch_meta["content_fetch_latency_ms"] = int((time.perf_counter() - started) * 1000)
+                    except Exception as exc:  # noqa: BLE001
+                        fetch_meta["content_fetch_latency_ms"] = int((time.perf_counter() - started) * 1000)
+                        reason = str(exc).strip().lower()
+                        if reason in {"pdf_disabled", "firecrawl_missing_key"}:
+                            fetch_meta["content_fetch_status"] = "skipped"
+                            fetch_meta["content_fetch_skip_reason"] = reason
+                            safety_notes.append(f"content_fetch_skipped:{reason}")
+                        else:
+                            fetch_meta["content_fetch_status"] = "failed"
+                            fetch_meta["content_fetch_error"] = type(exc).__name__
+                            if isinstance(exc, FirecrawlHTTPError):
+                                LOGGER.warning(
+                                    "[Research] firecrawl_fetch_failed error=%s status_code=%s url=%s",
+                                    type(exc).__name__,
+                                    exc.status_code,
+                                    self._redact_url(fetch_url),
+                                )
+                            else:
+                                LOGGER.warning("[Research] content fetch failed: %s", exc)
+                            safety_notes.append(f"content_fetch_failed:{type(exc).__name__}")
+
+            url_domain = parse.urlparse(fetch_url).hostname or ""
+            LOGGER.info(
+                "[Research] content_fetch attempted=%s provider=%s status=%s domain=%s markdown_chars=%s latency_ms=%s",
+                fetch_meta["content_fetch_attempted"],
+                fetch_meta["content_fetch_provider"],
+                fetch_meta["content_fetch_status"],
+                url_domain,
+                fetch_meta["content_fetch_markdown_chars"],
+                fetch_meta.get("content_fetch_latency_ms", 0),
             )
 
-        self._cache.set("query", request_packet.prompt, self._packet_to_payload(packet))
-        self._record_budget_spend(request_packet, use_override_spend=use_override_spend)
-        remaining_after = int(self._budget.current_state().get("remaining", 0))
-        LOGGER.info("[Research] rounds_used=%s budget_remaining=%s", rounds_used, remaining_after)
-        return packet
+            if not markdown:
+                packet = self._sources_only_packet(search_result, sources, safety_notes, metadata_extra=fetch_meta)
+                self._cache.set("query", request_packet.prompt, self._packet_to_payload(packet))
+                if not self._record_budget_spend(reservation, execution_success=(packet.status != "error")):
+                    return self._safe_error_packet("budget_finalize_failed")
+                LOGGER.info("[Research] rounds_used=1")
+                return packet
+
+            rounds_used = 2 if self._max_rounds >= 2 else 1
+            packet = self._extract_from_markdown(request_packet, fetch_url, markdown, sources, safety_notes)
+            packet = ResearchPacket(
+                schema=packet.schema,
+                status=packet.status,
+                answer_summary=packet.answer_summary,
+                extracted_facts=packet.extracted_facts,
+                sources=packet.sources,
+                safety_notes=packet.safety_notes,
+                metadata={**packet.metadata, **fetch_meta, "content_fetch_markdown": _clip(markdown, self._firecrawl_max_markdown_chars)},
+            )
+
+            if rounds_used == 2 and self._escalation_enabled and self._should_escalate(packet):
+                LOGGER.info("[Research] escalation triggered for second pass")
+                packet = self._extract_from_markdown(
+                    request_packet,
+                    best_url,
+                    markdown,
+                    sources,
+                    packet.safety_notes,
+                )
+
+            self._cache.set("query", request_packet.prompt, self._packet_to_payload(packet))
+            if not self._record_budget_spend(reservation, execution_success=(packet.status != "error")):
+                return self._safe_error_packet("budget_finalize_failed")
+            remaining_after = int(self._budget.current_state().get("remaining", 0))
+            LOGGER.info("[Research] rounds_used=%s budget_remaining=%s", rounds_used, remaining_after)
+            return packet
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("[Research] request failed before completion: %s", exc)
+            self._record_budget_spend(reservation, execution_success=False)
+            return self._safe_error_packet("research_execution_failed")
 
     def discover_domains(self, request_packet: ResearchRequest) -> list[str]:
         """Run lightweight source discovery and return candidate hostnames."""
@@ -397,29 +409,18 @@ class OpenAIResearchService(ResearchService):
 
         return domains
 
-    def _finish_sources_only(
-        self,
-        request_packet: ResearchRequest,
-        search_result: dict[str, Any],
-        sources: list[dict[str, str]],
-        safety_notes: list[str],
-    ) -> ResearchPacket:
-        packet = self._sources_only_packet(search_result, sources, safety_notes)
-        self._cache.set("query", request_packet.prompt, self._packet_to_payload(packet))
-        self._record_budget_spend(request_packet, use_override_spend=False)
-        LOGGER.info("[Research] rounds_used=1")
-        return packet
-
-    def _record_budget_spend(self, request_packet: ResearchRequest, *, use_override_spend: bool) -> None:
+    def _reserve_budget_spend(self, request_packet: ResearchRequest, *, use_override_spend: bool):
         audit_payload = self._budget_audit_payload(request_packet)
-        if use_override_spend:
-            self._budget.spend_with_override(
-                1,
-                audit_payload=audit_payload,
-                decision_source=self._over_budget_decision_source(request_packet),
-            )
-            return
-        self._budget.spend_if_allowed(1, audit_payload=audit_payload)
+        return self._budget.reserve_execution(
+            1,
+            audit_payload=audit_payload,
+            over_budget_approved=use_override_spend,
+            decision_source=self._over_budget_decision_source(request_packet) if use_override_spend else None,
+        )
+
+    def _record_budget_spend(self, reservation, *, execution_success: bool) -> bool:
+        status = "committed" if execution_success else "aborted"
+        return bool(self._budget.finalize_execution(reservation, execution_status=status, refund=not execution_success))
 
     def _budget_audit_payload(self, request_packet: ResearchRequest) -> dict[str, Any]:
         context = request_packet.context if isinstance(request_packet.context, dict) else {}
