@@ -140,6 +140,20 @@ class PendingConfirmationToken:
     metadata: dict[str, Any] | None = None
 
 
+@dataclass
+class IntentLedgerEntry:
+    tool_name: str
+    normalized_intent: str
+    state: str
+    updated_at: float
+    pending_at: float | None = None
+    approved_at: float | None = None
+    denied_at: float | None = None
+    timeout_at: float | None = None
+    failure_at: float | None = None
+    executed_at: float | None = None
+
+
 def _validate_outbound_endpoint(url: str) -> None:
     parsed = urlparse(url)
     if parsed.scheme not in ALLOWED_OUTBOUND_SCHEMES:
@@ -537,6 +551,14 @@ class RealtimeAPI:
         self._active_response_confirmation_guarded = False
         self._active_response_origin = "unknown"
         self._last_executed_tool_call: dict[str, Any] | None = None
+        self._intent_ledger: dict[str, IntentLedgerEntry] = {}
+        self._intent_state_ttl_s = float(research_cfg.get("intent_state_ttl_s", 300.0))
+        self._intent_execution_cooldown_s = float(
+            research_cfg.get("intent_execution_cooldown_s", self._tool_call_dedupe_ttl_s)
+        )
+        self._intent_denial_cooldown_s = float(
+            research_cfg.get("intent_denial_cooldown_s", 45.0)
+        )
 
         realtime_cfg = config.get("realtime") or {}
         self._debug_vad = bool(realtime_cfg.get("debug_vad", False))
@@ -1582,6 +1604,99 @@ class RealtimeAPI:
             f"- alternatives: {alternatives}"
         )
 
+    def _normalize_tool_intent(self, tool_name: str, args: dict[str, Any]) -> str:
+        payload = json.dumps({"tool": tool_name, "args": args}, sort_keys=True, separators=(",", ":"))
+        return payload
+
+    def _prune_intent_ledger(self, *, now: float | None = None) -> None:
+        now_ts = time.monotonic() if now is None else float(now)
+        ttl_s = max(0.0, float(getattr(self, "_intent_state_ttl_s", 300.0)))
+        expired = [
+            key
+            for key, entry in self._intent_ledger.items()
+            if now_ts - float(entry.updated_at) > ttl_s
+        ]
+        for key in expired:
+            self._intent_ledger.pop(key, None)
+
+    def _intent_ledger_key(self, tool_name: str, args: dict[str, Any]) -> str:
+        normalized = self._normalize_tool_intent(tool_name, args)
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+    def _record_intent_state(self, tool_name: str, args: dict[str, Any], state: str) -> None:
+        now = time.monotonic()
+        self._prune_intent_ledger(now=now)
+        key = self._intent_ledger_key(tool_name, args)
+        normalized = self._normalize_tool_intent(tool_name, args)
+        entry = self._intent_ledger.get(key)
+        if entry is None:
+            entry = IntentLedgerEntry(
+                tool_name=tool_name,
+                normalized_intent=normalized,
+                state=state,
+                updated_at=now,
+            )
+        entry.state = state
+        entry.updated_at = now
+        if state == "pending":
+            entry.pending_at = now
+        elif state == "approved":
+            entry.approved_at = now
+        elif state == "denied":
+            entry.denied_at = now
+        elif state == "timeout":
+            entry.timeout_at = now
+        elif state == "failure":
+            entry.failure_at = now
+        elif state == "executed":
+            entry.executed_at = now
+        self._intent_ledger[key] = entry
+
+    def _evaluate_intent_guard(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        *,
+        phase: str,
+    ) -> tuple[bool, str | None, str | None]:
+        now = time.monotonic()
+        self._prune_intent_ledger(now=now)
+        key = self._intent_ledger_key(tool_name, args)
+        entry = self._intent_ledger.get(key)
+        if entry is None:
+            return False, None, None
+
+        denial_at = entry.denied_at
+        denial_cooldown_s = max(0.0, float(getattr(self, "_intent_denial_cooldown_s", 45.0)))
+        if isinstance(denial_at, (int, float)) and now - float(denial_at) <= denial_cooldown_s:
+            logger.info(
+                "INTENT_GUARD_HIT reason=blocked_recent_denial phase=%s tool=%s remaining_s=%.2f",
+                phase,
+                tool_name,
+                max(0.0, denial_cooldown_s - (now - float(denial_at))),
+            )
+            return True, "blocked_recent_denial", "Request was recently denied; wait briefly or modify the request."
+
+        executed_at = entry.executed_at
+        execution_cooldown_s = max(
+            0.0,
+            float(getattr(self, "_intent_execution_cooldown_s", getattr(self, "_tool_call_dedupe_ttl_s", 30.0))),
+        )
+        if (
+            phase == "execution"
+            and isinstance(executed_at, (int, float))
+            and now - float(executed_at) <= execution_cooldown_s
+        ):
+            logger.info(
+                "INTENT_GUARD_HIT reason=blocked_duplicate_execution phase=%s tool=%s remaining_s=%.2f",
+                phase,
+                tool_name,
+                max(0.0, execution_cooldown_s - (now - float(executed_at))),
+            )
+            return True, "blocked_duplicate_execution", "Duplicate execution blocked by intent cooldown; reuse recent results."
+
+        return False, None, None
+
     def _build_tool_call_fingerprint(self, tool_name: str, args: dict[str, Any]) -> str:
         payload = json.dumps({"tool": tool_name, "args": args}, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -2281,6 +2396,14 @@ class RealtimeAPI:
             token.kind,
             outcome,
         )
+        if token.pending_action is not None:
+            action = token.pending_action.action
+            if outcome in {"accepted", "approved"}:
+                self._record_intent_state(action.tool_name, action.tool_args, "approved")
+            elif outcome in {"rejected", "cancelled_by_stop_word", "cleared_pending_action"}:
+                self._record_intent_state(action.tool_name, action.tool_args, "denied")
+            elif outcome in {"awaiting_decision_timeout", "expired", "retry_exhausted", "unclear_cancelled"}:
+                self._record_intent_state(action.tool_name, action.tool_args, "timeout")
         pending_deferred_call = self._deferred_research_tool_call
         deferred_call_id = None
         deferred_action = "none"
@@ -4154,6 +4277,20 @@ class RealtimeAPI:
             )
             should_execute = decision.approved or approved_via_prior_permission
             if should_execute:
+                blocked, blocked_status, blocked_message = self._evaluate_intent_guard(
+                    action.tool_name,
+                    action.tool_args,
+                    phase="execution",
+                )
+                if blocked:
+                    await self._reject_tool_call(
+                        action,
+                        blocked_message or "Tool execution blocked by intent guard.",
+                        websocket,
+                        staging=staging,
+                        status=blocked_status or "blocked",
+                    )
+                    return
                 decision_reason = (
                     "approved_via_prior_research_permission"
                     if approved_via_prior_permission
@@ -4176,12 +4313,27 @@ class RealtimeAPI:
                         call_id,
                         decision_reason,
                     )
+                self._record_intent_state(action.tool_name, action.tool_args, "approved")
                 self.orchestration_state.transition(
                     OrchestrationPhase.ACT,
                     reason=f"function_call {function_name}",
                 )
                 await self._execute_action(action, staging, websocket)
             elif decision.needs_confirmation:
+                blocked, blocked_status, blocked_message = self._evaluate_intent_guard(
+                    action.tool_name,
+                    action.tool_args,
+                    phase="confirmation_prompt",
+                )
+                if blocked:
+                    await self._reject_tool_call(
+                        action,
+                        blocked_message or "Tool confirmation blocked by intent guard.",
+                        websocket,
+                        staging=staging,
+                        status=blocked_status or "blocked",
+                    )
+                    return
                 final_execution_decision = "request_confirmation"
                 if self._debug_governance_decisions:
                     log_info(
@@ -4195,6 +4347,7 @@ class RealtimeAPI:
                     original_intent=self._last_user_input_text or "",
                     created_at=time.monotonic(),
                 )
+                self._record_intent_state(action.tool_name, action.tool_args, "pending")
                 token = self._create_confirmation_token(
                     kind="tool_governance",
                     tool_name=action.tool_name,
@@ -4214,6 +4367,7 @@ class RealtimeAPI:
                 token.prompt_sent = True
                 self._set_confirmation_state(ConfirmationState.AWAITING_DECISION, reason="tool_prompt_sent")
             else:
+                self._record_intent_state(action.tool_name, action.tool_args, "denied")
                 final_execution_decision = "reject"
                 if self._debug_governance_decisions:
                     log_info(
@@ -4258,6 +4412,7 @@ class RealtimeAPI:
                 error_message = f"Error executing function '{function_name}': {exc}"
                 log_error(error_message)
                 result = {"error": error_message}
+                self._record_intent_state(function_name, args, "failure")
                 await self.send_error_message_to_assistant(error_message, websocket)
         else:
             error_message = (
@@ -4265,6 +4420,7 @@ class RealtimeAPI:
             )
             log_error(error_message)
             result = {"error": error_message}
+            self._record_intent_state(function_name, args, "failure")
             await self.send_error_message_to_assistant(error_message, websocket)
 
         self._tool_call_records.append(
@@ -4354,6 +4510,20 @@ class RealtimeAPI:
                 status="invalid_arguments",
             )
             return
+        blocked, blocked_status, blocked_message = self._evaluate_intent_guard(
+            action.tool_name,
+            action.tool_args,
+            phase="execution",
+        )
+        if blocked:
+            await self._reject_tool_call(
+                action,
+                blocked_message or "Tool execution blocked by intent guard.",
+                websocket,
+                staging=staging,
+                status=blocked_status or "blocked",
+            )
+            return
         if action.tier > 1 and action.id not in self._presented_actions:
             await self._present_action(
                 action,
@@ -4372,6 +4542,7 @@ class RealtimeAPI:
             inject_no_tools_instruction=inject_no_tools_instruction,
         )
         self._record_executed_tool_call(action.tool_name, action.tool_args)
+        self._record_intent_state(action.tool_name, action.tool_args, "executed")
         self._governance.record_execution(action)
         self._presented_actions.discard(action.id)
 
