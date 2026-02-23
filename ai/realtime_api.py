@@ -404,6 +404,10 @@ class RealtimeAPI:
         self._confirmation_late_decision_grace_s = float(
             realtime_cfg.get("confirmation_late_decision_grace_s", 15.0)
         )
+        self._confirmation_decision_expiry_grace_s = max(
+            0.0,
+            float(realtime_cfg.get("confirmation_decision_expiry_grace_s", 1.5)),
+        )
         self._confirmation_unclear_max_reprompts = max(
             0,
             int(realtime_cfg.get("confirmation_unclear_max_reprompts", 1)),
@@ -425,6 +429,7 @@ class RealtimeAPI:
         )
         self._confirmation_timeout_markers: dict[str, float] = {}
         self._confirmation_timeout_causes: dict[str, str] = {}
+        self._confirmation_transition_lock: asyncio.Lock | None = None
         self._websocket_close_timeout_s = float(config.get("websocket_close_timeout_s", 5.0))
         self._tool_definitions = {tool["name"]: tool for tool in tools}
         self._storage = StorageController.get_instance()
@@ -2343,7 +2348,9 @@ class RealtimeAPI:
         *,
         source_event: str,
     ) -> bool:
-        expired_token = self._expire_confirmation_awaiting_decision_timeout()
+        transition_lock = await self._confirmation_transition_guard()
+        async with transition_lock:
+            expired_token = self._expire_confirmation_awaiting_decision_timeout()
         if expired_token is None:
             return False
         logger.info(
@@ -2455,6 +2462,35 @@ class RealtimeAPI:
         if getattr(self, "_confirmation_asr_pending", False):
             return "asr_pending"
         return None
+
+    def _is_confirmation_ttl_paused(self) -> bool:
+        return self._confirmation_pause_reason() in {"speech_active", "asr_pending"}
+
+    def _approval_expired_for_action(
+        self,
+        action: ActionPacket,
+        *,
+        now: float,
+        decision: str,
+    ) -> bool:
+        if action.expiry_ts is None:
+            return False
+        if self._is_confirmation_ttl_paused():
+            return False
+        expiry_ts = float(action.expiry_ts)
+        if now <= expiry_ts:
+            return False
+        grace_s = max(0.0, float(getattr(self, "_confirmation_decision_expiry_grace_s", 1.5)))
+        if decision in {"yes", "no", "cancel"} and (now - expiry_ts) <= grace_s:
+            return False
+        return True
+
+    async def _confirmation_transition_guard(self) -> asyncio.Lock:
+        lock = getattr(self, "_confirmation_transition_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._confirmation_transition_lock = lock
+        return lock
 
     def _refresh_confirmation_pause(self) -> None:
         token = getattr(self, "_pending_confirmation_token", None)
@@ -2831,162 +2867,164 @@ class RealtimeAPI:
     async def _maybe_handle_approval_response(
         self, text: str, websocket: Any
     ) -> bool:
-        token = getattr(self, "_pending_confirmation_token", None)
-        if token is not None and (token.kind != "tool_governance" or token.pending_action is None):
-            return False
-        pending = token.pending_action if token is not None else self._pending_action
-        if pending is None:
-            return False
-        if token is not None:
-            self._mark_confirmation_activity(reason="approval_transcript")
+        transition_lock = await self._confirmation_transition_guard()
+        async with transition_lock:
+            token = getattr(self, "_pending_confirmation_token", None)
+            if token is not None and (token.kind != "tool_governance" or token.pending_action is None):
+                return False
+            pending = token.pending_action if token is not None else self._pending_action
+            if pending is None:
+                return False
+            if token is not None:
+                self._mark_confirmation_activity(reason="approval_transcript")
 
-        action = pending.action
-        if await self._handle_stop_word(text, websocket, source="approval_response"):
-            return True
-        cooldown_remaining = self._tool_execution_cooldown_remaining()
-        if cooldown_remaining > 0:
-            if token is not None:
-                self._set_confirmation_state(ConfirmationState.RESOLVING, reason="stop_word_cooldown")
-            await self._reject_tool_call(
-                action,
-                f"Tool execution paused for {cooldown_remaining:.0f}s due to stop word.",
-                websocket,
-                staging=pending.staging,
-                status="cancelled",
+            action = pending.action
+            if await self._handle_stop_word(text, websocket, source="approval_response"):
+                return True
+            cooldown_remaining = self._tool_execution_cooldown_remaining()
+            if cooldown_remaining > 0:
+                if token is not None:
+                    self._set_confirmation_state(ConfirmationState.RESOLVING, reason="stop_word_cooldown")
+                await self._reject_tool_call(
+                    action,
+                    f"Tool execution paused for {cooldown_remaining:.0f}s due to stop word.",
+                    websocket,
+                    staging=pending.staging,
+                    status="cancelled",
+                )
+                if token is not None:
+                    self._close_confirmation_token(outcome="cancelled_by_stop_word")
+                else:
+                    self._clear_pending_action()
+                self._awaiting_confirmation_completion = False
+                self.orchestration_state.transition(
+                    OrchestrationPhase.IDLE,
+                    reason="confirmation cancelled by stop word",
+                )
+                return True
+
+            normalized = text.strip()
+            if not normalized:
+                return False
+
+            decision = self._parse_confirmation_decision(normalized)
+            now = time.monotonic()
+            if self._approval_expired_for_action(action, now=now, decision=decision):
+                if token is not None:
+                    self._set_confirmation_state(ConfirmationState.RESOLVING, reason="approval_expired")
+                logger.info("CONFIRMATION_TIMEOUT tool=%s cause=expiry", action.tool_name)
+                self._record_confirmation_timeout(action, cause="expiry")
+                self._log_structured_noop_event(
+                    status="timeout",
+                    reason="approval_expired",
+                    tool_name=action.tool_name,
+                    action_id=action.id,
+                    token_id=getattr(token, "id", None),
+                )
+                await self.send_assistant_message(
+                    "No action taken.\nApproval window expired. Please ask again if you still want this.",
+                    websocket,
+                )
+                if token is not None:
+                    self._close_confirmation_token(outcome="expired")
+                else:
+                    self._clear_pending_action()
+                self._awaiting_confirmation_completion = False
+                self.orchestration_state.transition(
+                    OrchestrationPhase.IDLE,
+                    reason="confirmation timeout",
+                )
+                return True
+
+            logger.info(
+                'CONFIRMATION_CANDIDATE transcript="%s" len=%d decision=%s',
+                self._clip_text(normalized, limit=100),
+                len(normalized),
+                decision,
             )
+
+            if decision == "yes":
+                if token is not None:
+                    self._set_confirmation_state(ConfirmationState.RESOLVING, reason="tool_confirmation_accepted")
+                logger.info("CONFIRMATION_ACCEPTED tool=%s", action.tool_name)
+                staging = pending.staging or self._stage_action(action)
+                self._awaiting_confirmation_completion = True
+                await self._execute_action(
+                    action,
+                    staging,
+                    websocket,
+                    idempotency_key=pending.idempotency_key,
+                    force_no_tools_followup=True,
+                    inject_no_tools_instruction=True,
+                )
+                if token is not None:
+                    self._close_confirmation_token(outcome="accepted")
+                else:
+                    self._clear_pending_action()
+                return True
+
+            if decision in {"no", "cancel"}:
+                if token is not None:
+                    self._set_confirmation_state(ConfirmationState.RESOLVING, reason="tool_confirmation_rejected")
+                logger.info("CONFIRMATION_REJECTED tool=%s", action.tool_name)
+                await self._reject_tool_call(
+                    action,
+                    "User declined approval.",
+                    websocket,
+                    status="cancelled",
+                )
+                if token is not None:
+                    self._close_confirmation_token(outcome="rejected")
+                else:
+                    self._clear_pending_action()
+                self._awaiting_confirmation_completion = False
+                self.orchestration_state.transition(
+                    OrchestrationPhase.IDLE,
+                    reason="confirmation rejected",
+                )
+                return True
+
             if token is not None:
-                self._close_confirmation_token(outcome="cancelled_by_stop_word")
+                token.retry_count += 1
+                retry_count = token.retry_count
+                max_retries = token.max_retries
             else:
-                self._clear_pending_action()
-            self._awaiting_confirmation_completion = False
-            self.orchestration_state.transition(
-                OrchestrationPhase.IDLE,
-                reason="confirmation cancelled by stop word",
-            )
-            return True
+                pending.retry_count += 1
+                retry_count = pending.retry_count
+                max_retries = pending.max_retries
 
-        now = time.monotonic()
-        if action.expiry_ts is not None and now > action.expiry_ts:
+            if retry_count > max_retries:
+                if token is not None:
+                    self._set_confirmation_state(ConfirmationState.RESOLVING, reason="tool_confirmation_retry_exhausted")
+                logger.info("CONFIRMATION_TIMEOUT tool=%s cause=retry_exhausted", action.tool_name)
+                self._record_confirmation_timeout(action, cause="retry_exhausted")
+                self._log_structured_noop_event(
+                    status="timeout",
+                    reason="retry_exhausted",
+                    tool_name=action.tool_name,
+                    action_id=action.id,
+                    token_id=getattr(token, "id", None),
+                )
+                await self.send_assistant_message(
+                    "No action taken.\nI couldn't confirm this action. Please ask again if you still want it.",
+                    websocket,
+                )
+                if token is not None:
+                    self._close_confirmation_token(outcome="retry_exhausted")
+                else:
+                    self._clear_pending_action()
+                self._awaiting_confirmation_completion = False
+                self.orchestration_state.transition(
+                    OrchestrationPhase.IDLE,
+                    reason="confirmation timeout",
+                )
+                return True
+
             if token is not None:
-                self._set_confirmation_state(ConfirmationState.RESOLVING, reason="approval_expired")
-            logger.info("CONFIRMATION_TIMEOUT tool=%s cause=expiry", action.tool_name)
-            self._record_confirmation_timeout(action, cause="expiry")
-            self._log_structured_noop_event(
-                status="timeout",
-                reason="approval_expired",
-                tool_name=action.tool_name,
-                action_id=action.id,
-                token_id=getattr(token, "id", None),
-            )
-            await self.send_assistant_message(
-                "No action taken.\nApproval window expired. Please ask again if you still want this.",
-                websocket,
-            )
-            if token is not None:
-                self._close_confirmation_token(outcome="expired")
+                await self._send_confirmation_reminder(websocket, reason="non_decision_input")
             else:
-                self._clear_pending_action()
-            self._awaiting_confirmation_completion = False
-            self.orchestration_state.transition(
-                OrchestrationPhase.IDLE,
-                reason="confirmation timeout",
-            )
+                await self.send_assistant_message("Please reply with: yes or no.", websocket)
             return True
-
-        normalized = text.strip()
-        if not normalized:
-            return False
-
-        decision = self._parse_confirmation_decision(normalized)
-        logger.info(
-            'CONFIRMATION_CANDIDATE transcript="%s" len=%d decision=%s',
-            self._clip_text(normalized, limit=100),
-            len(normalized),
-            decision,
-        )
-
-        if decision == "yes":
-            if token is not None:
-                self._set_confirmation_state(ConfirmationState.RESOLVING, reason="tool_confirmation_accepted")
-            logger.info("CONFIRMATION_ACCEPTED tool=%s", action.tool_name)
-            staging = pending.staging or self._stage_action(action)
-            self._awaiting_confirmation_completion = True
-            await self._execute_action(
-                action,
-                staging,
-                websocket,
-                idempotency_key=pending.idempotency_key,
-                force_no_tools_followup=True,
-                inject_no_tools_instruction=True,
-            )
-            if token is not None:
-                self._close_confirmation_token(outcome="accepted")
-            else:
-                self._clear_pending_action()
-            return True
-
-        if decision in {"no", "cancel"}:
-            if token is not None:
-                self._set_confirmation_state(ConfirmationState.RESOLVING, reason="tool_confirmation_rejected")
-            logger.info("CONFIRMATION_REJECTED tool=%s", action.tool_name)
-            await self._reject_tool_call(
-                action,
-                "User declined approval.",
-                websocket,
-                status="cancelled",
-            )
-            if token is not None:
-                self._close_confirmation_token(outcome="rejected")
-            else:
-                self._clear_pending_action()
-            self._awaiting_confirmation_completion = False
-            self.orchestration_state.transition(
-                OrchestrationPhase.IDLE,
-                reason="confirmation rejected",
-            )
-            return True
-
-        if token is not None:
-            token.retry_count += 1
-            retry_count = token.retry_count
-            max_retries = token.max_retries
-        else:
-            pending.retry_count += 1
-            retry_count = pending.retry_count
-            max_retries = pending.max_retries
-
-        if retry_count > max_retries:
-            if token is not None:
-                self._set_confirmation_state(ConfirmationState.RESOLVING, reason="tool_confirmation_retry_exhausted")
-            logger.info("CONFIRMATION_TIMEOUT tool=%s cause=retry_exhausted", action.tool_name)
-            self._record_confirmation_timeout(action, cause="retry_exhausted")
-            self._log_structured_noop_event(
-                status="timeout",
-                reason="retry_exhausted",
-                tool_name=action.tool_name,
-                action_id=action.id,
-                token_id=getattr(token, "id", None),
-            )
-            await self.send_assistant_message(
-                "No action taken.\nI couldn't confirm this action. Please ask again if you still want it.",
-                websocket,
-            )
-            if token is not None:
-                self._close_confirmation_token(outcome="retry_exhausted")
-            else:
-                self._clear_pending_action()
-            self._awaiting_confirmation_completion = False
-            self.orchestration_state.transition(
-                OrchestrationPhase.IDLE,
-                reason="confirmation timeout",
-            )
-            return True
-
-        if token is not None:
-            await self._send_confirmation_reminder(websocket, reason="non_decision_input")
-        else:
-            await self.send_assistant_message("Please reply with: yes or no.", websocket)
-        return True
 
     async def _maybe_handle_research_permission_response(self, text: str, websocket: Any) -> bool:
         token = getattr(self, "_pending_confirmation_token", None)
