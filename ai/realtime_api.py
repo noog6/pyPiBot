@@ -1871,16 +1871,28 @@ class RealtimeAPI:
     ) -> tuple[bool, str | None, str | None]:
         now = time.monotonic()
         self._prune_intent_ledger(now=now)
-        key = self._intent_ledger_key(tool_name, args)
-        entry = self._intent_ledger.get(key)
-        if idempotency_key and (
-            entry is None or str(getattr(entry, "idempotency_key", "") or "") != str(idempotency_key)
-        ):
+        normalized_intent = self._normalize_tool_intent(tool_name, args)
+        entry = None
+        normalized_idempotency_key = str(idempotency_key or "").strip()
+        if normalized_idempotency_key:
+            matching_entries = [
+                existing
+                for existing in self._intent_ledger.values()
+                if str(getattr(existing, "idempotency_key", "") or "") == normalized_idempotency_key
+            ]
+            if matching_entries:
+                entry = max(matching_entries, key=lambda existing: float(existing.updated_at))
+
+        if entry is None:
+            key = self._intent_ledger_key(tool_name, args)
+            entry = self._intent_ledger.get(key)
+
+        if entry is None:
             entry = next(
                 (
                     existing
                     for existing in self._intent_ledger.values()
-                    if str(getattr(existing, "idempotency_key", "") or "") == str(idempotency_key)
+                    if existing.normalized_intent == normalized_intent
                 ),
                 None,
             )
@@ -1904,6 +1916,24 @@ class RealtimeAPI:
                 True,
                 "blocked_recent_denial",
                 "I can't re-open that confirmation yet because this exact request was just denied. Please wait briefly or change the request.",
+            )
+
+        timeout_at = entry.timeout_at
+        if (
+            phase == "confirmation_prompt"
+            and isinstance(timeout_at, (int, float))
+            and now - float(timeout_at) <= denial_cooldown_s
+        ):
+            logger.info(
+                "INTENT_GUARD_HIT reason=blocked_recent_timeout phase=%s tool=%s remaining_s=%.2f",
+                phase,
+                tool_name,
+                max(0.0, denial_cooldown_s - (now - float(timeout_at))),
+            )
+            return (
+                True,
+                "blocked_recent_timeout",
+                "I can't re-open that confirmation yet because this exact request just timed out. Please wait briefly or change the request.",
             )
 
         executed_at = entry.executed_at
@@ -1935,8 +1965,10 @@ class RealtimeAPI:
         reason: str,
         message: str,
         staging: dict[str, Any] | None = None,
+        include_assistant_message: bool = True,
     ) -> None:
-        await self.send_assistant_message(message, websocket)
+        if include_assistant_message:
+            await self.send_assistant_message(message, websocket)
         await self._send_noop_tool_output(
             websocket,
             call_id=action.id,
@@ -4827,6 +4859,7 @@ class RealtimeAPI:
                         reason=f"recent_confirmation_{suppressed_outcome}",
                         message=message,
                         staging=staging,
+                        include_assistant_message=False,
                     )
                     return
                 blocked, blocked_status, blocked_message = self._evaluate_intent_guard(
@@ -4836,6 +4869,7 @@ class RealtimeAPI:
                     idempotency_key=confirmation_decision.idempotency_key,
                 )
                 if blocked:
+                    suppression_reason = blocked_status or ""
                     await self._handle_intent_guard_block(
                         action,
                         websocket,
@@ -4843,6 +4877,8 @@ class RealtimeAPI:
                         reason=blocked_status or "intent_guard",
                         message=blocked_message or "Tool confirmation blocked by intent guard.",
                         staging=staging,
+                        include_assistant_message=suppression_reason
+                        not in {"blocked_recent_denial", "blocked_recent_timeout"},
                     )
                     return
                 final_execution_decision = "request_confirmation"
