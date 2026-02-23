@@ -1016,6 +1016,12 @@ def test_maybe_handle_approval_response_timeout_transitions_to_idle(caplog) -> N
     api._presented_actions = set()
     api._handle_stop_word = lambda *args, **kwargs: asyncio.sleep(0, result=False)
     api._tool_execution_cooldown_remaining = lambda: 0.0
+    executed: list[str] = []
+
+    async def _execute_action(*args, **kwargs):
+        executed.append("executed")
+
+    api._execute_action = _execute_action
 
     sent_messages: list[str] = []
 
@@ -1029,6 +1035,8 @@ def test_maybe_handle_approval_response_timeout_transitions_to_idle(caplog) -> N
 
     assert consumed is True
     assert sent_messages
+    assert sent_messages[0].startswith("No action taken.")
+    assert executed == []
     assert api._pending_action is None
     assert transitions == [(OrchestrationPhase.IDLE, "confirmation timeout")]
 
@@ -1169,6 +1177,8 @@ def test_handle_function_call_suppresses_during_pending_confirmation_without_act
     assert len(sent_payloads) == 1
     output_payload = json.loads(sent_payloads[0]["item"]["output"])
     assert output_payload["status"] == "awaiting_confirmation"
+    assert str(output_payload["message"]).startswith("No action taken.")
+    assert output_payload["no_op"] == {"executed": False, "category": "suppression"}
     assert api.function_call is None
     assert api.function_call_args == ""
 
@@ -1216,7 +1226,7 @@ def test_handle_function_call_suppresses_research_while_research_permission_pend
         async def send(self, payload: str) -> None:
             sent_payloads.append(json.loads(payload))
 
-    try:
+    with patch("ai.realtime_api.logger.info") as mock_info:
         budget_before = api._research_budget_remaining()
         usage_before = _usage_count(storage_controller_cls)
 
@@ -1225,12 +1235,17 @@ def test_handle_function_call_suppresses_research_while_research_permission_pend
         budget_after = api._research_budget_remaining()
         usage_after = _usage_count(storage_controller_cls)
 
+    logged = [call.args[0] % call.args[1:] for call in mock_info.call_args_list if call.args]
+
+    try:
         assert transitions == []
         assert confirmation_prompts["count"] == 0
         assert governance_calls == {"build": 0, "review": 0}
         assert len(sent_payloads) == 1
         output_payload = json.loads(sent_payloads[0]["item"]["output"])
         assert output_payload["status"] == "waiting_for_permission"
+        assert str(output_payload["message"]).startswith("No action taken.")
+        assert any("NO_OP_EVENT status=waiting_for_permission reason=permission_pending" in line for line in logged)
         assert budget_after == budget_before
         assert usage_after == usage_before
         assert api.function_call is None
@@ -1592,6 +1607,7 @@ def test_handle_function_call_suppresses_immediate_recall_after_confirmation_tim
     assert len(sent_payloads) == 1
     output_payload = json.loads(sent_payloads[0]["item"]["output"])
     assert output_payload["status"] == "suppressed_after_confirmation_timeout"
+    assert str(output_payload["message"]).startswith("No action taken.")
     assert transitions == []
     assert governance_calls["build"] == 0
     assert request_confirmation_calls["count"] == 0
@@ -1931,6 +1947,7 @@ def test_handle_function_call_replaces_pending_confirmation_for_new_intent_same_
 
     request_confirmation_calls: list[dict[str, object]] = []
     executed_calls: list[str] = []
+    assistant_messages: list[str] = []
 
     async def _request_tool_confirmation(action, *_args, **_kwargs):
         request_confirmation_calls.append(action.tool_args)
@@ -1940,6 +1957,11 @@ def test_handle_function_call_replaces_pending_confirmation_for_new_intent_same_
 
     api._request_tool_confirmation = _request_tool_confirmation
     api._execute_action = _execute_action
+
+    async def _send_assistant_message(message, *_args, **_kwargs):
+        assistant_messages.append(message)
+
+    api.send_assistant_message = _send_assistant_message
 
     class _Gov:
         def build_action_packet(self, function_name, call_id, args, **_kwargs):
@@ -1993,6 +2015,7 @@ def test_handle_function_call_replaces_pending_confirmation_for_new_intent_same_
     assert api._pending_confirmation_token.pending_action.action.tool_args["name"] == "B"
     assert request_confirmation_calls == [{"name": "A"}, {"name": "B"}]
     assert executed_calls == []
+    assert assistant_messages == ["No action taken. I replaced the pending confirmation with your newer request."]
     assert any("NO_OP_EVENT status=cancelled reason=replaced_by_new_intent" in line for line in logged)
     assert any("CONFIRMATION_TOKEN_CLOSED" in line and "outcome=replaced" in line for line in logged)
 
@@ -2166,7 +2189,7 @@ def test_awaiting_confirmation_timeout_clears_token_and_transitions_idle() -> No
     assert api._pending_confirmation_token is None
     assert api._confirmation_state == ConfirmationState.IDLE
     assert transitions == [(OrchestrationPhase.IDLE, "confirmation timeout")]
-    assert messages == ["I didn't get a clear yes/no in time, so I cancelled that request."]
+    assert messages == ["No action taken.\nI didn't get a clear yes/no in time, so I cancelled that request."]
 
 
 def test_process_ws_messages_recovers_from_event_handler_exception_and_continues(
@@ -2639,6 +2662,7 @@ def test_tool_confirmation_deny_does_not_execute_tool_and_emits_noop_payload() -
     assert len(function_outputs) == 1
     output_payload = json.loads(function_outputs[0]["item"]["output"])
     assert output_payload["status"] == "cancelled"
+    assert str(output_payload["message"]).startswith("No action taken.")
     assert output_payload["no_op"] == {"executed": False, "category": "rejection"}
 
 
