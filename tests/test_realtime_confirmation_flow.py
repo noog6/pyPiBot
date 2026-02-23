@@ -1919,6 +1919,169 @@ def test_tool_confirmation_reask_after_cooldown_allows_prompt() -> None:
 
     assert prompt_calls["count"] == 2
 
+def test_intent_guard_prefers_idempotency_key_for_semantically_equivalent_args() -> None:
+    api = _make_api_stub()
+    api._intent_denial_cooldown_s = 30.0
+
+    api._record_intent_state(
+        "perform_research",
+        {"query": "market update"},
+        "denied",
+        idempotency_key="same-key",
+    )
+
+    blocked, status, _message = api._evaluate_intent_guard(
+        "perform_research",
+        {"query": "  market   update  "},
+        phase="confirmation_prompt",
+        idempotency_key="same-key",
+    )
+
+    assert blocked is True
+    assert status == "blocked_recent_denial"
+
+
+def test_intent_guard_equivalent_args_normalization_blocks_retry() -> None:
+    api = _make_api_stub()
+    api._intent_denial_cooldown_s = 30.0
+
+    api._record_intent_state(
+        "perform_research",
+        {"query": "status   report"},
+        "timeout",
+        idempotency_key="idem-timeout",
+    )
+
+    blocked, status, _message = api._evaluate_intent_guard(
+        "perform_research",
+        {"query": "status report"},
+        phase="confirmation_prompt",
+        idempotency_key="idem-timeout",
+    )
+
+    assert blocked is True
+    assert status == "blocked_recent_timeout"
+
+
+def test_intent_guard_changed_args_creates_new_intent() -> None:
+    api = _make_api_stub()
+    api._intent_denial_cooldown_s = 30.0
+
+    api._record_intent_state(
+        "perform_research",
+        {"query": "status"},
+        "denied",
+        idempotency_key="idem-status",
+    )
+
+    blocked, status, _message = api._evaluate_intent_guard(
+        "perform_research",
+        {"query": "different topic"},
+        phase="confirmation_prompt",
+        idempotency_key="idem-different",
+    )
+
+    assert blocked is False
+    assert status is None
+
+
+def test_tool_confirmation_retry_after_denial_returns_noop_without_prompt() -> None:
+    api = _make_api_stub()
+    api._pending_action = None
+    api._extract_dry_run_flag = lambda _args: False
+    api._is_duplicate_tool_call = lambda *args, **kwargs: False
+    api._is_suppressed_after_confirmation_timeout = lambda *args, **kwargs: False
+    api._tool_execution_cooldown_remaining = lambda: 0.0
+    api._stage_action = lambda _action: {"valid": True}
+    api._intent_denial_cooldown_s = 30.0
+
+    prompts: list[str] = []
+
+    class _CaptureWs:
+        def __init__(self) -> None:
+            self.messages: list[dict[str, object]] = []
+
+        async def send(self, payload: str) -> None:
+            self.messages.append(json.loads(payload))
+
+    websocket = _CaptureWs()
+    api.websocket = websocket
+
+    async def _request_tool_confirmation(*_args, **_kwargs):
+        prompts.append("prompted")
+
+    async def _assistant(message: str, _ws):
+        prompts.append(message)
+
+    api._request_tool_confirmation = _request_tool_confirmation
+    api.send_assistant_message = _assistant
+
+    class _Gov:
+        def build_action_packet(self, function_name, call_id, args, **_kwargs):
+            return ActionPacket(
+                id=call_id,
+                tool_name=function_name,
+                tool_args=args,
+                tier=2,
+                what="research",
+                why="test",
+                impact="none",
+                rollback="n/a",
+                alternatives=[],
+                confidence=0.8,
+                cost="low",
+                risk_flags=[],
+                requires_confirmation=True,
+            )
+
+        def decide_tool_call(self, *_args, **_kwargs):
+            return type(
+                "Decision",
+                (),
+                {
+                    "approved": False,
+                    "needs_confirmation": True,
+                    "status": "needs_confirmation",
+                    "reason": "confirm",
+                    "confirm_required": True,
+                    "confirm_prompt": None,
+                    "confirm_reason": "confirm",
+                    "idempotency_key": "idem-noop",
+                    "cooldown_seconds": 30.0,
+                    "dry_run_supported": True,
+                },
+            )()
+
+        def describe_tool(self, *_args, **_kwargs):
+            return {}
+
+    api._governance = _Gov()
+
+    api.function_call = {"name": "perform_research", "call_id": "call_1"}
+    api.function_call_args = '{"query":"status"}'
+    asyncio.run(api.handle_function_call({}, websocket))
+    assert prompts == ["prompted"]
+
+    asyncio.run(api._maybe_handle_approval_response("no", websocket))
+
+    prompts.clear()
+    api.function_call = {"name": "perform_research", "call_id": "call_2"}
+    api.function_call_args = '{"query":"status"}'
+    asyncio.run(api.handle_function_call({}, websocket))
+
+    assert prompts == []
+    function_outputs = [
+        event
+        for event in websocket.messages
+        if event.get("type") == "conversation.item.create"
+        and isinstance(event.get("item"), dict)
+        and event["item"].get("type") == "function_call_output"
+    ]
+    payload = json.loads(function_outputs[-1]["item"]["output"])
+    assert payload["status"] == "suppressed_recent_confirmation_outcome"
+    assert payload["no_op"]["executed"] is False
+
+
 
 def _build_confirmation_token(*, kind: str, pending_action=None, request=None, token_id: str = "tok_1"):
     return PendingConfirmationToken(
