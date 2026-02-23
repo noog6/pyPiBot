@@ -26,6 +26,10 @@ class ToolSpec:
     confirm_prompt: str | None = None
     cooldown_seconds: float = 0.0
     dry_run_supported: bool = False
+    governance_tier: str = "GUARDED"
+    side_effects: str = "UNKNOWN"
+    sensitivity: str = "INTERNAL"
+    default_confirmation: str = "ASK"
 
 
 @dataclass
@@ -668,9 +672,61 @@ class GovernanceLayer:
         return max(0.0, min(1.0, base + tier_bump + cost_bump + reversible_bump))
 
 
-def build_tool_specs(raw: dict[str, dict[str, Any]]) -> dict[str, ToolSpec]:
+_REQUIRED_GOVERNANCE_METADATA_FIELDS = (
+    "governance_tier",
+    "side_effects",
+    "sensitivity",
+    "default_confirmation",
+)
+
+_ALLOWED_GOVERNANCE_TIERS = {"SAFE", "GUARDED", "PRIVILEGED"}
+_ALLOWED_DEFAULT_CONFIRMATION = {"NEVER", "ASK", "ALWAYS"}
+
+
+def _coerce_governance_metadata(tool_name: str, payload: dict[str, Any]) -> dict[str, str]:
+    missing = [field for field in _REQUIRED_GOVERNANCE_METADATA_FIELDS if payload.get(field) is None]
+    if missing:
+        raise ValueError(
+            f"Governance metadata missing for tool '{tool_name}': {', '.join(missing)}"
+        )
+
+    metadata = {
+        "governance_tier": str(payload["governance_tier"]).upper(),
+        "side_effects": str(payload["side_effects"]).upper(),
+        "sensitivity": str(payload["sensitivity"]).upper(),
+        "default_confirmation": str(payload["default_confirmation"]).upper(),
+    }
+    if metadata["governance_tier"] not in _ALLOWED_GOVERNANCE_TIERS:
+        raise ValueError(
+            f"Governance metadata for tool '{tool_name}' has invalid governance_tier "
+            f"'{metadata['governance_tier']}'. Expected one of {sorted(_ALLOWED_GOVERNANCE_TIERS)}."
+        )
+    if metadata["default_confirmation"] not in _ALLOWED_DEFAULT_CONFIRMATION:
+        raise ValueError(
+            f"Governance metadata for tool '{tool_name}' has invalid default_confirmation "
+            f"'{metadata['default_confirmation']}'. Expected one of "
+            f"{sorted(_ALLOWED_DEFAULT_CONFIRMATION)}."
+        )
+    return metadata
+
+
+def build_tool_specs(
+    raw: dict[str, dict[str, Any]],
+    *,
+    registered_tool_names: Iterable[str] | None = None,
+) -> dict[str, ToolSpec]:
+    raw = raw or {}
+    if registered_tool_names is not None:
+        missing = sorted(set(registered_tool_names) - set(raw.keys()))
+        if missing:
+            raise ValueError(
+                "Governance tool_specs missing entries for registered tools: "
+                + ", ".join(missing)
+            )
+
     specs: dict[str, ToolSpec] = {}
     for name, payload in raw.items():
+        metadata = _coerce_governance_metadata(name, payload)
         specs[name] = ToolSpec(
             tier=int(payload.get("tier", 2)),
             reversible=bool(payload.get("reversible", False)),
@@ -687,6 +743,10 @@ def build_tool_specs(raw: dict[str, dict[str, Any]]) -> dict[str, ToolSpec]:
             ),
             cooldown_seconds=float(payload.get("cooldown_seconds", 0.0) or 0.0),
             dry_run_supported=bool(payload.get("dry_run_supported", False)),
+            governance_tier=metadata["governance_tier"],
+            side_effects=metadata["side_effects"],
+            sensitivity=metadata["sensitivity"],
+            default_confirmation=metadata["default_confirmation"],
         )
     return specs
 

@@ -219,6 +219,10 @@ governance:
   #   confirm_prompt: optional custom confirmation wording
   #   cooldown_seconds: per-tool cooldown gate before execution
   #   dry_run_supported: allows no-op simulation output
+  #   governance_tier: SAFE | GUARDED | PRIVILEGED
+  #   side_effects: normalized impact label for audits
+  #   sensitivity: LOW | MEDIUM | HIGH
+  #   default_confirmation: NEVER | ASK | ALWAYS
   tool_specs:
     read_battery_voltage:
       tier: 0
@@ -230,6 +234,10 @@ governance:
       confirm_prompt: null
       cooldown_seconds: 0
       dry_run_supported: true
+      governance_tier: "SAFE"
+      side_effects: "NONE"
+      sensitivity: "LOW"
+      default_confirmation: "NEVER"
     read_environment:
       tier: 0
       reversible: true
@@ -240,6 +248,10 @@ governance:
       confirm_prompt: null
       cooldown_seconds: 0
       dry_run_supported: true
+      governance_tier: "SAFE"
+      side_effects: "NONE"
+      sensitivity: "LOW"
+      default_confirmation: "NEVER"
     read_imu_data:
       tier: 0
       reversible: true
@@ -250,6 +262,10 @@ governance:
       confirm_prompt: null
       cooldown_seconds: 0
       dry_run_supported: true
+      governance_tier: "SAFE"
+      side_effects: "NONE"
+      sensitivity: "LOW"
+      default_confirmation: "NEVER"
     gesture_idle:
       tier: 1
       reversible: true
@@ -260,6 +276,10 @@ governance:
       confirm_prompt: null
       cooldown_seconds: 0
       dry_run_supported: true
+      governance_tier: "GUARDED"
+      side_effects: "REVERSIBLE_MOTION"
+      sensitivity: "LOW"
+      default_confirmation: "ASK"
     gesture_nod:
       tier: 1
       reversible: true
@@ -270,6 +290,10 @@ governance:
       confirm_prompt: null
       cooldown_seconds: 0
       dry_run_supported: true
+      governance_tier: "GUARDED"
+      side_effects: "REVERSIBLE_MOTION"
+      sensitivity: "LOW"
+      default_confirmation: "ASK"
     gesture_no:
       tier: 1
       reversible: true
@@ -280,6 +304,10 @@ governance:
       confirm_prompt: null
       cooldown_seconds: 0
       dry_run_supported: true
+      governance_tier: "GUARDED"
+      side_effects: "REVERSIBLE_MOTION"
+      sensitivity: "LOW"
+      default_confirmation: "ASK"
     gesture_look_around:
       tier: 1
       reversible: true
@@ -290,6 +318,10 @@ governance:
       confirm_prompt: null
       cooldown_seconds: 0
       dry_run_supported: true
+      governance_tier: "GUARDED"
+      side_effects: "REVERSIBLE_MOTION"
+      sensitivity: "LOW"
+      default_confirmation: "ASK"
     gesture_look_up:
       tier: 1
       reversible: true
@@ -300,6 +332,10 @@ governance:
       confirm_prompt: null
       cooldown_seconds: 0
       dry_run_supported: true
+      governance_tier: "GUARDED"
+      side_effects: "REVERSIBLE_MOTION"
+      sensitivity: "LOW"
+      default_confirmation: "ASK"
     gesture_look_left:
       tier: 1
       reversible: true
@@ -310,6 +346,10 @@ governance:
       confirm_prompt: null
       cooldown_seconds: 0
       dry_run_supported: true
+      governance_tier: "GUARDED"
+      side_effects: "REVERSIBLE_MOTION"
+      sensitivity: "LOW"
+      default_confirmation: "ASK"
     gesture_look_right:
       tier: 1
       reversible: true
@@ -320,6 +360,10 @@ governance:
       confirm_prompt: null
       cooldown_seconds: 0
       dry_run_supported: true
+      governance_tier: "GUARDED"
+      side_effects: "REVERSIBLE_MOTION"
+      sensitivity: "LOW"
+      default_confirmation: "ASK"
     gesture_look_down:
       tier: 1
       reversible: true
@@ -330,6 +374,10 @@ governance:
       confirm_prompt: null
       cooldown_seconds: 0
       dry_run_supported: true
+      governance_tier: "GUARDED"
+      side_effects: "REVERSIBLE_MOTION"
+      sensitivity: "LOW"
+      default_confirmation: "ASK"
     gesture_look_center:
       tier: 1
       reversible: true
@@ -340,6 +388,10 @@ governance:
       confirm_prompt: null
       cooldown_seconds: 0
       dry_run_supported: true
+      governance_tier: "GUARDED"
+      side_effects: "REVERSIBLE_MOTION"
+      sensitivity: "LOW"
+      default_confirmation: "ASK"
     gesture_curious_tilt:
       tier: 1
       reversible: true
@@ -350,6 +402,10 @@ governance:
       confirm_prompt: null
       cooldown_seconds: 0
       dry_run_supported: true
+      governance_tier: "GUARDED"
+      side_effects: "REVERSIBLE_MOTION"
+      sensitivity: "LOW"
+      default_confirmation: "ASK"
     gesture_attention_snap:
       tier: 1
       reversible: true
@@ -360,6 +416,10 @@ governance:
       confirm_prompt: null
       cooldown_seconds: 0
       dry_run_supported: true
+      governance_tier: "GUARDED"
+      side_effects: "REVERSIBLE_MOTION"
+      sensitivity: "LOW"
+      default_confirmation: "ASK"
     update_user_profile:
       tier: 2
       reversible: false
@@ -370,6 +430,10 @@ governance:
       confirm_prompt: "Do you want me to update your profile with these changes?"
       cooldown_seconds: 0
       dry_run_supported: false
+      governance_tier: "PRIVILEGED"
+      side_effects: "PERSISTENT_WRITE"
+      sensitivity: "HIGH"
+      default_confirmation: "ALWAYS"
     get_output_volume:
       tier: 0
       reversible: true
@@ -380,6 +444,10 @@ governance:
       confirm_prompt: null
       cooldown_seconds: 0
       dry_run_supported: true
+      governance_tier: "SAFE"
+      side_effects: "NONE"
+      sensitivity: "LOW"
+      default_confirmation: "NEVER"
     set_output_volume:
       tier: 1
       reversible: true
@@ -390,6 +458,10 @@ governance:
       confirm_prompt: null
       cooldown_seconds: 0
       dry_run_supported: true
+      governance_tier: "GUARDED"
+      side_effects: "REVERSIBLE_AUDIO"
+      sensitivity: "LOW"
+      default_confirmation: "ASK"
     remember_memory:
       tier: 1
       reversible: true
@@ -400,6 +472,10 @@ governance:
       confirm_prompt: null
       cooldown_seconds: 0
       dry_run_supported: true
+      governance_tier: "GUARDED"
+      side_effects: "PERSISTENT_WRITE"
+      sensitivity: "MEDIUM"
+      default_confirmation: "ASK"
     recall_memories:
       tier: 1
       reversible: true
@@ -410,6 +486,10 @@ governance:
       confirm_prompt: null
       cooldown_seconds: 0
       dry_run_supported: true
+      governance_tier: "SAFE"
+      side_effects: "NONE"
+      sensitivity: "MEDIUM"
+      default_confirmation: "NEVER"
     forget_memory:
       tier: 1
       reversible: false
@@ -420,6 +500,10 @@ governance:
       confirm_prompt: "This will delete memory records. Should I continue?"
       cooldown_seconds: 0
       dry_run_supported: false
+      governance_tier: "PRIVILEGED"
+      side_effects: "PERSISTENT_DELETE"
+      sensitivity: "HIGH"
+      default_confirmation: "ALWAYS"
     perform_research:
       tier: 1
       reversible: false
@@ -430,6 +514,10 @@ governance:
       confirm_prompt: null
       cooldown_seconds: 0
       dry_run_supported: true
+      governance_tier: "GUARDED"
+      side_effects: "NETWORK_IO"
+      sensitivity: "MEDIUM"
+      default_confirmation: "ASK"
 # Image response injection mode ("respond" or "catalog_only")
 image_response_mode: "catalog_only"
 injection_response_triggers:
