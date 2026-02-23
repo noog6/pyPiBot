@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from collections import deque
 from datetime import datetime, timedelta
 from enum import Enum
+import hashlib
+import json
+import re
 import time
 from typing import Any, Iterable
 
@@ -142,6 +145,40 @@ def normalized_decision_payload(decision: GovernanceDecision) -> dict[str, Any]:
     }
 
 
+_ARG_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def normalize_tool_argument_value(value: Any) -> Any:
+    if isinstance(value, str):
+        trimmed = value.strip()
+        if not trimmed:
+            return ""
+        return _ARG_WHITESPACE_RE.sub("", trimmed)
+    if isinstance(value, dict):
+        return {str(key): normalize_tool_argument_value(val) for key, val in value.items()}
+    if isinstance(value, list):
+        return [normalize_tool_argument_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [normalize_tool_argument_value(item) for item in value]
+    return value
+
+
+def normalize_tool_arguments(args: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(args, dict):
+        return {}
+    return {str(key): normalize_tool_argument_value(value) for key, value in args.items()}
+
+
+def build_normalized_idempotency_key(tool_name: str, args: dict[str, Any]) -> str:
+    normalized_args = normalize_tool_arguments(args)
+    payload = json.dumps(
+        {"tool": str(tool_name), "args": normalized_args},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return f"{tool_name}:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
+
+
 @dataclass(frozen=True)
 class AutonomyWindowSpec:
     name: str
@@ -233,8 +270,7 @@ class GovernanceLayer:
         )
 
     def _idempotency_key(self, action: ActionPacket) -> str:
-        ordered = sorted((str(key), repr(value)) for key, value in action.tool_args.items())
-        return f"{action.tool_name}:{ordered}"
+        return build_normalized_idempotency_key(action.tool_name, action.tool_args)
 
     def decide_tool_call(
         self,
@@ -314,7 +350,11 @@ class GovernanceLayer:
             ),
             confirm_prompt=getattr(decision, "confirm_prompt", None),
             idempotency_key=getattr(decision, "idempotency_key", None)
-            or (f"{action.tool_name}:{action.id}" if action is not None else None),
+            or (
+                build_normalized_idempotency_key(action.tool_name, action.tool_args)
+                if action is not None
+                else None
+            ),
             cooldown_seconds=float(getattr(decision, "cooldown_seconds", 0.0) or 0.0),
             dry_run_supported=bool(getattr(decision, "dry_run_supported", False)),
         )

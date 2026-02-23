@@ -1462,8 +1462,8 @@ def test_handle_function_call_logs_consolidated_governance_review_summary() -> N
     assert any(
         "Governance review summary | call_id=call_gov_1 tool=perform_research "
         "initial_status=needs_confirmation initial_reason=expensive_read "
-        "confirm_required=True confirm_reason=expensive_read idempotency_key=perform_research:call_gov_1 "
-        "prior_permission_override=False final_execution_decision=request_confirmation" in line
+        "confirm_required=True confirm_reason=expensive_read idempotency_key=perform_research:" in line
+        and "prior_permission_override=False final_execution_decision=request_confirmation" in line
         for line in logged
     )
 
@@ -1601,6 +1601,85 @@ def _build_confirmation_token(*, kind: str, pending_action=None, request=None, t
         metadata={"approval_flow": True},
     )
 
+
+
+
+def test_handle_function_call_replaces_pending_confirmation_for_new_intent_same_tool() -> None:
+    api = _make_api_stub()
+    api._pending_action = None
+    api._pending_confirmation_token = None
+    api._extract_dry_run_flag = lambda args: False
+    api._is_duplicate_tool_call = lambda *args, **kwargs: False
+    api._is_suppressed_after_confirmation_timeout = lambda *args, **kwargs: False
+    api._tool_execution_cooldown_remaining = lambda: 0.0
+    api._stage_action = lambda action: {"valid": True}
+
+    request_confirmation_calls: list[dict[str, object]] = []
+    executed_calls: list[str] = []
+
+    async def _request_tool_confirmation(action, *_args, **_kwargs):
+        request_confirmation_calls.append(action.tool_args)
+
+    async def _execute_action(*_args, **_kwargs):
+        executed_calls.append("executed")
+
+    api._request_tool_confirmation = _request_tool_confirmation
+    api._execute_action = _execute_action
+
+    class _Gov:
+        def build_action_packet(self, function_name, call_id, args, **_kwargs):
+            return ActionPacket(
+                id=call_id,
+                tool_name=function_name,
+                tool_args=args,
+                tier=2,
+                what="update profile",
+                why="test",
+                impact="profile update",
+                rollback="manual",
+                alternatives=["skip"],
+                confidence=0.9,
+                cost="low",
+                risk_flags=[],
+                requires_confirmation=True,
+            )
+
+        def review(self, *_args, **_kwargs):
+            return type(
+                "Decision",
+                (),
+                {
+                    "approved": False,
+                    "needs_confirmation": True,
+                    "status": "needs_confirmation",
+                    "reason": "confirm",
+                },
+            )()
+
+    api._governance = _Gov()
+
+    api.function_call = {"name": "update_user_profile", "call_id": "call_name_a"}
+    api.function_call_args = '{"name":"A"}'
+    asyncio.run(api.handle_function_call({}, _Ws()))
+
+    first_token_id = api._pending_confirmation_token.id
+
+    api.function_call = {"name": "update_user_profile", "call_id": "call_name_b"}
+    api.function_call_args = '{"name":"B"}'
+
+    with patch("ai.realtime_api.logger.info") as mock_info:
+        asyncio.run(api.handle_function_call({}, _Ws()))
+
+    logged = [call.args[0] % call.args[1:] for call in mock_info.call_args_list if call.args]
+
+    assert api._pending_confirmation_token is not None
+    assert api._pending_confirmation_token.id != first_token_id
+    assert api._pending_confirmation_token.pending_action is not None
+    assert api._pending_confirmation_token.pending_action.action.tool_args["name"] == "B"
+    assert request_confirmation_calls == [{"name": "A"}, {"name": "B"}]
+    assert executed_calls == []
+    assert any("NO_OP_EVENT status=cancelled reason=replaced_by_new_intent" in line for line in logged)
+    assert any("CONFIRMATION_TOKEN_CLOSED" in line and "outcome=replaced" in line for line in logged)
 
 def test_stale_drop_preserves_active_confirmation_prompt() -> None:
     api = _make_api_stub()

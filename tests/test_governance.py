@@ -61,3 +61,18 @@ def test_tier1_guarded_tool_requires_confirmation_when_runtime_threshold_exceede
     assert decision.status == "needs_confirmation"
     assert decision.needs_confirmation is True
     assert decision.reason == "tier1_guarded_threshold_exceeded"
+
+
+def test_build_normalized_idempotency_key_collapses_string_whitespace() -> None:
+    from ai.governance import build_normalized_idempotency_key
+
+    key_with_space = build_normalized_idempotency_key(
+        "update_user_profile",
+        {"name": "Sprinkles 2", "favorites": ["ice cream"]},
+    )
+    key_without_space = build_normalized_idempotency_key(
+        "update_user_profile",
+        {"name": "Sprinkles2", "favorites": ["icecream"]},
+    )
+
+    assert key_with_space == key_without_space
