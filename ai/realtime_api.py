@@ -440,6 +440,15 @@ class RealtimeAPI:
             0,
             int(realtime_cfg.get("confirmation_unclear_max_reprompts", 1)),
         )
+        self._confirmation_reminder_interval_s = max(
+            0.0,
+            float(realtime_cfg.get("confirmation_reminder_interval_s", 6.0)),
+        )
+        self._confirmation_reminder_max_count = max(
+            0,
+            int(realtime_cfg.get("confirmation_reminder_max_count", 2)),
+        )
+        self._confirmation_reminder_tracker: dict[str, dict[str, float | int]] = {}
         self._confirmation_token_created_at: float | None = None
         self._confirmation_last_activity_at: float | None = None
         self._confirmation_speech_active = False
@@ -2781,6 +2790,9 @@ class RealtimeAPI:
             self._presented_actions.discard(token.pending_action.action.id)
         self._confirmation_timeout_check_last_logged_at.pop(token.id, None)
         self._confirmation_timeout_check_last_pause_reason.pop(token.id, None)
+        reminder_key = self._confirmation_reminder_key(token)
+        if reminder_key is not None:
+            self._confirmation_reminder_tracker.pop(reminder_key, None)
         self._pending_confirmation_token = None
         self._confirmation_token_created_at = None
         self._confirmation_last_activity_at = None
@@ -2804,6 +2816,39 @@ class RealtimeAPI:
     def _has_active_confirmation_token(self) -> bool:
         return getattr(self, "_pending_confirmation_token", None) is not None
 
+    def _confirmation_reminder_key(self, token: PendingConfirmationToken | None) -> str | None:
+        if token is not None:
+            if token.pending_action is not None and token.pending_action.idempotency_key:
+                return f"{token.kind}:{token.pending_action.idempotency_key}"
+            if token.kind in {"research_permission", "research_budget"} and token.request is not None:
+                return f"{token.kind}:{self._build_research_request_fingerprint(token.request)}"
+            return f"{token.kind}:{token.id}"
+        pending_action = getattr(self, "_pending_action", None)
+        if pending_action is not None:
+            action_packet = getattr(pending_action, "action", None)
+            action_id = getattr(action_packet, "id", None)
+            return f"legacy:{action_id or id(pending_action)}"
+        return None
+
+    def _allow_confirmation_reminder(self, token: PendingConfirmationToken | None, *, reason: str) -> tuple[bool, str | None, int, float | None, str | None]:
+        key = self._confirmation_reminder_key(token)
+        if key is None:
+            logger.info(
+                "CONFIRMATION_REMINDER_SUPPRESSED reason=%s suppress_reason=no_confirmation_key",
+                reason,
+            )
+            return False, None, 0, None, "no_confirmation_key"
+        now = time.monotonic()
+        entry = self._confirmation_reminder_tracker.get(key)
+        sent_count = int(entry.get("count", 0)) if isinstance(entry, dict) else 0
+        last_sent_at = float(entry.get("last_sent_at", 0.0)) if isinstance(entry, dict) else None
+        if self._confirmation_reminder_max_count > 0 and sent_count >= self._confirmation_reminder_max_count:
+            return False, key, sent_count, last_sent_at, "max_count"
+        if last_sent_at is not None and (now - last_sent_at) < self._confirmation_reminder_interval_s:
+            return False, key, sent_count, last_sent_at, "interval"
+        self._confirmation_reminder_tracker[key] = {"count": sent_count + 1, "last_sent_at": now}
+        return True, key, sent_count + 1, now, None
+
     def _is_token_approval_flow_metadata(self, metadata: dict[str, Any]) -> bool:
         approval_flow = str(metadata.get("approval_flow", "")).strip().lower()
         if approval_flow in {"true", "1", "yes"}:
@@ -2816,11 +2861,32 @@ class RealtimeAPI:
 
     async def _send_confirmation_reminder(self, websocket: Any, *, reason: str) -> None:
         token = getattr(self, "_pending_confirmation_token", None)
-        if token is None or token.reminder_sent:
+        allowed, key, sent_count, sent_at, suppress_reason = self._allow_confirmation_reminder(
+            token,
+            reason=reason,
+        )
+        if not allowed:
+            logger.info(
+                "CONFIRMATION_REMINDER_SUPPRESSED reason=%s suppress_reason=%s key=%s sent_count=%s max_count=%s interval_s=%.2f",
+                reason,
+                suppress_reason or "unknown",
+                key or "none",
+                sent_count,
+                self._confirmation_reminder_max_count,
+                self._confirmation_reminder_interval_s,
+            )
             return
-        token.reminder_sent = True
+        if token is not None:
+            token.reminder_sent = True
         if self._confirmation_state == ConfirmationState.PENDING_PROMPT:
             self._set_confirmation_state(ConfirmationState.AWAITING_DECISION, reason="reminder_sent")
+        logger.info(
+            "CONFIRMATION_REMINDER_SENT reason=%s key=%s sent_count=%s sent_at=%.3f",
+            reason,
+            key or "none",
+            sent_count,
+            sent_at or 0.0,
+        )
         logger.info(
             "CONFIRMATION_NON_DECISION_RESPONSE_SUPPRESSED origin=%s response_id=%s reason=%s",
             self._active_response_origin,
@@ -3140,7 +3206,7 @@ class RealtimeAPI:
             if token is not None:
                 await self._send_confirmation_reminder(websocket, reason="non_decision_input")
             else:
-                await self.send_assistant_message("Please reply with: yes or no.", websocket)
+                await self._send_confirmation_reminder(websocket, reason="non_decision_input_legacy")
             return True
 
     async def _maybe_handle_research_permission_response(self, text: str, websocket: Any) -> bool:
@@ -5286,10 +5352,9 @@ class RealtimeAPI:
                         reason="transcribe_response_done",
                     )
                 else:
-                    await self.send_assistant_message(
-                        "Please reply with: yes or no.",
+                    await self._send_confirmation_reminder(
                         self.websocket,
-                        response_metadata={"trigger": "confirmation_reminder", "approval_flow": "true"},
+                        reason="transcribe_response_done_legacy",
                     )
             self._active_response_confirmation_guarded = False
             self.response_in_progress = False
