@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from collections import deque
 from datetime import datetime, timedelta
+from enum import Enum
 import time
 from typing import Any, Iterable
 
@@ -88,6 +89,55 @@ class GovernanceDecision:
     @property
     def denied(self) -> bool:
         return self.status == "denied"
+
+
+class GovernanceReason(str, Enum):
+    AUTONOMY_OBSERVE_ONLY = "autonomy_observe_only"
+    TOOL_CALL_BUDGET_EXHAUSTED = "tool_call_budget_exhausted"
+    EXPENSIVE_CALL_BUDGET_EXHAUSTED = "expensive_call_budget_exhausted"
+    RISK_THRESHOLD_EXCEEDED = "risk_threshold_exceeded"
+    AUTONOMY_WINDOW_CLOSED = "autonomy_window_closed"
+    AUTONOMY_LEVEL_REQUIRES_CONFIRMATION = "autonomy_level_requires_confirmation"
+    WITHIN_BOUNDS = "within_bounds"
+    DRY_RUN_NOT_SUPPORTED = "dry_run_not_supported"
+    TOOL_EXECUTION_COOLDOWN = "tool_execution_cooldown"
+
+
+_REASON_NORMALIZATION_MAP: dict[str, GovernanceReason] = {
+    "autonomy dial set to observe-only": GovernanceReason.AUTONOMY_OBSERVE_ONLY,
+    "tool-call budget exhausted": GovernanceReason.TOOL_CALL_BUDGET_EXHAUSTED,
+    "expensive-call budget exhausted": GovernanceReason.EXPENSIVE_CALL_BUDGET_EXHAUSTED,
+    "risk threshold exceeded": GovernanceReason.RISK_THRESHOLD_EXCEEDED,
+    "autonomy window closed for tiered action": GovernanceReason.AUTONOMY_WINDOW_CLOSED,
+    "autonomy level requires confirmation": GovernanceReason.AUTONOMY_LEVEL_REQUIRES_CONFIRMATION,
+    "within bounds": GovernanceReason.WITHIN_BOUNDS,
+    "dry-run not supported for this tool": GovernanceReason.DRY_RUN_NOT_SUPPORTED,
+}
+
+
+def normalize_governance_reason(reason: str) -> str:
+    lowered = str(reason or "").strip().lower()
+    if lowered.startswith("tool execution paused for"):
+        return GovernanceReason.TOOL_EXECUTION_COOLDOWN.value
+    normalized = _REASON_NORMALIZATION_MAP.get(lowered)
+    return normalized.value if normalized is not None else str(reason or "unknown")
+
+
+def normalized_decision_payload(decision: GovernanceDecision) -> dict[str, Any]:
+    confirm_reason = decision.confirm_reason
+    if confirm_reason is None and decision.confirm_required:
+        confirm_reason = decision.reason
+    normalized_confirm_reason = (
+        normalize_governance_reason(confirm_reason) if confirm_reason is not None else None
+    )
+    return {
+        "confirm_required": decision.needs_confirmation,
+        "confirm_reason": normalized_confirm_reason,
+        "confirm_prompt": decision.confirm_prompt,
+        "idempotency_key": decision.idempotency_key,
+        "cooldown_seconds": float(decision.cooldown_seconds or 0.0),
+        "dry_run_supported": bool(decision.dry_run_supported),
+    }
 
 
 @dataclass(frozen=True)
@@ -191,6 +241,8 @@ class GovernanceLayer:
             else decision.needs_confirmation
         )
         confirm_reason = spec.confirm_reason or (decision.reason if confirm_required else None)
+        if confirm_reason is not None:
+            confirm_reason = normalize_governance_reason(confirm_reason)
         confirm_prompt = spec.confirm_prompt
         cooldown_seconds = max(0.0, float(runtime_cooldown_seconds), float(spec.cooldown_seconds))
         dry_run_supported = bool(spec.dry_run_supported)
@@ -198,7 +250,7 @@ class GovernanceLayer:
         if dry_run_requested and not dry_run_supported:
             return GovernanceDecision(
                 status="denied",
-                reason="dry-run not supported for this tool",
+                reason=GovernanceReason.DRY_RUN_NOT_SUPPORTED.value,
                 confirm_required=False,
                 idempotency_key=self._idempotency_key(action),
                 cooldown_seconds=cooldown_seconds,
@@ -208,7 +260,7 @@ class GovernanceLayer:
         if cooldown_seconds > 0:
             return GovernanceDecision(
                 status="denied",
-                reason=f"tool execution paused for {cooldown_seconds:.0f}s",
+                reason=GovernanceReason.TOOL_EXECUTION_COOLDOWN.value,
                 confirm_required=False,
                 idempotency_key=self._idempotency_key(action),
                 cooldown_seconds=cooldown_seconds,
@@ -220,7 +272,7 @@ class GovernanceLayer:
 
         return GovernanceDecision(
             status=decision.status,
-            reason=decision.reason,
+            reason=normalize_governance_reason(decision.reason),
             confirm_required=confirm_required,
             confirm_reason=confirm_reason,
             confirm_prompt=confirm_prompt,
@@ -234,7 +286,7 @@ class GovernanceLayer:
         if isinstance(decision, GovernanceDecision):
             return decision
         status = str(getattr(decision, "status", "denied"))
-        reason = str(getattr(decision, "reason", "policy denied"))
+        reason = normalize_governance_reason(str(getattr(decision, "reason", "policy denied")))
         confirm_required = bool(
             getattr(decision, "confirm_required", False)
             or getattr(decision, "needs_confirmation", False)
@@ -244,7 +296,11 @@ class GovernanceLayer:
             status=status,
             reason=reason,
             confirm_required=confirm_required,
-            confirm_reason=getattr(decision, "confirm_reason", None),
+            confirm_reason=(
+                normalize_governance_reason(str(getattr(decision, "confirm_reason")))
+                if getattr(decision, "confirm_reason", None) is not None
+                else None
+            ),
             confirm_prompt=getattr(decision, "confirm_prompt", None),
             idempotency_key=getattr(decision, "idempotency_key", None)
             or (f"{action.tool_name}:{action.id}" if action is not None else None),
@@ -346,13 +402,13 @@ class GovernanceLayer:
         if self._autonomy_level in {"observe-only", "observe"}:
             return GovernanceDecision(
                 status="denied",
-                reason="autonomy dial set to observe-only",
+                reason=GovernanceReason.AUTONOMY_OBSERVE_ONLY.value,
             )
 
         if not self._tool_calls_budget.allow(now):
             return GovernanceDecision(
                 status="denied",
-                reason="tool-call budget exhausted",
+                reason=GovernanceReason.TOOL_CALL_BUDGET_EXHAUSTED.value,
             )
 
         spec = self._tool_specs.get(action.tool_name, self._default_spec())
@@ -360,13 +416,13 @@ class GovernanceLayer:
         if action.cost == "expensive" and not self._expensive_budget.allow(now):
             return GovernanceDecision(
                 status="denied",
-                reason="expensive-call budget exhausted",
+                reason=GovernanceReason.EXPENSIVE_CALL_BUDGET_EXHAUSTED.value,
             )
 
         if risk_score >= self._risk_threshold:
             return GovernanceDecision(
                 status="needs_confirmation",
-                reason="risk threshold exceeded",
+                reason=GovernanceReason.RISK_THRESHOLD_EXCEEDED.value,
             )
 
         if action.tier > 1:
@@ -374,17 +430,17 @@ class GovernanceLayer:
             if window_state is None or action.tier not in window_state.allowed_tiers:
                 return GovernanceDecision(
                     status="needs_confirmation",
-                    reason="autonomy window closed for tiered action",
+                    reason=GovernanceReason.AUTONOMY_WINDOW_CLOSED.value,
                 )
 
         if self._autonomy_level in {"assist", "act-with-confirm"}:
             if action.tier > 0:
                 return GovernanceDecision(
                     status="needs_confirmation",
-                    reason="autonomy level requires confirmation",
+                    reason=GovernanceReason.AUTONOMY_LEVEL_REQUIRES_CONFIRMATION.value,
                 )
 
-        return GovernanceDecision(status="approved", reason="within bounds")
+        return GovernanceDecision(status="approved", reason=GovernanceReason.WITHIN_BOUNDS.value)
 
     def record_execution(self, action: ActionPacket) -> None:
         now = time.monotonic()

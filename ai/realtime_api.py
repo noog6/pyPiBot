@@ -44,7 +44,7 @@ from interaction import (
 from ai.tools import function_map, tools
 from ai.reflection import ReflectionCoordinator, ReflectionContext
 from ai.stimuli_coordinator import StimuliCoordinator
-from ai.governance import ActionPacket, GovernanceLayer, build_tool_specs
+from ai.governance import ActionPacket, GovernanceLayer, build_tool_specs, normalized_decision_payload
 from ai.orchestration import OrchestrationPhase, OrchestrationState
 from ai.event_bus import Event, EventBus
 from ai.event_injector import EventInjector
@@ -1581,8 +1581,18 @@ class RealtimeAPI:
             )
         return f"Would call {action.tool_name} with the proposed arguments."
 
-    def _build_approval_prompt(self, action: ActionPacket) -> str:
+    def _build_approval_prompt(
+        self,
+        action: ActionPacket,
+        *,
+        confirm_prompt: str | None = None,
+        confirm_reason: str | None = None,
+    ) -> str:
+        if confirm_prompt:
+            return str(confirm_prompt)
         one_line_reason = " ".join(str(action.why).split())
+        if confirm_reason:
+            one_line_reason = str(confirm_reason)
         return (
             "Approval required for this action.\n"
             f"Action summary: {action.summary()}\n"
@@ -4278,16 +4288,20 @@ class RealtimeAPI:
             else:
                 decision = self._governance.review(action)
             decision = GovernanceLayer.coerce_decision_payload(decision, action)
-            if decision.cooldown_seconds > 0:
+            normalized_decision = normalized_decision_payload(decision)
+            if normalized_decision["cooldown_seconds"] > 0:
                 await self._reject_tool_call(
                     action,
-                    f"Tool execution paused for {decision.cooldown_seconds:.0f}s due to stop word.",
+                    (
+                        f"Tool execution paused for "
+                        f"{normalized_decision['cooldown_seconds']:.0f}s due to stop word."
+                    ),
                     websocket,
                     status="cancelled",
                 )
                 return
             if dry_run_requested:
-                if not decision.dry_run_supported:
+                if not normalized_decision["dry_run_supported"]:
                     await self._reject_tool_call(
                         action,
                         decision.reason,
@@ -4335,10 +4349,11 @@ class RealtimeAPI:
                     )
                 if self._debug_governance_decisions:
                     logger.info(
-                        "Function call outcome: executing tool | tool=%s call_id=%s decision_reason=%s",
+                        "Function call outcome: executing tool | tool=%s call_id=%s decision_reason=%s idempotency_key=%s",
                         function_name,
                         call_id,
                         decision_reason,
+                        normalized_decision["idempotency_key"],
                     )
                 self._record_intent_state(action.tool_name, action.tool_args, "approved")
                 self.orchestration_state.transition(
@@ -4387,9 +4402,19 @@ class RealtimeAPI:
                 self._sync_confirmation_legacy_fields()
                 await self._request_tool_confirmation(
                     action,
-                    decision.confirm_reason or decision.reason,
+                    str(normalized_decision["confirm_reason"] or decision.reason),
                     websocket,
                     staging,
+                    confirm_prompt=(
+                        str(normalized_decision["confirm_prompt"])
+                        if normalized_decision["confirm_prompt"] is not None
+                        else None
+                    ),
+                    confirm_reason=(
+                        str(normalized_decision["confirm_reason"])
+                        if normalized_decision["confirm_reason"] is not None
+                        else None
+                    ),
                 )
                 token.prompt_sent = True
                 self._set_confirmation_state(ConfirmationState.AWAITING_DECISION, reason="tool_prompt_sent")
@@ -4409,12 +4434,16 @@ class RealtimeAPI:
                 )
             logger.info(
                 "Governance review summary | call_id=%s tool=%s initial_status=%s "
-                "initial_reason=%s prior_permission_override=%s "
+                "initial_reason=%s confirm_required=%s confirm_reason=%s idempotency_key=%s "
+                "prior_permission_override=%s "
                 "final_execution_decision=%s",
                 call_id,
                 function_name,
                 decision.status,
                 decision.reason,
+                normalized_decision["confirm_required"],
+                normalized_decision["confirm_reason"],
+                normalized_decision["idempotency_key"],
                 approved_via_prior_permission,
                 final_execution_decision,
             )
@@ -4579,6 +4608,9 @@ class RealtimeAPI:
         reason: str,
         websocket: Any,
         staging: dict[str, Any],
+        *,
+        confirm_prompt: str | None = None,
+        confirm_reason: str | None = None,
     ) -> None:
         summary = action.summary()
         tool_metadata = self._governance.describe_tool(action.tool_name)
@@ -4592,7 +4624,11 @@ class RealtimeAPI:
             reason=f"needs confirmation for {action.tool_name}",
         )
         self._awaiting_confirmation_completion = False
-        message = self._build_approval_prompt(action)
+        message = self._build_approval_prompt(
+            action,
+            confirm_prompt=confirm_prompt,
+            confirm_reason=confirm_reason,
+        )
         token = getattr(self, "_pending_confirmation_token", None)
         response_metadata = {"trigger": "confirmation_prompt", "approval_flow": "true"}
         if token is not None:
