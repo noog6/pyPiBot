@@ -4486,6 +4486,7 @@ class RealtimeAPI:
         if self.function_call:
             function_name = self.function_call.get("name")
             call_id = self.function_call.get("call_id")
+            suppression_notice_sent = False
             try:
                 args = json.loads(self.function_call_args) if self.function_call_args else {}
                 args_parsed = True
@@ -4521,11 +4522,18 @@ class RealtimeAPI:
                             function_name,
                             call_id,
                         )
+                    self._log_structured_noop_event(
+                        status="blocked_by_research_permission",
+                        reason="research_permission_denied",
+                        tool_name=function_name,
+                        action_id=str(call_id) if call_id is not None else None,
+                        token_id=getattr(token, "id", None),
+                    )
                     await self._send_noop_tool_output(
                         websocket,
                         call_id=call_id,
                         status="blocked_by_research_permission",
-                        message="Research request was denied for this query; do not retry until user re-approves.",
+                        message="No action taken. Research request was denied for this query; do not retry until user re-approves.",
                         tool_name=function_name,
                         reason="research_permission_denied",
                         category="suppression",
@@ -4563,11 +4571,18 @@ class RealtimeAPI:
                         deferred_token_id or "legacy",
                         previous_call_id or "none",
                     )
+                self._log_structured_noop_event(
+                    status="waiting_for_permission",
+                    reason="permission_pending",
+                    tool_name=function_name,
+                    action_id=str(call_id) if call_id is not None else None,
+                    token_id=getattr(token, "id", None),
+                )
                 await self._send_noop_tool_output(
                     websocket,
                     call_id=call_id,
                     status="waiting_for_permission",
-                    message="Permission required; ask user first.",
+                    message="No action taken. Permission required; ask user first.",
                     tool_name=function_name,
                     reason="permission_pending",
                     category="suppression",
@@ -4604,10 +4619,12 @@ class RealtimeAPI:
                         action_id=previous_action_id,
                         token_id=previous_token_id,
                     )
-                    await self.send_assistant_message(
-                        "No action taken. I replaced the pending confirmation with your newer request.",
-                        websocket,
-                    )
+                    if not suppression_notice_sent:
+                        await self.send_assistant_message(
+                            "No action taken. I replaced the pending confirmation with your newer request.",
+                            websocket,
+                        )
+                        suppression_notice_sent = True
                     if self.orchestration_state.phase == OrchestrationPhase.AWAITING_CONFIRMATION:
                         self.orchestration_state.transition(
                             OrchestrationPhase.IDLE,
@@ -4630,11 +4647,18 @@ class RealtimeAPI:
                     function_name,
                     call_id,
                 )
+                self._log_structured_noop_event(
+                    status="redundant",
+                    reason="duplicate_tool_call",
+                    tool_name=function_name,
+                    action_id=str(call_id) if call_id is not None else None,
+                    token_id=getattr(token, "id", None),
+                )
                 await self._send_noop_tool_output(
                     websocket,
                     call_id=call_id,
                     status="redundant",
-                    message="Duplicate tool call ignored; use previous tool results.",
+                    message="No action taken. Duplicate tool call ignored; use previous tool results.",
                     tool_name=function_name,
                     reason="duplicate_tool_call",
                     category="suppression",
@@ -4648,11 +4672,18 @@ class RealtimeAPI:
                     function_name,
                     call_id,
                 )
+                self._log_structured_noop_event(
+                    status="suppressed_after_confirmation_timeout",
+                    reason="confirmation_timeout_debounce",
+                    tool_name=function_name,
+                    action_id=str(call_id) if call_id is not None else None,
+                    token_id=getattr(token, "id", None),
+                )
                 await self._send_noop_tool_output(
                     websocket,
                     call_id=call_id,
                     status="suppressed_after_confirmation_timeout",
-                    message="Tool call suppressed after confirmation timeout; retry shortly.",
+                    message="No action taken. Tool call suppressed after confirmation timeout; retry shortly.",
                     tool_name=function_name,
                     reason="confirmation_timeout_debounce",
                     category="suppression",
@@ -5130,11 +5161,18 @@ class RealtimeAPI:
             return
         pending = self._pending_action
         action = pending.action
+        self._log_structured_noop_event(
+            status="awaiting_confirmation",
+            reason="pending_confirmation",
+            tool_name=action.tool_name,
+            action_id=action.id,
+            token_id=getattr(getattr(self, "_pending_confirmation_token", None), "id", None),
+        )
         await self._send_noop_tool_output(
             websocket,
             call_id=call_id,
             status="awaiting_confirmation",
-            message="Awaiting explicit yes/no confirmation for pending action.",
+            message="No action taken. Awaiting explicit yes/no confirmation for pending action.",
             tool_name=action.tool_name,
             reason="pending_confirmation",
             category="suppression",
