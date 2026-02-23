@@ -112,6 +112,7 @@ class PendingAction:
     staging: dict[str, Any]
     original_intent: str
     created_at: float
+    idempotency_key: str | None = None
     retry_count: int = 0
     max_retries: int = 2
 
@@ -144,6 +145,7 @@ class PendingConfirmationToken:
 class IntentLedgerEntry:
     tool_name: str
     normalized_intent: str
+    idempotency_key: str | None
     state: str
     updated_at: float
     pending_at: float | None = None
@@ -1689,7 +1691,14 @@ class RealtimeAPI:
         normalized = self._normalize_tool_intent(tool_name, args)
         return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
-    def _record_intent_state(self, tool_name: str, args: dict[str, Any], state: str) -> None:
+    def _record_intent_state(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        state: str,
+        *,
+        idempotency_key: str | None = None,
+    ) -> None:
         now = time.monotonic()
         self._prune_intent_ledger(now=now)
         key = self._intent_ledger_key(tool_name, args)
@@ -1699,9 +1708,12 @@ class RealtimeAPI:
             entry = IntentLedgerEntry(
                 tool_name=tool_name,
                 normalized_intent=normalized,
+                idempotency_key=idempotency_key,
                 state=state,
                 updated_at=now,
             )
+        if idempotency_key:
+            entry.idempotency_key = idempotency_key
         entry.state = state
         entry.updated_at = now
         if state == "pending":
@@ -1724,24 +1736,44 @@ class RealtimeAPI:
         args: dict[str, Any],
         *,
         phase: str,
+        idempotency_key: str | None = None,
     ) -> tuple[bool, str | None, str | None]:
         now = time.monotonic()
         self._prune_intent_ledger(now=now)
         key = self._intent_ledger_key(tool_name, args)
         entry = self._intent_ledger.get(key)
+        if idempotency_key and (
+            entry is None or str(getattr(entry, "idempotency_key", "") or "") != str(idempotency_key)
+        ):
+            entry = next(
+                (
+                    existing
+                    for existing in self._intent_ledger.values()
+                    if str(getattr(existing, "idempotency_key", "") or "") == str(idempotency_key)
+                ),
+                None,
+            )
         if entry is None:
             return False, None, None
 
         denial_at = entry.denied_at
         denial_cooldown_s = max(0.0, float(getattr(self, "_intent_denial_cooldown_s", 45.0)))
-        if isinstance(denial_at, (int, float)) and now - float(denial_at) <= denial_cooldown_s:
+        if (
+            phase == "confirmation_prompt"
+            and isinstance(denial_at, (int, float))
+            and now - float(denial_at) <= denial_cooldown_s
+        ):
             logger.info(
                 "INTENT_GUARD_HIT reason=blocked_recent_denial phase=%s tool=%s remaining_s=%.2f",
                 phase,
                 tool_name,
                 max(0.0, denial_cooldown_s - (now - float(denial_at))),
             )
-            return True, "blocked_recent_denial", "Request was recently denied; wait briefly or modify the request."
+            return (
+                True,
+                "blocked_recent_denial",
+                "I can't re-open that confirmation yet because this exact request was just denied. Please wait briefly or change the request.",
+            )
 
         executed_at = entry.executed_at
         execution_cooldown_s = max(
@@ -1762,6 +1794,32 @@ class RealtimeAPI:
             return True, "blocked_duplicate_execution", "Duplicate execution blocked by intent cooldown; reuse recent results."
 
         return False, None, None
+
+    async def _handle_intent_guard_block(
+        self,
+        action: ActionPacket,
+        websocket: Any,
+        *,
+        status: str,
+        reason: str,
+        message: str,
+        staging: dict[str, Any] | None = None,
+    ) -> None:
+        await self.send_assistant_message(message, websocket)
+        await self._send_noop_tool_output(
+            websocket,
+            call_id=action.id,
+            status=status,
+            message=message,
+            tool_name=action.tool_name,
+            reason=reason,
+            category="suppression",
+            action=action,
+            staging=staging,
+        )
+        self._presented_actions.discard(action.id)
+        self.function_call = None
+        self.function_call_args = ""
 
     def _build_tool_call_fingerprint(self, tool_name: str, args: dict[str, Any]) -> str:
         payload = json.dumps({"tool": tool_name, "args": args}, sort_keys=True, separators=(",", ":"))
@@ -2464,12 +2522,28 @@ class RealtimeAPI:
         )
         if token.pending_action is not None:
             action = token.pending_action.action
+            idempotency_key = token.pending_action.idempotency_key
             if outcome in {"accepted", "approved"}:
-                self._record_intent_state(action.tool_name, action.tool_args, "approved")
+                self._record_intent_state(
+                    action.tool_name,
+                    action.tool_args,
+                    "approved",
+                    idempotency_key=idempotency_key,
+                )
             elif outcome in {"rejected", "cancelled_by_stop_word", "cleared_pending_action"}:
-                self._record_intent_state(action.tool_name, action.tool_args, "denied")
+                self._record_intent_state(
+                    action.tool_name,
+                    action.tool_args,
+                    "denied",
+                    idempotency_key=idempotency_key,
+                )
             elif outcome in {"awaiting_decision_timeout", "expired", "retry_exhausted", "unclear_cancelled"}:
-                self._record_intent_state(action.tool_name, action.tool_args, "timeout")
+                self._record_intent_state(
+                    action.tool_name,
+                    action.tool_args,
+                    "timeout",
+                    idempotency_key=idempotency_key,
+                )
         pending_deferred_call = self._deferred_research_tool_call
         deferred_call_id = None
         deferred_action = "none"
@@ -2783,6 +2857,7 @@ class RealtimeAPI:
                 action,
                 staging,
                 websocket,
+                idempotency_key=pending.idempotency_key,
                 force_no_tools_followup=True,
                 inject_no_tools_instruction=True,
             )
@@ -4322,14 +4397,16 @@ class RealtimeAPI:
                     action.tool_name,
                     action.tool_args,
                     phase="execution",
+                    idempotency_key=normalized_decision["idempotency_key"],
                 )
                 if blocked:
-                    await self._reject_tool_call(
+                    await self._handle_intent_guard_block(
                         action,
-                        blocked_message or "Tool execution blocked by intent guard.",
                         websocket,
-                        staging=staging,
                         status=blocked_status or "blocked",
+                        reason=blocked_status or "intent_guard",
+                        message=blocked_message or "Tool execution blocked by intent guard.",
+                        staging=staging,
                     )
                     return
                 decision_reason = (
@@ -4355,25 +4432,37 @@ class RealtimeAPI:
                         decision_reason,
                         normalized_decision["idempotency_key"],
                     )
-                self._record_intent_state(action.tool_name, action.tool_args, "approved")
+                self._record_intent_state(
+                    action.tool_name,
+                    action.tool_args,
+                    "approved",
+                    idempotency_key=normalized_decision["idempotency_key"],
+                )
                 self.orchestration_state.transition(
                     OrchestrationPhase.ACT,
                     reason=f"function_call {function_name}",
                 )
-                await self._execute_action(action, staging, websocket)
+                await self._execute_action(
+                    action,
+                    staging,
+                    websocket,
+                    idempotency_key=normalized_decision["idempotency_key"],
+                )
             elif decision.needs_confirmation:
                 blocked, blocked_status, blocked_message = self._evaluate_intent_guard(
                     action.tool_name,
                     action.tool_args,
                     phase="confirmation_prompt",
+                    idempotency_key=normalized_decision["idempotency_key"],
                 )
                 if blocked:
-                    await self._reject_tool_call(
+                    await self._handle_intent_guard_block(
                         action,
-                        blocked_message or "Tool confirmation blocked by intent guard.",
                         websocket,
-                        staging=staging,
                         status=blocked_status or "blocked",
+                        reason=blocked_status or "intent_guard",
+                        message=blocked_message or "Tool confirmation blocked by intent guard.",
+                        staging=staging,
                     )
                     return
                 final_execution_decision = "request_confirmation"
@@ -4388,8 +4477,14 @@ class RealtimeAPI:
                     staging=staging,
                     original_intent=self._last_user_input_text or "",
                     created_at=time.monotonic(),
+                    idempotency_key=normalized_decision["idempotency_key"],
                 )
-                self._record_intent_state(action.tool_name, action.tool_args, "pending")
+                self._record_intent_state(
+                    action.tool_name,
+                    action.tool_args,
+                    "pending",
+                    idempotency_key=normalized_decision["idempotency_key"],
+                )
                 token = self._create_confirmation_token(
                     kind="tool_governance",
                     tool_name=action.tool_name,
@@ -4419,7 +4514,12 @@ class RealtimeAPI:
                 token.prompt_sent = True
                 self._set_confirmation_state(ConfirmationState.AWAITING_DECISION, reason="tool_prompt_sent")
             else:
-                self._record_intent_state(action.tool_name, action.tool_args, "denied")
+                self._record_intent_state(
+                    action.tool_name,
+                    action.tool_args,
+                    "denied",
+                    idempotency_key=normalized_decision["idempotency_key"],
+                )
                 final_execution_decision = "reject"
                 if self._debug_governance_decisions:
                     log_info(
@@ -4554,6 +4654,7 @@ class RealtimeAPI:
         staging: dict[str, Any],
         websocket: Any,
         *,
+        idempotency_key: str | None = None,
         force_no_tools_followup: bool = False,
         inject_no_tools_instruction: bool = False,
     ) -> None:
@@ -4570,14 +4671,16 @@ class RealtimeAPI:
             action.tool_name,
             action.tool_args,
             phase="execution",
+            idempotency_key=idempotency_key,
         )
         if blocked:
-            await self._reject_tool_call(
+            await self._handle_intent_guard_block(
                 action,
-                blocked_message or "Tool execution blocked by intent guard.",
                 websocket,
-                staging=staging,
                 status=blocked_status or "blocked",
+                reason=blocked_status or "intent_guard",
+                message=blocked_message or "Tool execution blocked by intent guard.",
+                staging=staging,
             )
             return
         if action.tier > 1 and action.id not in self._presented_actions:
@@ -4598,7 +4701,12 @@ class RealtimeAPI:
             inject_no_tools_instruction=inject_no_tools_instruction,
         )
         self._record_executed_tool_call(action.tool_name, action.tool_args)
-        self._record_intent_state(action.tool_name, action.tool_args, "executed")
+        self._record_intent_state(
+            action.tool_name,
+            action.tool_args,
+            "executed",
+            idempotency_key=idempotency_key,
+        )
         self._governance.record_execution(action)
         self._presented_actions.discard(action.id)
 
