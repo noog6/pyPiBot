@@ -1404,6 +1404,7 @@ def test_handle_function_call_logs_consolidated_governance_review_summary() -> N
     assert any(
         "Governance review summary | call_id=call_gov_1 tool=perform_research "
         "initial_status=needs_confirmation initial_reason=expensive_read "
+        "confirm_required=True confirm_reason=expensive_read idempotency_key=perform_research:call_gov_1 "
         "prior_permission_override=False final_execution_decision=request_confirmation" in line
         for line in logged
     )
