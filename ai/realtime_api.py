@@ -1590,16 +1590,38 @@ class RealtimeAPI:
         confirm_prompt: str | None = None,
         confirm_reason: str | None = None,
     ) -> str:
-        if confirm_prompt:
-            return str(confirm_prompt)
         one_line_reason = " ".join(str(action.why).split())
         if confirm_reason:
-            one_line_reason = str(confirm_reason)
-        return (
-            "Approval required for this action.\n"
-            f"Action summary: {action.summary()}\n"
-            f"Reason: {one_line_reason}\n"
-            "Options: Approve / Deny / Dry-run"
+            one_line_reason = " ".join(str(confirm_reason).split())
+        tool_metadata = self._governance.describe_tool(action.tool_name)
+        dry_run_supported = bool(tool_metadata.get("dry_run_supported"))
+        options = "Approve / Deny / Dry-run" if dry_run_supported else "Approve / Deny"
+        prompt_lines = [
+            "Approval required for this action.",
+            f"Action summary: {action.summary()}",
+            f"Reason: {one_line_reason}",
+            f"Options: {options}",
+        ]
+        if confirm_prompt:
+            prompt_lines.insert(0, str(confirm_prompt).strip())
+        return "\n".join(prompt_lines)
+
+    def _log_structured_noop_event(
+        self,
+        *,
+        status: str,
+        reason: str,
+        tool_name: str | None,
+        action_id: str | None,
+        token_id: str | None = None,
+    ) -> None:
+        logger.info(
+            "NO_OP_EVENT status=%s reason=%s token=%s tool=%s action=%s",
+            status,
+            reason,
+            token_id or "",
+            tool_name or "",
+            action_id or "",
         )
 
     async def _send_noop_tool_output(
@@ -2309,8 +2331,16 @@ class RealtimeAPI:
             expired_token.kind,
             source_event,
         )
+        action = expired_token.pending_action.action if expired_token.pending_action is not None else None
+        self._log_structured_noop_event(
+            status="timeout",
+            reason="awaiting_decision_timeout",
+            tool_name=getattr(action, "tool_name", None),
+            action_id=getattr(action, "id", None),
+            token_id=expired_token.id,
+        )
         await self.send_assistant_message(
-            "I didn't get a clear yes/no in time, so I cancelled that request.",
+            "No action taken.\nI didn't get a clear yes/no in time, so I cancelled that request.",
             websocket,
         )
         return True
@@ -2820,8 +2850,15 @@ class RealtimeAPI:
                 self._set_confirmation_state(ConfirmationState.RESOLVING, reason="approval_expired")
             logger.info("CONFIRMATION_TIMEOUT tool=%s cause=expiry", action.tool_name)
             self._record_confirmation_timeout(action, cause="expiry")
+            self._log_structured_noop_event(
+                status="timeout",
+                reason="approval_expired",
+                tool_name=action.tool_name,
+                action_id=action.id,
+                token_id=getattr(token, "id", None),
+            )
             await self.send_assistant_message(
-                "Approval window expired. Please ask again if you still want this.",
+                "No action taken.\nApproval window expired. Please ask again if you still want this.",
                 websocket,
             )
             if token is not None:
@@ -2902,8 +2939,15 @@ class RealtimeAPI:
                 self._set_confirmation_state(ConfirmationState.RESOLVING, reason="tool_confirmation_retry_exhausted")
             logger.info("CONFIRMATION_TIMEOUT tool=%s cause=retry_exhausted", action.tool_name)
             self._record_confirmation_timeout(action, cause="retry_exhausted")
+            self._log_structured_noop_event(
+                status="timeout",
+                reason="retry_exhausted",
+                tool_name=action.tool_name,
+                action_id=action.id,
+                token_id=getattr(token, "id", None),
+            )
             await self.send_assistant_message(
-                "I couldn't confirm this action. Please ask again if you still want it.",
+                "No action taken.\nI couldn't confirm this action. Please ask again if you still want it.",
                 websocket,
             )
             if token is not None:
@@ -4877,7 +4921,14 @@ class RealtimeAPI:
         status: str = "denied",
     ) -> None:
         packet = self._format_action_packet(action)
-        message = f"Tool execution not run.\n{packet}\nReason: {reason}."
+        message = f"No action taken.\n{packet}\nReason: {reason}."
+        self._log_structured_noop_event(
+            status=status,
+            reason=reason,
+            tool_name=action.tool_name,
+            action_id=action.id,
+            token_id=getattr(getattr(self, "_pending_confirmation_token", None), "id", None),
+        )
         await self.send_assistant_message(message, websocket)
         await self._send_noop_tool_output(
             websocket,
