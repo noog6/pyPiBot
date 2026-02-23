@@ -44,7 +44,14 @@ from interaction import (
 from ai.tools import function_map, tools
 from ai.reflection import ReflectionCoordinator, ReflectionContext
 from ai.stimuli_coordinator import StimuliCoordinator
-from ai.governance import ActionPacket, GovernanceLayer, build_tool_specs, normalized_decision_payload
+from ai.governance import (
+    ActionPacket,
+    GovernanceLayer,
+    build_normalized_idempotency_key,
+    build_tool_specs,
+    normalize_tool_arguments,
+    normalized_decision_payload,
+)
 from ai.orchestration import OrchestrationPhase, OrchestrationState
 from ai.event_bus import Event, EventBus
 from ai.event_injector import EventInjector
@@ -1721,7 +1728,12 @@ class RealtimeAPI:
         )
 
     def _normalize_tool_intent(self, tool_name: str, args: dict[str, Any]) -> str:
-        payload = json.dumps({"tool": tool_name, "args": args}, sort_keys=True, separators=(",", ":"))
+        normalized_args = normalize_tool_arguments(args)
+        payload = json.dumps(
+            {"tool": tool_name, "args": normalized_args},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
         return payload
 
     def _prune_intent_ledger(self, *, now: float | None = None) -> None:
@@ -1870,8 +1882,8 @@ class RealtimeAPI:
         self.function_call_args = ""
 
     def _build_tool_call_fingerprint(self, tool_name: str, args: dict[str, Any]) -> str:
-        payload = json.dumps({"tool": tool_name, "args": args}, sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        key = build_normalized_idempotency_key(tool_name, args)
+        return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
     def _record_confirmation_timeout(self, action: ActionPacket, cause: str) -> None:
         fingerprint = self._build_tool_call_fingerprint(action.tool_name, action.tool_args)
@@ -2629,6 +2641,13 @@ class RealtimeAPI:
                     action.tool_name,
                     action.tool_args,
                     "timeout",
+                    idempotency_key=idempotency_key,
+                )
+            elif outcome == "replaced":
+                self._record_intent_state(
+                    action.tool_name,
+                    action.tool_args,
+                    "replaced",
                     idempotency_key=idempotency_key,
                 )
         pending_deferred_call = self._deferred_research_tool_call
@@ -4395,15 +4414,40 @@ class RealtimeAPI:
                 return
             pending_action = token.pending_action if token is not None else self._pending_action
             if pending_action is not None:
-                logger.info(
-                    "Function call outcome: suppressed pending confirmation | incoming=%s pending=%s",
-                    function_name,
-                    pending_action.action.tool_name,
-                )
-                await self._send_awaiting_confirmation_output(call_id, websocket)
-                self.function_call = None
-                self.function_call_args = ""
-                return
+                pending_tool = pending_action.action.tool_name
+                pending_intent = self._normalize_tool_intent(pending_tool, pending_action.action.tool_args)
+                incoming_intent = self._normalize_tool_intent(function_name, args)
+                if function_name == pending_tool and incoming_intent != pending_intent:
+                    previous_action_id = pending_action.action.id
+                    previous_token_id = token.id if token is not None else None
+                    logger.info(
+                        "Function call outcome: replacing pending confirmation intent | tool=%s old_call=%s new_call=%s",
+                        function_name,
+                        previous_action_id,
+                        call_id,
+                    )
+                    if token is not None and token.pending_action is not None:
+                        self._close_confirmation_token(outcome="replaced")
+                    else:
+                        self._clear_pending_action()
+                    self._log_structured_noop_event(
+                        status="cancelled",
+                        reason="replaced_by_new_intent",
+                        tool_name=function_name,
+                        action_id=previous_action_id,
+                        token_id=previous_token_id,
+                    )
+                    pending_action = None
+                else:
+                    logger.info(
+                        "Function call outcome: suppressed pending confirmation | incoming=%s pending=%s",
+                        function_name,
+                        pending_tool,
+                    )
+                    await self._send_awaiting_confirmation_output(call_id, websocket)
+                    self.function_call = None
+                    self.function_call_args = ""
+                    return
             if self._is_duplicate_tool_call(function_name, args):
                 logger.info(
                     "Function call outcome: skipped duplicate | tool=%s call_id=%s",
