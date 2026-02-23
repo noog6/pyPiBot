@@ -70,6 +70,7 @@ def _make_api_stub() -> RealtimeAPI:
     api._confirmation_awaiting_decision_timeout_s = 20.0
     api._research_permission_awaiting_decision_timeout_s = 60.0
     api._confirmation_late_decision_grace_s = 15.0
+    api._confirmation_decision_expiry_grace_s = 1.5
     api._confirmation_unclear_max_reprompts = 1
     api._confirmation_token_created_at = None
     api._confirmation_last_activity_at = None
@@ -1024,6 +1025,63 @@ def test_maybe_handle_approval_response_timeout_transitions_to_idle(caplog) -> N
     assert sent_messages
     assert api._pending_action is None
     assert transitions == [(OrchestrationPhase.IDLE, "confirmation timeout")]
+
+
+def test_maybe_handle_approval_response_pauses_expiry_while_asr_pending() -> None:
+    api = _make_api_stub()
+    api._pending_action = _build_pending_action(expiry_ts=10.0)
+    api._awaiting_confirmation_completion = False
+    api._presented_actions = set()
+    api._confirmation_asr_pending = True
+    api._handle_stop_word = lambda *args, **kwargs: asyncio.sleep(0, result=False)
+    api._tool_execution_cooldown_remaining = lambda: 0.0
+
+    executed: list[str] = []
+
+    async def _execute_action(*args, **kwargs):
+        executed.append("done")
+
+    api._execute_action = _execute_action
+
+    with patch("ai.realtime_api.time.monotonic", return_value=11.0):
+        consumed = asyncio.run(api._maybe_handle_approval_response("yes", api.websocket))
+
+    assert consumed is True
+    assert executed == ["done"]
+
+
+def test_maybe_handle_approval_response_yes_wins_within_expiry_grace_window() -> None:
+    api = _make_api_stub()
+    api._pending_action = _build_pending_action(expiry_ts=10.0)
+    api._awaiting_confirmation_completion = False
+    api._presented_actions = set()
+    api._confirmation_decision_expiry_grace_s = 1.5
+    api._handle_stop_word = lambda *args, **kwargs: asyncio.sleep(0, result=False)
+    api._tool_execution_cooldown_remaining = lambda: 0.0
+
+    executed: list[str] = []
+    sent_messages: list[str] = []
+
+    async def _execute_action(*args, **kwargs):
+        executed.append("done")
+
+    async def _send_assistant_message(message, *args, **kwargs):
+        sent_messages.append(message)
+
+    api._execute_action = _execute_action
+    api.send_assistant_message = _send_assistant_message
+
+    with patch("ai.realtime_api.time.monotonic", return_value=11.0):
+        consumed = asyncio.run(api._maybe_handle_approval_response("Yes.", api.websocket))
+
+    assert consumed is True
+    assert executed == ["done"]
+
+    with patch("ai.realtime_api.time.monotonic", return_value=11.1):
+        follow_up = asyncio.run(api._maybe_handle_approval_response("", api.websocket))
+
+    assert follow_up is False
+    assert sent_messages == []
 
 
 def test_maybe_handle_approval_response_retry_exhaustion_logs_timeout_cause(caplog) -> None:
