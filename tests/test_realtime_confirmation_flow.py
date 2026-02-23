@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections import deque
 from unittest.mock import patch
 
@@ -56,6 +57,7 @@ def _make_api_stub() -> RealtimeAPI:
     api.state_manager = type("State", (), {"state": InteractionState.IDLE, "update_state": lambda *args, **kwargs: None})()
     api._response_in_flight = False
     api._response_create_queue = deque()
+    api._pending_response_create_origins = deque()
     api._audio_playback_busy = False
     api._last_response_create_ts = None
     api._response_create_debug_trace = False
@@ -65,6 +67,7 @@ def _make_api_stub() -> RealtimeAPI:
     api._active_response_id = None
     api._confirmation_timeout_markers = {}
     api._confirmation_timeout_causes = {}
+    api._recent_confirmation_outcomes = {}
     api._confirmation_timeout_debounce_window_s = 5.0
     api._approval_timeout_s = 30.0
     api._confirmation_awaiting_decision_timeout_s = 20.0
@@ -1587,6 +1590,243 @@ def test_handle_function_call_allows_recall_after_timeout_debounce_window() -> N
 
     assert request_confirmation_calls["count"] == 1
     assert transitions == []
+
+
+def test_tool_confirmation_reask_after_deny_within_cooldown_suppresses_prompt() -> None:
+    api = _make_api_stub()
+    api._pending_action = None
+    api._extract_dry_run_flag = lambda _args: False
+    api._is_duplicate_tool_call = lambda *args, **kwargs: False
+    api._is_suppressed_after_confirmation_timeout = lambda *args, **kwargs: False
+    api._tool_execution_cooldown_remaining = lambda: 0.0
+    api._stage_action = lambda _action: {"valid": True}
+    api._intent_denial_cooldown_s = 0.0
+
+    prompt_calls = {"count": 0}
+
+    async def _request_tool_confirmation(*_args, **_kwargs):
+        prompt_calls["count"] += 1
+
+    async def _assistant(*_args, **_kwargs):
+        return None
+
+    api._request_tool_confirmation = _request_tool_confirmation
+    api.send_assistant_message = _assistant
+
+    class _Gov:
+        def build_action_packet(self, function_name, call_id, args, **_kwargs):
+            return ActionPacket(
+                id=call_id,
+                tool_name=function_name,
+                tool_args=args,
+                tier=2,
+                what="research",
+                why="test",
+                impact="none",
+                rollback="n/a",
+                alternatives=[],
+                confidence=0.8,
+                cost="low",
+                risk_flags=[],
+                requires_confirmation=True,
+            )
+
+        def decide_tool_call(self, *_args, **_kwargs):
+            return type(
+                "Decision",
+                (),
+                {
+                    "approved": False,
+                    "needs_confirmation": True,
+                    "status": "needs_confirmation",
+                    "reason": "confirm",
+                    "confirm_required": True,
+                    "confirm_prompt": None,
+                    "confirm_reason": "confirm",
+                    "idempotency_key": "idem-1",
+                    "cooldown_seconds": 30.0,
+                    "dry_run_supported": True,
+                },
+            )()
+
+        def describe_tool(self, *_args, **_kwargs):
+            return {}
+
+    api._governance = _Gov()
+
+    api.function_call = {"name": "perform_research", "call_id": "call_1"}
+    api.function_call_args = '{"query":"status"}'
+    asyncio.run(api.handle_function_call({}, _Ws()))
+
+    assert prompt_calls["count"] == 1
+    assert api._pending_confirmation_token is not None
+
+    asyncio.run(api._maybe_handle_approval_response("no", _Ws()))
+
+    api.function_call = {"name": "perform_research", "call_id": "call_2"}
+    api.function_call_args = '{"query":"status"}'
+    asyncio.run(api.handle_function_call({}, _Ws()))
+
+    assert prompt_calls["count"] == 1
+
+
+def test_tool_confirmation_reask_after_expired_within_cooldown_suppresses_prompt() -> None:
+    api = _make_api_stub()
+    api._pending_action = None
+    api._extract_dry_run_flag = lambda _args: False
+    api._is_duplicate_tool_call = lambda *args, **kwargs: False
+    api._is_suppressed_after_confirmation_timeout = lambda *args, **kwargs: False
+    api._tool_execution_cooldown_remaining = lambda: 0.0
+    api._stage_action = lambda _action: {"valid": True}
+    api._intent_denial_cooldown_s = 0.0
+
+    prompt_calls = {"count": 0}
+
+    async def _request_tool_confirmation(*_args, **_kwargs):
+        prompt_calls["count"] += 1
+
+    async def _assistant(*_args, **_kwargs):
+        return None
+
+    api._request_tool_confirmation = _request_tool_confirmation
+    api.send_assistant_message = _assistant
+
+    class _Gov:
+        def build_action_packet(self, function_name, call_id, args, **_kwargs):
+            return ActionPacket(
+                id=call_id,
+                tool_name=function_name,
+                tool_args=args,
+                tier=2,
+                what="research",
+                why="test",
+                impact="none",
+                rollback="n/a",
+                alternatives=[],
+                confidence=0.8,
+                cost="low",
+                risk_flags=[],
+                requires_confirmation=True,
+            )
+
+        def decide_tool_call(self, *_args, **_kwargs):
+            return type(
+                "Decision",
+                (),
+                {
+                    "approved": False,
+                    "needs_confirmation": True,
+                    "status": "needs_confirmation",
+                    "reason": "confirm",
+                    "confirm_required": True,
+                    "confirm_prompt": None,
+                    "confirm_reason": "confirm",
+                    "idempotency_key": "idem-2",
+                    "cooldown_seconds": 30.0,
+                    "dry_run_supported": True,
+                },
+            )()
+
+        def describe_tool(self, *_args, **_kwargs):
+            return {}
+
+    api._governance = _Gov()
+
+    api.function_call = {"name": "perform_research", "call_id": "call_1"}
+    api.function_call_args = '{"query":"status"}'
+    asyncio.run(api.handle_function_call({}, _Ws()))
+
+    assert prompt_calls["count"] == 1
+    pending = api._pending_confirmation_token.pending_action
+    assert pending is not None
+    pending.action.expiry_ts = 0.0
+
+    with patch("ai.realtime_api.time.monotonic", return_value=100.0):
+        assert asyncio.run(api._maybe_handle_approval_response("yes", _Ws())) is True
+    api._recent_confirmation_outcomes["idem-2"]["timestamp"] = time.monotonic()
+
+    api.function_call = {"name": "perform_research", "call_id": "call_2"}
+    api.function_call_args = '{"query":"status"}'
+    asyncio.run(api.handle_function_call({}, _Ws()))
+
+    assert prompt_calls["count"] == 1
+
+
+def test_tool_confirmation_reask_after_cooldown_allows_prompt() -> None:
+    api = _make_api_stub()
+    api._pending_action = None
+    api._extract_dry_run_flag = lambda _args: False
+    api._is_duplicate_tool_call = lambda *args, **kwargs: False
+    api._is_suppressed_after_confirmation_timeout = lambda *args, **kwargs: False
+    api._tool_execution_cooldown_remaining = lambda: 0.0
+    api._stage_action = lambda _action: {"valid": True}
+    api._intent_denial_cooldown_s = 0.0
+
+    prompt_calls = {"count": 0}
+
+    async def _request_tool_confirmation(*_args, **_kwargs):
+        prompt_calls["count"] += 1
+
+    async def _assistant(*_args, **_kwargs):
+        return None
+
+    api._request_tool_confirmation = _request_tool_confirmation
+    api.send_assistant_message = _assistant
+
+    class _Gov:
+        def build_action_packet(self, function_name, call_id, args, **_kwargs):
+            return ActionPacket(
+                id=call_id,
+                tool_name=function_name,
+                tool_args=args,
+                tier=2,
+                what="research",
+                why="test",
+                impact="none",
+                rollback="n/a",
+                alternatives=[],
+                confidence=0.8,
+                cost="low",
+                risk_flags=[],
+                requires_confirmation=True,
+            )
+
+        def decide_tool_call(self, *_args, **_kwargs):
+            return type(
+                "Decision",
+                (),
+                {
+                    "approved": False,
+                    "needs_confirmation": True,
+                    "status": "needs_confirmation",
+                    "reason": "confirm",
+                    "confirm_required": True,
+                    "confirm_prompt": None,
+                    "confirm_reason": "confirm",
+                    "idempotency_key": "idem-3",
+                    "cooldown_seconds": 10.0,
+                    "dry_run_supported": True,
+                },
+            )()
+
+        def describe_tool(self, *_args, **_kwargs):
+            return {}
+
+    api._governance = _Gov()
+
+    api.function_call = {"name": "perform_research", "call_id": "call_1"}
+    api.function_call_args = '{"query":"status"}'
+    asyncio.run(api.handle_function_call({}, _Ws()))
+    assert prompt_calls["count"] == 1
+
+    asyncio.run(api._maybe_handle_approval_response("no", _Ws()))
+
+    api._recent_confirmation_outcomes["idem-3"]["timestamp"] = time.monotonic() - 20.0
+    api.function_call = {"name": "perform_research", "call_id": "call_2"}
+    api.function_call_args = '{"query":"status"}'
+    asyncio.run(api.handle_function_call({}, _Ws()))
+
+    assert prompt_calls["count"] == 2
 
 
 def _build_confirmation_token(*, kind: str, pending_action=None, request=None, token_id: str = "tok_1"):
