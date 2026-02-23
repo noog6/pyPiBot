@@ -124,6 +124,20 @@ class PendingAction:
     max_retries: int = 2
 
 
+@dataclass(frozen=True)
+class NormalizedConfirmationDecision:
+    status: str
+    reason: str
+    approved: bool
+    needs_confirmation: bool
+    confirm_required: bool
+    confirm_reason: str | None
+    confirm_prompt: str | None
+    idempotency_key: str
+    cooldown_seconds: float
+    dry_run_supported: bool
+
+
 class ConfirmationState(str, Enum):
     IDLE = "idle"
     PENDING_PROMPT = "pending_prompt"
@@ -1591,7 +1605,7 @@ class RealtimeAPI:
     def _build_tool_runtime_context(self, action: ActionPacket) -> dict[str, Any]:
         cost_score_map = {"cheap": 0.2, "med": 0.5, "expensive": 0.9}
         context: dict[str, Any] = {
-            "cost_score": cost_score_map.get(str(action.cost).lower(), 0.5),
+            "cost_score": cost_score_map.get(str(getattr(action, "cost", "med")).lower(), 0.5),
         }
         requests_bucket = None
         if isinstance(self.rate_limits, dict):
@@ -1603,11 +1617,51 @@ class RealtimeAPI:
 
         privacy_keys = {"contains_pii", "sensitive", "private", "privacy_sensitive"}
         context["privacy_flag"] = any(
-            self._normalize_dry_run_flag(action.tool_args.get(key))
+            self._normalize_dry_run_flag(getattr(action, "tool_args", {}).get(key))
             for key in privacy_keys
-            if key in action.tool_args
+            if key in getattr(action, "tool_args", {})
         )
         return context
+
+    def _normalize_confirmation_decision(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        governance_decision: Any,
+        runtime_context: dict[str, Any] | None,
+    ) -> NormalizedConfirmationDecision:
+        """Normalize governance decision fields used by confirmation plumbing.
+
+        runtime_context is accepted for symmetry with governance callers and future
+        context-aware shaping, while current normalization preserves existing behavior.
+        """
+        del runtime_context
+        decision = GovernanceLayer.coerce_decision_payload(governance_decision)
+        normalized_payload = normalized_decision_payload(decision)
+        idempotency_key = str(
+            normalized_payload["idempotency_key"]
+            or build_normalized_idempotency_key(tool_name, args)
+        )
+        return NormalizedConfirmationDecision(
+            status=str(decision.status),
+            reason=str(decision.reason),
+            approved=decision.approved,
+            needs_confirmation=decision.needs_confirmation,
+            confirm_required=bool(normalized_payload["confirm_required"]),
+            confirm_reason=(
+                str(normalized_payload["confirm_reason"])
+                if normalized_payload["confirm_reason"] is not None
+                else None
+            ),
+            confirm_prompt=(
+                str(normalized_payload["confirm_prompt"])
+                if normalized_payload["confirm_prompt"] is not None
+                else None
+            ),
+            idempotency_key=idempotency_key,
+            cooldown_seconds=float(normalized_payload["cooldown_seconds"]),
+            dry_run_supported=bool(normalized_payload["dry_run_supported"]),
+        )
 
     def _describe_staged_action(
         self, action: ActionPacket, motion_info: dict[str, Any] | None
@@ -4459,7 +4513,10 @@ class RealtimeAPI:
             pending_action = token.pending_action if token is not None else self._pending_action
             if pending_action is not None:
                 pending_tool = pending_action.action.tool_name
-                pending_intent = self._normalize_tool_intent(pending_tool, pending_action.action.tool_args)
+                pending_intent = self._normalize_tool_intent(
+                    pending_tool,
+                    getattr(pending_action.action, "tool_args", {}),
+                )
                 incoming_intent = self._normalize_tool_intent(function_name, args)
                 if function_name == pending_tool and incoming_intent != pending_intent:
                     previous_action_id = pending_action.action.id
@@ -4554,33 +4611,38 @@ class RealtimeAPI:
                     status="invalid_arguments",
                 )
                 return
+            runtime_context = self._build_tool_runtime_context(action)
             if hasattr(self._governance, "decide_tool_call"):
-                decision = self._governance.decide_tool_call(
+                governance_decision = self._governance.decide_tool_call(
                     action,
                     dry_run_requested=dry_run_requested,
                     runtime_cooldown_seconds=self._tool_execution_cooldown_remaining(),
-                    runtime_context=self._build_tool_runtime_context(action),
+                    runtime_context=runtime_context,
                 )
             else:
-                decision = self._governance.review(action)
-            decision = GovernanceLayer.coerce_decision_payload(decision, action)
-            normalized_decision = normalized_decision_payload(decision)
-            if normalized_decision["cooldown_seconds"] > 0 and not decision.needs_confirmation:
+                governance_decision = self._governance.review(action)
+            confirmation_decision = self._normalize_confirmation_decision(
+                function_name,
+                args,
+                governance_decision,
+                runtime_context,
+            )
+            if confirmation_decision.cooldown_seconds > 0 and not confirmation_decision.needs_confirmation:
                 await self._reject_tool_call(
                     action,
                     (
                         f"Tool execution paused for "
-                        f"{normalized_decision['cooldown_seconds']:.0f}s due to stop word."
+                        f"{confirmation_decision.cooldown_seconds:.0f}s due to stop word."
                     ),
                     websocket,
                     status="cancelled",
                 )
                 return
             if dry_run_requested:
-                if not normalized_decision["dry_run_supported"]:
+                if not confirmation_decision.dry_run_supported:
                     await self._reject_tool_call(
                         action,
-                        decision.reason,
+                        confirmation_decision.reason,
                         websocket,
                         staging=staging,
                         status="denied",
@@ -4589,16 +4651,16 @@ class RealtimeAPI:
                 await self._send_dry_run_output(action, staging, websocket)
                 return
             approved_via_prior_permission = (
-                decision.needs_confirmation
+                confirmation_decision.needs_confirmation
                 and self._consume_prior_research_permission_marker_if_fresh(action)
             )
-            should_execute = decision.approved or approved_via_prior_permission
+            should_execute = confirmation_decision.approved or approved_via_prior_permission
             if should_execute:
                 blocked, blocked_status, blocked_message = self._evaluate_intent_guard(
                     action.tool_name,
                     action.tool_args,
                     phase="execution",
-                    idempotency_key=normalized_decision["idempotency_key"],
+                    idempotency_key=confirmation_decision.idempotency_key,
                 )
                 if blocked:
                     await self._handle_intent_guard_block(
@@ -4613,12 +4675,12 @@ class RealtimeAPI:
                 decision_reason = (
                     "approved_via_prior_research_permission"
                     if approved_via_prior_permission
-                    else decision.reason
+                    else confirmation_decision.reason
                 )
                 final_execution_decision = "execute"
                 if self._debug_governance_decisions:
                     log_info(
-                        f"🛡️ Governance decision: {decision.status} ({decision.reason}) {action.summary()}"
+                        f"🛡️ Governance decision: {confirmation_decision.status} ({confirmation_decision.reason}) {action.summary()}"
                     )
                 if approved_via_prior_permission and self._debug_governance_decisions:
                     log_info(
@@ -4631,13 +4693,13 @@ class RealtimeAPI:
                         function_name,
                         call_id,
                         decision_reason,
-                        normalized_decision["idempotency_key"],
+                        confirmation_decision.idempotency_key,
                     )
                 self._record_intent_state(
                     action.tool_name,
                     action.tool_args,
                     "approved",
-                    idempotency_key=normalized_decision["idempotency_key"],
+                    idempotency_key=confirmation_decision.idempotency_key,
                 )
                 self.orchestration_state.transition(
                     OrchestrationPhase.ACT,
@@ -4647,12 +4709,12 @@ class RealtimeAPI:
                     action,
                     staging,
                     websocket,
-                    idempotency_key=normalized_decision["idempotency_key"],
+                    idempotency_key=confirmation_decision.idempotency_key,
                 )
-            elif decision.needs_confirmation:
+            elif confirmation_decision.needs_confirmation:
                 suppressed_outcome = self._suppressed_confirmation_outcome(
-                    idempotency_key=normalized_decision["idempotency_key"],
-                    cooldown_seconds=float(normalized_decision["cooldown_seconds"] or 0.0),
+                    idempotency_key=confirmation_decision.idempotency_key,
+                    cooldown_seconds=float(confirmation_decision.cooldown_seconds or 0.0),
                 )
                 if suppressed_outcome is not None:
                     guidance = (
@@ -4674,7 +4736,7 @@ class RealtimeAPI:
                     action.tool_name,
                     action.tool_args,
                     phase="confirmation_prompt",
-                    idempotency_key=normalized_decision["idempotency_key"],
+                    idempotency_key=confirmation_decision.idempotency_key,
                 )
                 if blocked:
                     await self._handle_intent_guard_block(
@@ -4689,7 +4751,7 @@ class RealtimeAPI:
                 final_execution_decision = "request_confirmation"
                 if self._debug_governance_decisions:
                     log_info(
-                        f"🛡️ Governance decision: {decision.status} ({decision.reason}) {action.summary()}"
+                        f"🛡️ Governance decision: {confirmation_decision.status} ({confirmation_decision.reason}) {action.summary()}"
                     )
                 action.requires_confirmation = True
                 action.expiry_ts = time.monotonic() + self._approval_timeout_s
@@ -4698,13 +4760,13 @@ class RealtimeAPI:
                     staging=staging,
                     original_intent=self._last_user_input_text or "",
                     created_at=time.monotonic(),
-                    idempotency_key=normalized_decision["idempotency_key"],
+                    idempotency_key=confirmation_decision.idempotency_key,
                 )
                 self._record_intent_state(
                     action.tool_name,
                     action.tool_args,
                     "pending",
-                    idempotency_key=normalized_decision["idempotency_key"],
+                    idempotency_key=confirmation_decision.idempotency_key,
                 )
                 token = self._create_confirmation_token(
                     kind="tool_governance",
@@ -4718,17 +4780,17 @@ class RealtimeAPI:
                 self._sync_confirmation_legacy_fields()
                 await self._request_tool_confirmation(
                     action,
-                    str(normalized_decision["confirm_reason"] or decision.reason),
+                    str(confirmation_decision.confirm_reason or confirmation_decision.reason),
                     websocket,
                     staging,
                     confirm_prompt=(
-                        str(normalized_decision["confirm_prompt"])
-                        if normalized_decision["confirm_prompt"] is not None
+                        str(confirmation_decision.confirm_prompt)
+                        if confirmation_decision.confirm_prompt is not None
                         else None
                     ),
                     confirm_reason=(
-                        str(normalized_decision["confirm_reason"])
-                        if normalized_decision["confirm_reason"] is not None
+                        str(confirmation_decision.confirm_reason)
+                        if confirmation_decision.confirm_reason is not None
                         else None
                     ),
                 )
@@ -4739,16 +4801,16 @@ class RealtimeAPI:
                     action.tool_name,
                     action.tool_args,
                     "denied",
-                    idempotency_key=normalized_decision["idempotency_key"],
+                    idempotency_key=confirmation_decision.idempotency_key,
                 )
                 final_execution_decision = "reject"
                 if self._debug_governance_decisions:
                     log_info(
-                        f"🛡️ Governance decision: {decision.status} ({decision.reason}) {action.summary()}"
+                        f"🛡️ Governance decision: {confirmation_decision.status} ({confirmation_decision.reason}) {action.summary()}"
                     )
                 await self._reject_tool_call(
                     action,
-                    decision.reason,
+                    confirmation_decision.reason,
                     websocket,
                     staging=staging,
                     status="denied",
@@ -4760,11 +4822,11 @@ class RealtimeAPI:
                 "final_execution_decision=%s",
                 call_id,
                 function_name,
-                decision.status,
-                decision.reason,
-                normalized_decision["confirm_required"],
-                normalized_decision["confirm_reason"],
-                normalized_decision["idempotency_key"],
+                confirmation_decision.status,
+                confirmation_decision.reason,
+                confirmation_decision.confirm_required,
+                confirmation_decision.confirm_reason,
+                confirmation_decision.idempotency_key,
                 approved_via_prior_permission,
                 final_execution_decision,
             )
