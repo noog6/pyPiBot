@@ -9,7 +9,7 @@ import time
 from collections import deque
 from unittest.mock import patch
 
-from ai.governance import ActionPacket
+from ai.governance import ActionPacket, build_normalized_idempotency_key
 from ai.orchestration import OrchestrationPhase
 from ai.realtime_api import ConfirmationState, PendingConfirmationToken, RealtimeAPI
 from interaction import InteractionState
@@ -1415,6 +1415,78 @@ def test_handle_function_call_logs_tool_and_call_id_with_parse_status(monkeypatc
         for line in logged
     )
 
+
+
+
+def test_normalize_confirmation_decision_preserves_confirmation_required_defaults() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+
+    decision = type(
+        "Decision",
+        (),
+        {
+            "status": "needs_confirmation",
+            "reason": "expensive_read",
+            "needs_confirmation": True,
+            "confirm_required": False,
+            "confirm_reason": None,
+            "confirm_prompt": None,
+            "idempotency_key": None,
+            "cooldown_seconds": 0.0,
+            "dry_run_supported": False,
+        },
+    )()
+
+    normalized = api._normalize_confirmation_decision(
+        "perform_research",
+        {"query": "status update"},
+        decision,
+        {"privacy_flag": False},
+    )
+
+    assert normalized.status == "needs_confirmation"
+    assert normalized.needs_confirmation is True
+    assert normalized.confirm_required is True
+    assert normalized.confirm_reason == "expensive_read"
+    assert normalized.confirm_prompt is None
+    assert normalized.idempotency_key == build_normalized_idempotency_key(
+        "perform_research",
+        {"query": "status update"},
+    )
+
+
+def test_normalize_confirmation_decision_keeps_explicit_confirmation_fields() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+
+    decision = type(
+        "Decision",
+        (),
+        {
+            "status": "needs_confirmation",
+            "reason": "within_bounds",
+            "needs_confirmation": True,
+            "confirm_required": True,
+            "confirm_reason": "autonomy level requires confirmation",
+            "confirm_prompt": "Confirm execution?",
+            "idempotency_key": "fixed-key",
+            "cooldown_seconds": 12.0,
+            "dry_run_supported": True,
+        },
+    )()
+
+    normalized = api._normalize_confirmation_decision(
+        "perform_research",
+        {"query": "status"},
+        decision,
+        {"privacy_flag": True},
+    )
+
+    assert normalized.confirm_required is True
+    assert normalized.confirm_reason == "autonomy_level_requires_confirmation"
+    assert normalized.confirm_prompt == "Confirm execution?"
+    assert normalized.idempotency_key == "fixed-key"
+    assert normalized.cooldown_seconds == 12.0
+    assert normalized.dry_run_supported is True
 
 def test_handle_function_call_logs_consolidated_governance_review_summary() -> None:
     api = _make_api_stub()
