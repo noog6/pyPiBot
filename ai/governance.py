@@ -98,6 +98,7 @@ class GovernanceReason(str, Enum):
     RISK_THRESHOLD_EXCEEDED = "risk_threshold_exceeded"
     AUTONOMY_WINDOW_CLOSED = "autonomy_window_closed"
     AUTONOMY_LEVEL_REQUIRES_CONFIRMATION = "autonomy_level_requires_confirmation"
+    TIER1_GUARDED_THRESHOLD_EXCEEDED = "tier1_guarded_threshold_exceeded"
     WITHIN_BOUNDS = "within_bounds"
     DRY_RUN_NOT_SUPPORTED = "dry_run_not_supported"
     TOOL_EXECUTION_COOLDOWN = "tool_execution_cooldown"
@@ -110,6 +111,7 @@ _REASON_NORMALIZATION_MAP: dict[str, GovernanceReason] = {
     "risk threshold exceeded": GovernanceReason.RISK_THRESHOLD_EXCEEDED,
     "autonomy window closed for tiered action": GovernanceReason.AUTONOMY_WINDOW_CLOSED,
     "autonomy level requires confirmation": GovernanceReason.AUTONOMY_LEVEL_REQUIRES_CONFIRMATION,
+    "tier-1 guarded runtime thresholds exceeded": GovernanceReason.TIER1_GUARDED_THRESHOLD_EXCEEDED,
     "within bounds": GovernanceReason.WITHIN_BOUNDS,
     "dry-run not supported for this tool": GovernanceReason.DRY_RUN_NOT_SUPPORTED,
 }
@@ -203,6 +205,14 @@ class GovernanceLayer:
             60.0 * 60.0 * 24.0,
         )
         self._risk_threshold = float(governance_cfg.get("risk_threshold", 0.6))
+        guarded_thresholds = governance_cfg.get("guarded_thresholds") or {}
+        self._guarded_max_cost_score = float(guarded_thresholds.get("max_cost_score", 0.8))
+        self._guarded_min_rate_limit_remaining = int(
+            guarded_thresholds.get("min_rate_limit_remaining", 2)
+        )
+        self._guarded_privacy_flag_requires_confirmation = bool(
+            guarded_thresholds.get("privacy_flag_requires_confirmation", True)
+        )
         self._scheduled_windows = self._load_autonomy_windows(
             governance_cfg.get("autonomy_windows") or []
         )
@@ -232,8 +242,9 @@ class GovernanceLayer:
         *,
         dry_run_requested: bool = False,
         runtime_cooldown_seconds: float = 0.0,
+        runtime_context: dict[str, Any] | None = None,
     ) -> GovernanceDecision:
-        decision = self.review(action)
+        decision = self.review_with_runtime_context(action, runtime_context=runtime_context)
         spec = self._tool_specs.get(action.tool_name, self._default_spec())
         confirm_required = (
             bool(spec.confirm_required)
@@ -397,6 +408,14 @@ class GovernanceLayer:
         self._log_window_transition(previous=previous.name, current=None)
 
     def review(self, action: ActionPacket) -> GovernanceDecision:
+        return self.review_with_runtime_context(action, runtime_context=None)
+
+    def review_with_runtime_context(
+        self,
+        action: ActionPacket,
+        *,
+        runtime_context: dict[str, Any] | None,
+    ) -> GovernanceDecision:
         now = time.monotonic()
         now_wall = time.time()
         if self._autonomy_level in {"observe-only", "observe"}:
@@ -440,7 +459,37 @@ class GovernanceLayer:
                     reason=GovernanceReason.AUTONOMY_LEVEL_REQUIRES_CONFIRMATION.value,
                 )
 
+        if self._tier1_guarded_threshold_exceeded(action, runtime_context=runtime_context):
+            return GovernanceDecision(
+                status="needs_confirmation",
+                reason=GovernanceReason.TIER1_GUARDED_THRESHOLD_EXCEEDED.value,
+            )
+
         return GovernanceDecision(status="approved", reason=GovernanceReason.WITHIN_BOUNDS.value)
+
+    def _tier1_guarded_threshold_exceeded(
+        self,
+        action: ActionPacket,
+        *,
+        runtime_context: dict[str, Any] | None,
+    ) -> bool:
+        if action.tier != 1:
+            return False
+        tags = {str(tag).strip().lower() for tag in action.risk_flags if str(tag).strip()}
+        is_guarded = "network" in tags or "research" in tags or "privacy" in tags
+        if not is_guarded:
+            return False
+        context = runtime_context or {}
+        cost_score = context.get("cost_score")
+        if isinstance(cost_score, (int, float)) and float(cost_score) >= self._guarded_max_cost_score:
+            return True
+        remaining = context.get("rate_limit_remaining")
+        if isinstance(remaining, (int, float)) and float(remaining) <= self._guarded_min_rate_limit_remaining:
+            return True
+        privacy_flag = context.get("privacy_flag")
+        if self._guarded_privacy_flag_requires_confirmation and bool(privacy_flag):
+            return True
+        return False
 
     def record_execution(self, action: ActionPacket) -> None:
         now = time.monotonic()
