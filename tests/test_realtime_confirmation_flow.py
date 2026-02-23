@@ -75,6 +75,9 @@ def _make_api_stub() -> RealtimeAPI:
     api._confirmation_late_decision_grace_s = 15.0
     api._confirmation_decision_expiry_grace_s = 1.5
     api._confirmation_unclear_max_reprompts = 1
+    api._confirmation_reminder_interval_s = 6.0
+    api._confirmation_reminder_max_count = 2
+    api._confirmation_reminder_tracker = {}
     api._confirmation_token_created_at = None
     api._confirmation_last_activity_at = None
     api._confirmation_speech_active = False
@@ -2034,6 +2037,59 @@ def test_handle_response_done_fallback_reminder_without_transcript_callback() ->
     asyncio.run(api.handle_response_done({"type": "response.done"}))
 
     assert reminders == ["response_done_fallback"]
+
+
+def test_send_confirmation_reminder_respects_interval_and_max_count() -> None:
+    api = _make_api_stub()
+    token = _build_confirmation_token(kind="tool_governance", pending_action=_build_pending_action())
+    api._pending_confirmation_token = token
+    api._confirmation_state = ConfirmationState.AWAITING_DECISION
+    api._confirmation_reminder_interval_s = 5.0
+    api._confirmation_reminder_max_count = 2
+
+    sent_messages: list[str] = []
+
+    async def _assistant(message, *_args, **_kwargs):
+        sent_messages.append(message)
+
+    api.send_assistant_message = _assistant
+
+    asyncio.run(api._send_confirmation_reminder(api.websocket, reason="test_repeat_1"))
+    asyncio.run(api._send_confirmation_reminder(api.websocket, reason="test_repeat_2"))
+
+    reminder_key = api._confirmation_reminder_key(token)
+    assert reminder_key is not None
+    api._confirmation_reminder_tracker[reminder_key]["last_sent_at"] = 0.0
+
+    asyncio.run(api._send_confirmation_reminder(api.websocket, reason="test_repeat_3"))
+    asyncio.run(api._send_confirmation_reminder(api.websocket, reason="test_repeat_4"))
+
+    assert sent_messages == [
+        "Please reply with: yes or no.",
+        "Please reply with: yes or no.",
+    ]
+
+
+def test_confirmation_reminder_logs_sent_and_suppressed() -> None:
+    api = _make_api_stub()
+    token = _build_confirmation_token(kind="tool_governance", pending_action=_build_pending_action())
+    api._pending_confirmation_token = token
+    api._confirmation_state = ConfirmationState.AWAITING_DECISION
+    api._confirmation_reminder_interval_s = 10.0
+    api._confirmation_reminder_max_count = 1
+
+    async def _assistant(*_args, **_kwargs):
+        return None
+
+    api.send_assistant_message = _assistant
+
+    with patch("ai.realtime_api.logger.info") as mock_info:
+        asyncio.run(api._send_confirmation_reminder(api.websocket, reason="structured_1"))
+        asyncio.run(api._send_confirmation_reminder(api.websocket, reason="structured_2"))
+
+    logged = [call.args[0] % call.args[1:] for call in mock_info.call_args_list if call.args]
+    assert any("CONFIRMATION_REMINDER_SENT" in line for line in logged)
+    assert any("CONFIRMATION_REMINDER_SUPPRESSED" in line for line in logged)
 
 
 def test_parse_confirmation_decision_supports_explicit_cancel_terms() -> None:
