@@ -443,6 +443,7 @@ class RealtimeAPI:
         )
         self._confirmation_timeout_markers: dict[str, float] = {}
         self._confirmation_timeout_causes: dict[str, str] = {}
+        self._recent_confirmation_outcomes: dict[str, dict[str, Any]] = {}
         self._confirmation_transition_lock: asyncio.Lock | None = None
         self._websocket_close_timeout_s = float(config.get("websocket_close_timeout_s", 5.0))
         self._tool_definitions = {tool["name"]: tool for tool in tools}
@@ -1897,6 +1898,41 @@ class RealtimeAPI:
         self._confirmation_timeout_markers[fingerprint] = time.monotonic()
         self._confirmation_timeout_causes[fingerprint] = cause
 
+    def _record_recent_confirmation_outcome(self, idempotency_key: str | None, outcome: str) -> None:
+        normalized_key = str(idempotency_key or "").strip()
+        if not normalized_key:
+            return
+        self._recent_confirmation_outcomes[normalized_key] = {
+            "outcome": str(outcome),
+            "timestamp": time.monotonic(),
+        }
+
+    def _suppressed_confirmation_outcome(
+        self,
+        *,
+        idempotency_key: str | None,
+        cooldown_seconds: float,
+    ) -> str | None:
+        if cooldown_seconds <= 0:
+            return None
+        normalized_key = str(idempotency_key or "").strip()
+        if not normalized_key:
+            return None
+        outcomes = getattr(self, "_recent_confirmation_outcomes", {})
+        payload = outcomes.get(normalized_key)
+        if not isinstance(payload, dict):
+            return None
+        outcome = str(payload.get("outcome") or "").strip()
+        if outcome not in {"rejected", "expired"}:
+            return None
+        timestamp = payload.get("timestamp")
+        if not isinstance(timestamp, (int, float)):
+            return None
+        if time.monotonic() - float(timestamp) <= float(cooldown_seconds):
+            return outcome
+        outcomes.pop(normalized_key, None)
+        return None
+
     def _is_suppressed_after_confirmation_timeout(
         self, tool_name: str, args: dict[str, Any]
     ) -> bool:
@@ -2657,6 +2693,7 @@ class RealtimeAPI:
                     "replaced",
                     idempotency_key=idempotency_key,
                 )
+            self._record_recent_confirmation_outcome(idempotency_key, outcome)
         pending_deferred_call = self._deferred_research_tool_call
         deferred_call_id = None
         deferred_action = "none"
@@ -4444,6 +4481,15 @@ class RealtimeAPI:
                         action_id=previous_action_id,
                         token_id=previous_token_id,
                     )
+                    await self.send_assistant_message(
+                        "No action taken. I replaced the pending confirmation with your newer request.",
+                        websocket,
+                    )
+                    if self.orchestration_state.phase == OrchestrationPhase.AWAITING_CONFIRMATION:
+                        self.orchestration_state.transition(
+                            OrchestrationPhase.IDLE,
+                            reason="confirmation replaced",
+                        )
                     pending_action = None
                 else:
                     logger.info(
@@ -4519,7 +4565,7 @@ class RealtimeAPI:
                 decision = self._governance.review(action)
             decision = GovernanceLayer.coerce_decision_payload(decision, action)
             normalized_decision = normalized_decision_payload(decision)
-            if normalized_decision["cooldown_seconds"] > 0:
+            if normalized_decision["cooldown_seconds"] > 0 and not decision.needs_confirmation:
                 await self._reject_tool_call(
                     action,
                     (
@@ -4604,6 +4650,26 @@ class RealtimeAPI:
                     idempotency_key=normalized_decision["idempotency_key"],
                 )
             elif decision.needs_confirmation:
+                suppressed_outcome = self._suppressed_confirmation_outcome(
+                    idempotency_key=normalized_decision["idempotency_key"],
+                    cooldown_seconds=float(normalized_decision["cooldown_seconds"] or 0.0),
+                )
+                if suppressed_outcome is not None:
+                    guidance = (
+                        "Please wait briefly before asking again, or change the request details."
+                        if suppressed_outcome == "rejected"
+                        else "That confirmation recently expired. Please wait briefly, then ask again if needed."
+                    )
+                    message = f"No action taken. {guidance}"
+                    await self._handle_intent_guard_block(
+                        action,
+                        websocket,
+                        status="suppressed_recent_confirmation_outcome",
+                        reason=f"recent_confirmation_{suppressed_outcome}",
+                        message=message,
+                        staging=staging,
+                    )
+                    return
                 blocked, blocked_status, blocked_message = self._evaluate_intent_guard(
                     action.tool_name,
                     action.tool_args,
