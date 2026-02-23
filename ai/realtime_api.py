@@ -1568,6 +1568,27 @@ class RealtimeAPI:
             return False
         return self._normalize_dry_run_flag(args.pop("dry_run"))
 
+    def _build_tool_runtime_context(self, action: ActionPacket) -> dict[str, Any]:
+        cost_score_map = {"cheap": 0.2, "med": 0.5, "expensive": 0.9}
+        context: dict[str, Any] = {
+            "cost_score": cost_score_map.get(str(action.cost).lower(), 0.5),
+        }
+        requests_bucket = None
+        if isinstance(self.rate_limits, dict):
+            requests_bucket = self.rate_limits.get("requests")
+        if isinstance(requests_bucket, dict):
+            remaining = requests_bucket.get("remaining")
+            if isinstance(remaining, (int, float)):
+                context["rate_limit_remaining"] = float(remaining)
+
+        privacy_keys = {"contains_pii", "sensitive", "private", "privacy_sensitive"}
+        context["privacy_flag"] = any(
+            self._normalize_dry_run_flag(action.tool_args.get(key))
+            for key in privacy_keys
+            if key in action.tool_args
+        )
+        return context
+
     def _describe_staged_action(
         self, action: ActionPacket, motion_info: dict[str, Any] | None
     ) -> str:
@@ -4403,6 +4424,7 @@ class RealtimeAPI:
                     action,
                     dry_run_requested=dry_run_requested,
                     runtime_cooldown_seconds=self._tool_execution_cooldown_remaining(),
+                    runtime_context=self._build_tool_runtime_context(action),
                 )
             else:
                 decision = self._governance.review(action)

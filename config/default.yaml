@@ -193,6 +193,10 @@ reflection_min_interval_s: 300
 governance:
   autonomy_level: "act-with-bounds"
   risk_threshold: 0.6
+  guarded_thresholds:
+    max_cost_score: 0.8
+    min_rate_limit_remaining: 2
+    privacy_flag_requires_confirmation: true
   budgets:
     tool_calls_per_minute: 30
     expensive_calls_per_day: 20
