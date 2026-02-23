@@ -245,6 +245,10 @@ def _validate_tool_specs(tool_specs: dict[str, Any], tool_defs: list[dict[str, A
         "confirm_prompt",
         "cooldown_seconds",
         "dry_run_supported",
+        "governance_tier",
+        "side_effects",
+        "sensitivity",
+        "default_confirmation",
     )
     tool_names = {tool.get("name") for tool in tool_defs}
     missing_specs = sorted(tool_names - set(tool_specs.keys()))
@@ -393,7 +397,10 @@ class RealtimeAPI:
         self._alert_policy = AlertPolicy.from_config(config)
         governance_cfg = config.get("governance") or {}
         _validate_tool_specs(governance_cfg.get("tool_specs") or {}, tools)
-        tool_specs = build_tool_specs(governance_cfg.get("tool_specs") or {})
+        tool_specs = build_tool_specs(
+            governance_cfg.get("tool_specs") or {},
+            registered_tool_names=(tool.get("name") for tool in tools),
+        )
         self._governance = GovernanceLayer(tool_specs, config)
         self._debug_governance_decisions = bool(governance_cfg.get("debug_decisions", False))
         self._pending_action: PendingAction | None = None
