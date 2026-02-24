@@ -335,6 +335,7 @@ class RealtimeAPI:
         self._response_in_flight = False
         self._response_create_queue: deque[dict[str, Any]] = deque()
         self._queued_confirmation_reminder_keys: set[str] = set()
+        self._pending_confirmation_prompt_latches: set[str] = set()
         self._pending_response_create_origins: deque[str] = deque(maxlen=64)
         self._audio_playback_busy = False
         self.function_call: dict[str, Any] | None = None
@@ -2975,6 +2976,10 @@ class RealtimeAPI:
         reminder_key = self._confirmation_reminder_key(token)
         if reminder_key is not None:
             self._confirmation_reminder_tracker.pop(reminder_key, None)
+        if outcome in {"accepted", "rejected", "awaiting_decision_timeout", "replaced"}:
+            latch_key = self._confirmation_prompt_latch_key(token)
+            if latch_key is not None:
+                self._pending_confirmation_prompt_latches.discard(latch_key)
         self._clear_queued_confirmation_reminder_markers(token)
         self._pending_confirmation_token = None
         self._confirmation_token_created_at = None
@@ -3012,6 +3017,22 @@ class RealtimeAPI:
             action_id = getattr(action_packet, "id", None)
             return f"legacy:{action_id or id(pending_action)}"
         return None
+
+    def _confirmation_prompt_latch_key(self, token: PendingConfirmationToken | None) -> str | None:
+        if token is None:
+            return None
+        idempotency_key = str(
+            getattr(getattr(token, "pending_action", None), "idempotency_key", "") or ""
+        ).strip()
+        if idempotency_key:
+            return f"idempotency:{idempotency_key}"
+        return f"token:{token.id}"
+
+    def _is_confirmation_prompt_latched(self, token: PendingConfirmationToken | None) -> bool:
+        latch_key = self._confirmation_prompt_latch_key(token)
+        if latch_key is None:
+            return False
+        return latch_key in self._pending_confirmation_prompt_latches
 
     def _clear_queued_confirmation_reminder_markers(
         self,
@@ -3171,6 +3192,13 @@ class RealtimeAPI:
                 awaiting_phase,
             )
             return
+        if token is not None and not self._is_confirmation_prompt_latched(token):
+            logger.info(
+                "CONFIRMATION_REMINDER_SUPPRESSED reason=%s suppress_reason=prompt_not_sent token=%s",
+                reason,
+                token.id,
+            )
+            return
 
         reminder_key = self._confirmation_reminder_key(token)
         tracker_entry = (
@@ -3261,7 +3289,7 @@ class RealtimeAPI:
             reason,
         )
         await self.send_assistant_message(
-            "Please reply with: yes or no.",
+            "Please reply with yes or no.",
             websocket,
             response_metadata={
                 "trigger": "confirmation_reminder",
@@ -5535,6 +5563,15 @@ class RealtimeAPI:
             confirm_reason=confirm_reason,
         )
         token = getattr(self, "_pending_confirmation_token", None)
+        latch_key = self._confirmation_prompt_latch_key(token)
+        if token is not None and latch_key is not None and latch_key in self._pending_confirmation_prompt_latches:
+            logger.info(
+                "CONFIRMATION_PROMPT_SUPPRESSED reason=latched token=%s latch_key=%s",
+                token.id,
+                latch_key,
+            )
+            await self._maybe_emit_confirmation_reminder(websocket, reason="confirmation_prompt_latched")
+            return
         response_metadata = {"trigger": "confirmation_prompt", "approval_flow": "true"}
         if token is not None:
             response_metadata["confirmation_token"] = token.id
@@ -5543,6 +5580,8 @@ class RealtimeAPI:
             websocket,
             response_metadata=response_metadata,
         )
+        if latch_key is not None:
+            self._pending_confirmation_prompt_latches.add(latch_key)
         function_call_output = {
             "type": "conversation.item.create",
             "item": {
@@ -5806,7 +5845,12 @@ class RealtimeAPI:
             self._assistant_reply_accum = ""
             if self.websocket is not None:
                 if self._has_active_confirmation_token():
-                    if self._is_guarded_server_auto_reminder_allowed(reason="transcribe_response_done"):
+                    token = self._pending_confirmation_token
+                    if (
+                        token is not None
+                        and self._is_confirmation_prompt_latched(token)
+                        and self._is_guarded_server_auto_reminder_allowed(reason="transcribe_response_done")
+                    ):
                         await self._maybe_emit_confirmation_reminder(
                             self.websocket,
                             reason="transcribe_response_done",
@@ -5924,6 +5968,7 @@ class RealtimeAPI:
                 self.websocket is not None
                 and self._has_active_confirmation_token()
                 and self._is_awaiting_confirmation_phase()
+                and self._is_confirmation_prompt_latched(self._pending_confirmation_token)
                 and self._should_send_response_done_fallback_reminder()
                 and self._is_guarded_server_auto_reminder_allowed(reason="response_done_fallback")
             ):
