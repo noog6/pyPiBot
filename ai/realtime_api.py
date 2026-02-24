@@ -3088,13 +3088,18 @@ class RealtimeAPI:
         token: PendingConfirmationToken | None,
     ) -> tuple[int, tuple[float, ...], float]:
         metadata = token.metadata if token is not None and isinstance(token.metadata, dict) else {}
+        is_tool_governance = token is not None and str(token.kind or "") == "tool_governance"
         configured_max = self._coerce_optional_int(metadata.get("max_reminders"))
-        max_reminders = (
-            max(0, configured_max)
-            if configured_max is not None
-            else int(self._confirmation_reminder_max_count)
-        )
-        schedule = self._coerce_schedule_seconds(metadata.get("reminder_schedule_seconds"))
+        if configured_max is not None:
+            max_reminders = max(0, configured_max)
+        elif is_tool_governance:
+            max_reminders = 1
+        else:
+            max_reminders = int(self._confirmation_reminder_max_count)
+        configured_schedule = self._coerce_schedule_seconds(metadata.get("reminder_schedule_seconds"))
+        schedule = configured_schedule
+        if not schedule and is_tool_governance:
+            schedule = (8.0,)
         min_interval_s = max(0.0, float(self._confirmation_reminder_interval_s))
         if max_reminders > 0 and not schedule:
             schedule = tuple(min_interval_s * index for index in range(max_reminders))
@@ -3236,72 +3241,17 @@ class RealtimeAPI:
             )
             return
 
-        reminder_key = self._confirmation_reminder_key(token)
-        tracker_entry = (
-            self._confirmation_reminder_tracker.get(reminder_key)
-            if reminder_key is not None
-            else None
-        )
-        sent_count = int(tracker_entry.get("count", 0)) if isinstance(tracker_entry, dict) else 0
-        last_sent_at = (
-            float(tracker_entry.get("last_sent_at", 0.0))
-            if isinstance(tracker_entry, dict) and isinstance(tracker_entry.get("last_sent_at"), (int, float))
-            else None
-        )
-        metadata = token.metadata if token is not None and isinstance(token.metadata, dict) else {}
-        configured_max = self._coerce_optional_int(metadata.get("max_reminders"))
-        max_reminders = max(0, configured_max) if configured_max is not None else 1
-        raw_cooldown = metadata.get("cooldown_seconds")
-        if raw_cooldown is None:
-            raw_cooldown = metadata.get("confirmation_reminder_interval_s")
-        configured_cooldown: float | None = None
-        if isinstance(raw_cooldown, (int, float)) and not isinstance(raw_cooldown, bool):
-            configured_cooldown = max(0.0, float(raw_cooldown))
-        elif isinstance(raw_cooldown, str):
-            stripped = raw_cooldown.strip()
-            if stripped:
-                try:
-                    configured_cooldown = max(0.0, float(stripped))
-                except ValueError:
-                    configured_cooldown = None
-        default_cooldown = min(12.0, max(8.0, float(self._confirmation_reminder_interval_s)))
-        cooldown_seconds = configured_cooldown if configured_cooldown is not None else default_cooldown
-        now = time.monotonic()
-        if sent_count >= max_reminders:
-            logger.info(
-                "CONFIRMATION_REMINDER_SUPPRESSED reason=%s suppress_reason=max_count key=%s sent_count=%s max_count=%s cooldown_s=%.2f",
-                reason,
-                reminder_key or "none",
-                sent_count,
-                max_reminders,
-                cooldown_seconds,
-            )
-            return
-        if last_sent_at is not None and (now - last_sent_at) < cooldown_seconds:
-            logger.info(
-                "CONFIRMATION_REMINDER_SUPPRESSED reason=%s suppress_reason=cooldown key=%s sent_count=%s max_count=%s cooldown_s=%.2f elapsed_s=%.2f",
-                reason,
-                reminder_key or "none",
-                sent_count,
-                max_reminders,
-                cooldown_seconds,
-                now - last_sent_at,
-            )
-            return
-
         allowed, key, next_sent_count, sent_at, suppress_reason = self._allow_confirmation_reminder(
             token,
             reason=reason,
         )
         if not allowed:
             logger.info(
-                "CONFIRMATION_REMINDER_SUPPRESSED reason=%s suppress_reason=%s key=%s sent_count=%s max_count=%s interval_s=%.2f",
+                "CONFIRMATION_REMINDER_SUPPRESSED reason=%s suppress_reason=%s key=%s sent_count=%s",
                 reason,
                 suppress_reason or "unknown",
                 key or "none",
                 next_sent_count,
-                max_reminders,
-                cooldown_seconds,
             )
             return
         if token is not None:
@@ -3318,6 +3268,15 @@ class RealtimeAPI:
             token.id if token is not None else "none",
             getattr(getattr(token, "pending_action", None), "idempotency_key", None) or "none",
         )
+        metadata = token.metadata if token is not None and isinstance(token.metadata, dict) else {}
+        reminder_summary = " ".join(str(metadata.get("action_summary") or "").split()).strip()
+        if not reminder_summary and token is not None and token.pending_action is not None:
+            reminder_summary = " ".join(str(token.pending_action.action.summary() or "").split()).strip()
+        if reminder_summary.endswith("."):
+            reminder_summary = reminder_summary[:-1]
+        if not reminder_summary:
+            reminder_summary = "confirm or deny the pending request"
+        reminder_message = f"Pending action: {reminder_summary}. Reply Approve or Deny."
         logger.info(
             "CONFIRMATION_NON_DECISION_RESPONSE_SUPPRESSED origin=%s response_id=%s reason=%s",
             self._active_response_origin,
@@ -3325,7 +3284,7 @@ class RealtimeAPI:
             reason,
         )
         await self.send_assistant_message(
-            "Please reply with yes or no.",
+            reminder_message,
             websocket,
             response_metadata={
                 "trigger": "confirmation_reminder",
@@ -5420,6 +5379,7 @@ class RealtimeAPI:
                         "approval_flow": True,
                         "max_reminders": confirmation_decision.max_reminders,
                         "reminder_schedule_seconds": list(confirmation_decision.reminder_schedule_seconds),
+                        "action_summary": confirmation_decision.action_summary,
                     },
                 )
                 self._pending_action = pending_action
