@@ -741,7 +741,7 @@ def test_request_tool_confirmation_sends_single_spoken_prompt() -> None:
     assert sent_payloads
 
 
-def _build_pending_action(*, expiry_ts=None):
+def _build_pending_action(*, expiry_ts=None, idempotency_key: str | None = "idem-pending"):
     from ai.governance import ActionPacket
     from ai.realtime_api import PendingAction
 
@@ -766,6 +766,7 @@ def _build_pending_action(*, expiry_ts=None):
         staging={"valid": True},
         original_intent="test",
         created_at=0.0,
+        idempotency_key=idempotency_key,
     )
 
 
@@ -2207,7 +2208,13 @@ def test_stale_drop_preserves_active_confirmation_prompt() -> None:
 
 def test_handle_response_done_fallback_reminder_without_transcript_callback() -> None:
     api = _make_api_stub()
-    api._pending_confirmation_token = _build_confirmation_token(kind="tool_governance", pending_action=_build_pending_action())
+    token = _build_confirmation_token(kind="tool_governance", pending_action=_build_pending_action())
+    token.metadata = {
+        "approval_flow": True,
+        "max_reminders": 1,
+        "reminder_schedule_seconds": [0.0],
+    }
+    api._pending_confirmation_token = token
     api._confirmation_state = ConfirmationState.AWAITING_DECISION
     api._active_response_confirmation_guarded = True
     api._pending_image_stimulus = None
@@ -2223,6 +2230,33 @@ def test_handle_response_done_fallback_reminder_without_transcript_callback() ->
     asyncio.run(api.handle_response_done({"type": "response.done"}))
 
     assert reminders == ["response_done_fallback"]
+
+
+def test_handle_response_done_fallback_suppressed_when_budget_exhausted() -> None:
+    api = _make_api_stub()
+    token = _build_confirmation_token(kind="tool_governance", pending_action=_build_pending_action(idempotency_key="idem-fallback"))
+    token.metadata = {
+        "approval_flow": True,
+        "max_reminders": 1,
+        "reminder_schedule_seconds": [0.0],
+    }
+    api._pending_confirmation_token = token
+    api._confirmation_state = ConfirmationState.AWAITING_DECISION
+    api._active_response_confirmation_guarded = True
+    api._pending_image_stimulus = None
+    api._pending_image_flush_after_playback = False
+    api._confirmation_reminder_tracker["idem-fallback"] = {"count": 1, "last_sent_at": 0.0}
+
+    reminders: list[str] = []
+
+    async def _send_confirmation_reminder(websocket, *, reason: str):
+        reminders.append(reason)
+
+    api._send_confirmation_reminder = _send_confirmation_reminder
+
+    asyncio.run(api.handle_response_done({"type": "response.done"}))
+
+    assert reminders == []
 
 
 def test_send_confirmation_reminder_respects_interval_and_max_count() -> None:
@@ -2254,6 +2288,75 @@ def test_send_confirmation_reminder_respects_interval_and_max_count() -> None:
         "Please reply with: yes or no.",
         "Please reply with: yes or no.",
     ]
+
+
+def test_non_decision_reminders_are_bounded_by_token_schedule() -> None:
+    api = _make_api_stub()
+    token = _build_confirmation_token(kind="tool_governance", pending_action=_build_pending_action(idempotency_key="idem-non-decision"))
+    token.metadata = {
+        "approval_flow": True,
+        "max_reminders": 2,
+        "reminder_schedule_seconds": [0.0, 0.0],
+    }
+    api._pending_confirmation_token = token
+    api._confirmation_state = ConfirmationState.AWAITING_DECISION
+    api._confirmation_reminder_interval_s = 0.0
+
+    sent_messages: list[str] = []
+
+    async def _assistant(message, *_args, **_kwargs):
+        sent_messages.append(message)
+
+    api.send_assistant_message = _assistant
+
+    asyncio.run(api._send_confirmation_reminder(api.websocket, reason="non_decision_input"))
+    asyncio.run(api._send_confirmation_reminder(api.websocket, reason="non_decision_input"))
+    asyncio.run(api._send_confirmation_reminder(api.websocket, reason="non_decision_input"))
+
+    assert len(sent_messages) == 2
+
+
+def test_same_pending_idempotency_key_does_not_duplicate_reminder_burst() -> None:
+    api = _make_api_stub()
+    api._confirmation_state = ConfirmationState.AWAITING_DECISION
+    api._confirmation_reminder_interval_s = 0.0
+
+    first_token = _build_confirmation_token(
+        kind="tool_governance",
+        pending_action=_build_pending_action(idempotency_key="idem-shared"),
+        token_id="tok_first",
+    )
+    first_token.metadata = {
+        "approval_flow": True,
+        "max_reminders": 1,
+        "reminder_schedule_seconds": [0.0],
+    }
+    api._pending_confirmation_token = first_token
+
+    sent_messages: list[str] = []
+
+    async def _assistant(message, *_args, **_kwargs):
+        sent_messages.append(message)
+
+    api.send_assistant_message = _assistant
+
+    asyncio.run(api._send_confirmation_reminder(api.websocket, reason="non_decision_input"))
+
+    replacement_token = _build_confirmation_token(
+        kind="tool_governance",
+        pending_action=_build_pending_action(idempotency_key="idem-shared"),
+        token_id="tok_second",
+    )
+    replacement_token.metadata = {
+        "approval_flow": True,
+        "max_reminders": 1,
+        "reminder_schedule_seconds": [0.0],
+    }
+    api._pending_confirmation_token = replacement_token
+
+    asyncio.run(api._send_confirmation_reminder(api.websocket, reason="non_decision_input"))
+
+    assert len(sent_messages) == 1
 
 
 def test_confirmation_reminder_logs_sent_and_suppressed() -> None:
