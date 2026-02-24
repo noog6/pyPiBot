@@ -334,6 +334,7 @@ class RealtimeAPI:
         self.response_in_progress = False
         self._response_in_flight = False
         self._response_create_queue: deque[dict[str, Any]] = deque()
+        self._queued_confirmation_reminder_keys: set[str] = set()
         self._pending_response_create_origins: deque[str] = deque(maxlen=64)
         self._audio_playback_busy = False
         self.function_call: dict[str, Any] | None = None
@@ -2339,21 +2340,33 @@ class RealtimeAPI:
                 f"{delta_ms:.1f}" if delta_ms is not None else "n/a",
             )
         if self._response_in_flight or self._audio_playback_busy:
+            reminder_key = self._extract_confirmation_reminder_dedupe_key(response_create_event)
+            if reminder_key is not None:
+                for queued_item in self._response_create_queue:
+                    if self._queued_response_reminder_key(queued_item) == reminder_key:
+                        logger.info(
+                            "Skipping duplicate queued confirmation reminder response.create origin=%s dedupe_key=%s.",
+                            origin,
+                            reminder_key,
+                        )
+                        return False
             if self._response_in_flight:
                 logger.info("Deferring response.create while another response is active (origin=%s).", origin)
             else:
                 logger.info("Deferring response.create while audio playback is still active (origin=%s).", origin)
-            self._response_create_queue.append(
-                {
-                    "websocket": websocket,
-                    "event": response_create_event,
-                    "origin": origin,
-                    "record_ai_call": record_ai_call,
-                    "debug_context": debug_context,
-                    "memory_brief_note": memory_brief_note,
-                    "enqueued_done_serial": self._response_done_serial,
-                }
-            )
+            queued_item = {
+                "websocket": websocket,
+                "event": response_create_event,
+                "origin": origin,
+                "record_ai_call": record_ai_call,
+                "debug_context": debug_context,
+                "memory_brief_note": memory_brief_note,
+                "enqueued_done_serial": self._response_done_serial,
+            }
+            if reminder_key is not None:
+                queued_item["queued_reminder_key"] = reminder_key
+                self._queued_confirmation_reminder_keys.add(reminder_key)
+            self._response_create_queue.append(queued_item)
             return False
         if memory_brief_note:
             try:
@@ -2378,9 +2391,13 @@ class RealtimeAPI:
             or not self._response_create_queue
         ):
             return
+        self._dedupe_queued_confirmation_reminders()
         queue_len = len(self._response_create_queue)
         for _ in range(queue_len):
             queued = self._response_create_queue.popleft()
+            queued_reminder_key = self._queued_response_reminder_key(queued)
+            if queued_reminder_key is not None:
+                self._queued_confirmation_reminder_keys.discard(queued_reminder_key)
             if self._is_stale_queued_response_create(queued):
                 logger.info(
                     "Dropping stale queued response.create origin=%s after newer responses completed.",
@@ -2391,6 +2408,8 @@ class RealtimeAPI:
             queued_trigger = self._extract_response_create_trigger(response_metadata)
             if not self._can_release_queued_response_create(queued_trigger, response_metadata):
                 self._response_create_queue.append(queued)
+                if queued_reminder_key is not None:
+                    self._queued_confirmation_reminder_keys.add(queued_reminder_key)
                 logger.info(
                     "Deferring queued response.create origin=%s trigger=%s while awaiting confirmation.",
                     queued.get("origin"),
@@ -2406,6 +2425,67 @@ class RealtimeAPI:
                 memory_brief_note=queued.get("memory_brief_note"),
             )
             return
+
+    def _extract_confirmation_reminder_dedupe_key(
+        self,
+        response_create_event: dict[str, Any],
+    ) -> str | None:
+        metadata = self._extract_response_create_metadata(response_create_event)
+        if self._extract_response_create_trigger(metadata) != "confirmation_reminder":
+            return None
+        confirmation_token = str(metadata.get("confirmation_token") or "").strip()
+        if confirmation_token:
+            return f"token:{confirmation_token}"
+        idempotency_key = str(
+            metadata.get("confirmation_idempotency_key")
+            or metadata.get("idempotency_key")
+            or ""
+        ).strip()
+        if idempotency_key:
+            return f"idempotency:{idempotency_key}"
+        return None
+
+    def _queued_response_reminder_key(self, queued: dict[str, Any]) -> str | None:
+        queued_key = queued.get("queued_reminder_key")
+        if isinstance(queued_key, str) and queued_key.strip():
+            return queued_key.strip()
+        queued_event = queued.get("event")
+        if isinstance(queued_event, dict):
+            return self._extract_confirmation_reminder_dedupe_key(queued_event)
+        return None
+
+    def _dedupe_queued_confirmation_reminders(self) -> None:
+        if len(self._response_create_queue) <= 1:
+            return
+        queued_items = list(self._response_create_queue)
+        newest_index_by_key: dict[str, int] = {}
+        for index, queued in enumerate(queued_items):
+            reminder_key = self._queued_response_reminder_key(queued)
+            if reminder_key is not None:
+                newest_index_by_key[reminder_key] = index
+        if not newest_index_by_key:
+            return
+        deduped_queue: deque[dict[str, Any]] = deque()
+        dropped_count = 0
+        for index, queued in enumerate(queued_items):
+            reminder_key = self._queued_response_reminder_key(queued)
+            if reminder_key is not None and newest_index_by_key.get(reminder_key) != index:
+                dropped_count += 1
+                logger.info(
+                    "Dropping duplicate queued confirmation reminder response.create dedupe_key=%s origin=%s (newer entry kept).",
+                    reminder_key,
+                    queued.get("origin"),
+                )
+                continue
+            deduped_queue.append(queued)
+        if dropped_count <= 0:
+            return
+        self._response_create_queue = deduped_queue
+        self._queued_confirmation_reminder_keys = {
+            key
+            for key in (self._queued_response_reminder_key(item) for item in self._response_create_queue)
+            if key is not None
+        }
 
     def _is_stale_queued_response_create(self, queued: dict[str, Any]) -> bool:
         origin = str(queued.get("origin") or "").strip().lower()
@@ -2895,6 +2975,7 @@ class RealtimeAPI:
         reminder_key = self._confirmation_reminder_key(token)
         if reminder_key is not None:
             self._confirmation_reminder_tracker.pop(reminder_key, None)
+        self._clear_queued_confirmation_reminder_markers(token)
         self._pending_confirmation_token = None
         self._confirmation_token_created_at = None
         self._confirmation_last_activity_at = None
@@ -2931,6 +3012,19 @@ class RealtimeAPI:
             action_id = getattr(action_packet, "id", None)
             return f"legacy:{action_id or id(pending_action)}"
         return None
+
+    def _clear_queued_confirmation_reminder_markers(
+        self,
+        token: PendingConfirmationToken | None,
+    ) -> None:
+        if token is None:
+            return
+        self._queued_confirmation_reminder_keys.discard(f"token:{token.id}")
+        idempotency_key = str(
+            getattr(getattr(token, "pending_action", None), "idempotency_key", "") or ""
+        ).strip()
+        if idempotency_key:
+            self._queued_confirmation_reminder_keys.discard(f"idempotency:{idempotency_key}")
 
     def _confirmation_reminder_schedule(
         self,
