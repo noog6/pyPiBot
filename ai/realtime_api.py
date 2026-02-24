@@ -3221,7 +3221,48 @@ class RealtimeAPI:
         token_id = str(metadata.get("confirmation_token", "")).strip()
         return token_id != "" and token_id == token.id
 
-    async def _maybe_emit_confirmation_reminder(self, websocket: Any, *, reason: str) -> None:
+    def _classify_pending_confirmation_intent(
+        self,
+        transcript: str,
+        *,
+        pending_action: PendingAction | None,
+    ) -> tuple[str | None, str | None]:
+        if pending_action is None:
+            return None, None
+        normalized_text = str(transcript or "").strip()
+        if not normalized_text:
+            return None, None
+        pending_packet = getattr(pending_action, "action", None)
+        pending_tool = str(getattr(pending_packet, "tool_name", "") or "")
+        if not pending_tool:
+            return None, None
+        pending_args = getattr(pending_packet, "tool_args", {})
+        pending_intent = self._normalize_tool_intent(pending_tool, pending_args)
+        pending_idempotency_key = str(
+            pending_action.idempotency_key or build_normalized_idempotency_key(pending_tool, pending_args)
+        ).strip()
+
+        incoming_tool = "perform_research" if has_research_intent(normalized_text) else ""
+        if not incoming_tool:
+            return "intent_switched", None
+        incoming_args = {"query": normalized_text}
+        incoming_intent = self._normalize_tool_intent(incoming_tool, incoming_args)
+        incoming_idempotency_key = build_normalized_idempotency_key(incoming_tool, incoming_args)
+        if (
+            incoming_intent == pending_intent
+            or (pending_idempotency_key and incoming_idempotency_key == pending_idempotency_key)
+        ):
+            return "intent_match", incoming_idempotency_key
+        return "intent_switched", incoming_idempotency_key
+
+    async def _maybe_emit_confirmation_reminder(
+        self,
+        websocket: Any,
+        *,
+        reason: str,
+        parsed_intent_category: str | None = None,
+        parsed_intent_idempotency_key: str | None = None,
+    ) -> None:
         token = getattr(self, "_pending_confirmation_token", None)
         token_active = token is not None or self._pending_action is not None
         awaiting_phase = self._is_awaiting_confirmation_phase()
@@ -3238,6 +3279,18 @@ class RealtimeAPI:
                 "CONFIRMATION_REMINDER_SUPPRESSED reason=%s suppress_reason=prompt_not_sent token=%s",
                 reason,
                 token.id,
+            )
+            return
+
+        pending_action = getattr(token, "pending_action", None) if token is not None else self._pending_action
+        pending_idempotency_key = str(getattr(pending_action, "idempotency_key", "") or "").strip()
+        incoming_idempotency_key = str(parsed_intent_idempotency_key or "").strip()
+        if parsed_intent_category == "intent_switched":
+            logger.info(
+                "CONFIRMATION_REMINDER_SUPPRESSED reason=%s suppress_reason=intent_switched pending_idempotency_key=%s incoming_idempotency_key=%s",
+                reason,
+                pending_idempotency_key or "none",
+                incoming_idempotency_key or "none",
             )
             return
 
@@ -3676,10 +3729,24 @@ class RealtimeAPI:
                 )
                 return True
 
+            parsed_intent_category, parsed_intent_idempotency_key = self._classify_pending_confirmation_intent(
+                normalized,
+                pending_action=pending,
+            )
             if token is not None:
-                await self._maybe_emit_confirmation_reminder(websocket, reason="non_decision_input")
+                await self._maybe_emit_confirmation_reminder(
+                    websocket,
+                    reason="non_decision_input",
+                    parsed_intent_category=parsed_intent_category,
+                    parsed_intent_idempotency_key=parsed_intent_idempotency_key,
+                )
             else:
-                await self._maybe_emit_confirmation_reminder(websocket, reason="non_decision_input_legacy")
+                await self._maybe_emit_confirmation_reminder(
+                    websocket,
+                    reason="non_decision_input_legacy",
+                    parsed_intent_category=parsed_intent_category,
+                    parsed_intent_idempotency_key=parsed_intent_idempotency_key,
+                )
             return True
 
     async def _maybe_handle_research_permission_response(self, text: str, websocket: Any) -> bool:

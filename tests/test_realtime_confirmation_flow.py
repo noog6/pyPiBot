@@ -58,6 +58,8 @@ def _make_api_stub() -> RealtimeAPI:
     api._response_in_flight = False
     api._response_create_queue = deque()
     api._queued_confirmation_reminder_keys = set()
+    api._pending_confirmation_prompt_latches = set()
+    api._is_confirmation_prompt_latched = lambda *_args, **_kwargs: True
     api._pending_response_create_origins = deque()
     api._audio_playback_busy = False
     api._last_response_create_ts = None
@@ -1234,6 +1236,46 @@ def test_maybe_handle_approval_response_retry_exhaustion_logs_timeout_cause(capl
     assert sent_messages
     assert api._pending_action is None
     assert transitions == [(OrchestrationPhase.IDLE, "confirmation timeout")]
+
+
+def test_maybe_handle_approval_response_suppresses_reminder_when_intent_switched() -> None:
+    api = _make_api_stub()
+    pending = _build_pending_action(idempotency_key=build_normalized_idempotency_key("perform_research", {"query": "status"}))
+    token = _build_confirmation_token(kind="tool_governance", pending_action=pending, token_id="tok_intent_switch")
+    api._pending_confirmation_token = token
+    api._pending_action = None
+    api._confirmation_state = ConfirmationState.AWAITING_DECISION
+    api._confirmation_reminder_interval_s = 0.0
+    api._confirmation_reminder_max_count = 3
+    api._handle_stop_word = lambda *args, **kwargs: asyncio.sleep(0, result=False)
+    api._tool_execution_cooldown_remaining = lambda: 0.0
+
+    executed: list[str] = []
+
+    async def _execute_action(*_args, **_kwargs):
+        executed.append("done")
+
+    sent_messages: list[str] = []
+
+    async def _send_assistant_message(message, *_args, **_kwargs):
+        sent_messages.append(message)
+
+    api._execute_action = _execute_action
+    api.send_assistant_message = _send_assistant_message
+
+    with patch("ai.realtime_api.logger.info") as mock_info:
+        consumed = asyncio.run(api._maybe_handle_approval_response("What time is it in Tokyo right now?", api.websocket))
+
+    assert consumed is True
+    assert executed == []
+    assert sent_messages == []
+    assert api._pending_confirmation_token is token
+    assert token.pending_action is pending
+    logged = [call.args[0] % call.args[1:] for call in mock_info.call_args_list if call.args]
+    assert any(
+        "CONFIRMATION_REMINDER_SUPPRESSED" in line and "suppress_reason=intent_switched" in line
+        for line in logged
+    )
 
 
 def test_record_confirmation_timeout_tracks_cause_metadata() -> None:
