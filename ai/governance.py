@@ -146,6 +146,8 @@ def normalized_decision_payload(decision: GovernanceDecision) -> dict[str, Any]:
         "idempotency_key": decision.idempotency_key,
         "cooldown_seconds": float(decision.cooldown_seconds or 0.0),
         "dry_run_supported": bool(decision.dry_run_supported),
+        "max_reminders": getattr(decision, "max_reminders", None),
+        "reminder_schedule_seconds": getattr(decision, "reminder_schedule_seconds", None),
     }
 
 
