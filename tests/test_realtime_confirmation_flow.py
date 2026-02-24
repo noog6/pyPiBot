@@ -2302,10 +2302,10 @@ def test_handle_response_done_fallback_reminder_without_transcript_callback() ->
 
     reminders: list[str] = []
 
-    async def _send_confirmation_reminder(websocket, *, reason: str):
+    async def _maybe_emit_confirmation_reminder(websocket, *, reason: str):
         reminders.append(reason)
 
-    api._send_confirmation_reminder = _send_confirmation_reminder
+    api._maybe_emit_confirmation_reminder = _maybe_emit_confirmation_reminder
 
     asyncio.run(api.handle_response_done({"type": "response.done"}))
 
@@ -2329,10 +2329,10 @@ def test_handle_response_done_fallback_suppressed_when_budget_exhausted() -> Non
 
     reminders: list[str] = []
 
-    async def _send_confirmation_reminder(websocket, *, reason: str):
+    async def _maybe_emit_confirmation_reminder(websocket, *, reason: str):
         reminders.append(reason)
 
-    api._send_confirmation_reminder = _send_confirmation_reminder
+    api._maybe_emit_confirmation_reminder = _maybe_emit_confirmation_reminder
 
     asyncio.run(api.handle_response_done({"type": "response.done"}))
 
@@ -2506,6 +2506,11 @@ def test_send_confirmation_reminder_respects_interval_and_max_count() -> None:
     api = _make_api_stub()
     token = _build_confirmation_token(kind="tool_governance", pending_action=_build_pending_action())
     api._pending_confirmation_token = token
+    token.metadata = {
+        "approval_flow": True,
+        "max_reminders": 2,
+        "cooldown_seconds": 5.0,
+    }
     api._confirmation_state = ConfirmationState.AWAITING_DECISION
     api._confirmation_reminder_interval_s = 5.0
     api._confirmation_reminder_max_count = 2
@@ -2540,6 +2545,7 @@ def test_non_decision_reminders_are_bounded_by_token_schedule() -> None:
         "approval_flow": True,
         "max_reminders": 2,
         "reminder_schedule_seconds": [0.0, 0.0],
+        "cooldown_seconds": 0.0,
     }
     api._pending_confirmation_token = token
     api._confirmation_state = ConfirmationState.AWAITING_DECISION

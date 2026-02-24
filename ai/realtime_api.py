@@ -3159,9 +3159,73 @@ class RealtimeAPI:
         token_id = str(metadata.get("confirmation_token", "")).strip()
         return token_id != "" and token_id == token.id
 
-    async def _send_confirmation_reminder(self, websocket: Any, *, reason: str) -> None:
+    async def _maybe_emit_confirmation_reminder(self, websocket: Any, *, reason: str) -> None:
         token = getattr(self, "_pending_confirmation_token", None)
-        allowed, key, sent_count, sent_at, suppress_reason = self._allow_confirmation_reminder(
+        token_active = token is not None or self._pending_action is not None
+        awaiting_phase = self._is_awaiting_confirmation_phase()
+        if not token_active or not awaiting_phase:
+            logger.info(
+                "CONFIRMATION_REMINDER_SUPPRESSED reason=%s suppress_reason=inactive_confirmation_context token_active=%s awaiting_phase=%s",
+                reason,
+                token_active,
+                awaiting_phase,
+            )
+            return
+
+        reminder_key = self._confirmation_reminder_key(token)
+        tracker_entry = (
+            self._confirmation_reminder_tracker.get(reminder_key)
+            if reminder_key is not None
+            else None
+        )
+        sent_count = int(tracker_entry.get("count", 0)) if isinstance(tracker_entry, dict) else 0
+        last_sent_at = (
+            float(tracker_entry.get("last_sent_at", 0.0))
+            if isinstance(tracker_entry, dict) and isinstance(tracker_entry.get("last_sent_at"), (int, float))
+            else None
+        )
+        metadata = token.metadata if token is not None and isinstance(token.metadata, dict) else {}
+        configured_max = self._coerce_optional_int(metadata.get("max_reminders"))
+        max_reminders = max(0, configured_max) if configured_max is not None else 1
+        raw_cooldown = metadata.get("cooldown_seconds")
+        if raw_cooldown is None:
+            raw_cooldown = metadata.get("confirmation_reminder_interval_s")
+        configured_cooldown: float | None = None
+        if isinstance(raw_cooldown, (int, float)) and not isinstance(raw_cooldown, bool):
+            configured_cooldown = max(0.0, float(raw_cooldown))
+        elif isinstance(raw_cooldown, str):
+            stripped = raw_cooldown.strip()
+            if stripped:
+                try:
+                    configured_cooldown = max(0.0, float(stripped))
+                except ValueError:
+                    configured_cooldown = None
+        default_cooldown = min(12.0, max(8.0, float(self._confirmation_reminder_interval_s)))
+        cooldown_seconds = configured_cooldown if configured_cooldown is not None else default_cooldown
+        now = time.monotonic()
+        if sent_count >= max_reminders:
+            logger.info(
+                "CONFIRMATION_REMINDER_SUPPRESSED reason=%s suppress_reason=max_count key=%s sent_count=%s max_count=%s cooldown_s=%.2f",
+                reason,
+                reminder_key or "none",
+                sent_count,
+                max_reminders,
+                cooldown_seconds,
+            )
+            return
+        if last_sent_at is not None and (now - last_sent_at) < cooldown_seconds:
+            logger.info(
+                "CONFIRMATION_REMINDER_SUPPRESSED reason=%s suppress_reason=cooldown key=%s sent_count=%s max_count=%s cooldown_s=%.2f elapsed_s=%.2f",
+                reason,
+                reminder_key or "none",
+                sent_count,
+                max_reminders,
+                cooldown_seconds,
+                now - last_sent_at,
+            )
+            return
+
+        allowed, key, next_sent_count, sent_at, suppress_reason = self._allow_confirmation_reminder(
             token,
             reason=reason,
         )
@@ -3171,9 +3235,9 @@ class RealtimeAPI:
                 reason,
                 suppress_reason or "unknown",
                 key or "none",
-                sent_count,
-                self._confirmation_reminder_max_count,
-                self._confirmation_reminder_interval_s,
+                next_sent_count,
+                max_reminders,
+                cooldown_seconds,
             )
             return
         if token is not None:
@@ -3184,7 +3248,7 @@ class RealtimeAPI:
             "CONFIRMATION_REMINDER_SENT reason=%s key=%s sent_count=%s sent_at=%.3f run_id=%s token_id=%s idempotency_key=%s",
             reason,
             key or "none",
-            sent_count,
+            next_sent_count,
             sent_at or 0.0,
             self._current_run_id() or "none",
             token.id if token is not None else "none",
@@ -3208,6 +3272,14 @@ class RealtimeAPI:
                 "confirmation_token": token.id if token is not None else "",
             },
         )
+
+    async def _send_confirmation_reminder(self, websocket: Any, *, reason: str) -> None:
+        """Backward-compatible alias for reminder emission.
+
+        This shim keeps existing tests/callers working while routing reminder
+        emissions through `_maybe_emit_confirmation_reminder`.
+        """
+        await self._maybe_emit_confirmation_reminder(websocket, reason=reason)
 
     def _parse_confirmation_decision(self, text: str) -> str:
         normalized = " ".join(re.sub(r"[^\w\s]", " ", text.lower()).split())
@@ -3517,9 +3589,9 @@ class RealtimeAPI:
                 return True
 
             if token is not None:
-                await self._send_confirmation_reminder(websocket, reason="non_decision_input")
+                await self._maybe_emit_confirmation_reminder(websocket, reason="non_decision_input")
             else:
-                await self._send_confirmation_reminder(websocket, reason="non_decision_input_legacy")
+                await self._maybe_emit_confirmation_reminder(websocket, reason="non_decision_input_legacy")
             return True
 
     async def _maybe_handle_research_permission_response(self, text: str, websocket: Any) -> bool:
@@ -5735,7 +5807,7 @@ class RealtimeAPI:
             if self.websocket is not None:
                 if self._has_active_confirmation_token():
                     if self._is_guarded_server_auto_reminder_allowed(reason="transcribe_response_done"):
-                        await self._send_confirmation_reminder(
+                        await self._maybe_emit_confirmation_reminder(
                             self.websocket,
                             reason="transcribe_response_done",
                         )
@@ -5743,7 +5815,7 @@ class RealtimeAPI:
                     if self._is_guarded_server_auto_reminder_allowed(
                         reason="transcribe_response_done_legacy"
                     ):
-                        await self._send_confirmation_reminder(
+                        await self._maybe_emit_confirmation_reminder(
                             self.websocket,
                             reason="transcribe_response_done_legacy",
                         )
@@ -5855,7 +5927,7 @@ class RealtimeAPI:
                 and self._should_send_response_done_fallback_reminder()
                 and self._is_guarded_server_auto_reminder_allowed(reason="response_done_fallback")
             ):
-                await self._send_confirmation_reminder(self.websocket, reason="response_done_fallback")
+                await self._maybe_emit_confirmation_reminder(self.websocket, reason="response_done_fallback")
             self._recover_confirmation_guard_microphone("response_done")
         await self._drain_response_create_queue()
         if self._pending_image_stimulus and not self._pending_image_flush_after_playback:
