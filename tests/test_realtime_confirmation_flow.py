@@ -1574,6 +1574,8 @@ def test_normalize_confirmation_decision_preserves_confirmation_required_default
         "perform_research",
         {"query": "status update"},
     )
+    assert normalized.decision_source == "tier_default"
+    assert normalized.thresholds == {"privacy_flag": False}
 
 
 def test_normalize_confirmation_decision_keeps_explicit_confirmation_fields() -> None:
@@ -1609,6 +1611,8 @@ def test_normalize_confirmation_decision_keeps_explicit_confirmation_fields() ->
     assert normalized.idempotency_key == "fixed-key"
     assert normalized.cooldown_seconds == 12.0
     assert normalized.dry_run_supported is True
+    assert normalized.decision_source == "tier_default"
+    assert normalized.thresholds == {"privacy_flag": True}
 
 def test_handle_function_call_logs_consolidated_governance_review_summary() -> None:
     api = _make_api_stub()
@@ -1659,6 +1663,7 @@ def test_handle_function_call_logs_consolidated_governance_review_summary() -> N
     assert any(
         "Governance review summary | call_id=call_gov_1 tool=perform_research "
         "initial_status=needs_confirmation initial_reason=expensive_read "
+        "decision_source=tier_default thresholds={\"cost_score\":0.5,\"privacy_flag\":false} "
         "confirm_required=True confirm_reason=expensive_read idempotency_key=perform_research:" in line
         and "prior_permission_override=False final_execution_decision=request_confirmation" in line
         for line in logged
