@@ -3121,6 +3121,34 @@ class RealtimeAPI:
                 return False
         return suppress_reason is None
 
+    def _is_guarded_server_auto_reminder_allowed(self, *, reason: str) -> bool:
+        normalized_origin = str(getattr(self, "_active_response_origin", "") or "").strip().lower()
+        if normalized_origin != "server_auto":
+            return True
+        token = getattr(self, "_pending_confirmation_token", None)
+        allowed, key, sent_count, _sent_at, suppress_reason, _now = self._evaluate_confirmation_reminder(
+            token,
+            reason=reason,
+        )
+        if not allowed:
+            logger.info(
+                "CONFIRMATION_GUARDED_COMPLETION decision=server_auto_suppressed origin=%s reason=%s suppress_reason=%s key=%s sent_count=%s",
+                normalized_origin,
+                reason,
+                suppress_reason or "unknown",
+                key or "none",
+                sent_count,
+            )
+            return False
+        logger.info(
+            "CONFIRMATION_GUARDED_COMPLETION decision=reminder_allowed origin=%s reason=%s key=%s next_count=%s",
+            normalized_origin,
+            reason,
+            key or "none",
+            sent_count,
+        )
+        return True
+
     def _is_token_approval_flow_metadata(self, metadata: dict[str, Any]) -> bool:
         approval_flow = str(metadata.get("approval_flow", "")).strip().lower()
         if approval_flow in {"true", "1", "yes"}:
@@ -5706,15 +5734,19 @@ class RealtimeAPI:
             self._assistant_reply_accum = ""
             if self.websocket is not None:
                 if self._has_active_confirmation_token():
-                    await self._send_confirmation_reminder(
-                        self.websocket,
-                        reason="transcribe_response_done",
-                    )
+                    if self._is_guarded_server_auto_reminder_allowed(reason="transcribe_response_done"):
+                        await self._send_confirmation_reminder(
+                            self.websocket,
+                            reason="transcribe_response_done",
+                        )
                 else:
-                    await self._send_confirmation_reminder(
-                        self.websocket,
-                        reason="transcribe_response_done_legacy",
-                    )
+                    if self._is_guarded_server_auto_reminder_allowed(
+                        reason="transcribe_response_done_legacy"
+                    ):
+                        await self._send_confirmation_reminder(
+                            self.websocket,
+                            reason="transcribe_response_done_legacy",
+                        )
             self._active_response_confirmation_guarded = False
             self.response_in_progress = False
             self._recover_confirmation_guard_microphone("transcribe_response_done")
@@ -5821,6 +5853,7 @@ class RealtimeAPI:
                 and self._has_active_confirmation_token()
                 and self._is_awaiting_confirmation_phase()
                 and self._should_send_response_done_fallback_reminder()
+                and self._is_guarded_server_auto_reminder_allowed(reason="response_done_fallback")
             ):
                 await self._send_confirmation_reminder(self.websocket, reason="response_done_fallback")
             self._recover_confirmation_guard_microphone("response_done")
