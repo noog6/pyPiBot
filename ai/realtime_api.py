@@ -137,6 +137,8 @@ class NormalizedConfirmationDecision:
     idempotency_key: str
     cooldown_seconds: float
     dry_run_supported: bool
+    decision_source: str = "tier_default"
+    thresholds: dict[str, Any] | None = None
     max_reminders: int | None = None
     reminder_schedule_seconds: tuple[float, ...] = ()
 
@@ -1645,12 +1647,7 @@ class RealtimeAPI:
         governance_decision: Any,
         runtime_context: dict[str, Any] | None,
     ) -> NormalizedConfirmationDecision:
-        """Normalize governance decision fields used by confirmation plumbing.
-
-        runtime_context is accepted for symmetry with governance callers and future
-        context-aware shaping, while current normalization preserves existing behavior.
-        """
-        del runtime_context
+        """Normalize governance decision fields used by confirmation plumbing."""
         decision = GovernanceLayer.coerce_decision_payload(governance_decision)
         action_summary_fallback = f"tool={tool_name} requires confirmation"
         normalized_payload = normalized_decision_payload(
@@ -1665,8 +1662,8 @@ class RealtimeAPI:
             status=str(decision.status),
             reason=str(decision.reason),
             action_summary=str(normalized_payload["action_summary"]),
-            approved=decision.approved,
-            needs_confirmation=decision.needs_confirmation,
+            approved=str(decision.status) == "approved",
+            needs_confirmation=bool(normalized_payload["confirm_required"]),
             confirm_required=bool(normalized_payload["confirm_required"]),
             confirm_reason=(
                 str(normalized_payload["confirm_reason"])
@@ -1681,11 +1678,17 @@ class RealtimeAPI:
             idempotency_key=idempotency_key,
             cooldown_seconds=float(normalized_payload["cooldown_seconds"]),
             dry_run_supported=bool(normalized_payload["dry_run_supported"]),
+            decision_source=str(normalized_payload.get("decision_source") or "tier_default"),
+            thresholds=self._compact_governance_thresholds(normalized_payload.get("thresholds") or runtime_context),
             max_reminders=self._coerce_optional_int(normalized_payload.get("max_reminders")),
             reminder_schedule_seconds=self._coerce_schedule_seconds(
                 normalized_payload.get("reminder_schedule_seconds")
             ),
         )
+
+    def _compact_governance_thresholds(self, thresholds: dict[str, Any] | None) -> dict[str, Any]:
+        payload = dict(thresholds or {})
+        return {key: value for key, value in payload.items() if value is not None}
 
     def _coerce_optional_int(self, value: Any) -> int | None:
         if value is None:
@@ -5461,13 +5464,15 @@ class RealtimeAPI:
                 )
             logger.info(
                 "Governance review summary | call_id=%s tool=%s initial_status=%s "
-                "initial_reason=%s confirm_required=%s confirm_reason=%s idempotency_key=%s "
-                "prior_permission_override=%s "
-                "final_execution_decision=%s",
+                "initial_reason=%s decision_source=%s thresholds=%s "
+                "confirm_required=%s confirm_reason=%s idempotency_key=%s "
+                "prior_permission_override=%s final_execution_decision=%s",
                 call_id,
                 function_name,
                 confirmation_decision.status,
                 confirmation_decision.reason,
+                confirmation_decision.decision_source,
+                json.dumps(confirmation_decision.thresholds or {}, separators=(",", ":"), sort_keys=True),
                 confirmation_decision.confirm_required,
                 confirmation_decision.confirm_reason,
                 confirmation_decision.idempotency_key,

@@ -85,6 +85,8 @@ class GovernanceDecision:
     idempotency_key: str | None = None
     cooldown_seconds: float = 0.0
     dry_run_supported: bool = False
+    decision_source: str = "tier_default"
+    thresholds: dict[str, Any] | None = None
 
     @property
     def approved(self) -> bool:
@@ -160,6 +162,8 @@ def normalized_decision_payload(
         "idempotency_key": decision.idempotency_key,
         "cooldown_seconds": float(decision.cooldown_seconds or 0.0),
         "dry_run_supported": bool(decision.dry_run_supported),
+        "decision_source": str(getattr(decision, "decision_source", "tier_default") or "tier_default"),
+        "thresholds": dict(getattr(decision, "thresholds", None) or {}),
         "max_reminders": getattr(decision, "max_reminders", None),
         "reminder_schedule_seconds": getattr(decision, "reminder_schedule_seconds", None),
     }
@@ -322,6 +326,8 @@ class GovernanceLayer:
                 idempotency_key=self._idempotency_key(action),
                 cooldown_seconds=cooldown_seconds,
                 dry_run_supported=dry_run_supported,
+                decision_source="session_override",
+                thresholds=dict(getattr(decision, "thresholds", None) or {}),
             )
 
         if cooldown_seconds > 0:
@@ -332,6 +338,8 @@ class GovernanceLayer:
                 idempotency_key=self._idempotency_key(action),
                 cooldown_seconds=cooldown_seconds,
                 dry_run_supported=dry_run_supported,
+                decision_source="session_override",
+                thresholds=dict(getattr(decision, "thresholds", None) or {}),
             )
 
         if decision.status == "needs_confirmation":
@@ -347,6 +355,8 @@ class GovernanceLayer:
             idempotency_key=self._idempotency_key(action),
             cooldown_seconds=cooldown_seconds,
             dry_run_supported=dry_run_supported,
+            decision_source=str(getattr(decision, "decision_source", "tier_default") or "tier_default"),
+            thresholds=dict(getattr(decision, "thresholds", None) or {}),
         )
 
     @staticmethod
@@ -383,6 +393,8 @@ class GovernanceLayer:
             ),
             cooldown_seconds=float(getattr(decision, "cooldown_seconds", 0.0) or 0.0),
             dry_run_supported=bool(getattr(decision, "dry_run_supported", False)),
+            decision_source=str(getattr(decision, "decision_source", "tier_default") or "tier_default"),
+            thresholds=dict(getattr(decision, "thresholds", None) or {}),
         )
 
     def build_action_packet(
@@ -484,30 +496,40 @@ class GovernanceLayer:
     ) -> GovernanceDecision:
         now = time.monotonic()
         now_wall = time.time()
+        thresholds = self._build_runtime_threshold_snapshot(runtime_context)
         if self._autonomy_level in {"observe-only", "observe"}:
             return GovernanceDecision(
                 status="denied",
                 reason=GovernanceReason.AUTONOMY_OBSERVE_ONLY.value,
+                decision_source="session_override",
+                thresholds=thresholds,
             )
 
         if not self._tool_calls_budget.allow(now):
             return GovernanceDecision(
                 status="denied",
                 reason=GovernanceReason.TOOL_CALL_BUDGET_EXHAUSTED.value,
+                decision_source="threshold_crossed",
+                thresholds=thresholds,
             )
 
         spec = self._tool_specs.get(action.tool_name, self._default_spec())
         risk_score = self._estimate_risk(spec)
+        thresholds["risk_score"] = risk_score
         if action.cost == "expensive" and not self._expensive_budget.allow(now):
             return GovernanceDecision(
                 status="denied",
                 reason=GovernanceReason.EXPENSIVE_CALL_BUDGET_EXHAUSTED.value,
+                decision_source="threshold_crossed",
+                thresholds=thresholds,
             )
 
         if risk_score >= self._risk_threshold:
             return GovernanceDecision(
                 status="needs_confirmation",
                 reason=GovernanceReason.RISK_THRESHOLD_EXCEEDED.value,
+                decision_source="threshold_crossed",
+                thresholds=thresholds,
             )
 
         if action.tier > 1:
@@ -516,6 +538,8 @@ class GovernanceLayer:
                 return GovernanceDecision(
                     status="needs_confirmation",
                     reason=GovernanceReason.AUTONOMY_WINDOW_CLOSED.value,
+                    decision_source="autonomy_window_closed",
+                    thresholds=thresholds,
                 )
 
         if self._autonomy_level in {"assist", "act-with-confirm"}:
@@ -523,15 +547,40 @@ class GovernanceLayer:
                 return GovernanceDecision(
                     status="needs_confirmation",
                     reason=GovernanceReason.AUTONOMY_LEVEL_REQUIRES_CONFIRMATION.value,
+                    decision_source="tier_default",
+                    thresholds=thresholds,
                 )
 
         if self._tier1_guarded_threshold_exceeded(action, runtime_context=runtime_context):
             return GovernanceDecision(
                 status="needs_confirmation",
                 reason=GovernanceReason.TIER1_GUARDED_THRESHOLD_EXCEEDED.value,
+                decision_source="threshold_crossed",
+                thresholds=thresholds,
             )
 
-        return GovernanceDecision(status="approved", reason=GovernanceReason.WITHIN_BOUNDS.value)
+        return GovernanceDecision(
+            status="approved",
+            reason=GovernanceReason.WITHIN_BOUNDS.value,
+            decision_source="tier_default",
+            thresholds=thresholds,
+        )
+
+    def _build_runtime_threshold_snapshot(
+        self,
+        runtime_context: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        context = runtime_context or {}
+        return {
+            "risk_score": None,
+            "risk_threshold": self._risk_threshold,
+            "guarded_max_cost_score": self._guarded_max_cost_score,
+            "guarded_min_rate_limit_remaining": self._guarded_min_rate_limit_remaining,
+            "guarded_privacy_flag_requires_confirmation": self._guarded_privacy_flag_requires_confirmation,
+            "cost_score": context.get("cost_score"),
+            "rate_limit_remaining": context.get("rate_limit_remaining"),
+            "privacy_flag": bool(context.get("privacy_flag")),
+        }
 
     def _tier1_guarded_threshold_exceeded(
         self,
