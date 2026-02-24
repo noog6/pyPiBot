@@ -600,6 +600,7 @@ class RealtimeAPI:
         self._active_response_id: str | None = None
         self._active_response_confirmation_guarded = False
         self._active_response_origin = "unknown"
+        self._pending_alternate_intent_override: dict[str, Any] | None = None
         self._last_executed_tool_call: dict[str, Any] | None = None
         self._intent_ledger: dict[str, IntentLedgerEntry] = {}
         self._intent_state_ttl_s = float(research_cfg.get("intent_state_ttl_s", 300.0))
@@ -3360,6 +3361,53 @@ class RealtimeAPI:
             return "cancel"
         return "unclear"
 
+    def _detect_alternate_intent_while_confirmation_pending(
+        self,
+        text: str,
+        *,
+        pending_action: PendingAction,
+    ) -> bool:
+        pending_tool_name = str(getattr(getattr(pending_action, "action", None), "tool_name", "") or "")
+        if not has_research_intent(text):
+            return False
+        return pending_tool_name != "perform_research"
+
+    def _consume_pending_alternate_intent_override(
+        self,
+        *,
+        function_name: str,
+        args: dict[str, Any],
+        pending_action: PendingAction,
+        token: PendingConfirmationToken | None,
+    ) -> bool:
+        marker = getattr(self, "_pending_alternate_intent_override", None)
+        if not isinstance(marker, dict):
+            return False
+        detected_at = marker.get("detected_at")
+        if not isinstance(detected_at, (int, float)) or (time.monotonic() - float(detected_at)) > 15.0:
+            self._pending_alternate_intent_override = None
+            return False
+        expected_token = str(marker.get("token_id") or "")
+        current_token = str(getattr(token, "id", "") or "")
+        if expected_token and expected_token != current_token:
+            self._pending_alternate_intent_override = None
+            return False
+        pending_intent = self._normalize_tool_intent(
+            pending_action.action.tool_name,
+            getattr(pending_action.action, "tool_args", {}),
+        )
+        incoming_intent = self._normalize_tool_intent(function_name, args)
+        if incoming_intent == pending_intent:
+            return False
+        self._pending_alternate_intent_override = None
+        logger.info(
+            "Function call outcome: bypassed pending confirmation suppression via alternate intent marker | incoming=%s pending=%s token=%s",
+            function_name,
+            pending_action.action.tool_name,
+            current_token or "legacy",
+        )
+        return True
+
     async def _maybe_apply_late_confirmation_decision(self, text: str, websocket: Any) -> bool:
         token = getattr(self, "_pending_confirmation_token", None)
         if token is not None:
@@ -3609,6 +3657,24 @@ class RealtimeAPI:
                     reason="confirmation rejected",
                 )
                 return True
+
+            if decision == "unclear" and self._detect_alternate_intent_while_confirmation_pending(
+                normalized,
+                pending_action=pending,
+            ):
+                self._pending_alternate_intent_override = {
+                    "detected_at": time.monotonic(),
+                    "token_id": token.id if token is not None else "",
+                    "pending_tool": action.tool_name,
+                    "idempotency_key": pending.idempotency_key,
+                }
+                logger.info(
+                    "CONFIRMATION_REMINDER_SUPPRESSED reason=%s suppress_reason=alternate_intent_detected idempotency_key=%s run_id=%s",
+                    "non_decision_input",
+                    pending.idempotency_key or "none",
+                    self._current_run_id() or "none",
+                )
+                return False
 
             if token is not None:
                 token.retry_count += 1
@@ -5086,15 +5152,21 @@ class RealtimeAPI:
                         )
                     pending_action = None
                 else:
-                    logger.info(
-                        "Function call outcome: suppressed pending confirmation | incoming=%s pending=%s",
-                        function_name,
-                        pending_tool,
-                    )
-                    await self._send_awaiting_confirmation_output(call_id, websocket)
-                    self.function_call = None
-                    self.function_call_args = ""
-                    return
+                    if not self._consume_pending_alternate_intent_override(
+                        function_name=function_name,
+                        args=args,
+                        pending_action=pending_action,
+                        token=token,
+                    ):
+                        logger.info(
+                            "Function call outcome: suppressed pending confirmation | incoming=%s pending=%s",
+                            function_name,
+                            pending_tool,
+                        )
+                        await self._send_awaiting_confirmation_output(call_id, websocket)
+                        self.function_call = None
+                        self.function_call_args = ""
+                        return
             if self._is_duplicate_tool_call(function_name, args):
                 logger.info(
                     "Function call outcome: skipped duplicate | tool=%s call_id=%s",
