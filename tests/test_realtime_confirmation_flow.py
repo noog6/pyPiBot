@@ -57,6 +57,7 @@ def _make_api_stub() -> RealtimeAPI:
     api.state_manager = type("State", (), {"state": InteractionState.IDLE, "update_state": lambda *args, **kwargs: None})()
     api._response_in_flight = False
     api._response_create_queue = deque()
+    api._queued_confirmation_reminder_keys = set()
     api._pending_response_create_origins = deque()
     api._audio_playback_busy = False
     api._last_response_create_ts = None
@@ -2336,6 +2337,169 @@ def test_handle_response_done_fallback_suppressed_when_budget_exhausted() -> Non
     asyncio.run(api.handle_response_done({"type": "response.done"}))
 
     assert reminders == []
+
+
+def test_confirmation_reminder_gate_allows_only_one_emit_across_non_decision_and_transcribe_callbacks() -> None:
+    api = _make_api_stub()
+    token = _build_confirmation_token(
+        kind="tool_governance",
+        pending_action=_build_pending_action(idempotency_key="idem-cooldown"),
+        token_id="tok_cooldown",
+    )
+    token.metadata = {
+        "approval_flow": True,
+        "max_reminders": 2,
+        "reminder_schedule_seconds": [0.0, 0.0],
+    }
+    api._pending_confirmation_token = token
+    api._confirmation_state = ConfirmationState.AWAITING_DECISION
+    api._confirmation_reminder_interval_s = 30.0
+    api._active_response_confirmation_guarded = True
+    api._pending_image_stimulus = None
+    api._pending_image_flush_after_playback = False
+    api._maybe_enqueue_reflection = lambda *_args, **_kwargs: None
+
+    sent_messages: list[str] = []
+
+    async def _assistant(message, *_args, **_kwargs):
+        sent_messages.append(message)
+
+    api.send_assistant_message = _assistant
+
+    with patch("ai.realtime_api.logger.info") as mock_info:
+        asyncio.run(api._send_confirmation_reminder(api.websocket, reason="non_decision_input"))
+        asyncio.run(api.handle_transcribe_response_done())
+
+    reminder_sent_logs = [
+        call.args[0] % call.args[1:]
+        for call in mock_info.call_args_list
+        if call.args and "CONFIRMATION_REMINDER_SENT" in str(call.args[0])
+    ]
+    assert len(sent_messages) == 1
+    assert len(reminder_sent_logs) == 1
+    assert "token_id=tok_cooldown" in reminder_sent_logs[0]
+    assert "idempotency_key=idem-cooldown" in reminder_sent_logs[0]
+
+
+def test_confirmation_reminder_response_create_queue_dedupes_while_response_in_flight() -> None:
+    api = _make_api_stub()
+    api._response_in_flight = True
+    token = _build_confirmation_token(kind="tool_governance", pending_action=_build_pending_action(), token_id="tok_q")
+    reminder_event = {
+        "type": "response.create",
+        "response": {
+            "metadata": {
+                "trigger": "confirmation_reminder",
+                "approval_flow": "true",
+                "confirmation_token": token.id,
+            }
+        },
+    }
+
+    for _ in range(3):
+        asyncio.run(
+            api._send_response_create(
+                api.websocket,
+                reminder_event,
+                origin="assistant_message",
+            )
+        )
+
+    assert len(api._response_create_queue) == 1
+    assert api._response_create_queue[0]["queued_reminder_key"] == "token:tok_q"
+
+
+def test_drain_response_create_queue_sends_single_confirmation_reminder_after_duplicate_queueing() -> None:
+    api = _make_api_stub()
+    reminder_event = {
+        "type": "response.create",
+        "response": {
+            "metadata": {
+                "trigger": "confirmation_reminder",
+                "approval_flow": "true",
+                "confirmation_token": "tok_playback",
+            }
+        },
+    }
+    api._response_create_queue.append(
+        {
+            "websocket": api.websocket,
+            "event": reminder_event,
+            "origin": "assistant_message",
+            "record_ai_call": False,
+            "debug_context": None,
+            "queued_reminder_key": "token:tok_playback",
+        }
+    )
+    api._response_create_queue.append(
+        {
+            "websocket": api.websocket,
+            "event": reminder_event,
+            "origin": "assistant_message",
+            "record_ai_call": False,
+            "debug_context": None,
+            "queued_reminder_key": "token:tok_playback",
+        }
+    )
+    sent: list[str] = []
+
+    async def _send_response_create(*_args, **_kwargs):
+        sent.append("sent")
+        return True
+
+    api._send_response_create = _send_response_create
+
+    asyncio.run(api._drain_response_create_queue())
+
+    assert sent == ["sent"]
+    assert len(api._response_create_queue) == 0
+
+
+def test_response_created_server_auto_pending_suppresses_spoken_output_when_reminder_gate_blocks() -> None:
+    api = _make_api_stub()
+    token = _build_confirmation_token(
+        kind="tool_governance",
+        pending_action=_build_pending_action(idempotency_key="idem-server-auto"),
+        token_id="tok_server_auto",
+    )
+    token.metadata = {
+        "approval_flow": True,
+        "max_reminders": 0,
+        "reminder_schedule_seconds": [],
+    }
+    api._pending_confirmation_token = token
+    api._pending_response_create_origins = deque(["server_auto"])
+    api._audio_accum = bytearray()
+    api._audio_accum_bytes_target = 9600
+    api._mic_receive_on_first_audio = False
+    api._speaking_started = False
+    api._assistant_reply_accum = ""
+    api._tool_call_records = []
+    api._last_tool_call_results = []
+    api._last_response_metadata = {}
+    api._reflection_enqueued = False
+    api.audio_player = None
+    api._is_user_approved_interrupt_response = lambda *_args, **_kwargs: False
+    api._pending_image_stimulus = None
+    api._pending_image_flush_after_playback = False
+    api._maybe_enqueue_reflection = lambda *_args, **_kwargs: None
+
+    sent_messages: list[str] = []
+
+    async def _assistant(message, *_args, **_kwargs):
+        sent_messages.append(message)
+
+    api.send_assistant_message = _assistant
+    api.state_manager = type("State", (), {"state": InteractionState.IDLE, "update_state": lambda *args: None})()
+
+    asyncio.run(api.handle_event({"type": "response.created", "response": {"id": "resp_guarded"}}, api.websocket))
+    asyncio.run(api.handle_event({"type": "response.text.delta", "delta": "Should not speak"}, api.websocket))
+    asyncio.run(api.handle_transcribe_response_done())
+
+    assert api._active_response_origin == "server_auto"
+    assert api._active_response_confirmation_guarded is False
+    assert api.assistant_reply == ""
+    assert sent_messages == []
 
 
 def test_send_confirmation_reminder_respects_interval_and_max_count() -> None:
