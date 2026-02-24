@@ -1742,20 +1742,41 @@ class RealtimeAPI:
     def _log_structured_noop_event(
         self,
         *,
-        status: str,
+        outcome: str,
         reason: str,
         tool_name: str | None,
         action_id: str | None,
         token_id: str | None = None,
+        idempotency_key: str | None = None,
     ) -> None:
+        run_id = self._current_run_id() or ""
         logger.info(
-            "NO_OP_EVENT status=%s reason=%s token=%s tool=%s action=%s",
-            status,
+            "NO_OP_EVENT run_id=%s idempotency_key=%s reason=%s outcome=%s token=%s tool=%s action=%s",
+            run_id,
+            idempotency_key or "",
             reason,
+            outcome,
             token_id or "",
             tool_name or "",
             action_id or "",
         )
+
+    async def _emit_final_noop_user_text(
+        self,
+        websocket: Any,
+        *,
+        outcome: str,
+        reason: str,
+    ) -> bool:
+        if self._has_active_confirmation_token():
+            logger.info(
+                "NO_OP_USER_TEXT_SKIPPED reason=token_not_resolved outcome=%s path_reason=%s",
+                outcome,
+                reason,
+            )
+            return False
+        await self.send_assistant_message("No action taken.", websocket)
+        return True
 
     async def _send_noop_tool_output(
         self,
@@ -1850,6 +1871,18 @@ class RealtimeAPI:
     def _intent_ledger_key(self, tool_name: str, args: dict[str, Any]) -> str:
         normalized = self._normalize_tool_intent(tool_name, args)
         return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+    def _idempotency_key_for_action(self, action: ActionPacket | None) -> str | None:
+        if action is None:
+            return None
+        token = getattr(self, "_pending_confirmation_token", None)
+        pending = getattr(token, "pending_action", None) if token is not None else None
+        if pending is not None and getattr(pending, "action", None) is action:
+            return pending.idempotency_key
+        fallback_pending = getattr(self, "_pending_action", None)
+        if fallback_pending is not None and getattr(fallback_pending, "action", None) is action:
+            return fallback_pending.idempotency_key
+        return None
 
     def _record_intent_state(
         self,
@@ -2540,15 +2573,17 @@ class RealtimeAPI:
         )
         action = expired_token.pending_action.action if expired_token.pending_action is not None else None
         self._log_structured_noop_event(
-            status="timeout",
+            outcome="timeout",
             reason="awaiting_decision_timeout",
             tool_name=getattr(action, "tool_name", None),
             action_id=getattr(action, "id", None),
             token_id=expired_token.id,
+            idempotency_key=getattr(getattr(expired_token, "pending_action", None), "idempotency_key", None),
         )
-        await self.send_assistant_message(
-            "No action taken.\nI didn't get a clear yes/no in time, so I cancelled that request.",
+        await self._emit_final_noop_user_text(
             websocket,
+            outcome="timeout",
+            reason="awaiting_decision_timeout",
         )
         return True
 
@@ -3238,20 +3273,22 @@ class RealtimeAPI:
                 logger.info("CONFIRMATION_TIMEOUT tool=%s cause=expiry", action.tool_name)
                 self._record_confirmation_timeout(action, cause="expiry")
                 self._log_structured_noop_event(
-                    status="timeout",
+                    outcome="timeout",
                     reason="approval_expired",
                     tool_name=action.tool_name,
                     action_id=action.id,
                     token_id=getattr(token, "id", None),
-                )
-                await self.send_assistant_message(
-                    "No action taken.\nApproval window expired. Please ask again if you still want this.",
-                    websocket,
+                    idempotency_key=pending.idempotency_key,
                 )
                 if token is not None:
                     self._close_confirmation_token(outcome="expired")
                 else:
                     self._clear_pending_action()
+                await self._emit_final_noop_user_text(
+                    websocket,
+                    outcome="timeout",
+                    reason="approval_expired",
+                )
                 self._awaiting_confirmation_completion = False
                 self.orchestration_state.transition(
                     OrchestrationPhase.IDLE,
@@ -3295,11 +3332,17 @@ class RealtimeAPI:
                     "User declined approval.",
                     websocket,
                     status="cancelled",
+                    include_assistant_message=False,
                 )
                 if token is not None:
                     self._close_confirmation_token(outcome="rejected")
                 else:
                     self._clear_pending_action()
+                await self._emit_final_noop_user_text(
+                    websocket,
+                    outcome="cancelled",
+                    reason="user_declined_approval",
+                )
                 self._awaiting_confirmation_completion = False
                 self.orchestration_state.transition(
                     OrchestrationPhase.IDLE,
@@ -3322,20 +3365,22 @@ class RealtimeAPI:
                 logger.info("CONFIRMATION_TIMEOUT tool=%s cause=retry_exhausted", action.tool_name)
                 self._record_confirmation_timeout(action, cause="retry_exhausted")
                 self._log_structured_noop_event(
-                    status="timeout",
+                    outcome="timeout",
                     reason="retry_exhausted",
                     tool_name=action.tool_name,
                     action_id=action.id,
                     token_id=getattr(token, "id", None),
-                )
-                await self.send_assistant_message(
-                    "No action taken.\nI couldn't confirm this action. Please ask again if you still want it.",
-                    websocket,
+                    idempotency_key=pending.idempotency_key,
                 )
                 if token is not None:
                     self._close_confirmation_token(outcome="retry_exhausted")
                 else:
                     self._clear_pending_action()
+                await self._emit_final_noop_user_text(
+                    websocket,
+                    outcome="timeout",
+                    reason="retry_exhausted",
+                )
                 self._awaiting_confirmation_completion = False
                 self.orchestration_state.transition(
                     OrchestrationPhase.IDLE,
@@ -4513,7 +4558,7 @@ class RealtimeAPI:
                 "suppressed": False,
             }
             self._log_utterance_envelope(event_type)
-            if self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase():
+            if self._has_active_confirmation_token():
                 self._confirmation_speech_active = True
                 self._confirmation_asr_pending = True
                 self._mark_confirmation_activity(reason="speech_started")
@@ -4534,7 +4579,7 @@ class RealtimeAPI:
                 ) * 1000.0
                 self._refresh_utterance_audio_levels()
                 self._log_utterance_envelope(event_type)
-            if self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase():
+            if self._has_active_confirmation_token():
                 self._confirmation_speech_active = False
                 self._confirmation_asr_pending = True
                 self._mark_confirmation_activity(reason="speech_stopped")
@@ -4663,11 +4708,12 @@ class RealtimeAPI:
                             call_id,
                         )
                     self._log_structured_noop_event(
-                        status="blocked_by_research_permission",
+                        outcome="blocked_by_research_permission",
                         reason="research_permission_denied",
                         tool_name=function_name,
                         action_id=str(call_id) if call_id is not None else None,
                         token_id=getattr(token, "id", None),
+                        idempotency_key=build_normalized_idempotency_key(function_name, args),
                     )
                     await self._send_noop_tool_output(
                         websocket,
@@ -4677,6 +4723,11 @@ class RealtimeAPI:
                         tool_name=function_name,
                         reason="research_permission_denied",
                         category="suppression",
+                    )
+                    await self._emit_final_noop_user_text(
+                        websocket,
+                        outcome="blocked_by_research_permission",
+                        reason="research_permission_denied",
                     )
                     self.function_call = None
                     self.function_call_args = ""
@@ -4712,11 +4763,12 @@ class RealtimeAPI:
                         previous_call_id or "none",
                     )
                 self._log_structured_noop_event(
-                    status="waiting_for_permission",
+                    outcome="waiting_for_permission",
                     reason="permission_pending",
                     tool_name=function_name,
                     action_id=str(call_id) if call_id is not None else None,
                     token_id=getattr(token, "id", None),
+                    idempotency_key=build_normalized_idempotency_key(function_name, args),
                 )
                 await self._send_noop_tool_output(
                     websocket,
@@ -4753,16 +4805,18 @@ class RealtimeAPI:
                     else:
                         self._clear_pending_action()
                     self._log_structured_noop_event(
-                        status="cancelled",
+                        outcome="cancelled",
                         reason="replaced_by_new_intent",
                         tool_name=function_name,
                         action_id=previous_action_id,
                         token_id=previous_token_id,
+                        idempotency_key=getattr(pending_action, "idempotency_key", None),
                     )
                     if not suppression_notice_sent:
-                        await self.send_assistant_message(
-                            "No action taken. I replaced the pending confirmation with your newer request.",
+                        await self._emit_final_noop_user_text(
                             websocket,
+                            outcome="cancelled",
+                            reason="replaced_by_new_intent",
                         )
                         suppression_notice_sent = True
                     if self.orchestration_state.phase == OrchestrationPhase.AWAITING_CONFIRMATION:
@@ -4788,11 +4842,12 @@ class RealtimeAPI:
                     call_id,
                 )
                 self._log_structured_noop_event(
-                    status="redundant",
+                    outcome="redundant",
                     reason="duplicate_tool_call",
                     tool_name=function_name,
                     action_id=str(call_id) if call_id is not None else None,
                     token_id=getattr(token, "id", None),
+                    idempotency_key=build_normalized_idempotency_key(function_name, args),
                 )
                 await self._send_noop_tool_output(
                     websocket,
@@ -4802,6 +4857,11 @@ class RealtimeAPI:
                     tool_name=function_name,
                     reason="duplicate_tool_call",
                     category="suppression",
+                )
+                await self._emit_final_noop_user_text(
+                    websocket,
+                    outcome="redundant",
+                    reason="duplicate_tool_call",
                 )
                 self.function_call = None
                 self.function_call_args = ""
@@ -4813,11 +4873,12 @@ class RealtimeAPI:
                     call_id,
                 )
                 self._log_structured_noop_event(
-                    status="suppressed_after_confirmation_timeout",
+                    outcome="suppressed_after_confirmation_timeout",
                     reason="confirmation_timeout_debounce",
                     tool_name=function_name,
                     action_id=str(call_id) if call_id is not None else None,
                     token_id=getattr(token, "id", None),
+                    idempotency_key=build_normalized_idempotency_key(function_name, args),
                 )
                 await self._send_noop_tool_output(
                     websocket,
@@ -4827,6 +4888,11 @@ class RealtimeAPI:
                     tool_name=function_name,
                     reason="confirmation_timeout_debounce",
                     category="suppression",
+                )
+                await self._emit_final_noop_user_text(
+                    websocket,
+                    outcome="suppressed_after_confirmation_timeout",
+                    reason="confirmation_timeout_debounce",
                 )
                 self.function_call = None
                 self.function_call_args = ""
@@ -5310,11 +5376,12 @@ class RealtimeAPI:
         pending = self._pending_action
         action = pending.action
         self._log_structured_noop_event(
-            status="awaiting_confirmation",
+            outcome="awaiting_confirmation",
             reason="pending_confirmation",
             tool_name=action.tool_name,
             action_id=action.id,
             token_id=getattr(getattr(self, "_pending_confirmation_token", None), "id", None),
+            idempotency_key=getattr(pending, "idempotency_key", None),
         )
         await self._send_noop_tool_output(
             websocket,
@@ -5410,17 +5477,20 @@ class RealtimeAPI:
         *,
         staging: dict[str, Any] | None = None,
         status: str = "denied",
+        include_assistant_message: bool = True,
     ) -> None:
         packet = self._format_action_packet(action)
         message = f"No action taken.\n{packet}\nReason: {reason}."
         self._log_structured_noop_event(
-            status=status,
+            outcome=status,
             reason=reason,
             tool_name=action.tool_name,
             action_id=action.id,
             token_id=getattr(getattr(self, "_pending_confirmation_token", None), "id", None),
+            idempotency_key=self._idempotency_key_for_action(action),
         )
-        await self.send_assistant_message(message, websocket)
+        if include_assistant_message:
+            await self.send_assistant_message(message, websocket)
         await self._send_noop_tool_output(
             websocket,
             call_id=action.id,
@@ -5826,7 +5896,7 @@ class RealtimeAPI:
             log_warning("Skipping injected response (%s): websocket unavailable.", trigger)
             return
 
-        if self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase():
+        if self._has_active_confirmation_token():
             if not self._is_user_confirmation_trigger(trigger, metadata):
                 logger.info(
                     "Suppressing duplicate non-user response request trigger=%s phase=%s pending_action=%s",
@@ -5943,7 +6013,7 @@ class RealtimeAPI:
             "stimulus": json.dumps(metadata, sort_keys=True),
             "origin": "injection",
         }
-        if self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase():
+        if self._has_active_confirmation_token():
             response_metadata["approval_flow"] = "true"
         memory_brief_note = self._consume_pending_memory_brief_note()
         response_create_event = {
@@ -5988,7 +6058,7 @@ class RealtimeAPI:
     async def _flush_pending_image_stimulus(self, reason: str) -> None:
         if not self._pending_image_stimulus:
             return
-        if self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase():
+        if self._has_active_confirmation_token():
             logger.info(
                 "Deferring pending image stimulus flush after %s: awaiting confirmation unresolved.",
                 reason,
