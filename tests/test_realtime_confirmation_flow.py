@@ -165,8 +165,9 @@ def test_parse_confirmation_decision_accepts_go_ahead_phrasing() -> None:
     assert api._parse_confirmation_decision("proceed") == "yes"
 
 
-def test_build_approval_prompt_uses_summary_reason_and_standard_options() -> None:
+def test_build_approval_prompt_has_two_sentences_with_reason_and_options() -> None:
     api = RealtimeAPI.__new__(RealtimeAPI)
+    api._governance = type("Gov", (), {"describe_tool": lambda *_args, **_kwargs: {"dry_run_supported": True}})()
     action = ActionPacket(
         id="call_1",
         tool_name="perform_research",
@@ -183,12 +184,17 @@ def test_build_approval_prompt_uses_summary_reason_and_standard_options() -> Non
         requires_confirmation=True,
     )
 
-    assert api._build_approval_prompt(action) == (
-        "Approval required for this action.\n"
-        "Action summary: tool=perform_research tier=2 cost=low confidence=0.91 requires_confirmation=True\n"
-        "Reason: Need latest weather summary for planning\n"
-        "Options: Approve / Deny / Dry-run"
+    prompt = api._build_approval_prompt(
+        action,
+        action_summary="tool=perform_research tier=2 cost=low confidence=0.91 requires_confirmation=True",
+        confirm_reason="expensive_read",
     )
+
+    assert prompt == (
+        "Action summary: tool=perform_research tier=2 cost=low confidence=0.91 requires_confirmation=True. "
+        "Reason: expensive_read; options: Approve / Deny / Dry-run."
+    )
+    assert len([sentence for sentence in prompt.split(". ") if sentence]) == 2
 
 
 def test_maybe_request_response_blocks_image_trigger_during_confirmation() -> None:
@@ -696,7 +702,7 @@ def test_request_tool_confirmation_sends_single_spoken_prompt() -> None:
     api.function_call = "perform_research"
     api.function_call_args = '{"query":"x"}'
     api._governance = type("Gov", (), {"describe_tool": lambda *args, **kwargs: {"tier": 2}})()
-    api._build_approval_prompt = lambda action: "Need approval"
+    api._build_approval_prompt = lambda action, **_kwargs: "Need approval"
 
     calls = {"assistant": 0, "response_create": 0}
 
@@ -1464,6 +1470,7 @@ def test_normalize_confirmation_decision_preserves_confirmation_required_default
     )
 
     assert normalized.status == "needs_confirmation"
+    assert normalized.action_summary == "tool=perform_research requires confirmation."
     assert normalized.needs_confirmation is True
     assert normalized.confirm_required is True
     assert normalized.confirm_reason == "expensive_read"
@@ -1500,6 +1507,7 @@ def test_normalize_confirmation_decision_keeps_explicit_confirmation_fields() ->
         {"privacy_flag": True},
     )
 
+    assert normalized.action_summary == "tool=perform_research requires confirmation."
     assert normalized.confirm_required is True
     assert normalized.confirm_reason == "autonomy_level_requires_confirmation"
     assert normalized.confirm_prompt == "Confirm execution?"
