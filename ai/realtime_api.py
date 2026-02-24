@@ -128,6 +128,7 @@ class PendingAction:
 class NormalizedConfirmationDecision:
     status: str
     reason: str
+    action_summary: str
     approved: bool
     needs_confirmation: bool
     confirm_required: bool
@@ -1648,7 +1649,11 @@ class RealtimeAPI:
         """
         del runtime_context
         decision = GovernanceLayer.coerce_decision_payload(governance_decision)
-        normalized_payload = normalized_decision_payload(decision)
+        action_summary_fallback = f"tool={tool_name} requires confirmation"
+        normalized_payload = normalized_decision_payload(
+            decision,
+            action_summary_fallback=action_summary_fallback,
+        )
         idempotency_key = str(
             normalized_payload["idempotency_key"]
             or build_normalized_idempotency_key(tool_name, args)
@@ -1656,6 +1661,7 @@ class RealtimeAPI:
         return NormalizedConfirmationDecision(
             status=str(decision.status),
             reason=str(decision.reason),
+            action_summary=str(normalized_payload["action_summary"]),
             approved=decision.approved,
             needs_confirmation=decision.needs_confirmation,
             confirm_required=bool(normalized_payload["confirm_required"]),
@@ -1720,24 +1726,24 @@ class RealtimeAPI:
         self,
         action: ActionPacket,
         *,
+        action_summary: str | None = None,
         confirm_prompt: str | None = None,
         confirm_reason: str | None = None,
     ) -> str:
-        one_line_reason = " ".join(str(action.why).split())
-        if confirm_reason:
-            one_line_reason = " ".join(str(confirm_reason).split())
+        normalized_summary = " ".join(str(action_summary or action.summary()).split())
+        if not normalized_summary.endswith("."):
+            normalized_summary = f"{normalized_summary}."
+        one_line_reason = " ".join(str(confirm_reason or action.why).split())
         tool_metadata = self._governance.describe_tool(action.tool_name)
         dry_run_supported = bool(tool_metadata.get("dry_run_supported"))
         options = "Approve / Deny / Dry-run" if dry_run_supported else "Approve / Deny"
-        prompt_lines = [
-            "Approval required for this action.",
-            f"Action summary: {action.summary()}",
-            f"Reason: {one_line_reason}",
-            f"Options: {options}",
-        ]
         if confirm_prompt:
-            prompt_lines.insert(0, str(confirm_prompt).strip())
-        return "\n".join(prompt_lines)
+            logger.info(
+                "Approval prompt structured details | tool=%s details=%s",
+                action.tool_name,
+                json.dumps({"confirm_prompt": str(confirm_prompt).strip()}, sort_keys=True),
+            )
+        return f"Action summary: {normalized_summary} Reason: {one_line_reason}; options: {options}."
 
     def _log_structured_noop_event(
         self,
@@ -5028,6 +5034,7 @@ class RealtimeAPI:
                     str(confirmation_decision.confirm_reason or confirmation_decision.reason),
                     websocket,
                     staging,
+                    action_summary=confirmation_decision.action_summary,
                     confirm_prompt=(
                         str(confirmation_decision.confirm_prompt)
                         if confirmation_decision.confirm_prompt is not None
@@ -5245,6 +5252,7 @@ class RealtimeAPI:
         websocket: Any,
         staging: dict[str, Any],
         *,
+        action_summary: str | None = None,
         confirm_prompt: str | None = None,
         confirm_reason: str | None = None,
     ) -> None:
@@ -5262,6 +5270,7 @@ class RealtimeAPI:
         self._awaiting_confirmation_completion = False
         message = self._build_approval_prompt(
             action,
+            action_summary=action_summary,
             confirm_prompt=confirm_prompt,
             confirm_reason=confirm_reason,
         )

@@ -78,6 +78,7 @@ class ActionPacket:
 class GovernanceDecision:
     status: str
     reason: str
+    action_summary: str | None = None
     confirm_required: bool = False
     confirm_reason: str | None = None
     confirm_prompt: str | None = None
@@ -129,17 +130,30 @@ def normalize_governance_reason(reason: str) -> str:
     if lowered.startswith("tool execution paused for"):
         return GovernanceReason.TOOL_EXECUTION_COOLDOWN.value
     normalized = _REASON_NORMALIZATION_MAP.get(lowered)
-    return normalized.value if normalized is not None else str(reason or "unknown")
+    if normalized is not None:
+        return normalized.value
+    stable = re.sub(r"[^a-z0-9]+", "_", lowered).strip("_")
+    return stable or "unknown"
 
 
-def normalized_decision_payload(decision: GovernanceDecision) -> dict[str, Any]:
+def normalized_decision_payload(
+    decision: GovernanceDecision,
+    *,
+    action_summary_fallback: str | None = None,
+) -> dict[str, Any]:
     confirm_reason = decision.confirm_reason
     if confirm_reason is None and decision.confirm_required:
         confirm_reason = decision.reason
     normalized_confirm_reason = (
         normalize_governance_reason(confirm_reason) if confirm_reason is not None else None
     )
+    action_summary = " ".join(
+        str(decision.action_summary or action_summary_fallback or "Action requires confirmation.").split()
+    )
+    if not action_summary.endswith("."):
+        action_summary = f"{action_summary}."
     return {
+        "action_summary": action_summary,
         "confirm_required": decision.needs_confirmation,
         "confirm_reason": normalized_confirm_reason,
         "confirm_prompt": decision.confirm_prompt,
@@ -326,6 +340,7 @@ class GovernanceLayer:
         return GovernanceDecision(
             status=decision.status,
             reason=normalize_governance_reason(decision.reason),
+            action_summary=action.summary(),
             confirm_required=confirm_required,
             confirm_reason=confirm_reason,
             confirm_prompt=confirm_prompt,
@@ -348,6 +363,11 @@ class GovernanceLayer:
         return GovernanceDecision(
             status=status,
             reason=reason,
+            action_summary=(
+                " ".join(str(getattr(decision, "action_summary", "")).split())
+                if getattr(decision, "action_summary", None) is not None
+                else None
+            ),
             confirm_required=confirm_required,
             confirm_reason=(
                 normalize_governance_reason(str(getattr(decision, "confirm_reason")))
