@@ -1252,7 +1252,7 @@ def test_handle_function_call_suppresses_research_while_research_permission_pend
         output_payload = json.loads(sent_payloads[0]["item"]["output"])
         assert output_payload["status"] == "waiting_for_permission"
         assert str(output_payload["message"]).startswith("No action taken.")
-        assert any("NO_OP_EVENT status=waiting_for_permission reason=permission_pending" in line for line in logged)
+        assert any("NO_OP_EVENT" in line and "outcome=waiting_for_permission" in line and "reason=permission_pending" in line for line in logged)
         assert budget_after == budget_before
         assert usage_after == usage_before
         assert api.function_call is None
@@ -2187,9 +2187,80 @@ def test_handle_function_call_replaces_pending_confirmation_for_new_intent_same_
     assert api._pending_confirmation_token.pending_action.action.tool_args["name"] == "B"
     assert request_confirmation_calls == [{"name": "A"}, {"name": "B"}]
     assert executed_calls == []
-    assert assistant_messages == ["No action taken. I replaced the pending confirmation with your newer request."]
-    assert any("NO_OP_EVENT status=cancelled reason=replaced_by_new_intent" in line for line in logged)
+    assert assistant_messages == ["No action taken."]
+    assert any("NO_OP_EVENT" in line and "outcome=cancelled" in line and "reason=replaced_by_new_intent" in line for line in logged)
     assert any("CONFIRMATION_TOKEN_CLOSED" in line and "outcome=replaced" in line for line in logged)
+
+
+
+def test_pending_confirmation_suppression_does_not_emit_noop_user_text_while_token_active() -> None:
+    api = _make_api_stub()
+    api._pending_action = None
+    api._pending_confirmation_token = PendingConfirmationToken(
+        id="tok_active",
+        kind="research_permission",
+        tool_name="perform_research",
+        request=ResearchRequest(prompt="status"),
+        pending_action=None,
+        created_at=0.0,
+        expiry_ts=None,
+        metadata={"approval_flow": True},
+    )
+    api.function_call = {"name": "perform_research", "call_id": "call_waiting"}
+    api.function_call_args = '{"query":"status"}'
+
+    assistant_messages: list[str] = []
+    executed_calls: list[str] = []
+
+    async def _assistant(message, *_args, **_kwargs):
+        assistant_messages.append(message)
+
+    async def _execute(*_args, **_kwargs):
+        executed_calls.append("executed")
+
+    api.send_assistant_message = _assistant
+    api._execute_action = _execute
+
+    class _SendWs:
+        async def send(self, _payload: str) -> None:
+            return None
+
+    asyncio.run(api.handle_function_call({}, _SendWs()))
+
+    assert executed_calls == []
+    assert assistant_messages == []
+
+
+def test_duplicate_suppression_emits_noop_user_text_when_no_token_active() -> None:
+    api = _make_api_stub()
+    api._pending_action = None
+    api._pending_confirmation_token = None
+    api._is_duplicate_tool_call = lambda *_args, **_kwargs: True
+    api._is_suppressed_after_confirmation_timeout = lambda *_args, **_kwargs: False
+    api.function_call = {"name": "perform_research", "call_id": "call_duplicate"}
+    api.function_call_args = '{"query":"status"}'
+
+    assistant_messages: list[str] = []
+    executed_calls: list[str] = []
+
+    async def _assistant(message, *_args, **_kwargs):
+        assistant_messages.append(message)
+
+    async def _execute(*_args, **_kwargs):
+        executed_calls.append("executed")
+
+    api.send_assistant_message = _assistant
+    api._execute_action = _execute
+
+    class _SendWs:
+        async def send(self, _payload: str) -> None:
+            return None
+
+    asyncio.run(api.handle_function_call({}, _SendWs()))
+
+    assert executed_calls == []
+    assert assistant_messages == ["No action taken."]
+
 
 def test_stale_drop_preserves_active_confirmation_prompt() -> None:
     api = _make_api_stub()
@@ -2451,11 +2522,16 @@ def test_awaiting_confirmation_timeout_clears_token_and_transitions_idle() -> No
     )()
 
     messages: list[str] = []
+    executed_calls: list[str] = []
 
     async def _assistant(message, *_args, **_kwargs):
         messages.append(message)
 
+    async def _execute(*_args, **_kwargs):
+        executed_calls.append("executed")
+
     api.send_assistant_message = _assistant
+    api._execute_action = _execute
 
     with patch("ai.realtime_api.time.monotonic", return_value=25.0):
         asyncio.run(api.handle_event({"type": "rate_limits.updated", "rate_limits": []}, _Ws()))
@@ -2463,7 +2539,8 @@ def test_awaiting_confirmation_timeout_clears_token_and_transitions_idle() -> No
     assert api._pending_confirmation_token is None
     assert api._confirmation_state == ConfirmationState.IDLE
     assert transitions == [(OrchestrationPhase.IDLE, "confirmation timeout")]
-    assert messages == ["No action taken.\nI didn't get a clear yes/no in time, so I cancelled that request."]
+    assert executed_calls == []
+    assert messages == ["No action taken."]
 
 
 def test_process_ws_messages_recovers_from_event_handler_exception_and_continues(
