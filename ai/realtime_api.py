@@ -1732,20 +1732,52 @@ class RealtimeAPI:
         confirm_prompt: str | None = None,
         confirm_reason: str | None = None,
     ) -> str:
-        normalized_summary = " ".join(str(action_summary or action.summary()).split())
-        if not normalized_summary.endswith("."):
-            normalized_summary = f"{normalized_summary}."
-        one_line_reason = " ".join(str(confirm_reason or action.why).split())
         tool_metadata = self._governance.describe_tool(action.tool_name)
         dry_run_supported = bool(tool_metadata.get("dry_run_supported"))
         options = "Approve / Deny / Dry-run" if dry_run_supported else "Approve / Deny"
+        options_suffix = f"options: {options}."
+
+        def _normalize_sentence(value: str | None) -> str:
+            normalized = " ".join(str(value or "").split()).strip()
+            if normalized.endswith("."):
+                return normalized
+            return f"{normalized}."
+
+        normalized_summary_sentence = _normalize_sentence(action_summary)
+        normalized_reason_sentence = _normalize_sentence(confirm_reason)
+
+        def _is_contract_compliant(prompt_text: str) -> bool:
+            parts = [part.strip() for part in prompt_text.split(" Reason: ", maxsplit=1)]
+            if len(parts) != 2:
+                return False
+            if not parts[0].startswith("Action summary: "):
+                return False
+            reason_clause = parts[1]
+            expected_suffix = f"; {options_suffix}"
+            if not reason_clause.endswith(expected_suffix):
+                return False
+            action_body = parts[0][len("Action summary: ") :].strip()
+            reason_body = reason_clause[: -len(expected_suffix)].strip()
+            return bool(action_body.endswith(".") and reason_body.endswith("."))
+
         if confirm_prompt:
+            prompt_override = " ".join(str(confirm_prompt).split()).strip()
+            if _is_contract_compliant(prompt_override):
+                logger.info(
+                    "Approval prompt override accepted | tool=%s details=%s",
+                    action.tool_name,
+                    json.dumps({"confirm_prompt": prompt_override}, sort_keys=True),
+                )
+                return prompt_override
             logger.info(
-                "Approval prompt structured details | tool=%s details=%s",
+                "Approval prompt override ignored due to contract violation | tool=%s details=%s",
                 action.tool_name,
-                json.dumps({"confirm_prompt": str(confirm_prompt).strip()}, sort_keys=True),
+                json.dumps({"confirm_prompt": prompt_override}, sort_keys=True),
             )
-        return f"Action summary: {normalized_summary} Reason: {one_line_reason}; options: {options}."
+        return (
+            f"Action summary: {normalized_summary_sentence} "
+            f"Reason: {normalized_reason_sentence}; {options_suffix}"
+        )
 
     def _log_structured_noop_event(
         self,

@@ -193,9 +193,103 @@ def test_build_approval_prompt_has_two_sentences_with_reason_and_options() -> No
 
     assert prompt == (
         "Action summary: tool=perform_research tier=2 cost=low confidence=0.91 requires_confirmation=True. "
-        "Reason: expensive_read; options: Approve / Deny / Dry-run."
+        "Reason: expensive_read.; options: Approve / Deny / Dry-run."
     )
     assert len([sentence for sentence in prompt.split(". ") if sentence]) == 2
+
+
+def test_build_approval_prompt_override_is_ignored_when_non_compliant() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._governance = type("Gov", (), {"describe_tool": lambda *_args, **_kwargs: {"dry_run_supported": False}})()
+    action = ActionPacket(
+        id="call_1",
+        tool_name="perform_research",
+        tool_args={"query": "weather"},
+        tier=2,
+        what="Run research",
+        why="Need latest weather summary",
+        impact="Read only",
+        rollback="None",
+        alternatives=["skip"],
+        confidence=0.91,
+        cost="low",
+        risk_flags=[],
+        requires_confirmation=True,
+    )
+
+    with patch("ai.realtime_api.logger.info") as logger_info:
+        prompt = api._build_approval_prompt(
+            action,
+            action_summary="Normalized action summary",
+            confirm_reason="Normalized reason",
+            confirm_prompt="Please approve this action now.",
+        )
+
+    assert prompt == "Action summary: Normalized action summary. Reason: Normalized reason.; options: Approve / Deny."
+    assert logger_info.call_count == 1
+    assert "override ignored due to contract violation" in logger_info.call_args[0][0]
+
+
+def test_build_approval_prompt_override_is_used_when_contract_compliant() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._governance = type("Gov", (), {"describe_tool": lambda *_args, **_kwargs: {"dry_run_supported": True}})()
+    action = ActionPacket(
+        id="call_1",
+        tool_name="perform_research",
+        tool_args={"query": "weather"},
+        tier=2,
+        what="Run research",
+        why="Need latest weather summary",
+        impact="Read only",
+        rollback="None",
+        alternatives=["skip"],
+        confidence=0.91,
+        cost="low",
+        risk_flags=[],
+        requires_confirmation=True,
+    )
+
+    prompt = api._build_approval_prompt(
+        action,
+        action_summary="Ignored",
+        confirm_reason="Ignored",
+        confirm_prompt="Action summary: Use the override sentence. Reason: Because it is contract compliant.; options: Approve / Deny / Dry-run.",
+    )
+
+    assert prompt == (
+        "Action summary: Use the override sentence. "
+        "Reason: Because it is contract compliant.; options: Approve / Deny / Dry-run."
+    )
+
+
+def test_build_approval_prompt_is_stable_for_identical_normalized_decisions() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._governance = type("Gov", (), {"describe_tool": lambda *_args, **_kwargs: {"dry_run_supported": True}})()
+    action = ActionPacket(
+        id="call_1",
+        tool_name="perform_research",
+        tool_args={"query": "weather"},
+        tier=2,
+        what="Run research",
+        why="Need latest weather summary",
+        impact="Read only",
+        rollback="None",
+        alternatives=["skip"],
+        confidence=0.91,
+        cost="low",
+        risk_flags=[],
+        requires_confirmation=True,
+    )
+
+    decision_payload = {
+        "action_summary": "tool=perform_research tier=2",
+        "confirm_reason": "high_impact",
+        "confirm_prompt": None,
+    }
+    first_prompt = api._build_approval_prompt(action, **decision_payload)
+    second_prompt = api._build_approval_prompt(action, **decision_payload)
+
+    assert first_prompt == second_prompt
 
 
 def test_maybe_request_response_blocks_image_trigger_during_confirmation() -> None:
