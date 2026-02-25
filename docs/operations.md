@@ -11,6 +11,32 @@ runs in the background once the realtime agent is initialized. It coordinates
 health probes, emits health snapshots and heartbeats, applies budget windows,
 and routes alerts onto the shared event bus for downstream injection.
 
+## Runtime Startup Dependency Classes
+
+Startup components are classified so operators can quickly distinguish fatal
+boot blockers from degradations:
+
+- **Required**
+  - `realtime_api`: If initialization fails, startup exits immediately with a
+    fatal status and non-zero process code.
+- **Optional**
+  - `motion_controller`
+  - `camera_controller`
+  - `imu_monitor`
+  - `battery_monitor`
+  - `ops_orchestrator`
+
+Optional startup failures are logged as warnings and runtime continues in a
+degraded mode.
+
+Startup log lines are standardized to include markers for automation and
+runbook parsing:
+
+- `component=<name>`
+- `dependency_class=required|optional`
+- `status=starting|ready|warning|fatal`
+- Optional `detail=<error>` when failures occur
+
 ## Operational Models (ops_models)
 
 Operational state is captured by a set of lightweight data models:

@@ -110,6 +110,32 @@ def main(argv: list[str] | None = None) -> int:
         print(format_results(results))
         return 1 if any(result.status is DiagnosticStatus.FAIL for result in results) else 0
 
+    def log_startup_status(
+        component: str,
+        dependency_class: str,
+        status: str,
+        *,
+        detail: str | None = None,
+        level: str = "info",
+    ) -> None:
+        message = (
+            "startup component=%s dependency_class=%s status=%s"
+            if detail is None
+            else "startup component=%s dependency_class=%s status=%s detail=%s"
+        )
+        args: tuple[object, ...] = (
+            (component, dependency_class, status)
+            if detail is None
+            else (component, dependency_class, status, detail)
+        )
+        if level == "warning":
+            logger.warning(message, *args)
+            return
+        if level == "exception":
+            logger.exception(message, *args)
+            return
+        logger.info(message, *args)
+
     prompts = args.prompts.split("|") if args.prompts else None
     storage_controller = StorageController.get_instance()
     semantic_state = inspect_memory_embeddings(config)
@@ -189,64 +215,104 @@ def main(argv: list[str] | None = None) -> int:
     logger.info( ":                                        :" )
     logger.info( "··········································" )
     
+    # Required dependency: runtime cannot continue without RealtimeAPI.
     try:
-        logger.info("Starting realtime API...")
+        log_startup_status("realtime_api", "required", "starting")
         realtime_api_instance = RealtimeAPI(prompts)
+        log_startup_status("realtime_api", "required", "ready")
     except Exception as exc:
-        logger.exception("Realtime API startup failed: %s", exc)
+        log_startup_status(
+            "realtime_api",
+            "required",
+            "fatal",
+            detail=str(exc),
+            level="exception",
+        )
         return 1
 
     event_bus = realtime_api_instance.get_event_bus()
 
+    # Optional dependency: motion control failure degrades capabilities only.
     motion_controller = None
     try:
-        logger.info("Starting motion controller...")
+        log_startup_status("motion_controller", "optional", "starting")
         motion_controller = MotionController.get_instance()
         motion_controller.start_control_loop()
+        log_startup_status("motion_controller", "optional", "ready")
     except Exception as exc:
-        logger.warning("Motion controller unavailable: %s", exc)
+        log_startup_status(
+            "motion_controller",
+            "optional",
+            "warning",
+            detail=str(exc),
+            level="warning",
+        )
 
+    # Optional dependency: camera/vision failure is non-fatal.
     camera_instance = None
     try:
-        logger.info("Starting camera controller...")
+        log_startup_status("camera_controller", "optional", "starting")
         with suppress_noisy_stderr(
             "camera startup",
             env_var="THEO_CAMERA_DEBUG",
             logger=logger,
         ):
             camera_instance = CameraController.get_instance()
-        logger.info("Starting vision thread...")
         camera_instance.set_realtime_instance(realtime_api_instance)
         camera_instance.start_vision_loop(vision_loop_period_ms=1000)
+        log_startup_status("camera_controller", "optional", "ready")
     except Exception as exc:
-        logger.warning("Camera controller unavailable: %s", exc)
+        log_startup_status(
+            "camera_controller",
+            "optional",
+            "warning",
+            detail=str(exc),
+            level="warning",
+        )
 
+    # Optional dependency: IMU telemetry failure is non-fatal.
     imu_monitor = None
     imu_event_handler = None
     try:
-        logger.info("Starting IMU monitor...")
+        log_startup_status("imu_monitor", "optional", "starting")
         imu_monitor = ImuMonitor.get_instance()
         imu_monitor.start_loop()
         imu_event_handler = imu_monitor.create_event_bus_handler(event_bus)
         imu_monitor.register_event_handler(imu_event_handler)
+        log_startup_status("imu_monitor", "optional", "ready")
     except Exception as exc:
-        logger.warning("IMU monitor unavailable: %s", exc)
+        log_startup_status(
+            "imu_monitor",
+            "optional",
+            "warning",
+            detail=str(exc),
+            level="warning",
+        )
 
+    # Optional dependency: battery telemetry failure is non-fatal.
     battery_monitor = None
     battery_event_handler = None
     try:
-        logger.info("Starting battery monitor...")
+        log_startup_status("battery_monitor", "optional", "starting")
         battery_monitor = BatteryMonitor.get_instance()
         battery_monitor.start_loop()
         battery_event_handler = battery_monitor.create_event_bus_handler(event_bus)
         battery_monitor.register_event_handler(battery_event_handler)
+        log_startup_status("battery_monitor", "optional", "ready")
     except Exception as exc:
-        logger.warning("Battery monitor unavailable: %s", exc)
+        log_startup_status(
+            "battery_monitor",
+            "optional",
+            "warning",
+            detail=str(exc),
+            level="warning",
+        )
 
+    # Optional dependency: ops/system-context is additive and may be skipped.
     ops_orchestrator = None
     system_context_coordinator = None
     try:
-        logger.info("Starting ops orchestrator...")
+        log_startup_status("ops_orchestrator", "optional", "starting")
         ops_orchestrator = OpsOrchestrator.get_instance()
         ops_orchestrator.set_realtime_api(realtime_api_instance)
         ops_orchestrator.set_event_bus(event_bus)
@@ -263,8 +329,15 @@ def main(argv: list[str] | None = None) -> int:
             semantic_reason=semantic_reason,
         )
         system_context_coordinator.start()
+        log_startup_status("ops_orchestrator", "optional", "ready")
     except Exception as exc:
-        logger.warning("Ops orchestrator unavailable: %s", exc)
+        log_startup_status(
+            "ops_orchestrator",
+            "optional",
+            "warning",
+            detail=str(exc),
+            level="warning",
+        )
 
     try:
         asyncio.run(realtime_api_instance.run())
