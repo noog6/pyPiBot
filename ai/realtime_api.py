@@ -111,6 +111,58 @@ ALLOWED_OUTBOUND_SCHEMES = {"https", "wss"}
 
 _EMAIL_REDACT_RE = re.compile(r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[A-Za-z]{2,}\b")
 _PHONE_REDACT_RE = re.compile(r"(?:(?<=\s)|^)(?:\+?\d[\d()\-\s]{7,}\d)(?=\s|$)")
+_PREFERENCE_RECALL_MARKERS = (
+    "prefer",
+    "preferred",
+    "preference",
+    "favorite",
+    "favourite",
+    "what do i use",
+    "which",
+)
+_PREFERENCE_RECALL_DOMAINS = {
+    "editor",
+    "ide",
+    "tool",
+    "workflow",
+    "language",
+    "theme",
+    "music",
+    "drink",
+    "food",
+}
+_PREFERENCE_QUERY_CANONICAL_BY_DOMAIN = {
+    "editor": ("preferred editor", "favorite editor", "user preference"),
+    "ide": ("preferred editor", "favorite editor", "user preference"),
+}
+_PREFERENCE_QUERY_FALLBACK_CANONICAL = ("user preference", "favorite preference", "preferred setting")
+_PREFERENCE_KEYWORD_STOPWORDS = {
+    "which",
+    "what",
+    "who",
+    "when",
+    "where",
+    "why",
+    "how",
+    "do",
+    "i",
+    "my",
+    "you",
+    "the",
+    "a",
+    "an",
+    "is",
+    "are",
+    "to",
+    "for",
+    "of",
+    "about",
+    "prefer",
+    "preferred",
+    "preference",
+    "favorite",
+    "favourite",
+}
 
 
 @dataclass
@@ -616,6 +668,8 @@ class RealtimeAPI:
         self._memory_retrieval_error_throttle_s = 60.0
         self._memory_retrieval_last_error_log_at = 0.0
         self._memory_retrieval_suppressed_errors = 0
+        self._preference_recall_cooldown_s = self._memory_retrieval_cooldown_s
+        self._preference_recall_cache: dict[str, dict[str, Any]] = {}
 
         research_cfg = config.get("research") or {}
         self._research_enabled = bool(research_cfg.get("enabled", False))
@@ -1288,6 +1342,94 @@ class RealtimeAPI:
         if self._is_battery_status_query(clean_text):
             self._last_user_battery_query_time = self._last_user_input_time
         self._prepare_turn_memory_brief(clean_text, source=source)
+
+    def _extract_preference_keywords(self, text: str) -> list[str]:
+        tokens = re.findall(r"[a-zA-Z][a-zA-Z0-9_+-]{1,}", text.lower())
+        keywords: list[str] = []
+        for token in tokens:
+            if token in _PREFERENCE_KEYWORD_STOPWORDS:
+                continue
+            if token not in keywords:
+                keywords.append(token)
+        return keywords
+
+    def _build_preference_recall_query(self, user_text: str, *, keywords: list[str]) -> str:
+        canonical = list(_PREFERENCE_QUERY_FALLBACK_CANONICAL)
+        for domain in _PREFERENCE_RECALL_DOMAINS:
+            if domain in user_text:
+                canonical = list(_PREFERENCE_QUERY_CANONICAL_BY_DOMAIN.get(domain, canonical))
+                break
+        ordered_parts: list[str] = []
+        for item in canonical + keywords:
+            normalized = item.strip().lower()
+            if normalized and normalized not in ordered_parts:
+                ordered_parts.append(normalized)
+        return ", ".join(ordered_parts)
+
+    def _is_preference_recall_intent(self, text: str) -> tuple[bool, list[str]]:
+        normalized = " ".join((text or "").lower().split())
+        if not normalized:
+            return False, []
+        has_marker = any(marker in normalized for marker in _PREFERENCE_RECALL_MARKERS)
+        has_domain = any(domain in normalized for domain in _PREFERENCE_RECALL_DOMAINS)
+        if not has_marker or not has_domain:
+            return False, []
+        return True, self._extract_preference_keywords(normalized)
+
+    async def _maybe_handle_preference_recall_intent(self, text: str, websocket: Any, *, source: str) -> bool:
+        matched, keywords = self._is_preference_recall_intent(text)
+        if not matched:
+            return False
+
+        query = self._build_preference_recall_query(text.lower(), keywords=keywords)
+        now = time.monotonic()
+        cooldown_s = max(0.0, float(getattr(self, "_preference_recall_cooldown_s", 0.0)))
+        cached = self._preference_recall_cache.get(query)
+        result_payload: dict[str, Any] | None = None
+        if (
+            cached
+            and cooldown_s > 0.0
+            and now - float(cached.get("timestamp", 0.0)) < cooldown_s
+        ):
+            result_payload = cached.get("payload") if isinstance(cached.get("payload"), dict) else None
+            logger.info(
+                "Preference recall reused cached result source=%s query=%s cooldown_s=%.2f",
+                source,
+                query,
+                cooldown_s,
+            )
+        if result_payload is None:
+            recall_fn = function_map.get("recall_memories")
+            if recall_fn is None:
+                logger.warning("Preference recall intent matched but recall_memories tool unavailable.")
+                return False
+            result_payload = await recall_fn(
+                query=query,
+                limit=3,
+                scope=str(getattr(self, "_memory_retrieval_scope", MemoryScope.USER_GLOBAL.value)),
+            )
+            self._preference_recall_cache[query] = {"timestamp": now, "payload": result_payload}
+            logger.info(
+                "Preference recall executed source=%s query=%s keywords=%s",
+                source,
+                query,
+                ",".join(keywords),
+            )
+
+        memories = result_payload.get("memories") if isinstance(result_payload, dict) else None
+        if not isinstance(memories, list) or not memories:
+            await self.send_assistant_message(
+                "I don’t have that saved yet. If you share it, I can remember it for next time.",
+                websocket,
+            )
+            return True
+
+        first_memory = memories[0] if isinstance(memories[0], dict) else {}
+        memory_text = str(first_memory.get("content", "")).strip()
+        if not memory_text:
+            memory_text = "I found a saved preference, but it does not include enough detail to quote yet."
+        await self.send_assistant_message(memory_text, websocket)
+        return True
 
     def _should_skip_turn_memory_retrieval(self, user_text: str) -> bool:
         text = user_text.strip()
@@ -5117,6 +5259,12 @@ class RealtimeAPI:
                     return
                 if await self._maybe_apply_late_confirmation_decision(transcript, websocket):
                     return
+                if await self._maybe_handle_preference_recall_intent(
+                    transcript,
+                    websocket,
+                    source="input_audio_transcription",
+                ):
+                    return
                 if await self._maybe_process_research_intent(
                     transcript,
                     websocket,
@@ -6492,6 +6640,12 @@ class RealtimeAPI:
         if await self._maybe_handle_research_budget_response(text_message, self.websocket):
             return
         if await self._maybe_apply_late_confirmation_decision(text_message, self.websocket):
+            return
+        if await self._maybe_handle_preference_recall_intent(
+            text_message,
+            self.websocket,
+            source="text_message",
+        ):
             return
         if await self._maybe_process_research_intent(
             text_message,
