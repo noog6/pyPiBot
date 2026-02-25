@@ -25,6 +25,8 @@ memory:
   auto_memory_min_confidence: 0.75
   auto_pin_min_importance: 5
   auto_pin_requires_review: true
+  recall_trace_enabled: false
+  recall_trace_level: "debug"
   auto_reflection_semantic_dedupe:
     enabled: false
     recent_approved_limit: 24

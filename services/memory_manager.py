@@ -584,6 +584,10 @@ class MemoryManager:
         self._auto_reflection_dedupe_clear_pin = bool(auto_dedupe_cfg.get("downgrade_clear_pin", True))
         self._auto_reflection_dedupe_needs_review = bool(auto_dedupe_cfg.get("downgrade_mark_needs_review", True))
         self._auto_reflection_dedupe_apply_to_manual_tool = bool(auto_dedupe_cfg.get("apply_to_manual_tool", False))
+        self._recall_trace_enabled = bool(memory_cfg.get("recall_trace_enabled", False))
+        self._recall_trace_level = str(memory_cfg.get("recall_trace_level", "debug") or "debug").strip().lower()
+        if self._recall_trace_level not in {"info", "debug"}:
+            self._recall_trace_level = "debug"
         semantic_cfg = config.get("memory_semantic") or {}
         openai_cfg = semantic_cfg.get("openai") or {}
         self._semantic_config = MemorySemanticConfig(
@@ -1631,6 +1635,22 @@ class MemoryManager:
         scope: MemoryScopeInput | None = None,
         session_id: str | None = None,
     ) -> list[MemorySummary]:
+        memories, _ = self.recall_memories_with_trace(
+            query=query,
+            limit=limit,
+            scope=scope,
+            session_id=session_id,
+        )
+        return memories
+
+    def recall_memories_with_trace(
+        self,
+        *,
+        query: str | None = None,
+        limit: int = 5,
+        scope: MemoryScopeInput | None = None,
+        session_id: str | None = None,
+    ) -> tuple[list[MemorySummary], dict[str, object] | None]:
         bounded_limit = _clamp(limit, 1, MAX_RECALL_LIMIT)
         resolved_scope = _normalize_scope(scope, fallback=self._default_scope)
         resolved_session_id = self._resolve_session_id_for_scope(
@@ -1638,14 +1658,192 @@ class MemoryManager:
             session_id=session_id,
             strict=True,
         )
-        entries = self._store.search_memories(
+        trace_enabled = bool(getattr(self, "_recall_trace_enabled", False))
+        trace_level = str(getattr(self, "_recall_trace_level", "debug") or "debug").strip().lower()
+
+        if not trace_enabled:
+            entries = self._store.search_memories(
+                query=query,
+                limit=bounded_limit,
+                user_id=self._active_user_id,
+                scope=resolved_scope,
+                session_id=resolved_session_id,
+            )
+            return [MemorySummary.from_entry(entry) for entry in entries], None
+
+        entries, trace = self._build_recall_trace(
+            query=query,
+            bounded_limit=bounded_limit,
+            resolved_scope=resolved_scope,
+            resolved_session_id=resolved_session_id,
+        )
+        self._log_memory_recall_trace(trace=trace, level=trace_level)
+        return [MemorySummary.from_entry(entry) for entry in entries], trace
+
+    def _build_recall_trace(
+        self,
+        *,
+        query: str | None,
+        bounded_limit: int,
+        resolved_scope: MemoryScope,
+        resolved_session_id: str | None,
+    ) -> tuple[list[MemoryEntry], dict[str, object]]:
+        started_at = time.monotonic()
+        query_original = query if isinstance(query, str) else ""
+        query_normalized = " ".join(query_original.strip().split())
+
+        lexical_started_at = time.monotonic()
+        selected_entries = self._store.search_memories(
             query=query,
             limit=bounded_limit,
             user_id=self._active_user_id,
             scope=resolved_scope,
             session_id=resolved_session_id,
         )
-        return [MemorySummary.from_entry(entry) for entry in entries]
+        lexical_ms = int((time.monotonic() - lexical_started_at) * 1000)
+
+        candidate_limit = min(MAX_RETRIEVAL_CANDIDATE_CAP, max(bounded_limit * RANK_CANDIDATE_MULTIPLIER, bounded_limit))
+        candidates_by_query = self._store.search_memories(
+            query=query,
+            limit=candidate_limit,
+            user_id=self._active_user_id,
+            scope=resolved_scope,
+            session_id=resolved_session_id,
+        )
+        recency_candidates = self._store.search_memories(
+            query=None,
+            limit=candidate_limit,
+            user_id=self._active_user_id,
+            scope=resolved_scope,
+            session_id=resolved_session_id,
+        )
+
+        deduped_count = 0
+        combined_candidates: list[MemoryEntry] = []
+        seen_memory_ids: set[int] = set()
+        for entry in [*candidates_by_query, *recency_candidates]:
+            if entry.memory_id in seen_memory_ids:
+                deduped_count += 1
+                continue
+            seen_memory_ids.add(entry.memory_id)
+            combined_candidates.append(entry)
+            if len(combined_candidates) >= candidate_limit:
+                break
+
+        influence_threshold = 0.0
+        selected_trace: list[dict[str, object]] = []
+        for memory in selected_entries[: min(len(selected_entries), 10)]:
+            selected_trace.append(
+                {
+                    "memory_id": memory.memory_id,
+                    "score_total": round(float(memory.importance), 4),
+                    "score_lexical": round(float(memory.importance), 4),
+                    "score_semantic": 0.0,
+                    "selected_reason": "top_ranked_lexical_within_limit",
+                }
+            )
+
+        truncated_count = max(0, len(candidates_by_query) - len(selected_entries))
+        fallback_suggestion: dict[str, str] | None = None
+        if not selected_entries:
+            fallback_suggestion = self._build_empty_recall_fallback(query_normalized=query_normalized)
+
+        total_ms = int((time.monotonic() - started_at) * 1000)
+        trace: dict[str, object] = {
+            "query_original": query_original,
+            "query_normalized": query_normalized,
+            "mode_used": "lexical",
+            "timings_ms": {
+                "total_ms": total_ms,
+                "lexical_ms": lexical_ms,
+                "semantic_ms": 0,
+                "rerank_ms": 0,
+            },
+            "candidate_counts": {
+                "lexical_candidates": len(candidates_by_query),
+                "semantic_candidates": 0,
+                "combined_candidates": len(combined_candidates),
+                "scored": len(candidates_by_query),
+                "selected": len(selected_entries),
+            },
+            "thresholds": {
+                "influence_threshold": influence_threshold,
+                "max_results": bounded_limit,
+                "truncation_limit": candidate_limit,
+                "dedupe_enabled": True,
+                "rerank_enabled": False,
+            },
+            "selected": selected_trace,
+            "excluded_summary": {
+                "below_influence_threshold": 0,
+                "deduped": deduped_count,
+                "truncated": truncated_count,
+                "embedding_not_ready": 0,
+                "filtered_by_scope": 0,
+            },
+        }
+        if fallback_suggestion is not None:
+            trace["fallback_suggestion"] = fallback_suggestion
+        return selected_entries, trace
+
+    def _build_empty_recall_fallback(self, *, query_normalized: str) -> dict[str, str]:
+        if not query_normalized:
+            return {
+                "suggested_query": "",
+                "reason": "query was empty after normalization",
+            }
+
+        lowered = query_normalized.lower()
+        if "memory" in lowered and "id" in lowered:
+            keyword_matches = re.findall(r"[A-Za-z]{3,}", query_normalized)
+            preferred = " ".join([token for token in keyword_matches if token.lower() not in {"memory", "id"}])
+            return {
+                "suggested_query": preferred or "important preference",
+                "reason": (
+                    "query looked like an ID lookup; no direct ID matching is supported; "
+                    "keyword search is more likely to return results"
+                ),
+            }
+
+        keywords = re.findall(r"[A-Za-z]{3,}", query_normalized)
+        return {
+            "suggested_query": keywords[0] if keywords else query_normalized,
+            "reason": "no lexical matches found for normalized query",
+        }
+
+    def _log_memory_recall_trace(self, *, trace: dict[str, object], level: str) -> None:
+        selected_items = trace.get("selected") if isinstance(trace.get("selected"), list) else []
+        selected_preview = []
+        for item in selected_items[:3]:
+            if not isinstance(item, dict):
+                continue
+            selected_preview.append(
+                {
+                    "memory_id": item.get("memory_id"),
+                    "score_total": item.get("score_total"),
+                }
+            )
+        excluded_summary = trace.get("excluded_summary") if isinstance(trace.get("excluded_summary"), dict) else {}
+        timings_ms = trace.get("timings_ms") if isinstance(trace.get("timings_ms"), dict) else {}
+        fallback = trace.get("fallback_suggestion")
+        fallback_str = "none"
+        if isinstance(fallback, dict):
+            fallback_str = str(fallback.get("suggested_query", "")).strip() or "none"
+
+        log_method = logger.debug
+        if level == "info":
+            log_method = logger.info
+        log_method(
+            "memory_recall_trace query=%r mode=%s selected=%s total_ms=%s excluded=%s top_selected=%s fallback=%s",
+            trace.get("query_normalized", ""),
+            trace.get("mode_used", "lexical"),
+            (trace.get("candidate_counts") or {}).get("selected", 0),
+            timings_ms.get("total_ms", 0),
+            excluded_summary,
+            selected_preview,
+            fallback_str,
+        )
+        logger.debug("memory_recall_trace_full trace=%s", trace)
 
     def retrieve_startup_digest(
         self,
