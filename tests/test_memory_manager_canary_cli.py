@@ -85,6 +85,7 @@ def test_embed_canary_cli_success_output_and_exit_code(tmp_path: Path, monkeypat
     assert "api_key_present=False" in output
     assert "canary_success=True" in output
     assert "dimension=2" in output
+    assert "embedding_emitted=True" in output
     assert "error_code=none" in output
 
 
@@ -101,6 +102,8 @@ def test_embed_canary_cli_failure_output_and_exit_code(tmp_path: Path, monkeypat
     output = capsys.readouterr().out
     assert exit_code == 1
     assert "canary_success=False" in output
+    assert "dimension=null" in output
+    assert "embedding_emitted=False" in output
     assert "error_code=auth" in output
 
 
@@ -118,6 +121,7 @@ def test_embed_canary_cli_bypass_mode_succeeds_for_offline_validation(tmp_path: 
     output = capsys.readouterr().out
     assert exit_code == 0
     assert "canary_success=True" in output
+    assert "embedding_emitted=False" in output
     assert "error_code=bypassed" in output
 
 
@@ -146,6 +150,8 @@ def test_semantic_startup_summary_reports_effective_timeout_budget(tmp_path: Pat
     assert summary["query_timeout_ms"] == 900
     assert summary["startup_canary_timeout_ms"] == 1000
     assert summary["effective_timeout_budget_ms"] == 1000
+    assert summary["canary_dimension"] is None
+    assert summary["canary_embedding_emitted"] is False
 
 class _SlowReadyProvider(EmbeddingProvider):
     def __init__(self, *, sleep_s: float) -> None:
@@ -180,6 +186,8 @@ def test_embed_canary_cli_respects_configured_timeout_budget(tmp_path: Path, mon
     output = capsys.readouterr().out
     assert exit_code == 1
     assert "error_code=timeout" in output
+    assert "dimension=null" in output
+    assert "embedding_emitted=False" in output
     assert "timeout_triggered=canary_timeout" in output
 
 
@@ -196,5 +204,6 @@ def test_embed_probe_cli_reports_diagnostics_for_success(tmp_path: Path, monkeyp
     output = capsys.readouterr().out
     assert exit_code == 0
     assert "canary_success=True" in output
+    assert "embedding_emitted=True" in output
     assert "error_class=none" in output
     assert "timeout_triggered=none" in output

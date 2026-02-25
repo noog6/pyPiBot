@@ -654,6 +654,7 @@ class MemoryManager:
             "canary_success": False,
             "latency_ms": None,
             "dimension": None,
+            "embedding_emitted": False,
             "error_code": "not_run",
         }
         self._semantic_canary_last_checked_monotonic = 0.0
@@ -755,6 +756,7 @@ class MemoryManager:
             "canary_success": False,
             "latency_ms": 0,
             "dimension": None,
+            "embedding_emitted": False,
             "error_code": "skipped",
             "timeout_triggered": "none",
             "timeout_budget_ms": 0,
@@ -783,15 +785,16 @@ class MemoryManager:
                 queue_delay_ms = getattr(result, "submit_to_worker_delay_ms", None)
                 if queue_delay_ms is not None:
                     canary_state["queue_delay_ms"] = int(queue_delay_ms)
-                dimension = int(getattr(result, "dimension", 0) or 0)
-                canary_state["dimension"] = dimension if dimension > 0 else None
-
                 status = str(getattr(result, "status", "") or "")
                 vector = getattr(result, "vector", b"")
                 if status == "ready" and bool(vector):
+                    dimension = int(getattr(result, "dimension", 0) or 0)
+                    canary_state["dimension"] = dimension if dimension > 0 else None
+                    canary_state["embedding_emitted"] = True
                     canary_state["canary_success"] = True
                     canary_state["error_code"] = "none"
                 else:
+                    canary_state["dimension"] = None
                     raw_error = str(getattr(result, "error_code", "") or status or "unknown")
                     normalized_error = self._map_canary_error_code(raw_error)
                     canary_state["error_code"] = normalized_error
@@ -1069,7 +1072,12 @@ class MemoryManager:
             "canary_success": bool(canary_state.get("canary_success", False)),
             "canary_latency_ms": int(canary_state.get("latency_ms", 0) or 0),
             "canary_elapsed_ms": int(canary_state.get("latency_ms", 0) or 0),
-            "canary_dimension": int(canary_state.get("dimension", 0) or 0),
+            "canary_dimension": (
+                int(canary_state["dimension"])
+                if canary_state.get("dimension") is not None
+                else None
+            ),
+            "canary_embedding_emitted": bool(canary_state.get("embedding_emitted", False)),
             "canary_error_code": str(canary_state.get("error_code", "not_run") or "not_run"),
             "canary_raw_error_code": str(canary_state.get("raw_error_code", "") or ""),
             "canary_timeout_triggered": str(canary_state.get("timeout_triggered", "none") or "none"),
@@ -2142,6 +2150,7 @@ def run_embedding_probe_once(
         "canary_success": False,
         "latency_ms": 0,
         "dimension": None,
+        "embedding_emitted": False,
         "error_code": "skipped",
         "error_class": "none",
         "timeout_triggered": "none",
@@ -2173,15 +2182,17 @@ def run_embedding_probe_once(
             return result
 
     result["latency_ms"] = int((time.perf_counter() - started) * 1000.0)
-    dimension = int(getattr(response, "dimension", 0) or 0)
-    result["dimension"] = dimension if dimension > 0 else 0
     status = str(getattr(response, "status", "") or "")
     vector = getattr(response, "vector", b"")
     if status == "ready" and bool(vector):
+        dimension = int(getattr(response, "dimension", 0) or 0)
+        result["dimension"] = dimension if dimension > 0 else None
+        result["embedding_emitted"] = True
         result["canary_success"] = True
         result["error_code"] = "none"
         return result
 
+    result["dimension"] = None
     raw_error = str(getattr(response, "error_code", "") or status or "unknown")
     result["error_code"] = _normalize_canary_error_code(raw_error)
     response_error_class = _sanitize_error_class_name(getattr(response, "error_class", None))
@@ -2244,9 +2255,12 @@ def run_embed_canary_cli(
         f"startup_canary_timeout_ms={startup_canary_timeout_ms}"
     )
     print(f"api_key_present={_semantic_api_key_present(config)}")
+    canary_dimension = canary.get("dimension")
+    canary_dimension_label = "null" if canary_dimension is None else str(canary_dimension)
     print(
         f"canary_success={canary['canary_success']} latency_ms={canary['latency_ms']} "
-        f"dimension={canary['dimension']} error_code={canary['error_code']} "
+        f"dimension={canary_dimension_label} embedding_emitted={canary['embedding_emitted']} "
+        f"error_code={canary['error_code']} "
         f"error_class={canary['error_class']} timeout_triggered={canary['timeout_triggered']}"
     )
     return 0 if bool(canary["canary_success"]) else 1

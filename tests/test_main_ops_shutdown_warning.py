@@ -35,8 +35,14 @@ class _FakeMemoryManager:
             "provider_readiness_reason": "provider_disabled",
             "canary_success": False,
             "canary_latency_ms": 12,
-            "canary_dimension": 0,
+            "canary_dimension": None,
+            "canary_embedding_emitted": False,
             "canary_error_code": "auth",
+            "canary_timeout_triggered": "none",
+            "canary_timeout_budget_ms": 0,
+            "canary_elapsed_ms": 12,
+            "canary_timer_start": "submit_start",
+            "canary_queue_delay_ms": 0,
             "max_queries_per_minute": 240,
             "max_writes_per_minute": 120,
         }
@@ -270,7 +276,10 @@ def test_main_logs_semantic_memory_state_at_startup(monkeypatch) -> None:
         "Semantic startup summary enabled=True provider=openai model=text-embedding-3-small rerank_enabled=True "
         "background_embedding_enabled=True provider_ready=False readiness_reason=provider_disabled "
         "provider_timeout_s=10.0 startup_canary_timeout_ms=60 query_timeout_ms=40 write_timeout_ms=75 "
-        "effective_timeout_budget_ms=40 max_queries_per_minute=240 max_writes_per_minute=120"
+        "effective_timeout_budget_ms=40 max_queries_per_minute=240 max_writes_per_minute=120 "
+        "canary_dimension=null canary_embedding_emitted=False canary_error_code=auth "
+        "canary_timeout_triggered=none canary_timeout_budget_ms=0 canary_elapsed_ms=12 "
+        "canary_timer_start=submit_start canary_queue_delay_ms=0"
     ) in infos
     assert "semantic_runtime=offline reason=provider_disabled canary_latency_ms=12" in infos
 
