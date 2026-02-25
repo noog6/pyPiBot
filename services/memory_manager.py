@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from enum import Enum
 import hashlib
+import inspect
 import logging
 import math
 import os
@@ -183,6 +184,35 @@ def _normalize_canary_error_code(raw_error_code: str | None, *, exc: Exception |
     if any(token in raw for token in ["connection", "network", "dns", "refused"]):
         return "connection"
     return "connection"
+
+
+def _invoke_embed_text(
+    provider: object,
+    *,
+    text: str,
+    timeout_s: float,
+    timeout_ms: int,
+    operation: str,
+):
+    embed_text = getattr(provider, "embed_text")
+    try:
+        signature = inspect.signature(embed_text)
+    except (TypeError, ValueError):
+        signature = None
+
+    kwargs: dict[str, object] = {}
+    if signature is not None:
+        params = signature.parameters
+        accepts_kwargs = any(param.kind is inspect.Parameter.VAR_KEYWORD for param in params.values())
+        if accepts_kwargs or "timeout_s" in params:
+            kwargs["timeout_s"] = timeout_s
+        if accepts_kwargs or "timeout_ms" in params:
+            kwargs["timeout_ms"] = timeout_ms
+        if accepts_kwargs or "operation" in params:
+            kwargs["operation"] = operation
+    if kwargs:
+        return embed_text(text, **kwargs)
+    return embed_text(text)
 
 
 class MemoryScope(str, Enum):
@@ -1113,7 +1143,7 @@ class MemoryManager:
 
         now_monotonic = time.monotonic()
         backoff_until = float(getattr(self, "_semantic_timeout_backoff_until_monotonic", 0.0))
-        if backoff_until > now_monotonic:
+        if backoff_until > now_monotonic and not suppress_canary_refresh:
             result = SimpleNamespace(
                 status="unavailable",
                 dimension=0,
@@ -1160,15 +1190,34 @@ class MemoryManager:
         timeout_s = max(0.001, timeout_ms / 1000.0)
 
         executor = self._get_embedding_executor()
-        future = executor.submit(provider.embed_text, text)
         started_monotonic = time.monotonic()
+        future = executor.submit(
+            _invoke_embed_text,
+            provider,
+            text=text,
+            timeout_s=timeout_s,
+            timeout_ms=timeout_ms,
+            operation=operation,
+        )
 
         def _attach_timing_metadata(response: object) -> None:
             elapsed_ms = int((time.monotonic() - started_monotonic) * 1000)
+            timeout_override_ms_used = int(timeout_override_ms) if timeout_override_ms is not None else None
             setattr(response, "timeout_ms_used", timeout_ms)
+            setattr(response, "timeout_override_ms", timeout_override_ms_used)
+            setattr(response, "operation", operation)
             setattr(response, "elapsed_ms", elapsed_ms)
             if operation == "query" and not suppress_canary_refresh:
                 self._query_embedding_latency_samples.add_sample(elapsed_ms)
+            logger.debug(
+                "semantic_embedding_attempt operation=%s provider=%s timeout_ms_used=%s timeout_override_ms=%s elapsed_ms=%s error_code=%s",
+                operation,
+                type(provider).__name__,
+                timeout_ms,
+                timeout_override_ms_used,
+                elapsed_ms,
+                getattr(response, "error_code", None),
+            )
 
         try:
             result = future.result(timeout=timeout_s)
@@ -1182,19 +1231,21 @@ class MemoryManager:
             return result
         except FutureTimeoutError:
             future.cancel()
-            self._shutdown_embedding_executor()
             self._semantic_timeout_count = max(0, int(getattr(self, "_semantic_timeout_count", 0))) + 1
             previous_timeout_streak = max(0, int(getattr(self, "_semantic_timeout_consecutive_count", 0)))
             timeout_streak = previous_timeout_streak + 1
             self._semantic_timeout_consecutive_count = timeout_streak
             threshold = max(1, int(getattr(self, "_semantic_timeout_backoff_threshold", 3)))
             crossed_timeout_threshold = previous_timeout_streak < threshold <= timeout_streak
+            if operation == "write":
+                self._shutdown_embedding_executor()
             if timeout_streak >= threshold:
                 window_s = max(0.1, float(getattr(self, "_semantic_timeout_backoff_window_s", 5.0)))
                 self._semantic_timeout_backoff_until_monotonic = time.monotonic() + window_s
                 self._semantic_timeout_backoff_activation_count = (
                     max(0, int(getattr(self, "_semantic_timeout_backoff_activation_count", 0))) + 1
                 )
+                self._shutdown_embedding_executor()
             if crossed_timeout_threshold and not suppress_canary_refresh:
                 self._maybe_refresh_canary(reason="runtime_timeout_streak")
             result = SimpleNamespace(

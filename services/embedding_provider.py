@@ -33,7 +33,7 @@ class EmbeddingProvider(ABC):
     """Base interface for text embedding providers."""
 
     @abstractmethod
-    def embed_text(self, text: str) -> EmbeddingResult:
+    def embed_text(self, text: str, *, timeout_s: float | None = None) -> EmbeddingResult:
         """Embed a single text input."""
 
     @abstractmethod
@@ -57,7 +57,7 @@ class NoopEmbeddingProvider(EmbeddingProvider):
         self._error_code = error_code
         self._error_message = error_message
 
-    def embed_text(self, text: str) -> EmbeddingResult:
+    def embed_text(self, text: str, *, timeout_s: float | None = None) -> EmbeddingResult:
         return EmbeddingResult(
             vector=b"",
             dimension=0,
@@ -90,10 +90,11 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         self._timeout_s = max(1.0, float(timeout_s))
         self._enabled = bool(enabled)
 
-    def embed_text(self, text: str) -> EmbeddingResult:
-        return self.embed_batch([text])[0]
+    def embed_text(self, text: str, *, timeout_s: float | None = None) -> EmbeddingResult:
+        request_timeout_s = self._timeout_s if timeout_s is None else max(0.001, float(timeout_s))
+        return self.embed_batch([text], timeout_s=request_timeout_s)[0]
 
-    def embed_batch(self, texts: list[str]) -> list[EmbeddingResult]:
+    def embed_batch(self, texts: list[str], *, timeout_s: float | None = None) -> list[EmbeddingResult]:
         if not texts:
             return []
         if not self._enabled:
@@ -101,6 +102,7 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         if not self._api_key:
             return [self._failure_result(code="missing_api_key", message="OPENAI_API_KEY is not set.") for _ in texts]
 
+        request_timeout_s = self._timeout_s if timeout_s is None else max(0.001, float(timeout_s))
         try:
             payload = json.dumps(
                 {
@@ -118,7 +120,7 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
                     "Content-Type": "application/json",
                 },
             )
-            with request.urlopen(req, timeout=self._timeout_s) as response:  # noqa: S310
+            with request.urlopen(req, timeout=request_timeout_s) as response:  # noqa: S310
                 raw = response.read().decode("utf-8")
             parsed = json.loads(raw)
             vectors = parsed.get("data") or []

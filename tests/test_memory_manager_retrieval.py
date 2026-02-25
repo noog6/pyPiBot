@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import pytest
 import struct
 import time
 from types import SimpleNamespace
@@ -533,6 +534,7 @@ def test_retrieve_for_turn_semantic_reranks_within_lexical_pool(tmp_path) -> Non
         vector=_encode_vector([1.0, 0.0]),
         vector_norm=1.0,
     )
+    manager._semantic_canary_bypass = False
 
     class _ReadyProvider:
         def embed_text(self, text: str):
@@ -657,6 +659,7 @@ def test_retrieve_for_turn_rerank_influence_min_cosine_gate(tmp_path) -> None:
         vector=_encode_vector([0.8, 0.0]),
         vector_norm=0.8,
     )
+    manager._semantic_canary_bypass = False
 
     class _ReadyProvider:
         def embed_text(self, text: str):
@@ -1047,6 +1050,7 @@ def test_retrieve_for_turn_semantic_enabled_applies_hybrid_reranking(tmp_path) -
         vector=_encode_vector([1.0, 0.0]),
         vector_norm=1.0,
     )
+    manager._semantic_canary_bypass = False
 
     class _ReadyProvider:
         def embed_text(self, text: str):
@@ -1201,6 +1205,7 @@ def test_retrieve_for_turn_semantic_query_rate_limit_respected(tmp_path) -> None
         user_id="default",
         timestamp=now_ms - 1000,
     )
+    manager._semantic_canary_bypass = False
 
     class _ReadyProvider:
         def embed_text(self, text: str):
@@ -1496,6 +1501,7 @@ def test_embed_text_query_timeout_floor_logs_warning_once(tmp_path, caplog) -> N
         max_writes_per_minute=120,
         max_queries_per_minute=240,
     )
+    manager._semantic_canary_bypass = False
 
     class _ReadyProvider:
         def embed_text(self, text: str):
@@ -1549,6 +1555,96 @@ def test_embed_text_timeout_resets_executor_for_next_call(tmp_path) -> None:
     assert followup_result.status == "ready"
 
 
+def test_query_timeout_passes_provider_timeout_and_canary_can_use_longer_timeout(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._semantic_config = SimpleNamespace(
+        enabled=True,
+        rerank_enabled=False,
+        max_candidates_for_semantic=8,
+        min_similarity=0.0,
+        rerank_influence_min_cosine=0.0,
+        dedupe_strong_match_cosine=0.9,
+        background_embedding_enabled=False,
+        provider="openai",
+        write_timeout_ms=75,
+        query_timeout_ms=2000,
+        startup_canary_timeout_ms=5000,
+        max_writes_per_minute=120,
+        max_queries_per_minute=240,
+    )
+    manager._semantic_timeout_backoff_threshold = 1
+    manager._semantic_timeout_backoff_window_s = 5.0
+    manager._semantic_canary_bypass = False
+
+    class _SleepyProvider:
+        def __init__(self) -> None:
+            self.timeout_s_calls: list[float] = []
+
+        def embed_text(self, text: str, *, timeout_s: float | None = None):
+            self.timeout_s_calls.append(float(timeout_s or 0.0))
+            time.sleep(2.5)
+            return SimpleNamespace(status="ready", dimension=2, vector=_encode_vector([1.0, 0.0]), vector_norm=1.0)
+
+    provider = _SleepyProvider()
+    manager._embedding_provider = provider
+
+    query = manager._embed_text_with_semantic_policy(text="query", operation="query")
+    canary = manager._run_embedding_canary()
+
+    assert query.error_code == "timeout"
+    assert canary["canary_success"] is True
+    assert canary["error_code"] == "none"
+    assert len(provider.timeout_s_calls) >= 2
+    assert provider.timeout_s_calls[0] == pytest.approx(2.0, abs=0.2)
+    assert provider.timeout_s_calls[1] == pytest.approx(5.0, abs=0.2)
+
+
+def test_canary_path_bypasses_timeout_backoff(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._semantic_config = SimpleNamespace(
+        enabled=True,
+        rerank_enabled=False,
+        max_candidates_for_semantic=8,
+        min_similarity=0.0,
+        rerank_influence_min_cosine=0.0,
+        dedupe_strong_match_cosine=0.9,
+        background_embedding_enabled=False,
+        provider="openai",
+        write_timeout_ms=75,
+        query_timeout_ms=2000,
+        startup_canary_timeout_ms=5000,
+        max_writes_per_minute=120,
+        max_queries_per_minute=240,
+    )
+    manager._semantic_canary_bypass = False
+
+    class _ReadyProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def embed_text(self, text: str, *, timeout_s: float | None = None):
+            self.calls += 1
+            return SimpleNamespace(status="ready", dimension=2, vector=_encode_vector([1.0, 0.0]), vector_norm=1.0)
+
+    provider = _ReadyProvider()
+    manager._embedding_provider = provider
+    manager._semantic_timeout_backoff_until_monotonic = time.monotonic() + 1.0
+
+    blocked = manager._embed_text_with_semantic_policy(text="query", operation="query")
+    bypassed = manager._embed_text_with_semantic_policy(
+        text="canary",
+        operation="query",
+        suppress_canary_refresh=True,
+        timeout_override_ms=5000,
+    )
+
+    assert blocked.error_code == "timeout_backoff"
+    assert bypassed.status == "ready"
+    assert provider.calls == 1
+
+
 def test_find_semantic_duplicate_respects_write_rate_limit(tmp_path) -> None:
     store = MemoryStore(db_path=tmp_path / "memories.db")
     manager = _make_memory_manager(store)
@@ -1583,6 +1679,7 @@ def test_find_semantic_duplicate_respects_write_rate_limit(tmp_path) -> None:
         vector=_encode_vector([1.0, 0.0]),
         vector_norm=1.0,
     )
+    manager._semantic_canary_bypass = False
 
     class _ReadyProvider:
         def __init__(self) -> None:
