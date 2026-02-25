@@ -362,6 +362,17 @@ def main(argv: list[str] | None = None) -> int:
     runtime_exit_code = 0
     try:
         asyncio.run(realtime_api_instance.run())
+        get_session_health = getattr(realtime_api_instance, "get_session_health", None)
+        if callable(get_session_health):
+            session_health = get_session_health()
+            session_failures = int(session_health.get("failures", 0) or 0)
+            if session_failures > 0:
+                runtime_exit_code = 1
+                logger.error(
+                    "Runtime session failed failures=%s last_failure_reason=%s",
+                    session_failures,
+                    session_health.get("last_failure_reason", ""),
+                )
     except KeyboardInterrupt:
         logger.info("Program terminated by user")
     except Exception as exc:
