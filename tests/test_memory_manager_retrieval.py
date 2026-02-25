@@ -2116,3 +2116,80 @@ def test_retrieval_health_metrics_include_query_and_canary_latency_windows(tmp_p
     assert metrics["canary_refresh_latency_bucket_le_100ms"] == 1
     assert metrics["canary_refresh_latency_bucket_le_250ms"] == 1
     assert metrics["canary_refresh_latency_bucket_le_1000ms"] == 1
+
+
+def test_maybe_refresh_canary_repeated_failures_do_not_emit_duplicate_transition_logs(tmp_path, caplog) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._semantic_config.enabled = True
+    manager._semantic_config.rerank_enabled = True
+    manager._semantic_config.provider = "openai"
+    manager._semantic_provider_enabled = {"openai": True}
+    manager._semantic_canary_bypass = False
+    manager._embedding_provider = SimpleNamespace(embed_text=lambda text: None)
+    manager._semantic_canary_last_checked_monotonic = time.monotonic() - 600.0
+    manager._semantic_canary_last = {
+        "canary_success": False,
+        "latency_ms": 10,
+        "dimension": None,
+        "error_code": "timeout",
+    }
+    manager._semantic_readiness_reason_last = "canary_timeout"
+
+    def _fake_run_embedding_canary() -> dict[str, bool | int | float | str | None]:
+        state = {
+            "canary_success": False,
+            "latency_ms": 12,
+            "dimension": None,
+            "error_code": "timeout",
+        }
+        manager._semantic_canary_last = state
+        manager._semantic_canary_last_checked_monotonic = time.monotonic()
+        return state
+
+    manager._run_embedding_canary = _fake_run_embedding_canary
+
+    caplog.set_level(logging.INFO)
+    manager._maybe_refresh_canary(reason="periodic")
+    manager._semantic_canary_last_checked_monotonic = time.monotonic() - 600.0
+    manager._maybe_refresh_canary(reason="periodic")
+
+    readiness_logs = [
+        record.getMessage() for record in caplog.records if "semantic_readiness_transition" in record.getMessage()
+    ]
+    assert readiness_logs == []
+
+
+def test_semantic_runtime_health_ready_state_stays_sticky_after_successful_transition(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._semantic_config.enabled = True
+    manager._semantic_config.rerank_enabled = True
+    manager._semantic_config.provider = "openai"
+    manager._semantic_provider_enabled = {"openai": True}
+    manager._semantic_canary_bypass = False
+    manager._embedding_provider = SimpleNamespace(embed_text=lambda text: None)
+    manager._semantic_canary_last = {
+        "canary_success": False,
+        "latency_ms": 20,
+        "dimension": None,
+        "error_code": "timeout",
+    }
+    manager._semantic_provider_ready_last = False
+
+    offline = manager.get_semantic_runtime_health()
+    assert offline["ready"] is False
+
+    manager._semantic_canary_last = {
+        "canary_success": True,
+        "latency_ms": 8,
+        "dimension": 2,
+        "error_code": "none",
+    }
+    manager._semantic_provider_ready_last = True
+
+    ready_once = manager.get_semantic_runtime_health()
+    ready_twice = manager.get_semantic_runtime_health()
+    assert ready_once["ready"] is True
+    assert ready_twice["ready"] is True
+    assert ready_twice["readiness_reason"] == "provider_ready"

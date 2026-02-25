@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 
 from config.controller import ConfigController
 from services.embedding_provider import EmbeddingProvider, EmbeddingResult
@@ -144,4 +145,56 @@ def test_semantic_startup_summary_reports_effective_timeout_budget(tmp_path: Pat
     assert summary["provider_timeout_s"] == 1.2
     assert summary["query_timeout_ms"] == 900
     assert summary["startup_canary_timeout_ms"] == 1000
-    assert summary["effective_timeout_budget_ms"] == 900
+    assert summary["effective_timeout_budget_ms"] == 1000
+
+class _SlowReadyProvider(EmbeddingProvider):
+    def __init__(self, *, sleep_s: float) -> None:
+        self._sleep_s = sleep_s
+
+    def embed_text(self, text: str) -> EmbeddingResult:
+        time.sleep(self._sleep_s)
+        return EmbeddingResult(
+            vector=b"\x00\x00\x80?\x00\x00\x80?",
+            dimension=2,
+            model="stub-slow",
+            model_version="v1",
+            vector_norm=1.0,
+            provider="openai",
+            status="ready",
+        )
+
+    def embed_batch(self, texts: list[str]) -> list[EmbeddingResult]:
+        return [self.embed_text(text) for text in texts]
+
+
+def test_embed_canary_cli_respects_configured_timeout_budget(tmp_path: Path, monkeypatch, capsys) -> None:
+    _write_config(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    _reset_singletons()
+
+    exit_code = run_embed_canary_cli(
+        ["--embed-canary"],
+        provider_factory=lambda _config: _SlowReadyProvider(sleep_s=0.9),
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 1
+    assert "error_code=timeout" in output
+    assert "timeout_triggered=canary_timeout" in output
+
+
+def test_embed_probe_cli_reports_diagnostics_for_success(tmp_path: Path, monkeypatch, capsys) -> None:
+    _write_config(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    _reset_singletons()
+
+    exit_code = run_embed_canary_cli(
+        ["--embed-probe"],
+        provider_factory=lambda _config: _ReadyProvider(),
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "canary_success=True" in output
+    assert "error_class=none" in output
+    assert "timeout_triggered=none" in output

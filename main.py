@@ -227,11 +227,10 @@ def main(argv: list[str] | None = None) -> int:
         semantic_startup_summary["max_writes_per_minute"],
     )
     logger.info(
-        "embedding_canary success=%s latency_ms=%s dimension=%s error_code=%s",
-        semantic_startup_summary["canary_success"],
+        "semantic_runtime=%s reason=%s canary_latency_ms=%s",
+        "ready" if semantic_startup_summary["provider_ready"] else "offline",
+        semantic_startup_summary["provider_readiness_reason"],
         semantic_startup_summary["canary_latency_ms"],
-        semantic_startup_summary["canary_dimension"],
-        semantic_startup_summary["canary_error_code"],
     )
     memory_manager.set_active_session_id(runtime_session_id)
     logger.info("Assigned runtime memory session_id=%s", runtime_session_id)
