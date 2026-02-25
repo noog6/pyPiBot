@@ -45,6 +45,111 @@ thread itself is started by `RealtimeAPI.run()` at loop startup.【F:main.py†L
 
 ## System Map (Visual)
 
+### Runtime/Lifecycle Ownership
+
+```mermaid
+flowchart TD
+    MAIN[main.py] --> CFG[ConfigController]
+    MAIN --> STOR[StorageController]
+    MAIN --> MM[MemoryManager]
+    MM --> EW[MemoryEmbeddingWorker.start]
+
+    MAIN --> RT[RealtimeAPI (required)]
+    RT --> EB[EventBus]
+    RT --> EI[EventInjector.start in run()]
+    RT --> WS[WebSocket loops]
+    RT --> TOOLS[Tool dispatch + Governance]
+
+    MAIN --> MOT[MotionController.start_control_loop]
+    MAIN --> CAM[CameraController.start_vision_loop]
+    MAIN --> IMU[ImuMonitor.start_loop]
+    MAIN --> BAT[BatteryMonitor.start_loop]
+    MAIN --> OPS[OpsOrchestrator.start_loop]
+    MAIN --> SYSCTX[SystemContextCoordinator.start]
+
+    IMU --> EB
+    BAT --> EB
+    OPS --> EB
+    EI --> RT
+
+    MAIN --> SHUT[Shutdown sequence]
+    SHUT --> SYSCTX_STOP[system_context_coordinator.stop]
+    SHUT --> EW_STOP[embedding_worker.stop]
+    SHUT --> OPS_STOP[ops_orchestrator.stop_loop]
+    SHUT --> CAM_STOP[camera.stop_vision_loop]
+    SHUT --> MOT_STOP[motion.stop_control_loop]
+    SHUT --> IMU_STOP[imu.stop_loop + unregister]
+    SHUT --> BAT_STOP[battery.stop_loop + unregister]
+```
+
+### Layered Dependency Map
+
+```mermaid
+flowchart LR
+    subgraph AI
+      RT[ai/realtime_api.py]
+      GOV[ai/governance.py]
+      TOOLS[ai/tools.py]
+      EBUS[ai/event_bus.py]
+    end
+
+    subgraph Services
+      OPS[services/ops_orchestrator.py]
+      IMU[services/imu_monitor.py]
+      BAT[services/battery_monitor.py]
+      MM[services/memory_manager.py]
+      RS[services/research/*]
+    end
+
+    subgraph Storage
+      SC[storage/controller.py]
+      FAC[storage/factories.py]
+      RB[storage/research_budget.py]
+      MEM[storage/memories.py]
+      UP[storage/user_profiles.py]
+    end
+
+    subgraph HardwareMotion
+      HW[hardware/*]
+      MOT[motion/*]
+      INT[interaction/*]
+    end
+
+    RT --> GOV
+    RT --> TOOLS
+    RT --> INT
+    RT --> MOT
+    RT --> SC
+    RT --> RS
+
+    TOOLS --> Services
+    TOOLS --> SC
+
+    MM --> FAC
+    FAC --> MEM
+    FAC --> UP
+    FAC --> RB
+    RB --> SC
+
+    OPS --> MM
+    OPS --> MOT
+    OPS --> Services
+
+    IMU --> EBUS
+    BAT --> EBUS
+    OPS --> EBUS
+
+    IMU --> HW
+    BAT --> HW
+    MOT --> HW
+
+    %% Cross-boundary edges
+    Services -.imports ai event bus.-> EBUS
+    MOT -.imports storage controller.-> SC
+```
+
+### Detailed Runtime Flow
+
 ```mermaid
 flowchart LR
     subgraph Runtime["main.py runtime"]
