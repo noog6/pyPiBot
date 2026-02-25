@@ -2154,6 +2154,9 @@ def run_embedding_probe_once(
         "error_code": "skipped",
         "error_class": "none",
         "timeout_triggered": "none",
+        "timeout_budget_ms": max(0, int(timeout_ms)),
+        "observed_elapsed_ms_at_timeout": None,
+        "timer_start": "submit_start",
     }
     if not enabled:
         result["error_code"] = "disabled"
@@ -2170,13 +2173,20 @@ def run_embedding_probe_once(
             response = future.result(timeout=max(0.001, timeout_ms / 1000.0))
         except FutureTimeoutError:
             future.cancel()
-            result["latency_ms"] = int((time.perf_counter() - started) * 1000.0)
-            result["error_code"] = "timeout"
+            observed_elapsed_ms_at_timeout = int((time.perf_counter() - started) * 1000.0)
+            result["latency_ms"] = observed_elapsed_ms_at_timeout
+            result["dimension"] = None
+            result["embedding_emitted"] = False
+            result["error_code"] = "timeout_wrapper"
             result["error_class"] = "FutureTimeoutError"
-            result["timeout_triggered"] = "canary_timeout"
+            result["timeout_triggered"] = "wrapper"
+            result["observed_elapsed_ms_at_timeout"] = observed_elapsed_ms_at_timeout
+            result["timer_start"] = "future_wait_start"
             return result
         except Exception as exc:  # noqa: BLE001
             result["latency_ms"] = int((time.perf_counter() - started) * 1000.0)
+            result["dimension"] = None
+            result["embedding_emitted"] = False
             result["error_code"] = _normalize_canary_error_code(None, exc=exc)
             result["error_class"] = _sanitize_error_class_name(exc.__class__.__name__)
             return result
@@ -2193,12 +2203,13 @@ def run_embedding_probe_once(
         return result
 
     result["dimension"] = None
+    result["embedding_emitted"] = False
     raw_error = str(getattr(response, "error_code", "") or status or "unknown")
     result["error_code"] = _normalize_canary_error_code(raw_error)
     response_error_class = _sanitize_error_class_name(getattr(response, "error_class", None))
     result["error_class"] = response_error_class or "none"
-    if result["error_code"] == "timeout":
-        result["timeout_triggered"] = "provider_timeout"
+    if result["error_code"] == "timeout_provider":
+        result["timeout_triggered"] = "provider"
     return result
 
 
@@ -2261,7 +2272,10 @@ def run_embed_canary_cli(
         f"canary_success={canary['canary_success']} latency_ms={canary['latency_ms']} "
         f"dimension={canary_dimension_label} embedding_emitted={canary['embedding_emitted']} "
         f"error_code={canary['error_code']} "
-        f"error_class={canary['error_class']} timeout_triggered={canary['timeout_triggered']}"
+        f"error_class={canary['error_class']} timeout_triggered={canary['timeout_triggered']} "
+        f"timeout_budget_ms={canary['timeout_budget_ms']} "
+        f"observed_elapsed_ms_at_timeout={canary['observed_elapsed_ms_at_timeout']} "
+        f"timer_start={canary['timer_start']}"
     )
     return 0 if bool(canary["canary_success"]) else 1
 

@@ -185,10 +185,13 @@ def test_embed_canary_cli_respects_configured_timeout_budget(tmp_path: Path, mon
 
     output = capsys.readouterr().out
     assert exit_code == 1
-    assert "error_code=timeout" in output
+    assert "error_code=timeout_wrapper" in output
     assert "dimension=null" in output
     assert "embedding_emitted=False" in output
-    assert "timeout_triggered=canary_timeout" in output
+    assert "timeout_triggered=wrapper" in output
+    assert "timeout_budget_ms=800" in output
+    assert "observed_elapsed_ms_at_timeout=" in output
+    assert "timer_start=future_wait_start" in output
 
 
 def test_embed_probe_cli_reports_diagnostics_for_success(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -207,3 +210,6 @@ def test_embed_probe_cli_reports_diagnostics_for_success(tmp_path: Path, monkeyp
     assert "embedding_emitted=True" in output
     assert "error_class=none" in output
     assert "timeout_triggered=none" in output
+    assert "timeout_budget_ms=800" in output
+    assert "observed_elapsed_ms_at_timeout=None" in output
+    assert "timer_start=submit_start" in output
