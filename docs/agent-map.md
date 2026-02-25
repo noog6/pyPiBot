@@ -36,10 +36,12 @@ The entrypoint in `main.py` builds and launches the following components:
   snapshots/alerts onto the event bus.【F:services/ops_orchestrator.py†L1-L431】【F:services/health_probes.py†L1-L199】
 - **Event injector thread**: Drains the shared event bus, applies cooldown/TTL
   checks, and injects events into the realtime session when the websocket is
-  ready.【F:ai/event_injector.py†L1-L79】【F:ai/realtime_api.py†L193-L646】
+  ready. The injector is instantiated during `RealtimeAPI` construction and is
+  started when `RealtimeAPI.run()` begins.【F:ai/event_injector.py†L1-L79】【F:ai/realtime_api.py†L534-L4512】
 
-These are all started in `main.py` after the realtime API is initialized and
-before the async realtime loop runs.【F:main.py†L110-L246】
+`main.py` initializes `RealtimeAPI` and starts the sensor/service background
+threads before entering the async realtime loop, while the `EventInjector`
+thread itself is started by `RealtimeAPI.run()` at loop startup.【F:main.py†L110-L270】【F:ai/realtime_api.py†L534-L4512】
 
 ## System Map (Visual)
 
