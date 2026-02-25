@@ -92,7 +92,7 @@ memory_semantic:
   query_timeout_ms: 2000
   # Startup probe timeout for the embedding canary; this validates provider/network
   # path readiness and should tolerate cold-start jitter independent of write latency.
-  startup_canary_timeout_ms: 1500
+  startup_canary_timeout_ms: 5000
   # Test/offline bypass for canary gating (can also be overridden by PYPIBOT_SEMANTIC_CANARY_BYPASS).
   startup_canary_bypass: false
   max_writes_per_minute: 120

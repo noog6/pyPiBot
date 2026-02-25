@@ -34,7 +34,7 @@ def test_config_controller_sets_memory_semantic_defaults(tmp_path: Path, monkeyp
     assert semantic_cfg["max_embedding_retries"] == 8
     assert semantic_cfg["write_timeout_ms"] == 75
     assert semantic_cfg["query_timeout_ms"] == 2000
-    assert semantic_cfg["startup_canary_timeout_ms"] == 1500
+    assert semantic_cfg["startup_canary_timeout_ms"] == 5000
     assert semantic_cfg["startup_canary_bypass"] is False
     assert semantic_cfg["max_writes_per_minute"] == 120
     assert semantic_cfg["max_queries_per_minute"] == 240

@@ -272,7 +272,7 @@ def test_main_logs_semantic_memory_state_at_startup(monkeypatch) -> None:
         "provider_timeout_s=10.0 startup_canary_timeout_ms=60 query_timeout_ms=40 write_timeout_ms=75 "
         "effective_timeout_budget_ms=40 max_queries_per_minute=240 max_writes_per_minute=120"
     ) in infos
-    assert "embedding_canary success=False latency_ms=12 dimension=0 error_code=auth" in infos
+    assert "semantic_runtime=offline reason=openai_provider_disabled canary_latency_ms=12" in infos
 
 
 def test_main_realtime_api_init_failure_is_fatal_with_required_marker(monkeypatch) -> None:

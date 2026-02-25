@@ -864,7 +864,6 @@ class MemoryManager:
         canary_state = getattr(self, "_semantic_canary_last", {}) or {}
         provider_timeout_ms = int(max(1.0, float(getattr(self._semantic_config, "provider_timeout_s", 0.0)) * 1000.0))
         effective_timeout_budget_ms = min(
-            int(self._semantic_config.query_timeout_ms),
             int(getattr(self._semantic_config, "startup_canary_timeout_ms", 0)),
             max(1, provider_timeout_ms - 1),
         )
@@ -1837,18 +1836,20 @@ def _semantic_canary_bypass_enabled(config: dict[str, object]) -> bool:
     )
 
 
-def _run_embed_canary_once(
+def run_embedding_probe_once(
     *,
     provider: EmbeddingProvider,
     enabled: bool,
     bypass: bool,
-    startup_canary_timeout_ms: int,
+    timeout_ms: int,
 ) -> dict[str, bool | int | None | str]:
     result: dict[str, bool | int | None | str] = {
         "canary_success": False,
         "latency_ms": 0,
         "dimension": None,
         "error_code": "skipped",
+        "error_class": "none",
+        "timeout_triggered": "none",
     }
     if not enabled:
         result["error_code"] = "disabled"
@@ -1862,15 +1863,18 @@ def _run_embed_canary_once(
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(provider.embed_text, "ping")
         try:
-            response = future.result(timeout=max(0.001, startup_canary_timeout_ms / 1000.0))
+            response = future.result(timeout=max(0.001, timeout_ms / 1000.0))
         except FutureTimeoutError:
             future.cancel()
             result["latency_ms"] = int((time.perf_counter() - started) * 1000.0)
             result["error_code"] = "timeout"
+            result["error_class"] = "FutureTimeoutError"
+            result["timeout_triggered"] = "canary_timeout"
             return result
         except Exception as exc:  # noqa: BLE001
             result["latency_ms"] = int((time.perf_counter() - started) * 1000.0)
             result["error_code"] = _normalize_canary_error_code(None, exc=exc)
+            result["error_class"] = _sanitize_error_class_name(exc.__class__.__name__)
             return result
 
     result["latency_ms"] = int((time.perf_counter() - started) * 1000.0)
@@ -1885,7 +1889,26 @@ def _run_embed_canary_once(
 
     raw_error = str(getattr(response, "error_code", "") or status or "unknown")
     result["error_code"] = _normalize_canary_error_code(raw_error)
+    response_error_class = _sanitize_error_class_name(getattr(response, "error_class", None))
+    result["error_class"] = response_error_class or "none"
+    if result["error_code"] == "timeout":
+        result["timeout_triggered"] = "provider_timeout"
     return result
+
+
+def _run_embed_canary_once(
+    *,
+    provider: EmbeddingProvider,
+    enabled: bool,
+    bypass: bool,
+    startup_canary_timeout_ms: int,
+) -> dict[str, bool | int | None | str]:
+    return run_embedding_probe_once(
+        provider=provider,
+        enabled=enabled,
+        bypass=bypass,
+        timeout_ms=startup_canary_timeout_ms,
+    )
 
 
 def run_embed_canary_cli(
@@ -1895,8 +1918,9 @@ def run_embed_canary_cli(
 ) -> int:
     parser = argparse.ArgumentParser(description="Run memory semantic startup canary diagnostics.")
     parser.add_argument("--embed-canary", action="store_true", help="Run semantic embedding startup canary checks.")
+    parser.add_argument("--embed-probe", action="store_true", help="Run one semantic embedding diagnostic probe.")
     args = parser.parse_args(argv)
-    if not args.embed_canary:
+    if not args.embed_canary and not args.embed_probe:
         parser.print_help()
         return 2
 
@@ -1927,7 +1951,8 @@ def run_embed_canary_cli(
     print(f"api_key_present={_semantic_api_key_present(config)}")
     print(
         f"canary_success={canary['canary_success']} latency_ms={canary['latency_ms']} "
-        f"dimension={canary['dimension']} error_code={canary['error_code']}"
+        f"dimension={canary['dimension']} error_code={canary['error_code']} "
+        f"error_class={canary['error_class']} timeout_triggered={canary['timeout_triggered']}"
     )
     return 0 if bool(canary["canary_success"]) else 1
 
