@@ -131,3 +131,51 @@ def test_research_budget_manager_initializes_via_helper_and_round_trips_state(mo
         if controller is not None:
             controller.close()
         StorageController._instance = None
+
+
+def test_memory_embedding_worker_initializes_via_helper(monkeypatch, tmp_path) -> None:
+    import config.controller as config_controller
+
+    from services.embedding_provider import EmbeddingResult
+    from services.memory_embedding_worker import MemoryEmbeddingWorker
+    from storage.memories import MemoryStore
+
+    var_dir = tmp_path / "var"
+    log_dir = tmp_path / "log"
+    monkeypatch.setattr(
+        config_controller.ConfigController,
+        "get_instance",
+        lambda: _FakeConfigController(
+            {
+                "var_dir": str(var_dir),
+                "log_dir": str(log_dir),
+                "memory_semantic": {"max_embedding_retries": 2},
+            }
+        ),
+    )
+
+    created = {"called": False}
+
+    def _factory() -> MemoryStore:
+        created["called"] = True
+        return MemoryStore(db_path=var_dir / "memories.db")
+
+    class _Provider:
+        def embed_batch(self, texts):  # noqa: ANN001
+            return [
+                EmbeddingResult(
+                    vector=(1.0).hex().encode("utf-8"),
+                    dimension=1,
+                    model="test-model",
+                    model_version="v1",
+                    vector_norm=1.0,
+                    provider="test",
+                    status="ready",
+                )
+                for _ in texts
+            ]
+
+    monkeypatch.setattr("services.memory_embedding_worker.create_memory_store", _factory)
+
+    worker = MemoryEmbeddingWorker(provider=_Provider())
+    assert created["called"] is True

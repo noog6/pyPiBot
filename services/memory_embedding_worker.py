@@ -9,6 +9,7 @@ import time
 
 from config import ConfigController
 from services.embedding_provider import EmbeddingProvider, build_embedding_provider
+from storage.factories import create_memory_store
 from storage.memories import MemoryEntry, MemoryStore
 
 logger = logging.getLogger(__name__)
@@ -38,7 +39,7 @@ class MemoryEmbeddingWorker:
         rolling_backfill_interval_idle_cycles: int | None = None,
     ) -> None:
         config = ConfigController.get_instance().get_config()
-        self._store = store if store is not None else MemoryStore()
+        self._store = store if store is not None else create_memory_store()
         self._provider = provider if provider is not None else build_embedding_provider(config)
         self._batch_size = max(1, int(batch_size))
         self._idle_sleep_s = max(0.1, float(idle_sleep_s))
