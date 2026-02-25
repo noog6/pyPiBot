@@ -751,7 +751,23 @@ class MemoryManager:
     def _map_canary_error_code(self, raw_error_code: str | None, *, exc: Exception | None = None) -> str:
         return _normalize_canary_error_code(raw_error_code, exc=exc)
 
+    def _compute_startup_canary_budget_ms(self, *, safety_margin_ms: int = 1) -> int:
+        configured_timeout_ms = int(getattr(self._semantic_config, "startup_canary_timeout_ms", 0) or 0)
+        provider_timeout_s = float(
+            getattr(
+                self._semantic_config,
+                "provider_timeout_s",
+                max(0.0, configured_timeout_ms / 1000.0),
+            )
+            or 0.0
+        )
+        provider_timeout_ms = int(max(1.0, provider_timeout_s * 1000.0))
+        margin_ms = max(0, int(safety_margin_ms))
+        return max(1, min(configured_timeout_ms, provider_timeout_ms - margin_ms))
+
     def _run_embedding_canary(self) -> dict[str, bool | int | float | str | None]:
+        configured_timeout_ms = int(getattr(self._semantic_config, "startup_canary_timeout_ms", 0) or 0)
+        enforced_timeout_budget_ms = self._compute_startup_canary_budget_ms()
         canary_state: dict[str, bool | int | float | str | None] = {
             "canary_success": False,
             "latency_ms": 0,
@@ -759,10 +775,15 @@ class MemoryManager:
             "embedding_emitted": False,
             "error_code": "skipped",
             "timeout_triggered": "none",
-            "timeout_budget_ms": 0,
+            "timeout_budget_ms": int(enforced_timeout_budget_ms),
             "timer_start": "submit_start",
             "queue_delay_ms": None,
         }
+        logger.info(
+            "embedding_canary_timeout_budget configured_timeout_ms=%s enforced_timeout_budget_ms=%s",
+            configured_timeout_ms,
+            enforced_timeout_budget_ms,
+        )
         if not bool(getattr(self._semantic_config, "enabled", False)):
             canary_state["error_code"] = "disabled"
         elif bool(getattr(self, "_semantic_canary_bypass", False)):
@@ -775,12 +796,14 @@ class MemoryManager:
                     text="ping",
                     operation="query",
                     enforce_budget=False,
-                    timeout_override_ms=max(1, int(getattr(self._semantic_config, "startup_canary_timeout_ms", 120))),
+                    timeout_override_ms=enforced_timeout_budget_ms,
                     suppress_canary_refresh=True,
                 )
                 latency_ms = int((time.perf_counter() - started) * 1000.0)
                 canary_state["latency_ms"] = latency_ms
-                canary_state["timeout_budget_ms"] = int(getattr(result, "timeout_ms_used", 0) or 0)
+                canary_state["timeout_budget_ms"] = int(
+                    getattr(result, "timeout_ms_used", enforced_timeout_budget_ms) or enforced_timeout_budget_ms
+                )
                 canary_state["timer_start"] = "submit_start"
                 queue_delay_ms = getattr(result, "submit_to_worker_delay_ms", None)
                 if queue_delay_ms is not None:
@@ -1053,11 +1076,7 @@ class MemoryManager:
 
         provider_ready, readiness_reason = self._is_semantic_provider_ready()
         canary_state = getattr(self, "_semantic_canary_last", {}) or {}
-        provider_timeout_ms = int(max(1.0, float(getattr(self._semantic_config, "provider_timeout_s", 0.0)) * 1000.0))
-        effective_timeout_budget_ms = min(
-            int(getattr(self._semantic_config, "startup_canary_timeout_ms", 0)),
-            max(1, provider_timeout_ms - 1),
-        )
+        effective_timeout_budget_ms = self._compute_startup_canary_budget_ms()
         return {
             "enabled": bool(self._semantic_config.enabled),
             "provider": str(self._semantic_config.provider),

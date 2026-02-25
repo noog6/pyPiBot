@@ -1681,6 +1681,7 @@ def test_query_timeout_passes_provider_timeout_and_canary_can_use_longer_timeout
         dedupe_strong_match_cosine=0.9,
         background_embedding_enabled=False,
         provider="openai",
+        provider_timeout_s=10.0,
         write_timeout_ms=75,
         query_timeout_ms=2000,
         startup_canary_timeout_ms=5000,
@@ -1712,6 +1713,17 @@ def test_query_timeout_passes_provider_timeout_and_canary_can_use_longer_timeout
     assert len(provider.timeout_s_calls) >= 2
     assert provider.timeout_s_calls[0] == pytest.approx(2.0, abs=0.2)
     assert provider.timeout_s_calls[1] == pytest.approx(5.0, abs=0.2)
+
+
+def test_compute_startup_canary_budget_clamps_with_provider_timeout_and_floor(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._semantic_config = SimpleNamespace(startup_canary_timeout_ms=5000, provider_timeout_s=1.0)
+
+    assert manager._compute_startup_canary_budget_ms() == 999
+
+    manager._semantic_config = SimpleNamespace(startup_canary_timeout_ms=0, provider_timeout_s=0.0)
+    assert manager._compute_startup_canary_budget_ms() == 1
 
 
 def test_run_embedding_canary_includes_raw_error_code_when_normalized(tmp_path) -> None:
