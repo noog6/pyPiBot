@@ -57,6 +57,9 @@ def _make_api_stub() -> RealtimeAPI:
     api.state_manager = type("State", (), {"state": InteractionState.IDLE, "update_state": lambda *args, **kwargs: None})()
     api._response_in_flight = False
     api._response_create_queue = deque()
+    api._pending_response_create = None
+    api._response_create_turn_counter = 0
+    api._current_response_turn_id = None
     api._queued_confirmation_reminder_keys = set()
     api._pending_confirmation_prompt_latches = set()
     api._is_confirmation_prompt_latched = lambda *_args, **_kwargs: True
@@ -111,6 +114,7 @@ def _make_api_stub() -> RealtimeAPI:
     api._presented_actions = set()
     api._pending_confirmation_token = None
     api._confirmation_state = ConfirmationState.IDLE
+    api._ai_call_budget = type("Budget", (), {"allow": lambda self: True})()
     api._last_executed_tool_call = None
     api._intent_ledger = {}
     api._intent_state_ttl_s = 300.0
@@ -521,93 +525,84 @@ def test_drain_response_create_queue_waits_until_not_listening() -> None:
     assert len(api._response_create_queue) == 0
 
 
-def test_drain_response_create_queue_drops_stale_tool_output_entry() -> None:
+def test_response_create_coordinator_replaces_assistant_pending_with_tool_output() -> None:
     api = _make_api_stub()
-    api._response_done_serial = 7
-    api._response_create_queue.append(
-        {
-            "websocket": api.websocket,
-            "event": {"type": "response.create"},
-            "origin": "tool_output",
-            "record_ai_call": False,
-            "debug_context": None,
-            "enqueued_done_serial": 5,
-        }
+    api._response_in_flight = True
+
+    asyncio.run(
+        api._send_response_create(
+            api.websocket,
+            {"type": "response.create"},
+            origin="assistant_message",
+        )
     )
+    asyncio.run(
+        api._send_response_create(
+            api.websocket,
+            {"type": "response.create"},
+            origin="tool_output",
+        )
+    )
+
+    assert api._pending_response_create is not None
+    assert api._pending_response_create.origin == "tool_output"
+    assert len(api._response_create_queue) == 1
+    assert api._response_create_queue[0]["origin"] == "tool_output"
+
+
+def test_response_create_coordinator_coalesces_multiple_tool_outputs() -> None:
+    api = _make_api_stub()
+    api._response_in_flight = True
+
+    asyncio.run(
+        api._send_response_create(
+            api.websocket,
+            {"type": "response.create", "response": {"metadata": {"trigger": "tool_a"}}},
+            origin="tool_output",
+            debug_context={"call_id": "a"},
+        )
+    )
+    asyncio.run(
+        api._send_response_create(
+            api.websocket,
+            {"type": "response.create", "response": {"metadata": {"trigger": "tool_b"}}},
+            origin="tool_output",
+            debug_context={"call_id": "b"},
+        )
+    )
+
+    assert api._pending_response_create is not None
+    assert api._pending_response_create.origin == "tool_output"
+    assert api._pending_response_create.debug_context == {"call_id": "b"}
+    assert len(api._response_create_queue) == 1
+
+
+def test_drain_response_create_queue_does_not_emit_stale_drop_log_after_replacement() -> None:
+    api = _make_api_stub()
+    api._response_in_flight = True
+
+    asyncio.run(
+        api._send_response_create(
+            api.websocket,
+            {"type": "response.create"},
+            origin="assistant_message",
+        )
+    )
+    asyncio.run(
+        api._send_response_create(
+            api.websocket,
+            {"type": "response.create"},
+            origin="tool_output",
+        )
+    )
+
+    api._response_in_flight = False
+    api._pending_action = None
+    api.orchestration_state = type("S", (), {"phase": OrchestrationPhase.IDLE})()
     sent: list[str] = []
 
     async def _send_response_create(*args, **kwargs):
-        sent.append("sent")
-        return True
-
-    api._send_response_create = _send_response_create
-
-    asyncio.run(api._drain_response_create_queue())
-
-    assert sent == []
-    assert len(api._response_create_queue) == 0
-
-
-def test_drain_response_create_queue_drops_stale_assistant_message_after_confirmation() -> None:
-    api = _make_api_stub()
-    api._response_done_serial = 9
-    api._pending_action = None
-    api.orchestration_state = type("S", (), {"phase": OrchestrationPhase.IDLE})()
-    api._response_create_queue.append(
-        {
-            "websocket": api.websocket,
-            "event": {
-                "type": "response.create",
-                "response": {"metadata": {"origin": "assistant_message", "approval_flow": "true"}},
-            },
-            "origin": "assistant_message",
-            "record_ai_call": False,
-            "debug_context": None,
-            "enqueued_done_serial": 7,
-        }
-    )
-    sent: list[str] = []
-
-    async def _send_response_create(*args, **kwargs):
-        sent.append("sent")
-        return True
-
-    api._send_response_create = _send_response_create
-
-    asyncio.run(api._drain_response_create_queue())
-
-    assert sent == []
-    assert len(api._response_create_queue) == 0
-
-
-def test_drain_response_create_queue_drops_non_approval_assistant_message_after_one_completion() -> None:
-    api = _make_api_stub()
-    api._response_done_serial = 10
-    api._pending_action = None
-    api.orchestration_state = type("S", (), {"phase": OrchestrationPhase.IDLE})()
-    api._response_create_queue.append(
-        {
-            "websocket": api.websocket,
-            "event": {
-                "type": "response.create",
-                "response": {
-                    "metadata": {
-                        "origin": "assistant_message",
-                        "trigger": "research_summary",
-                    }
-                },
-            },
-            "origin": "assistant_message",
-            "record_ai_call": False,
-            "debug_context": None,
-            "enqueued_done_serial": 9,
-        }
-    )
-
-    info_logs = ["research summary window=alpha"]
-
-    async def _send_response_create(*args, **kwargs):
-        info_logs.append("origin=assistant_message replay window=alpha")
+        sent.append(str(kwargs.get("origin")))
         return True
 
     api._send_response_create = _send_response_create
@@ -615,15 +610,9 @@ def test_drain_response_create_queue_drops_non_approval_assistant_message_after_
     with patch("ai.realtime_api.logger.info") as mock_info:
         asyncio.run(api._drain_response_create_queue())
 
-    info_logs.extend(call.args[0] % call.args[1:] for call in mock_info.call_args_list if call.args)
-
-    assert info_logs.count("research summary window=alpha") == 1
-    assert "origin=assistant_message replay window=alpha" not in info_logs
-    assert any(
-        "Dropping stale queued response.create origin=assistant_message" in log
-        for log in info_logs
-    )
-    assert len(api._response_create_queue) == 0
+    logs = [call.args[0] % call.args[1:] for call in mock_info.call_args_list if call.args]
+    assert sent == ["tool_output"]
+    assert not any("Dropping stale queued response.create" in line for line in logs)
 
 
 def test_handle_response_done_keeps_listening_state_without_idle_transition() -> None:

@@ -229,6 +229,21 @@ class IntentLedgerEntry:
     executed_at: float | None = None
 
 
+@dataclass
+class PendingResponseCreate:
+    websocket: Any
+    event: dict[str, Any]
+    origin: str
+    turn_id: str
+    created_at: float
+    reason: str
+    record_ai_call: bool = False
+    debug_context: dict[str, Any] | None = None
+    memory_brief_note: str | None = None
+    queued_reminder_key: str | None = None
+    enqueued_done_serial: int = 0
+
+
 def _validate_outbound_endpoint(url: str) -> None:
     parsed = urlparse(url)
     if parsed.scheme not in ALLOWED_OUTBOUND_SCHEMES:
@@ -384,6 +399,9 @@ class RealtimeAPI:
         self.response_in_progress = False
         self._response_in_flight = False
         self._response_create_queue: deque[dict[str, Any]] = deque()
+        self._pending_response_create: PendingResponseCreate | None = None
+        self._response_create_turn_counter = 0
+        self._current_response_turn_id: str | None = None
         self._queued_confirmation_reminder_keys: set[str] = set()
         self._pending_confirmation_prompt_latches: set[str] = set()
         self._pending_response_create_origins: deque[str] = deque(maxlen=64)
@@ -2434,6 +2452,145 @@ class RealtimeAPI:
         research_id = result.get("research_id")
         return str(research_id) if research_id else None
 
+    def _next_response_turn_id(self) -> str:
+        self._response_create_turn_counter += 1
+        return f"turn_{self._response_create_turn_counter}"
+
+    def _resolve_response_create_turn_id(
+        self,
+        *,
+        origin: str,
+        response_create_event: dict[str, Any],
+    ) -> str:
+        metadata = self._extract_response_create_metadata(response_create_event)
+        metadata_turn_id = metadata.get("turn_id")
+        if isinstance(metadata_turn_id, str) and metadata_turn_id.strip():
+            turn_id = metadata_turn_id.strip()
+            self._current_response_turn_id = turn_id
+            return turn_id
+
+        normalized_origin = str(origin or "unknown").strip().lower()
+        if normalized_origin == "assistant_message":
+            turn_id = self._next_response_turn_id()
+            self._current_response_turn_id = turn_id
+            return turn_id
+        if normalized_origin == "tool_output":
+            if self._current_response_turn_id:
+                return self._current_response_turn_id
+            if self._pending_response_create is not None:
+                return self._pending_response_create.turn_id
+            turn_id = self._next_response_turn_id()
+            self._current_response_turn_id = turn_id
+            return turn_id
+        if self._current_response_turn_id:
+            return self._current_response_turn_id
+        turn_id = self._next_response_turn_id()
+        self._current_response_turn_id = turn_id
+        return turn_id
+
+    def _response_create_priority(self, origin: str) -> int:
+        normalized_origin = str(origin or "").strip().lower()
+        if normalized_origin == "tool_output":
+            return 3
+        if normalized_origin == "assistant_message":
+            return 2
+        return 1
+
+    def _sync_pending_response_create_queue(self) -> None:
+        self._response_create_queue.clear()
+        pending = self._pending_response_create
+        if pending is None:
+            self._queued_confirmation_reminder_keys.clear()
+            return
+        queued_item: dict[str, Any] = {
+            "websocket": pending.websocket,
+            "event": pending.event,
+            "origin": pending.origin,
+            "turn_id": pending.turn_id,
+            "record_ai_call": pending.record_ai_call,
+            "debug_context": pending.debug_context,
+            "memory_brief_note": pending.memory_brief_note,
+            "enqueued_done_serial": pending.enqueued_done_serial,
+        }
+        if pending.queued_reminder_key is not None:
+            queued_item["queued_reminder_key"] = pending.queued_reminder_key
+            self._queued_confirmation_reminder_keys = {pending.queued_reminder_key}
+        else:
+            self._queued_confirmation_reminder_keys.clear()
+        self._response_create_queue.append(queued_item)
+
+    def _schedule_pending_response_create(
+        self,
+        *,
+        websocket: Any,
+        response_create_event: dict[str, Any],
+        origin: str,
+        reason: str,
+        record_ai_call: bool,
+        debug_context: dict[str, Any] | None,
+        memory_brief_note: str | None,
+    ) -> bool:
+        turn_id = self._resolve_response_create_turn_id(origin=origin, response_create_event=response_create_event)
+        reminder_key = self._extract_confirmation_reminder_dedupe_key(response_create_event)
+        candidate = PendingResponseCreate(
+            websocket=websocket,
+            event=response_create_event,
+            origin=origin,
+            turn_id=turn_id,
+            created_at=time.monotonic(),
+            reason=reason,
+            record_ai_call=record_ai_call,
+            debug_context=debug_context,
+            memory_brief_note=memory_brief_note,
+            queued_reminder_key=reminder_key,
+            enqueued_done_serial=self._response_done_serial,
+        )
+        previous = self._pending_response_create
+        if previous is None:
+            self._pending_response_create = candidate
+            self._sync_pending_response_create_queue()
+            logger.info(
+                "response_create_scheduled turn_id=%s origin=%s reason=%s",
+                candidate.turn_id,
+                candidate.origin,
+                reason,
+            )
+            return False
+
+        should_replace = False
+        replacement_reason = ""
+        if candidate.turn_id != previous.turn_id:
+            should_replace = True
+            replacement_reason = "newer_turn"
+        else:
+            candidate_priority = self._response_create_priority(candidate.origin)
+            previous_priority = self._response_create_priority(previous.origin)
+            if candidate_priority > previous_priority:
+                should_replace = True
+                replacement_reason = "higher_priority"
+            elif candidate_priority == previous_priority:
+                should_replace = True
+                replacement_reason = "latest_update"
+
+        if should_replace:
+            self._pending_response_create = candidate
+            self._sync_pending_response_create_queue()
+            logger.info(
+                "response_create_replaced turn_id=%s old_origin=%s new_origin=%s reason=%s",
+                candidate.turn_id,
+                previous.origin,
+                candidate.origin,
+                replacement_reason,
+            )
+        else:
+            logger.info(
+                "response_create_dropped turn_id=%s origin=%s reason=%s",
+                candidate.turn_id,
+                candidate.origin,
+                "lower_priority_than_pending",
+            )
+        return False
+
     async def _send_response_create(
         self,
         websocket: Any,
@@ -2459,35 +2616,21 @@ class RealtimeAPI:
                 ctx.get("research_id"),
                 f"{delta_ms:.1f}" if delta_ms is not None else "n/a",
             )
+
+        # Coordinator rule: at most one pending response.create is retained per turn.
+        # When both assistant_message and tool_output compete, tool_output wins because
+        # it contains fresher tool results for the same turn.
         if self._response_in_flight or self._audio_playback_busy:
-            reminder_key = self._extract_confirmation_reminder_dedupe_key(response_create_event)
-            if reminder_key is not None:
-                for queued_item in self._response_create_queue:
-                    if self._queued_response_reminder_key(queued_item) == reminder_key:
-                        logger.info(
-                            "Skipping duplicate queued confirmation reminder response.create origin=%s dedupe_key=%s.",
-                            origin,
-                            reminder_key,
-                        )
-                        return False
-            if self._response_in_flight:
-                logger.info("Deferring response.create while another response is active (origin=%s).", origin)
-            else:
-                logger.info("Deferring response.create while audio playback is still active (origin=%s).", origin)
-            queued_item = {
-                "websocket": websocket,
-                "event": response_create_event,
-                "origin": origin,
-                "record_ai_call": record_ai_call,
-                "debug_context": debug_context,
-                "memory_brief_note": memory_brief_note,
-                "enqueued_done_serial": self._response_done_serial,
-            }
-            if reminder_key is not None:
-                queued_item["queued_reminder_key"] = reminder_key
-                self._queued_confirmation_reminder_keys.add(reminder_key)
-            self._response_create_queue.append(queued_item)
-            return False
+            queue_reason = "active_response" if self._response_in_flight else "audio_playback_busy"
+            return self._schedule_pending_response_create(
+                websocket=websocket,
+                response_create_event=response_create_event,
+                origin=origin,
+                reason=queue_reason,
+                record_ai_call=record_ai_call,
+                debug_context=debug_context,
+                memory_brief_note=memory_brief_note,
+            )
         if memory_brief_note:
             try:
                 await self._send_memory_brief_note(websocket, memory_brief_note)
@@ -2508,43 +2651,60 @@ class RealtimeAPI:
             self._response_in_flight
             or self._audio_playback_busy
             or current_state == InteractionState.LISTENING
-            or not self._response_create_queue
         ):
             return
-        self._dedupe_queued_confirmation_reminders()
-        queue_len = len(self._response_create_queue)
-        for _ in range(queue_len):
-            queued = self._response_create_queue.popleft()
-            queued_reminder_key = self._queued_response_reminder_key(queued)
-            if queued_reminder_key is not None:
-                self._queued_confirmation_reminder_keys.discard(queued_reminder_key)
-            if self._is_stale_queued_response_create(queued):
-                logger.info(
-                    "Dropping stale queued response.create origin=%s after newer responses completed.",
-                    queued.get("origin"),
+
+        if self._pending_response_create is None and self._response_create_queue:
+            self._dedupe_queued_confirmation_reminders()
+            queue_len = len(self._response_create_queue)
+            for _ in range(queue_len):
+                queued = self._response_create_queue.popleft()
+                metadata = self._extract_response_create_metadata(queued.get("event") or {})
+                queued_trigger = self._extract_response_create_trigger(metadata)
+                if not self._can_release_queued_response_create(queued_trigger, metadata):
+                    self._response_create_queue.append(queued)
+                    continue
+                self._pending_response_create = PendingResponseCreate(
+                    websocket=queued["websocket"],
+                    event=queued["event"],
+                    origin=queued["origin"],
+                    turn_id=str(queued.get("turn_id") or self._next_response_turn_id()),
+                    created_at=time.monotonic(),
+                    reason="legacy_queue_hydration",
+                    record_ai_call=bool(queued.get("record_ai_call", False)),
+                    debug_context=queued.get("debug_context"),
+                    memory_brief_note=queued.get("memory_brief_note"),
+                    queued_reminder_key=self._queued_response_reminder_key(queued),
+                    enqueued_done_serial=int(queued.get("enqueued_done_serial") or self._response_done_serial),
                 )
-                continue
-            response_metadata = self._extract_response_create_metadata(queued.get("event") or {})
-            queued_trigger = self._extract_response_create_trigger(response_metadata)
-            if not self._can_release_queued_response_create(queued_trigger, response_metadata):
-                self._response_create_queue.append(queued)
-                if queued_reminder_key is not None:
-                    self._queued_confirmation_reminder_keys.add(queued_reminder_key)
-                logger.info(
-                    "Deferring queued response.create origin=%s trigger=%s while awaiting confirmation.",
-                    queued.get("origin"),
-                    queued_trigger,
-                )
-                continue
-            await self._send_response_create(
-                queued["websocket"],
-                queued["event"],
-                origin=queued["origin"],
-                record_ai_call=bool(queued.get("record_ai_call", False)),
-                debug_context=queued.get("debug_context"),
-                memory_brief_note=queued.get("memory_brief_note"),
+                break
+        if self._pending_response_create is None:
+            return
+
+        pending = self._pending_response_create
+        response_metadata = self._extract_response_create_metadata(pending.event)
+        queued_trigger = self._extract_response_create_trigger(response_metadata)
+        if not self._can_release_queued_response_create(queued_trigger, response_metadata):
+            if pending.reason != "legacy_queue_hydration":
+                self._sync_pending_response_create_queue()
+            logger.info(
+                "Deferring queued response.create origin=%s trigger=%s while awaiting confirmation.",
+                pending.origin,
+                queued_trigger,
             )
             return
+
+        self._pending_response_create = None
+        if pending.reason != "legacy_queue_hydration":
+            self._sync_pending_response_create_queue()
+        await self._send_response_create(
+            pending.websocket,
+            pending.event,
+            origin=pending.origin,
+            record_ai_call=pending.record_ai_call,
+            debug_context=pending.debug_context,
+            memory_brief_note=pending.memory_brief_note,
+        )
 
     def _extract_confirmation_reminder_dedupe_key(
         self,
