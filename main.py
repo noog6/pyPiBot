@@ -360,13 +360,39 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     runtime_exit_code = 0
+    interrupted = False
+    session_failures_before = 0
+    get_session_health = getattr(realtime_api_instance, "get_session_health", None)
+    if callable(get_session_health):
+        try:
+            baseline_health = get_session_health() or {}
+            session_failures_before = int(baseline_health.get("failures", 0) or 0)
+        except Exception:
+            logger.debug("Unable to read baseline session health before runtime start.")
     try:
         asyncio.run(realtime_api_instance.run())
     except KeyboardInterrupt:
+        interrupted = True
         logger.info("Program terminated by user")
     except Exception as exc:
         runtime_exit_code = 1
         logger.exception("An unexpected error occurred: %s", exc)
+    else:
+        if runtime_exit_code == 0 and not interrupted and callable(get_session_health):
+            try:
+                runtime_health = get_session_health() or {}
+                session_failures_after = int(runtime_health.get("failures", 0) or 0)
+                if session_failures_after > session_failures_before:
+                    runtime_exit_code = 1
+                    failure_reason = runtime_health.get("last_failure_reason") or "unknown"
+                    logger.error(
+                        "Realtime session failed during runtime (failures_before=%s failures_after=%s reason=%s)",
+                        session_failures_before,
+                        session_failures_after,
+                        failure_reason,
+                    )
+            except Exception:
+                logger.debug("Unable to read runtime session health after realtime loop exit.")
     finally:
         if system_context_coordinator is not None:
             system_context_coordinator.stop()

@@ -51,6 +51,8 @@ class _FakeMemoryManager:
 class _FakeRealtimeAPI:
     def __init__(self, prompts) -> None:
         self._prompts = prompts
+        self._failures = 0
+        self._last_failure_reason = ""
 
     def get_event_bus(self):
         return object()
@@ -60,6 +62,12 @@ class _FakeRealtimeAPI:
 
     def is_ready_for_injections(self) -> bool:
         return False
+
+    def get_session_health(self) -> dict[str, object]:
+        return {
+            "failures": self._failures,
+            "last_failure_reason": self._last_failure_reason,
+        }
 
 
 class _FakeMotionController:
@@ -390,6 +398,28 @@ def test_main_returns_nonzero_when_runtime_websocket_session_fails(monkeypatch) 
     monkeypatch.setattr(main.StorageController, "get_instance", lambda: _FakeStorageController())
     monkeypatch.setattr(main.MemoryManager, "get_instance", lambda: _FakeMemoryManager())
     monkeypatch.setattr(main, "RealtimeAPI", _RuntimeFailureRealtimeAPI)
+    monkeypatch.setattr(main.MotionController, "get_instance", lambda: _FakeMotionController())
+    monkeypatch.setattr(main.CameraController, "get_instance", lambda: _FakeCameraController())
+    monkeypatch.setattr(main.ImuMonitor, "get_instance", lambda: _FakeMonitor())
+    monkeypatch.setattr(main.BatteryMonitor, "get_instance", lambda: _FakeMonitor())
+    monkeypatch.setattr(main.OpsOrchestrator, "get_instance", lambda: _FakeOpsOrchestrator())
+    monkeypatch.setattr(main, "suppress_noisy_stderr", lambda *args, **kwargs: nullcontext())
+
+    exit_code = main.main([])
+
+    assert exit_code == 1
+
+
+def test_main_returns_nonzero_when_runtime_session_failure_is_swallowed(monkeypatch) -> None:
+    class _SwallowedRuntimeFailureRealtimeAPI(_FakeRealtimeAPI):
+        async def run(self) -> None:
+            self._failures += 1
+            self._last_failure_reason = "session connect failed"
+
+    monkeypatch.setattr(main.ConfigController, "get_instance", lambda: _FakeConfigController())
+    monkeypatch.setattr(main.StorageController, "get_instance", lambda: _FakeStorageController())
+    monkeypatch.setattr(main.MemoryManager, "get_instance", lambda: _FakeMemoryManager())
+    monkeypatch.setattr(main, "RealtimeAPI", _SwallowedRuntimeFailureRealtimeAPI)
     monkeypatch.setattr(main.MotionController, "get_instance", lambda: _FakeMotionController())
     monkeypatch.setattr(main.CameraController, "get_instance", lambda: _FakeCameraController())
     monkeypatch.setattr(main.ImuMonitor, "get_instance", lambda: _FakeMonitor())
