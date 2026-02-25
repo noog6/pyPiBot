@@ -25,6 +25,10 @@ def _make_api_stub() -> RealtimeAPI:
     api._response_in_flight = False
     api._audio_playback_busy = False
     api._response_create_queue = deque()
+    api._pending_response_create = None
+    api._response_create_turn_counter = 0
+    api._current_response_turn_id = None
+    api._queued_confirmation_reminder_keys = set()
     api._response_done_serial = 0
     api._record_ai_call = lambda: None
     api._track_outgoing_event = lambda *args, **kwargs: None
