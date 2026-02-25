@@ -40,6 +40,7 @@ def test_recall_query_rewrite_rules() -> None:
         "22",
         "strip_memory_id_wrapper",
     )
+    assert normalize_recall_query_with_fallback("memory video 22") == ("memory video 22", "none")
     assert normalize_recall_query_with_fallback("VAD settings") == ("VAD settings", "none")
 
 

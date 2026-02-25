@@ -137,7 +137,9 @@ def normalize_recall_query_with_fallback(query: str | None) -> tuple[str, str]:
         return normalized, "none"
 
     numeric_token = number_match.group(1)
-    if "memory" not in lowered or "id" not in lowered:
+    has_memory_token = re.search(r"\bmemory\b", lowered) is not None
+    has_id_token = re.search(r"\bid\b", lowered) is not None
+    if not has_memory_token or not has_id_token:
         return normalized, "none"
 
     token_window = " ".join(re.findall(r"[a-zA-Z0-9]+", lowered))
