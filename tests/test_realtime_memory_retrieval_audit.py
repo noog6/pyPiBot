@@ -37,6 +37,12 @@ class _FakeManager:
             "semantic_query_duration_ms": 12,
             "semantic_error_code": "timeout",
             "semantic_error_class": "TimeoutError",
+            "semantic_failure_class": "timeout",
+            "canary_last_error_code": "timeout",
+            "canary_last_latency_ms": 48,
+            "canary_last_checked_age_ms": 730,
+            "semantic_provider_last_error_code": "timeout_backoff",
+            "timeout_backoff_until_remaining_ms": 120,
             "semantic_scoring_skipped_reason": "query_embedding_timeout",
             "query_fingerprint_hash": "abcdef0123456789",
             "query_fingerprint_length": 19,
@@ -88,6 +94,12 @@ def test_prepare_turn_memory_brief_logs_semantic_runtime_health_when_streak_non_
     assert "semantic_query_duration_ms=12" in message
     assert "semantic_error_code=timeout" in message
     assert "semantic_error_class=TimeoutError" in message
+    assert "semantic_failure_class=timeout" in message
+    assert "canary_last_error_code=timeout" in message
+    assert "canary_last_latency_ms=48" in message
+    assert "canary_last_checked_age_ms=730" in message
+    assert "semantic_provider_last_error_code=timeout_backoff" in message
+    assert "timeout_backoff_until_remaining_ms=120" in message
     assert "semantic_scoring_skipped_reason=query_embedding_timeout" in message
     assert "query_fingerprint_hash=abcdef0123456789" in message
     assert "query_fingerprint_length=19" in message

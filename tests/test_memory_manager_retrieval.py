@@ -877,10 +877,124 @@ def test_retrieve_for_turn_top_level_semantic_enabled_but_provider_disabled_skip
     assert metadata["semantic_provider_ready"] is False
     assert metadata["semantic_attempted"] is False
     assert metadata["fallback_reason"] == "provider_disabled"
+    assert metadata["semantic_error_code"] == "provider_disabled"
+    assert metadata["semantic_failure_class"] == "other"
+    assert metadata["semantic_query_timeout_ms_used"] is None
 
     metrics = manager.get_retrieval_health_metrics()
     assert metrics["semantic_provider_attempts"] == 0
 
+
+
+
+def test_retrieve_for_turn_semantic_not_ready_canary_timeout_populates_audit_diagnostics(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._semantic_config.enabled = True
+    manager._semantic_config.rerank_enabled = True
+    manager._semantic_config.provider = "openai"
+    manager._semantic_canary_bypass = False
+    manager._embedding_provider = SimpleNamespace(embed_text=lambda text: None)
+    manager._semantic_canary_last = {
+        "canary_success": False,
+        "latency_ms": 41,
+        "dimension": None,
+        "error_code": "timeout",
+    }
+    manager._semantic_canary_last_checked_monotonic = time.monotonic()
+    manager._maybe_refresh_canary = lambda *, reason: False
+
+    now_ms = _now_ms()
+    store.append_memory(
+        content="Remember project alpha milestones.",
+        tags=["work"],
+        importance=4,
+        user_id="default",
+        timestamp=now_ms - 1000,
+    )
+
+    brief = manager.retrieve_for_turn(
+        latest_user_utterance="project alpha",
+        user_id="default",
+        max_memories=2,
+        max_chars=300,
+    )
+
+    assert brief is not None
+    metadata = manager.get_last_turn_retrieval_debug_metadata()
+    assert metadata["semantic_readiness_reason"] == "canary_failed:timeout"
+    assert metadata["semantic_error_code"] == "timeout"
+    assert metadata["semantic_failure_class"] == "timeout"
+    assert metadata["canary_last_error_code"] == "timeout"
+    assert metadata["canary_last_latency_ms"] == 41
+    assert metadata["semantic_query_timeout_ms_used"] is None
+
+
+def test_retrieve_for_turn_semantic_not_ready_canary_not_run_populates_unknown_failure_class(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._semantic_config.enabled = True
+    manager._semantic_config.rerank_enabled = True
+    manager._semantic_config.provider = "openai"
+    manager._semantic_canary_bypass = False
+    manager._embedding_provider = SimpleNamespace(embed_text=lambda text: None)
+    manager._semantic_canary_last = {
+        "canary_success": False,
+        "latency_ms": None,
+        "dimension": None,
+        "error_code": "not_run",
+    }
+    manager._semantic_canary_last_checked_monotonic = time.monotonic()
+    manager._maybe_refresh_canary = lambda *, reason: False
+
+    now_ms = _now_ms()
+    store.append_memory(
+        content="Remember project alpha milestones.",
+        tags=["work"],
+        importance=4,
+        user_id="default",
+        timestamp=now_ms - 1000,
+    )
+
+    brief = manager.retrieve_for_turn(
+        latest_user_utterance="project alpha",
+        user_id="default",
+        max_memories=2,
+        max_chars=300,
+    )
+
+    assert brief is not None
+    metadata = manager.get_last_turn_retrieval_debug_metadata()
+    assert metadata["semantic_readiness_reason"] == "canary_not_run"
+    assert metadata["semantic_error_code"] == "not_run"
+    assert metadata["semantic_failure_class"] == "unknown"
+
+
+def test_get_semantic_diagnostics_for_audit_reports_backoff_and_provider_error(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._semantic_config.provider = "openai"
+    manager._embedding_provider = SimpleNamespace(embed_text=lambda text: None)
+    manager._semantic_canary_bypass = False
+    manager._semantic_canary_last = {
+        "canary_success": False,
+        "latency_ms": 17,
+        "dimension": None,
+        "error_code": "auth",
+    }
+    manager._semantic_provider_last_error_code = "auth_forbidden"
+    manager._semantic_timeout_backoff_until_monotonic = time.monotonic() + 0.3
+
+    diagnostics = manager.get_semantic_diagnostics_for_audit()
+
+    assert diagnostics["ready"] is False
+    assert diagnostics["readiness_reason"] == "canary_failed:auth"
+    assert diagnostics["semantic_error_code"] == "auth"
+    assert diagnostics["failure_class"] == "auth"
+    assert diagnostics["canary_error_code"] == "auth"
+    assert diagnostics["canary_latency_ms"] == 17
+    assert diagnostics["provider_last_error_code"] == "auth_forbidden"
+    assert diagnostics["timeout_backoff_remaining_ms"] > 0
 
 def test_retrieve_for_turn_semantic_fallback_when_query_embedding_not_ready(tmp_path) -> None:
     store = MemoryStore(db_path=tmp_path / "memories.db")

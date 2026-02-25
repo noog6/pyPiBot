@@ -157,6 +157,54 @@ def _normalize_semantic_failure_class(*, error_code: object, error_class: object
     return None
 
 
+def _map_readiness_reason_to_semantic_error_code(
+    readiness_reason: object,
+    *,
+    canary_error_code: object,
+    provider_last_error_code: object,
+) -> str:
+    reason = str(readiness_reason or "").strip().lower()
+    canary_code = str(canary_error_code or "").strip().lower()
+    provider_code = str(provider_last_error_code or "").strip().lower()
+
+    if reason.startswith("canary_failed:"):
+        suffix = reason.split(":", 1)[1].strip()
+        if suffix:
+            return suffix
+    if reason == "canary_not_run":
+        return "not_run"
+    if reason and not reason.startswith("canary_failed:") and reason not in {"unknown"}:
+        return reason
+    if reason in {"", "unknown"}:
+        if canary_code and canary_code not in {"none", "not_run"}:
+            return canary_code
+        if provider_code and provider_code not in {"none", "unknown"}:
+            return provider_code
+        return "unknown"
+    if canary_code and canary_code not in {"none", "not_run"}:
+        return canary_code
+    if provider_code and provider_code not in {"none", "unknown"}:
+        return provider_code
+    return reason
+
+
+def _classify_failure_class_for_readiness(*, readiness_reason: object, semantic_error_code: object) -> str:
+    reason = str(readiness_reason or "").strip().lower()
+    error_code = str(semantic_error_code or "").strip().lower()
+    normalized = _normalize_semantic_failure_class(error_code=error_code, error_class=None)
+    if normalized is not None:
+        return normalized
+    if reason in {"canary_not_run", "not_run", "unknown", ""}:
+        return "unknown"
+    if reason.startswith("canary_failed:"):
+        suffix = reason.split(":", 1)[1].strip()
+        if suffix in {"unknown", "not_run"}:
+            return "unknown"
+        if suffix == "other":
+            return "other"
+    return "other"
+
+
 def _normalize_canary_error_code(raw_error_code: str | None, *, exc: Exception | None = None) -> str:
     code = str(raw_error_code or "").strip().lower()
     if code in {"timeout", "timeout_backoff", "request_timeout"}:
@@ -954,9 +1002,7 @@ class MemoryManager:
         """Return runtime semantic-readiness telemetry for operations and auditing."""
 
         self._maybe_refresh_canary(reason="periodic")
-        provider_ready, readiness_reason = self._is_semantic_provider_ready()
-        last_checked = float(getattr(self, "_semantic_canary_last_checked_monotonic", 0.0) or 0.0)
-        canary_age_ms = int(max(0.0, (time.monotonic() - last_checked) * 1000.0)) if last_checked > 0.0 else -1
+        diagnostics = self.get_semantic_diagnostics_for_audit()
         readiness_last_transition = float(
             getattr(self, "_semantic_readiness_last_transition_monotonic", 0.0) or 0.0
         )
@@ -966,14 +1012,46 @@ class MemoryManager:
             else -1
         )
         return {
-            "ready": bool(provider_ready and self._semantic_provider_ready_last),
+            "ready": bool(diagnostics["ready"] and self._semantic_provider_ready_last),
             "query_embedding_not_ready_streak": int(self._semantic_query_embedding_not_ready_streak),
-            "last_error_code": str(getattr(self, "_semantic_provider_last_error_code", "none") or "none"),
-            "readiness_reason": str(readiness_reason),
-            "last_canary_age_ms": canary_age_ms,
+            "last_error_code": str(diagnostics["provider_last_error_code"]),
+            "readiness_reason": str(diagnostics["readiness_reason"]),
+            "last_canary_age_ms": int(diagnostics["canary_age_ms"]),
             "readiness_last_transition_at": readiness_last_transition,
             "readiness_age_ms": readiness_age_ms,
             "readiness_transition_count": int(getattr(self, "_semantic_readiness_transition_count", 0)),
+        }
+
+    def get_semantic_diagnostics_for_audit(self) -> dict[str, bool | int | str]:
+        """Return compact semantic diagnostics for one-line retrieval audit logs."""
+
+        provider_ready, readiness_reason = self._is_semantic_provider_ready()
+        canary_state = getattr(self, "_semantic_canary_last", {}) or {}
+        canary_error_code = str(canary_state.get("error_code", "not_run") or "not_run")
+        canary_latency_ms = int(canary_state.get("latency_ms", 0) or 0)
+        last_checked = float(getattr(self, "_semantic_canary_last_checked_monotonic", 0.0) or 0.0)
+        canary_age_ms = int(max(0.0, (time.monotonic() - last_checked) * 1000.0)) if last_checked > 0.0 else -1
+        provider_last_error_code = str(getattr(self, "_semantic_provider_last_error_code", "none") or "none")
+        backoff_until = float(getattr(self, "_semantic_timeout_backoff_until_monotonic", 0.0) or 0.0)
+        timeout_backoff_remaining_ms = int(max(0.0, (backoff_until - time.monotonic()) * 1000.0))
+        semantic_error_code = _map_readiness_reason_to_semantic_error_code(
+            readiness_reason,
+            canary_error_code=canary_error_code,
+            provider_last_error_code=provider_last_error_code,
+        )
+        return {
+            "ready": bool(provider_ready),
+            "readiness_reason": str(readiness_reason),
+            "failure_class": _classify_failure_class_for_readiness(
+                readiness_reason=readiness_reason,
+                semantic_error_code=semantic_error_code,
+            ),
+            "semantic_error_code": semantic_error_code,
+            "canary_error_code": canary_error_code,
+            "canary_latency_ms": canary_latency_ms,
+            "canary_age_ms": canary_age_ms,
+            "provider_last_error_code": provider_last_error_code,
+            "timeout_backoff_remaining_ms": timeout_backoff_remaining_ms,
         }
 
     def remember_memory(
@@ -1525,6 +1603,11 @@ class MemoryManager:
             "semantic_error_code": None,
             "semantic_error_class": None,
             "semantic_failure_class": None,
+            "canary_last_error_code": None,
+            "canary_last_latency_ms": 0,
+            "canary_last_checked_age_ms": -1,
+            "semantic_provider_last_error_code": "none",
+            "timeout_backoff_until_remaining_ms": 0,
             "semantic_scoring_skipped_reason": None,
             "query_fingerprint_hash": None,
             "query_fingerprint_length": 0,
@@ -1534,9 +1617,9 @@ class MemoryManager:
         backoff_until = float(getattr(self, "_semantic_timeout_backoff_until_monotonic", 0.0))
         if backoff_until > now_for_backoff:
             self._last_turn_retrieval_debug["semantic_timeout_backoff_active"] = True
-            self._last_turn_retrieval_debug["semantic_timeout_backoff_remaining_ms"] = int(
-                (backoff_until - now_for_backoff) * 1000.0
-            )
+            remaining_ms = int((backoff_until - now_for_backoff) * 1000.0)
+            self._last_turn_retrieval_debug["semantic_timeout_backoff_remaining_ms"] = remaining_ms
+            self._last_turn_retrieval_debug["timeout_backoff_until_remaining_ms"] = remaining_ms
 
         clean_utterance = " ".join(latest_user_utterance.strip().split())
         if not clean_utterance:
@@ -1633,6 +1716,16 @@ class MemoryManager:
         self._last_turn_retrieval_debug["semantic_enabled"] = semantic_enabled
         self._last_turn_retrieval_debug["semantic_provider_ready"] = semantic_provider_ready
         self._last_turn_retrieval_debug["semantic_readiness_reason"] = semantic_readiness_reason
+        semantic_diagnostics = self.get_semantic_diagnostics_for_audit()
+        self._last_turn_retrieval_debug["canary_last_error_code"] = semantic_diagnostics["canary_error_code"]
+        self._last_turn_retrieval_debug["canary_last_latency_ms"] = semantic_diagnostics["canary_latency_ms"]
+        self._last_turn_retrieval_debug["canary_last_checked_age_ms"] = semantic_diagnostics["canary_age_ms"]
+        self._last_turn_retrieval_debug["semantic_provider_last_error_code"] = semantic_diagnostics[
+            "provider_last_error_code"
+        ]
+        self._last_turn_retrieval_debug["timeout_backoff_until_remaining_ms"] = semantic_diagnostics[
+            "timeout_backoff_remaining_ms"
+        ]
         if semantic_enabled and lexical_ordered:
             self._retrieval_semantic_attempt_count += 1
             self._last_turn_retrieval_debug["semantic_attempted"] = True
@@ -1774,6 +1867,10 @@ class MemoryManager:
         elif self._semantic_config.enabled and self._semantic_config.rerank_enabled:
             self._last_turn_retrieval_debug["fallback_reason"] = semantic_readiness_reason
             self._last_turn_retrieval_debug["semantic_scoring_skipped_reason"] = "semantic_not_ready"
+            if not self._last_turn_retrieval_debug.get("semantic_error_code"):
+                self._last_turn_retrieval_debug["semantic_error_code"] = semantic_diagnostics["semantic_error_code"]
+            if not self._last_turn_retrieval_debug.get("semantic_failure_class"):
+                self._last_turn_retrieval_debug["semantic_failure_class"] = semantic_diagnostics["failure_class"]
 
         if self._last_turn_retrieval_debug.get("semantic_scoring_skipped_reason") in {
             "query_embedding_not_ready",
