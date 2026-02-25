@@ -298,6 +298,7 @@ def _invoke_embed_text(
     timeout_s: float,
     timeout_ms: int,
     operation: str,
+    submitted_monotonic: float | None = None,
 ):
     embed_text = getattr(provider, "embed_text")
     try:
@@ -315,9 +316,26 @@ def _invoke_embed_text(
             kwargs["timeout_ms"] = timeout_ms
         if accepts_kwargs or "operation" in params:
             kwargs["operation"] = operation
+    provider_request_started_monotonic = time.monotonic()
+    submit_to_worker_delay_ms: int | None = None
+    if submitted_monotonic is not None:
+        submit_to_worker_delay_ms = int(max(0.0, (provider_request_started_monotonic - submitted_monotonic) * 1000.0))
+
+    provider_started_perf = time.perf_counter()
     if kwargs:
-        return embed_text(text, **kwargs)
-    return embed_text(text)
+        response = embed_text(text, **kwargs)
+    else:
+        response = embed_text(text)
+    provider_elapsed_ms = int(max(0.0, (time.perf_counter() - provider_started_perf) * 1000.0))
+
+    payload: dict[str, object] = {}
+    if hasattr(response, "__dict__"):
+        payload.update(vars(response))
+    payload["submit_to_worker_delay_ms"] = submit_to_worker_delay_ms
+    payload["provider_elapsed_ms"] = provider_elapsed_ms
+    payload["provider_request_started_monotonic"] = provider_request_started_monotonic
+    payload["raw_provider_error_code"] = str(getattr(response, "error_code", "") or "")
+    return SimpleNamespace(**payload)
 
 
 class MemoryScope(str, Enum):
@@ -738,6 +756,10 @@ class MemoryManager:
             "latency_ms": 0,
             "dimension": None,
             "error_code": "skipped",
+            "timeout_triggered": "none",
+            "timeout_budget_ms": 0,
+            "timer_start": "submit_start",
+            "queue_delay_ms": None,
         }
         if not bool(getattr(self._semantic_config, "enabled", False)):
             canary_state["error_code"] = "disabled"
@@ -756,6 +778,11 @@ class MemoryManager:
                 )
                 latency_ms = int((time.perf_counter() - started) * 1000.0)
                 canary_state["latency_ms"] = latency_ms
+                canary_state["timeout_budget_ms"] = int(getattr(result, "timeout_ms_used", 0) or 0)
+                canary_state["timer_start"] = "submit_start"
+                queue_delay_ms = getattr(result, "submit_to_worker_delay_ms", None)
+                if queue_delay_ms is not None:
+                    canary_state["queue_delay_ms"] = int(queue_delay_ms)
                 dimension = int(getattr(result, "dimension", 0) or 0)
                 canary_state["dimension"] = dimension if dimension > 0 else None
 
@@ -769,6 +796,8 @@ class MemoryManager:
                     normalized_error = self._map_canary_error_code(raw_error)
                     canary_state["error_code"] = normalized_error
                     canary_state["raw_error_code"] = raw_error
+                    if normalized_error == "timeout_provider":
+                        canary_state["timeout_triggered"] = "provider"
                     timeout_triggered = getattr(result, "timeout_triggered", None)
                     if timeout_triggered:
                         canary_state["timeout_triggered"] = str(timeout_triggered)
@@ -1039,13 +1068,15 @@ class MemoryManager:
             "provider_readiness_reason": str(readiness_reason),
             "canary_success": bool(canary_state.get("canary_success", False)),
             "canary_latency_ms": int(canary_state.get("latency_ms", 0) or 0),
+            "canary_elapsed_ms": int(canary_state.get("latency_ms", 0) or 0),
             "canary_dimension": int(canary_state.get("dimension", 0) or 0),
             "canary_error_code": str(canary_state.get("error_code", "not_run") or "not_run"),
             "canary_raw_error_code": str(canary_state.get("raw_error_code", "") or ""),
-            "canary_timeout_triggered": str(canary_state.get("timeout_triggered", "") or ""),
+            "canary_timeout_triggered": str(canary_state.get("timeout_triggered", "none") or "none"),
             "canary_observed_elapsed_ms_at_timeout": int(canary_state.get("observed_elapsed_ms_at_timeout", 0) or 0),
             "canary_timeout_budget_ms": int(canary_state.get("timeout_budget_ms", 0) or 0),
-            "canary_timer_start": str(canary_state.get("timer_start", "") or ""),
+            "canary_timer_start": str(canary_state.get("timer_start", "submit_start") or "submit_start"),
+            "canary_queue_delay_ms": int(canary_state.get("queue_delay_ms", 0) or 0),
             "startup_canary_timeout_ms": int(getattr(self._semantic_config, "startup_canary_timeout_ms", 0)),
             "effective_timeout_budget_ms": int(effective_timeout_budget_ms),
             "startup_canary_bypass": bool(getattr(self, "_semantic_canary_bypass", False)),
@@ -1368,28 +1399,44 @@ class MemoryManager:
             timeout_s=timeout_s,
             timeout_ms=timeout_ms,
             operation=operation,
+            submitted_monotonic=started_monotonic,
         )
+
+        future_wait_started_monotonic = time.monotonic()
 
         def _attach_timing_metadata(response: object) -> None:
             elapsed_ms = int((time.monotonic() - started_monotonic) * 1000)
+            future_wait_elapsed_ms = int((time.monotonic() - future_wait_started_monotonic) * 1000)
             timeout_override_ms_used = int(timeout_override_ms) if timeout_override_ms is not None else None
             setattr(response, "timeout_ms_used", timeout_ms)
             setattr(response, "timeout_override_ms", timeout_override_ms_used)
             setattr(response, "operation", operation)
             setattr(response, "elapsed_ms", elapsed_ms)
+            setattr(response, "future_wait_elapsed_ms", future_wait_elapsed_ms)
+            if not hasattr(response, "submit_to_worker_delay_ms"):
+                setattr(response, "submit_to_worker_delay_ms", None)
+            if not hasattr(response, "provider_elapsed_ms"):
+                setattr(response, "provider_elapsed_ms", None)
+            if not hasattr(response, "raw_provider_error_code"):
+                setattr(response, "raw_provider_error_code", str(getattr(response, "error_code", "") or ""))
             if operation == "query" and not suppress_canary_refresh:
                 self._query_embedding_latency_samples.add_sample(elapsed_ms)
             logger.debug(
-                "semantic_embedding_attempt operation=%s provider=%s timeout_ms_used=%s timeout_override_ms=%s elapsed_ms=%s error_code=%s",
+                "semantic_embedding_attempt operation=%s provider=%s timeout_ms_used=%s timeout_override_ms=%s elapsed_ms=%s submit_to_worker_delay_ms=%s future_wait_elapsed_ms=%s provider_elapsed_ms=%s error_code=%s raw_provider_error_code=%s",
                 operation,
                 type(provider).__name__,
                 timeout_ms,
                 timeout_override_ms_used,
                 elapsed_ms,
+                getattr(response, "submit_to_worker_delay_ms", None),
+                future_wait_elapsed_ms,
+                getattr(response, "provider_elapsed_ms", None),
                 getattr(response, "error_code", None),
+                getattr(response, "raw_provider_error_code", None),
             )
 
         try:
+            future_wait_started_monotonic = time.monotonic()
             result = future.result(timeout=timeout_s)
             _attach_timing_metadata(result)
             self._semantic_timeout_consecutive_count = 0
@@ -1429,6 +1476,9 @@ class MemoryManager:
                 observed_elapsed_ms_at_timeout=observed_elapsed_ms_at_timeout,
                 timeout_budget_ms=timeout_ms,
                 timer_start="future_wait_start",
+                submit_to_worker_delay_ms=None,
+                provider_elapsed_ms=None,
+                raw_provider_error_code="",
             )
             _attach_timing_metadata(result)
             self._semantic_provider_ready_last = False

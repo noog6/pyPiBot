@@ -227,7 +227,9 @@ def main(argv: list[str] | None = None) -> int:
         "Semantic startup summary enabled=%s provider=%s model=%s rerank_enabled=%s "
         "background_embedding_enabled=%s provider_ready=%s readiness_reason=%s "
         "provider_timeout_s=%s startup_canary_timeout_ms=%s query_timeout_ms=%s write_timeout_ms=%s "
-        "effective_timeout_budget_ms=%s max_queries_per_minute=%s max_writes_per_minute=%s",
+        "effective_timeout_budget_ms=%s max_queries_per_minute=%s max_writes_per_minute=%s "
+        "canary_error_code=%s canary_timeout_triggered=%s canary_timeout_budget_ms=%s canary_elapsed_ms=%s "
+        "canary_timer_start=%s canary_queue_delay_ms=%s",
         semantic_startup_summary["enabled"],
         semantic_startup_summary["provider"],
         semantic_startup_summary["provider_model"],
@@ -242,6 +244,12 @@ def main(argv: list[str] | None = None) -> int:
         semantic_startup_summary["effective_timeout_budget_ms"],
         semantic_startup_summary["max_queries_per_minute"],
         semantic_startup_summary["max_writes_per_minute"],
+        semantic_startup_summary["canary_error_code"],
+        semantic_startup_summary["canary_timeout_triggered"],
+        semantic_startup_summary["canary_timeout_budget_ms"],
+        semantic_startup_summary["canary_elapsed_ms"],
+        semantic_startup_summary["canary_timer_start"],
+        semantic_startup_summary["canary_queue_delay_ms"],
     )
     logger.info(
         "semantic_runtime=%s reason=%s canary_latency_ms=%s",
