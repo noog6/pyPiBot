@@ -1390,6 +1390,43 @@ class RealtimeAPI:
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
+    def _sanitize_memory_cards_text_for_user(self, text: str) -> str:
+        """Strip retrieval-ID phrasing from memory card text before user delivery."""
+
+        cleaned_lines: list[str] = []
+        for raw_line in (text or "").splitlines():
+            line = str(raw_line).strip()
+            if not line:
+                continue
+            line = re.sub(r"\bmemory\s*#\s*\w+\b", "memory", line, flags=re.IGNORECASE)
+            line = re.sub(r"\bmemory\s+id\s*[:#-]?\s*\w+\b", "memory", line, flags=re.IGNORECASE)
+            line = re.sub(r"\bID\s*[:#-]?\s*\w+\b", "", line)
+            line = " ".join(line.split())
+            if line:
+                cleaned_lines.append(line)
+        return "\n".join(cleaned_lines)
+
+    def _memory_pin_followup_needed(
+        self,
+        *,
+        cards: list[dict[str, Any]],
+        memories: list[dict[str, Any]],
+        query: str,
+    ) -> bool:
+        confidence_needs_help = any(
+            str(card.get("confidence", "")).strip().lower() in {"medium", "low"}
+            for card in cards
+            if isinstance(card, dict)
+        )
+        likely_to_repeat = "prefer" in query or "favorite" in query or "favourite" in query
+        if not likely_to_repeat:
+            likely_to_repeat = any(
+                "preference" in {str(tag).strip().lower() for tag in memory.get("tags", []) if isinstance(tag, str)}
+                for memory in memories
+                if isinstance(memory, dict)
+            )
+        return confidence_needs_help or likely_to_repeat
+
     def _mark_preference_recall_candidate(self, text: str, *, source: str) -> None:
         matched, keywords = self._is_preference_recall_intent(text)
         if not matched:
@@ -1446,6 +1483,7 @@ class RealtimeAPI:
         cooldown_s = max(0.0, float(getattr(self, "_preference_recall_cooldown_s", 0.0)))
         cached = self._preference_recall_cache.get(query)
         result_payload: dict[str, Any] | None = None
+        recall_invoked = False
         if (
             cached
             and cooldown_s > 0.0
@@ -1465,6 +1503,7 @@ class RealtimeAPI:
                     self._pending_preference_recall_trace["reason"] = "policy_skip"
                 logger.warning("Preference recall intent matched but recall_memories tool unavailable.")
                 return False
+            recall_invoked = True
             result_payload = await recall_fn(
                 query=query,
                 limit=3,
@@ -1487,11 +1526,32 @@ class RealtimeAPI:
             self._clear_preference_recall_candidate()
             return True
 
-        first_memory = memories[0] if isinstance(memories[0], dict) else {}
-        memory_text = str(first_memory.get("content", "")).strip()
-        if not memory_text:
-            memory_text = "I found a saved preference, but it does not include enough detail to quote yet."
-        await self.send_assistant_message(memory_text, websocket)
+        cards = result_payload.get("memory_cards") if isinstance(result_payload, dict) else None
+        cards_list = cards if isinstance(cards, list) else []
+        memory_cards_text = ""
+        if isinstance(result_payload, dict):
+            memory_cards_text = self._sanitize_memory_cards_text_for_user(
+                str(result_payload.get("memory_cards_text", "")).strip()
+            )
+
+        response_lines: list[str] = []
+        if recall_invoked:
+            response_lines.append("I’m checking what I remember.")
+        if memory_cards_text:
+            response_lines.append(memory_cards_text)
+        else:
+            first_memory = memories[0] if isinstance(memories[0], dict) else {}
+            memory_text = str(first_memory.get("content", "")).strip()
+            if not memory_text:
+                memory_text = "I found a saved preference, but it does not include enough detail to quote yet."
+            response_lines.append(f'Relevant memory: "{memory_text}"')
+            response_lines.append("Why it's relevant: " + '"It matches your preference question."')
+            response_lines.append("Confidence: medium")
+
+        if self._memory_pin_followup_needed(cards=cards_list, memories=memories, query=query):
+            response_lines.append("Want me to pin or rename this memory so it’s easier to recall later?")
+
+        await self.send_assistant_message("\n".join(response_lines), websocket)
         self._clear_preference_recall_candidate()
         return True
 
