@@ -70,8 +70,9 @@ The runtime will:
 - Load configuration from `config/default.yaml`.
 - Initialize the storage layer and log run metadata.
 - Write per-run logs using incrementing numeric run IDs (for example `log/314/run_314.log`, with the current value tracked in `var/current_run`).
+- Start the Realtime API runtime (required); startup exits with a non-zero status if this dependency cannot initialize.
 - Attempt to start audio input/output (gracefully degrades if unavailable).
-- Start the motion controller and camera vision loop when hardware is present.
+- Attempt to start optional hardware peripherals when present, including motion control, camera vision, IMU monitoring, and battery monitoring.
 
 ## Configuration
 
