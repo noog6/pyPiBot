@@ -51,6 +51,8 @@ class _FakeMemoryManager:
 class _FakeRealtimeAPI:
     def __init__(self, prompts) -> None:
         self._prompts = prompts
+        self._failures = 0
+        self._last_failure_reason = ""
 
     def get_event_bus(self):
         return object()
@@ -63,6 +65,12 @@ class _FakeRealtimeAPI:
 
     def is_ready_for_injections(self) -> bool:
         return False
+
+    def get_session_health(self) -> dict[str, object]:
+        return {
+            "failures": self._failures,
+            "last_failure_reason": self._last_failure_reason,
+        }
 
 
 class _FakeMotionController:
