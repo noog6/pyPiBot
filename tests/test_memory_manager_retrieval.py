@@ -1600,6 +1600,39 @@ def test_query_timeout_passes_provider_timeout_and_canary_can_use_longer_timeout
     assert provider.timeout_s_calls[1] == pytest.approx(5.0, abs=0.2)
 
 
+def test_run_embedding_canary_includes_raw_error_code_when_normalized(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._semantic_config = SimpleNamespace(
+        enabled=True,
+        rerank_enabled=False,
+        max_candidates_for_semantic=8,
+        min_similarity=0.0,
+        rerank_influence_min_cosine=0.0,
+        dedupe_strong_match_cosine=0.9,
+        background_embedding_enabled=False,
+        provider="openai",
+        write_timeout_ms=75,
+        query_timeout_ms=2000,
+        startup_canary_timeout_ms=5000,
+        max_writes_per_minute=120,
+        max_queries_per_minute=240,
+    )
+    manager._semantic_canary_bypass = False
+
+    class _TimeoutCodeProvider:
+        def embed_text(self, text: str, *, timeout_s: float | None = None):
+            return SimpleNamespace(status="error", dimension=0, vector=b"", error_code="request_timeout")
+
+    manager._embedding_provider = _TimeoutCodeProvider()
+
+    canary = manager._run_embedding_canary()
+
+    assert canary["canary_success"] is False
+    assert canary["error_code"] == "timeout"
+    assert canary["raw_error_code"] == "request_timeout"
+
+
 def test_canary_path_bypasses_timeout_backoff(tmp_path) -> None:
     store = MemoryStore(db_path=tmp_path / "memories.db")
     manager = _make_memory_manager(store)

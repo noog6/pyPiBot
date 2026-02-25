@@ -159,15 +159,24 @@ def _normalize_semantic_failure_class(*, error_code: object, error_class: object
 
 def _normalize_canary_error_code(raw_error_code: str | None, *, exc: Exception | None = None) -> str:
     code = str(raw_error_code or "").strip().lower()
-    if code in {"timeout", "timeout_backoff"}:
+    if code in {"timeout", "timeout_backoff", "request_timeout"}:
         return "timeout"
-    if code in {"missing_api_key", "auth", "unauthorized", "forbidden", "invalid_api_key"}:
+    if code in {"missing_api_key", "auth_forbidden", "unauthorized", "forbidden", "invalid_api_key", "auth"}:
         return "auth"
     if code in {"model_not_found", "unknown_model", "invalid_model"}:
         return "model"
+    if code in {"provider_http_error", "http_error"}:
+        return "http"
     if code in {"not_found", "provider_not_found"}:
         return "not_found"
-    if code in {"provider_request_failed", "connection_error", "network_error", "connection"}:
+    if code in {
+        "connection_refused",
+        "connection_error",
+        "network_error",
+        "dns_error",
+        "connection",
+        "provider_request_failed",
+    }:
         return "connection"
 
     exc_name = type(exc).__name__ if exc is not None else ""
@@ -183,7 +192,7 @@ def _normalize_canary_error_code(raw_error_code: str | None, *, exc: Exception |
         return "not_found"
     if any(token in raw for token in ["connection", "network", "dns", "refused"]):
         return "connection"
-    return "connection"
+    return code if code else "unknown"
 
 
 def _invoke_embed_text(
@@ -654,11 +663,17 @@ class MemoryManager:
                     canary_state["error_code"] = "none"
                 else:
                     raw_error = str(getattr(result, "error_code", "") or status or "unknown")
-                    canary_state["error_code"] = self._map_canary_error_code(raw_error)
+                    normalized_error = self._map_canary_error_code(raw_error)
+                    canary_state["error_code"] = normalized_error
+                    if normalized_error != raw_error or normalized_error == "unknown":
+                        canary_state["raw_error_code"] = raw_error
             except Exception as exc:  # noqa: BLE001
                 latency_ms = int((time.perf_counter() - started) * 1000.0)
                 canary_state["latency_ms"] = latency_ms
-                canary_state["error_code"] = self._map_canary_error_code(None, exc=exc)
+                normalized_error = self._map_canary_error_code(None, exc=exc)
+                canary_state["error_code"] = normalized_error
+                if normalized_error == "unknown":
+                    canary_state["raw_error_code"] = ""
 
         self._semantic_canary_last = canary_state
         self._semantic_canary_last_checked_monotonic = time.monotonic()
