@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 from datetime import datetime, timezone
+import importlib
+import importlib.util
 import logging
 import sys
 
@@ -29,11 +31,26 @@ def configure_logging(level_name: str) -> None:
     """Configure application logging."""
 
     level = logging._nameToLevel.get(level_name.upper(), logging.INFO)
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
 
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    for handler in list(root_logger.handlers):
+        root_logger.removeHandler(handler)
+
+    if importlib.util.find_spec("rich") is not None:
+        rich_logging = importlib.import_module("rich.logging")
+        rich_console = importlib.import_module("rich.console")
+        rich_handler = rich_logging.RichHandler(
+            rich_tracebacks=True,
+            console=rich_console.Console(),
+        )
+        rich_handler.setFormatter(logging.Formatter("%(message)s", datefmt="[%X]"))
+        root_logger.addHandler(rich_handler)
+        return
+
+    fallback_handler = logging.StreamHandler()
+    fallback_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    root_logger.addHandler(fallback_handler)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
