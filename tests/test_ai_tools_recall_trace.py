@@ -6,7 +6,7 @@ import asyncio
 from types import SimpleNamespace
 
 import ai.tools as ai_tools
-from services.memory_manager import MemoryManager, MemoryScope
+from services.memory_manager import MemoryManager, MemoryScope, normalize_recall_query_with_fallback
 from storage.memories import MemoryStore
 
 
@@ -34,6 +34,16 @@ def _make_manager(store: MemoryStore, *, trace_enabled: bool) -> MemoryManager:
     return manager
 
 
+def test_recall_query_rewrite_rules() -> None:
+    assert normalize_recall_query_with_fallback("memory id 22") == ("22", "strip_memory_id_wrapper")
+    assert normalize_recall_query_with_fallback("recall memory with an ID of number 22") == (
+        "22",
+        "strip_memory_id_wrapper",
+    )
+    assert normalize_recall_query_with_fallback("memory video 22") == ("memory video 22", "none")
+    assert normalize_recall_query_with_fallback("VAD settings") == ("VAD settings", "none")
+
+
 def test_recall_tool_omits_trace_when_disabled(monkeypatch, tmp_path, caplog) -> None:
     store = MemoryStore(db_path=tmp_path / "memories.db")
     manager = _make_manager(store, trace_enabled=False)
@@ -59,33 +69,36 @@ def test_recall_tool_trace_contains_expected_fields_when_enabled(monkeypatch, tm
     with caplog.at_level("INFO"):
         result = asyncio.run(ai_tools.recall_memories(query="VAD", limit=5))
 
-    assert len(result["memories"]) >= 1
     trace = result["trace"]
-    assert trace["mode_used"] == "lexical"
     assert trace["query_original"] == "VAD"
-    assert trace["candidate_counts"]["selected"] >= 1
-    assert trace["selected"]
-    assert trace["selected"][0]["selected_reason"] == "top_ranked_lexical_within_limit"
+    assert trace["query_used"] == "VAD"
+    assert trace["retrieval_mode"] == "lexical"
+    assert trace["rewrite_applied"] == "none"
+    assert "candidate_counts" in trace
+    assert "thresholds_used" in trace
+    assert "ranking_summary" in trace
+    assert trace["ranking_summary"]
+    assert any(item.get("selected") for item in trace["ranking_summary"])
     assert "memory_recall_trace" in caplog.text
 
 
-def test_recall_tool_trace_reports_empty_with_fallback(monkeypatch, tmp_path) -> None:
+def test_recall_tool_fallback_rewrite_can_recover_results(monkeypatch, tmp_path) -> None:
     store = MemoryStore(db_path=tmp_path / "memories.db")
     manager = _make_manager(store, trace_enabled=True)
-    manager.remember_memory(content="Voice activity detection helps with VAD.", importance=4)
+    manager.remember_memory(content="Threshold was tuned to 22 for VAD sensitivity.", importance=4)
 
     monkeypatch.setattr(ai_tools.MemoryManager, "get_instance", lambda: manager)
-    result = asyncio.run(ai_tools.recall_memories(query="memory ID 22", limit=5))
+    result = asyncio.run(ai_tools.recall_memories(query="memory ID: 22", limit=5))
 
-    assert result["memories"] == []
+    assert len(result["memories"]) == 1
     trace = result["trace"]
-    assert trace["candidate_counts"]["selected"] == 0
-    assert trace["excluded_summary"]
-    assert trace["fallback_suggestion"]["suggested_query"]
-    assert "ID lookup" in trace["fallback_suggestion"]["reason"]
+    assert trace["rewrite_applied"] == "strip_memory_id_wrapper"
+    assert trace["query_used"] == "22"
+    assert trace["rewrite_helped"] is True
+    assert len(trace["attempts"]) == 2
 
 
-def test_recall_trace_counts_deduped_and_truncated_candidates(monkeypatch, tmp_path) -> None:
+def test_recall_trace_includes_exclusion_reason(monkeypatch, tmp_path) -> None:
     store = MemoryStore(db_path=tmp_path / "memories.db")
     manager = _make_manager(store, trace_enabled=True)
     manager.remember_memory(content="duplicate content", importance=5)
@@ -95,9 +108,24 @@ def test_recall_trace_counts_deduped_and_truncated_candidates(monkeypatch, tmp_p
     monkeypatch.setattr(ai_tools.MemoryManager, "get_instance", lambda: manager)
     result = asyncio.run(ai_tools.recall_memories(query="duplicate", limit=1))
 
-    trace = result["trace"]
-    assert trace["excluded_summary"]["deduped"] >= 1
-    assert trace["excluded_summary"]["truncated"] >= 1
+    ranking_summary = result["trace"]["ranking_summary"]
+    assert any(not item["selected"] for item in ranking_summary)
+    assert any(item.get("exclusion_reason") for item in ranking_summary if not item["selected"])
+
+
+def test_recall_cards_do_not_leak_memory_id(monkeypatch, tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_manager(store, trace_enabled=True)
+    manager.remember_memory(content="VAD padding is 700ms.", importance=5)
+
+    monkeypatch.setattr(ai_tools.MemoryManager, "get_instance", lambda: manager)
+    result = asyncio.run(ai_tools.recall_memories(query="VAD", limit=5))
+
+    output = result["memory_cards_text"]
+    assert "memory_id" not in output.lower()
+    assert "id " not in output.lower()
+    assert "#" not in output
+    assert "memory_id" not in str(result["memory_cards"])
 
 
 def test_recall_memories_callers_keep_list_contract(tmp_path) -> None:
