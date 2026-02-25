@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import nullcontext
 
 import main
+from ai.realtime_api import RealtimeAPIStartupError, StartupDependencyOutcome
 
 
 class _FakeConfigController:
@@ -50,6 +51,8 @@ class _FakeMemoryManager:
 class _FakeRealtimeAPI:
     def __init__(self, prompts) -> None:
         self._prompts = prompts
+        self._failures = 0
+        self._last_failure_reason = ""
 
     def get_event_bus(self):
         return object()
@@ -57,8 +60,17 @@ class _FakeRealtimeAPI:
     async def run(self) -> None:
         return None
 
+    def get_session_health(self) -> dict[str, object]:
+        return {"failures": 0, "last_failure_reason": ""}
+
     def is_ready_for_injections(self) -> bool:
         return False
+
+    def get_session_health(self) -> dict[str, object]:
+        return {
+            "failures": self._failures,
+            "last_failure_reason": self._last_failure_reason,
+        }
 
 
 class _FakeMotionController:
@@ -321,30 +333,43 @@ def test_main_optional_startup_failure_logs_warning_with_marker(monkeypatch) -> 
     )
 
 
-def test_main_logs_structured_shutdown_summary(monkeypatch) -> None:
+def test_main_audio_startup_failure_is_fatal_in_strict_mode(monkeypatch) -> None:
+    exceptions: list[str] = []
+
+    class _StrictAudioFailingRealtimeAPI:
+        def __init__(self, _prompts) -> None:
+            raise RealtimeAPIStartupError(
+                "audio input initialization failed",
+                outcome=StartupDependencyOutcome(
+                    component="audio_input",
+                    dependency_class="required",
+                    status="fatal",
+                    detail="PyAudio is required for AsyncMicrophone",
+                ),
+            )
+
+    def capture_exception(message: str, *args) -> None:
+        exceptions.append(message % args if args else message)
+
+    monkeypatch.setattr(main.ConfigController, "get_instance", lambda: _FakeConfigController())
+    monkeypatch.setattr(main.StorageController, "get_instance", lambda: _FakeStorageController())
+    monkeypatch.setattr(main.MemoryManager, "get_instance", lambda: _FakeMemoryManager())
+    monkeypatch.setattr(main, "RealtimeAPI", _StrictAudioFailingRealtimeAPI)
+    monkeypatch.setattr(main.logger, "exception", capture_exception)
+
+    exit_code = main.main([])
+
+    assert exit_code == 1
+    assert any(
+        "startup component=audio_input dependency_class=required status=fatal "
+        "detail=PyAudio is required for AsyncMicrophone" in message
+        for message in exceptions
+    )
+
+
+
+def test_main_logs_audio_input_startup_phase(monkeypatch) -> None:
     infos: list[str] = []
-
-    class _TimedOutMonitor(_FakeMonitor):
-        def __init__(self) -> None:
-            self._alive = True
-
-        def stop_loop(self) -> None:
-            return None
-
-        def is_loop_alive(self) -> bool:
-            return self._alive
-
-    class _TrackableMotion(_FakeMotionController):
-        def is_control_loop_alive(self) -> bool:
-            return False
-
-    class _TrackableCamera(_FakeCameraController):
-        def is_vision_loop_alive(self) -> bool:
-            return False
-
-    class _StoppedOps(_FakeOpsOrchestrator):
-        def stop_loop(self) -> str:
-            return "stopped"
 
     def capture_info(message: str, *args) -> None:
         infos.append(message % args if args else message)
@@ -353,22 +378,60 @@ def test_main_logs_structured_shutdown_summary(monkeypatch) -> None:
     monkeypatch.setattr(main.StorageController, "get_instance", lambda: _FakeStorageController())
     monkeypatch.setattr(main.MemoryManager, "get_instance", lambda: _FakeMemoryManager())
     monkeypatch.setattr(main, "RealtimeAPI", _FakeRealtimeAPI)
-    monkeypatch.setattr(main.MotionController, "get_instance", lambda: _TrackableMotion())
-    monkeypatch.setattr(main.CameraController, "get_instance", lambda: _TrackableCamera())
-    monkeypatch.setattr(main.ImuMonitor, "get_instance", lambda: _TimedOutMonitor())
-    monkeypatch.setattr(main.BatteryMonitor, "get_instance", lambda: _TimedOutMonitor())
-    monkeypatch.setattr(main.OpsOrchestrator, "get_instance", lambda: _StoppedOps(loop_alive=False))
+    monkeypatch.setattr(main.MotionController, "get_instance", lambda: _FakeMotionController())
+    monkeypatch.setattr(main.CameraController, "get_instance", lambda: _FakeCameraController())
+    monkeypatch.setattr(main.ImuMonitor, "get_instance", lambda: _FakeMonitor())
+    monkeypatch.setattr(main.BatteryMonitor, "get_instance", lambda: _FakeMonitor())
+    monkeypatch.setattr(main.OpsOrchestrator, "get_instance", lambda: _FakeOpsOrchestrator())
     monkeypatch.setattr(main, "suppress_noisy_stderr", lambda *args, **kwargs: nullcontext())
     monkeypatch.setattr(main.logger, "info", capture_info)
 
     exit_code = main.main([])
 
     assert exit_code == 0
-    summary_lines = [line for line in infos if line.startswith("shutdown summary=")]
-    assert summary_lines
-    summary_line = summary_lines[-1]
-    assert "'ops_orchestrator': 'stopped'" in summary_line
-    assert "'imu_monitor': 'timed_out'" in summary_line
-    assert "'battery_monitor': 'timed_out'" in summary_line
-    assert "'camera_controller': 'stopped'" in summary_line
-    assert "'motion_controller': 'stopped'" in summary_line
+    assert "startup component=audio_input dependency_class=required status=starting" in infos
+    assert "startup component=audio_input dependency_class=required status=ready" in infos
+
+def test_main_returns_nonzero_when_runtime_websocket_session_fails(monkeypatch) -> None:
+    class _RuntimeFailureRealtimeAPI(_FakeRealtimeAPI):
+        async def run(self) -> None:
+            raise RuntimeError("session connect failed")
+
+    monkeypatch.setattr(main.ConfigController, "get_instance", lambda: _FakeConfigController())
+    monkeypatch.setattr(main.StorageController, "get_instance", lambda: _FakeStorageController())
+    monkeypatch.setattr(main.MemoryManager, "get_instance", lambda: _FakeMemoryManager())
+    monkeypatch.setattr(main, "RealtimeAPI", _RuntimeFailureRealtimeAPI)
+    monkeypatch.setattr(main.MotionController, "get_instance", lambda: _FakeMotionController())
+    monkeypatch.setattr(main.CameraController, "get_instance", lambda: _FakeCameraController())
+    monkeypatch.setattr(main.ImuMonitor, "get_instance", lambda: _FakeMonitor())
+    monkeypatch.setattr(main.BatteryMonitor, "get_instance", lambda: _FakeMonitor())
+    monkeypatch.setattr(main.OpsOrchestrator, "get_instance", lambda: _FakeOpsOrchestrator())
+    monkeypatch.setattr(main, "suppress_noisy_stderr", lambda *args, **kwargs: nullcontext())
+
+    exit_code = main.main([])
+
+    assert exit_code == 1
+
+
+def test_main_returns_nonzero_when_runtime_records_session_failure(monkeypatch) -> None:
+    class _RuntimeRecordedFailureRealtimeAPI(_FakeRealtimeAPI):
+        async def run(self) -> None:
+            return None
+
+        def get_session_health(self) -> dict[str, object]:
+            return {"failures": 1, "last_failure_reason": "session closed unexpectedly"}
+
+    monkeypatch.setattr(main.ConfigController, "get_instance", lambda: _FakeConfigController())
+    monkeypatch.setattr(main.StorageController, "get_instance", lambda: _FakeStorageController())
+    monkeypatch.setattr(main.MemoryManager, "get_instance", lambda: _FakeMemoryManager())
+    monkeypatch.setattr(main, "RealtimeAPI", _RuntimeRecordedFailureRealtimeAPI)
+    monkeypatch.setattr(main.MotionController, "get_instance", lambda: _FakeMotionController())
+    monkeypatch.setattr(main.CameraController, "get_instance", lambda: _FakeCameraController())
+    monkeypatch.setattr(main.ImuMonitor, "get_instance", lambda: _FakeMonitor())
+    monkeypatch.setattr(main.BatteryMonitor, "get_instance", lambda: _FakeMonitor())
+    monkeypatch.setattr(main.OpsOrchestrator, "get_instance", lambda: _FakeOpsOrchestrator())
+    monkeypatch.setattr(main, "suppress_noisy_stderr", lambda *args, **kwargs: nullcontext())
+
+    exit_code = main.main([])
+
+    assert exit_code == 1

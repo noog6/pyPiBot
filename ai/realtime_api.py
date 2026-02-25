@@ -151,6 +151,53 @@ class ConfirmationState(str, Enum):
     COMPLETED = "completed"
 
 
+@dataclass(frozen=True)
+class StartupDependencyOutcome:
+    component: str
+    dependency_class: str
+    status: str
+    detail: str | None = None
+
+
+class RealtimeAPIStartupError(RuntimeError):
+    """Typed startup error for classified RealtimeAPI dependency failures."""
+
+    def __init__(self, message: str, *, outcome: StartupDependencyOutcome) -> None:
+        super().__init__(message)
+        self.outcome = outcome
+
+
+class _DisabledMicrophone:
+    """Fallback microphone implementation used when input startup is degraded."""
+
+    def __init__(self) -> None:
+        self.is_recording = False
+        self.is_receiving = False
+
+    def start_recording(self) -> None:
+        self.is_recording = True
+
+    def stop_recording(self) -> None:
+        self.is_recording = False
+
+    def start_receiving(self) -> None:
+        self.is_receiving = True
+        self.is_recording = False
+
+    def stop_receiving(self) -> None:
+        self.is_receiving = False
+
+    def get_audio_data(self) -> bytes | None:
+        return None
+
+    def drain_queue(self, max_items: int = 9999) -> int:
+        _ = max_items
+        return 0
+
+    def close(self) -> None:
+        return None
+
+
 @dataclass
 class PendingConfirmationToken:
     id: str
@@ -316,12 +363,13 @@ class RealtimeAPI:
         audio_cfg = config.get("audio") or {}
         input_cfg = audio_cfg.get("input") or {}
         output_cfg = audio_cfg.get("output") or {}
+        startup_cfg = config.get("startup") or {}
         self._audio_input_device_name = input_cfg.get("device_name")
         self._audio_output_device_name = output_cfg.get("device_name")
+        self._allow_audio_startup_degraded = bool(startup_cfg.get("allow_audio_input_failure", False))
         self.exit_event = asyncio.Event()
-        self.mic = AsyncMicrophone(
-            input_device_name=self._audio_input_device_name,
-            debug_list_devices=False,
+        self.mic = self._initialize_microphone(
+            allow_failure=self._allow_audio_startup_degraded,
         )
         self.audio_player: AudioPlayer | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
@@ -625,6 +673,36 @@ class RealtimeAPI:
             realtime_cfg.get("minimum_non_confirmation_duration_ms", 120)
         )
         self._vad_turn_detection = self._resolve_vad_turn_detection(config)
+
+    def _create_microphone(self) -> AsyncMicrophone:
+        return AsyncMicrophone(
+            input_device_name=self._audio_input_device_name,
+            debug_list_devices=False,
+        )
+
+    def _initialize_microphone(self, *, allow_failure: bool) -> AsyncMicrophone | _DisabledMicrophone:
+        try:
+            return self._create_microphone()
+        except Exception as exc:
+            outcome = StartupDependencyOutcome(
+                component="audio_input",
+                dependency_class="required",
+                status="degraded" if allow_failure else "fatal",
+                detail=str(exc),
+            )
+            if not allow_failure:
+                raise RealtimeAPIStartupError(
+                    f"audio input initialization failed: {exc}",
+                    outcome=outcome,
+                ) from exc
+            logger.warning(
+                "startup component=%s dependency_class=%s status=%s detail=%s",
+                outcome.component,
+                outcome.dependency_class,
+                outcome.status,
+                outcome.detail,
+            )
+            return _DisabledMicrophone()
 
     def _resolve_vad_turn_detection(self, config: dict[str, Any]) -> dict[str, float | int | bool]:
         realtime_cfg = config.get("realtime") or {}

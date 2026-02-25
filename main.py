@@ -9,6 +9,7 @@ import logging
 import sys
 
 from ai import RealtimeAPI
+from ai.realtime_api import RealtimeAPIStartupError
 from config import ConfigController
 from core.logging import enable_file_logging, logger
 from hardware import CameraController
@@ -269,11 +270,30 @@ def main(argv: list[str] | None = None) -> int:
     logger.info( ":                                        :" )
     logger.info( "··········································" )
     
-    # Required dependency: runtime cannot continue without RealtimeAPI.
+    # Required dependencies: runtime cannot continue without websocket/session startup.
     try:
         log_startup_status("realtime_api", "required", "starting")
+        log_startup_status("audio_input", "required", "starting")
         realtime_api_instance = RealtimeAPI(prompts)
+        log_startup_status("audio_input", "required", "ready")
         log_startup_status("realtime_api", "required", "ready")
+    except RealtimeAPIStartupError as exc:
+        outcome = exc.outcome
+        log_startup_status(
+            outcome.component,
+            outcome.dependency_class,
+            outcome.status,
+            detail=outcome.detail,
+            level="exception",
+        )
+        log_startup_status(
+            "realtime_api",
+            "required",
+            "fatal",
+            detail=str(exc),
+            level="exception",
+        )
+        return 1
     except Exception as exc:
         log_startup_status(
             "realtime_api",
@@ -393,12 +413,51 @@ def main(argv: list[str] | None = None) -> int:
             level="warning",
         )
 
+    runtime_exit_code = 0
+    interrupted = False
+    session_failures_before = 0
+    get_session_health = getattr(realtime_api_instance, "get_session_health", None)
+    if callable(get_session_health):
+        try:
+            baseline_health = get_session_health() or {}
+            session_failures_before = int(baseline_health.get("failures", 0) or 0)
+        except Exception:
+            logger.debug("Unable to read baseline session health before runtime start.")
     try:
         asyncio.run(realtime_api_instance.run())
+        get_session_health = getattr(realtime_api_instance, "get_session_health", None)
+        if callable(get_session_health):
+            session_health = get_session_health()
+            session_failures = int(session_health.get("failures", 0) or 0)
+            if session_failures > 0:
+                runtime_exit_code = 1
+                logger.error(
+                    "Runtime session failed failures=%s last_failure_reason=%s",
+                    session_failures,
+                    session_health.get("last_failure_reason", ""),
+                )
     except KeyboardInterrupt:
+        interrupted = True
         logger.info("Program terminated by user")
     except Exception as exc:
+        runtime_exit_code = 1
         logger.exception("An unexpected error occurred: %s", exc)
+    else:
+        if runtime_exit_code == 0 and not interrupted and callable(get_session_health):
+            try:
+                runtime_health = get_session_health() or {}
+                session_failures_after = int(runtime_health.get("failures", 0) or 0)
+                if session_failures_after > session_failures_before:
+                    runtime_exit_code = 1
+                    failure_reason = runtime_health.get("last_failure_reason") or "unknown"
+                    logger.error(
+                        "Realtime session failed during runtime (failures_before=%s failures_after=%s reason=%s)",
+                        session_failures_before,
+                        session_failures_after,
+                        failure_reason,
+                    )
+            except Exception:
+                logger.debug("Unable to read runtime session health after realtime loop exit.")
     finally:
         # Lifecycle ownership contract (startup/shutdown):
         # - main owns RealtimeAPI, MotionController, CameraController, ImuMonitor,
@@ -474,7 +533,7 @@ def main(argv: list[str] | None = None) -> int:
 
         logger.info("shutdown summary=%s", shutdown_summary)
 
-    return 0
+    return runtime_exit_code
 
 
 if __name__ == "__main__":
