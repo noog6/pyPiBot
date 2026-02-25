@@ -2,32 +2,14 @@
 
 from __future__ import annotations
 
-import re
-import subprocess
 import time
 import uuid
 import asyncio
 from typing import Any, Awaitable, Callable
 
 from config import ConfigController
-from hardware import ADS1015Sensor, LPS22HBSensor
-from motion import (
-    MotionController,
-    gesture_attention_snap,
-    gesture_curious_tilt,
-    gesture_idle,
-    gesture_look_around,
-    gesture_look_center,
-    gesture_look_down,
-    gesture_look_left,
-    gesture_look_right,
-    gesture_look_up,
-    gesture_no,
-    gesture_nod,
-)
 from services.imu_monitor import ImuMonitor
 from services.memory_manager import MemoryManager, MemoryScope
-from services.output_volume import OutputVolumeController
 from services.profile_manager import ProfileManager
 from services.research import ResearchRequest, build_openai_service_or_null
 from services.research.grounding import (
@@ -37,6 +19,7 @@ from services.research.grounding import (
 )
 from services.research.research_transcript import write_research_transcript
 from services.research.service import ResearchService
+from services import tool_runtime
 from storage import StorageController
 
 
@@ -58,48 +41,12 @@ def _get_research_service() -> ResearchService:
 
 async def read_battery_voltage() -> dict[str, Any]:
     """Return the current LiPo battery voltage via the ADS1015 sensor."""
-
-    sensor = ADS1015Sensor.get_instance()
-    voltage = sensor.read_battery_voltage()
-    return {
-        "voltage": voltage,
-        "unit": "V",
-        "min_voltage": 7.0,
-        "max_voltage": 8.4,
-    }
+    return tool_runtime.read_battery_voltage()
 
 
 async def read_environment() -> dict[str, Any]:
     """Return the current onboard air pressure and temperature."""
-
-    sensor = LPS22HBSensor.get_instance()
-    air_pressure, air_temperature = sensor.read_value()
-    cpu_temperature = None
-    cpu_status = "unavailable"
-    try:
-        result = subprocess.run(
-            ["vcgencmd", "measure_temp"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except (OSError, subprocess.CalledProcessError):
-        pass
-    else:
-        match = re.search(r"([0-9]+(?:\.[0-9]+)?)", result.stdout)
-        if match:
-            cpu_temperature = float(match.group(1))
-            cpu_status = "ok"
-    return {
-        "air_pressure": air_pressure,
-        "air_temperature": air_temperature,
-        "air_temperature_context": "LPS22HB onboard ambient sensor inside Theo",
-        "cpu_temperature": cpu_temperature,
-        "cpu_temperature_context": "Broadcom SoC core temperature (vcgencmd)",
-        "cpu_temperature_status": cpu_status,
-        "pressure_unit": "hPa",
-        "temperature_unit": "C",
-    }
+    return tool_runtime.read_environment()
 
 
 async def read_imu_data() -> dict[str, Any]:
@@ -153,109 +100,71 @@ async def read_imu_data() -> dict[str, Any]:
     }
 
 
-def _enqueue_gesture(action: Any) -> None:
-    controller = MotionController.get_instance()
-    controller.add_action_to_queue(action)
-
-
 async def enqueue_idle_gesture(delay_ms: int = 0, intensity: float = 1.0) -> dict[str, Any]:
     """Queue an idle gesture action on the motion controller."""
-
-    action = gesture_idle(delay_ms=delay_ms, intensity=float(intensity))
-    _enqueue_gesture(action)
-    return {"queued": True, "gesture": action.name, "delay_ms": delay_ms, "intensity": intensity}
+    return tool_runtime.enqueue_idle_gesture(delay_ms=delay_ms, intensity=intensity)
 
 
 async def enqueue_nod_gesture(delay_ms: int = 0, intensity: float = 1.0) -> dict[str, Any]:
     """Queue a nod gesture action on the motion controller."""
-
-    action = gesture_nod(delay_ms=delay_ms, intensity=float(intensity))
-    _enqueue_gesture(action)
-    return {"queued": True, "gesture": action.name, "delay_ms": delay_ms, "intensity": intensity}
+    return tool_runtime.enqueue_nod_gesture(delay_ms=delay_ms, intensity=intensity)
 
 
 async def enqueue_no_gesture(delay_ms: int = 0, intensity: float = 1.0) -> dict[str, Any]:
     """Queue a head shake gesture action on the motion controller."""
-
-    action = gesture_no(delay_ms=delay_ms, intensity=float(intensity))
-    _enqueue_gesture(action)
-    return {"queued": True, "gesture": action.name, "delay_ms": delay_ms, "intensity": intensity}
+    return tool_runtime.enqueue_no_gesture(delay_ms=delay_ms, intensity=intensity)
 
 
 async def enqueue_look_around_gesture(
     delay_ms: int = 0, intensity: float = 1.0
 ) -> dict[str, Any]:
     """Queue a casual look around gesture action on the motion controller."""
-
-    action = gesture_look_around(delay_ms=delay_ms, intensity=float(intensity))
-    _enqueue_gesture(action)
-    return {"queued": True, "gesture": action.name, "delay_ms": delay_ms, "intensity": intensity}
+    return tool_runtime.enqueue_look_around_gesture(delay_ms=delay_ms, intensity=intensity)
 
 
 async def enqueue_look_up_gesture(delay_ms: int = 0, intensity: float = 1.0) -> dict[str, Any]:
     """Queue a look up gesture action on the motion controller."""
-
-    action = gesture_look_up(delay_ms=delay_ms, intensity=float(intensity))
-    _enqueue_gesture(action)
-    return {"queued": True, "gesture": action.name, "delay_ms": delay_ms, "intensity": intensity}
+    return tool_runtime.enqueue_look_up_gesture(delay_ms=delay_ms, intensity=intensity)
 
 
 async def enqueue_look_left_gesture(
     delay_ms: int = 0, intensity: float = 1.0
 ) -> dict[str, Any]:
     """Queue a look left gesture action on the motion controller."""
-
-    action = gesture_look_left(delay_ms=delay_ms, intensity=float(intensity))
-    _enqueue_gesture(action)
-    return {"queued": True, "gesture": action.name, "delay_ms": delay_ms, "intensity": intensity}
+    return tool_runtime.enqueue_look_left_gesture(delay_ms=delay_ms, intensity=intensity)
 
 
 async def enqueue_look_right_gesture(
     delay_ms: int = 0, intensity: float = 1.0
 ) -> dict[str, Any]:
     """Queue a look right gesture action on the motion controller."""
-
-    action = gesture_look_right(delay_ms=delay_ms, intensity=float(intensity))
-    _enqueue_gesture(action)
-    return {"queued": True, "gesture": action.name, "delay_ms": delay_ms, "intensity": intensity}
+    return tool_runtime.enqueue_look_right_gesture(delay_ms=delay_ms, intensity=intensity)
 
 
 async def enqueue_look_down_gesture(
     delay_ms: int = 0, intensity: float = 1.0
 ) -> dict[str, Any]:
     """Queue a look down gesture action on the motion controller."""
-
-    action = gesture_look_down(delay_ms=delay_ms, intensity=float(intensity))
-    _enqueue_gesture(action)
-    return {"queued": True, "gesture": action.name, "delay_ms": delay_ms, "intensity": intensity}
+    return tool_runtime.enqueue_look_down_gesture(delay_ms=delay_ms, intensity=intensity)
 
 
 async def enqueue_look_center_gesture(delay_ms: int = 0) -> dict[str, Any]:
     """Queue a look center gesture action on the motion controller."""
-
-    action = gesture_look_center(delay_ms=delay_ms)
-    _enqueue_gesture(action)
-    return {"queued": True, "gesture": action.name, "delay_ms": delay_ms}
+    return tool_runtime.enqueue_look_center_gesture(delay_ms=delay_ms)
 
 
 async def enqueue_curious_tilt_gesture(
     delay_ms: int = 0, intensity: float = 1.0
 ) -> dict[str, Any]:
     """Queue a curious tilt gesture action on the motion controller."""
-
-    action = gesture_curious_tilt(delay_ms=delay_ms, intensity=float(intensity))
-    _enqueue_gesture(action)
-    return {"queued": True, "gesture": action.name, "delay_ms": delay_ms, "intensity": intensity}
+    return tool_runtime.enqueue_curious_tilt_gesture(delay_ms=delay_ms, intensity=intensity)
 
 
 async def enqueue_attention_snap_gesture(
     delay_ms: int = 0, intensity: float = 1.0
 ) -> dict[str, Any]:
     """Queue a quick attention snap gesture action on the motion controller."""
-
-    action = gesture_attention_snap(delay_ms=delay_ms, intensity=float(intensity))
-    _enqueue_gesture(action)
-    return {"queued": True, "gesture": action.name, "delay_ms": delay_ms, "intensity": intensity}
+    return tool_runtime.enqueue_attention_snap_gesture(delay_ms=delay_ms, intensity=intensity)
 
 
 async def update_user_profile(
@@ -283,24 +192,12 @@ async def update_user_profile(
 
 async def get_output_volume() -> dict[str, Any]:
     """Return the current output audio volume."""
-
-    controller = OutputVolumeController.get_instance()
-    status = controller.get_volume()
-    return {
-        "percent": status.percent,
-        "muted": status.muted,
-    }
+    return tool_runtime.get_output_volume()
 
 
 async def set_output_volume(percent: int, emergency: bool = False) -> dict[str, Any]:
     """Set the output audio volume within safe bounds."""
-
-    controller = OutputVolumeController.get_instance()
-    status = controller.set_volume(percent=int(percent), emergency=bool(emergency))
-    return {
-        "percent": status.percent,
-        "muted": status.muted,
-    }
+    return tool_runtime.set_output_volume(percent=percent, emergency=emergency)
 
 
 async def remember_memory(

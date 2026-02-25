@@ -1,0 +1,183 @@
+"""Shared hardware and motion operations used by AI tool handlers."""
+
+from __future__ import annotations
+
+import re
+import subprocess
+from typing import Any
+
+from hardware import ADS1015Sensor, LPS22HBSensor
+from motion import (
+    MotionController,
+    gesture_attention_snap,
+    gesture_curious_tilt,
+    gesture_idle,
+    gesture_look_around,
+    gesture_look_center,
+    gesture_look_down,
+    gesture_look_left,
+    gesture_look_right,
+    gesture_look_up,
+    gesture_no,
+    gesture_nod,
+)
+from services.output_volume import OutputVolumeController
+
+
+def read_battery_voltage() -> dict[str, Any]:
+    """Return the current LiPo battery voltage via the ADS1015 sensor."""
+
+    sensor = ADS1015Sensor.get_instance()
+    voltage = sensor.read_battery_voltage()
+    return {
+        "voltage": voltage,
+        "unit": "V",
+        "min_voltage": 7.0,
+        "max_voltage": 8.4,
+    }
+
+
+def read_environment() -> dict[str, Any]:
+    """Return the current onboard air pressure and temperature."""
+
+    sensor = LPS22HBSensor.get_instance()
+    air_pressure, air_temperature = sensor.read_value()
+    cpu_temperature = None
+    cpu_status = "unavailable"
+    try:
+        result = subprocess.run(
+            ["vcgencmd", "measure_temp"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    else:
+        match = re.search(r"([0-9]+(?:\.[0-9]+)?)", result.stdout)
+        if match:
+            cpu_temperature = float(match.group(1))
+            cpu_status = "ok"
+    return {
+        "air_pressure": air_pressure,
+        "air_temperature": air_temperature,
+        "air_temperature_context": "LPS22HB onboard ambient sensor inside Theo",
+        "cpu_temperature": cpu_temperature,
+        "cpu_temperature_context": "Broadcom SoC core temperature (vcgencmd)",
+        "cpu_temperature_status": cpu_status,
+        "pressure_unit": "hPa",
+        "temperature_unit": "C",
+    }
+
+
+def enqueue_idle_gesture(delay_ms: int = 0, intensity: float = 1.0) -> dict[str, Any]:
+    """Queue an idle gesture action on the motion controller."""
+
+    return _enqueue_gesture(gesture_idle(delay_ms=delay_ms, intensity=float(intensity)), delay_ms, intensity)
+
+
+def enqueue_nod_gesture(delay_ms: int = 0, intensity: float = 1.0) -> dict[str, Any]:
+    """Queue a nod gesture action on the motion controller."""
+
+    return _enqueue_gesture(gesture_nod(delay_ms=delay_ms, intensity=float(intensity)), delay_ms, intensity)
+
+
+def enqueue_no_gesture(delay_ms: int = 0, intensity: float = 1.0) -> dict[str, Any]:
+    """Queue a head shake gesture action on the motion controller."""
+
+    return _enqueue_gesture(gesture_no(delay_ms=delay_ms, intensity=float(intensity)), delay_ms, intensity)
+
+
+def enqueue_look_around_gesture(delay_ms: int = 0, intensity: float = 1.0) -> dict[str, Any]:
+    """Queue a casual look around gesture action on the motion controller."""
+
+    return _enqueue_gesture(
+        gesture_look_around(delay_ms=delay_ms, intensity=float(intensity)),
+        delay_ms,
+        intensity,
+    )
+
+
+def enqueue_look_up_gesture(delay_ms: int = 0, intensity: float = 1.0) -> dict[str, Any]:
+    """Queue a look up gesture action on the motion controller."""
+
+    return _enqueue_gesture(gesture_look_up(delay_ms=delay_ms, intensity=float(intensity)), delay_ms, intensity)
+
+
+def enqueue_look_left_gesture(delay_ms: int = 0, intensity: float = 1.0) -> dict[str, Any]:
+    """Queue a look left gesture action on the motion controller."""
+
+    return _enqueue_gesture(gesture_look_left(delay_ms=delay_ms, intensity=float(intensity)), delay_ms, intensity)
+
+
+def enqueue_look_right_gesture(delay_ms: int = 0, intensity: float = 1.0) -> dict[str, Any]:
+    """Queue a look right gesture action on the motion controller."""
+
+    return _enqueue_gesture(gesture_look_right(delay_ms=delay_ms, intensity=float(intensity)), delay_ms, intensity)
+
+
+def enqueue_look_down_gesture(delay_ms: int = 0, intensity: float = 1.0) -> dict[str, Any]:
+    """Queue a look down gesture action on the motion controller."""
+
+    return _enqueue_gesture(gesture_look_down(delay_ms=delay_ms, intensity=float(intensity)), delay_ms, intensity)
+
+
+def enqueue_look_center_gesture(delay_ms: int = 0) -> dict[str, Any]:
+    """Queue a look center gesture action on the motion controller."""
+
+    action = gesture_look_center(delay_ms=delay_ms)
+    _add_action_to_motion_queue(action)
+    return {"queued": True, "gesture": action.name, "delay_ms": delay_ms}
+
+
+def enqueue_curious_tilt_gesture(delay_ms: int = 0, intensity: float = 1.0) -> dict[str, Any]:
+    """Queue a curious tilt gesture action on the motion controller."""
+
+    return _enqueue_gesture(
+        gesture_curious_tilt(delay_ms=delay_ms, intensity=float(intensity)),
+        delay_ms,
+        intensity,
+    )
+
+
+def enqueue_attention_snap_gesture(delay_ms: int = 0, intensity: float = 1.0) -> dict[str, Any]:
+    """Queue a quick attention snap gesture action on the motion controller."""
+
+    return _enqueue_gesture(
+        gesture_attention_snap(delay_ms=delay_ms, intensity=float(intensity)),
+        delay_ms,
+        intensity,
+    )
+
+
+def get_output_volume() -> dict[str, Any]:
+    """Return the current output audio volume."""
+
+    controller = OutputVolumeController.get_instance()
+    status = controller.get_volume()
+    return {
+        "percent": status.percent,
+        "muted": status.muted,
+    }
+
+
+def set_output_volume(percent: int, emergency: bool = False) -> dict[str, Any]:
+    """Set the output audio volume within safe bounds."""
+
+    controller = OutputVolumeController.get_instance()
+    status = controller.set_volume(percent=int(percent), emergency=bool(emergency))
+    return {
+        "percent": status.percent,
+        "muted": status.muted,
+    }
+
+
+def _enqueue_gesture(action: Any, delay_ms: int, intensity: float) -> dict[str, Any]:
+    _add_action_to_motion_queue(action)
+    return {"queued": True, "gesture": action.name, "delay_ms": delay_ms, "intensity": intensity}
+
+
+def _add_action_to_motion_queue(action: Any) -> None:
+    controller = MotionController.get_instance()
+    controller.add_action_to_queue(action)
+
