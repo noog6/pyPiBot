@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 import uuid
 import asyncio
+import re
 from typing import Any, Awaitable, Callable
 
 from config import ConfigController
@@ -215,6 +216,47 @@ def _derive_memory_confidence(*, influence_score: float, threshold: float) -> st
     return "Low"
 
 
+def _tokenize_for_evidence(value: str) -> set[str]:
+    return {token for token in re.findall(r"[a-z0-9']+", str(value).lower()) if token}
+
+
+def _derive_memory_confidence_from_evidence(
+    *,
+    lexical_exact_match: bool,
+    lexical_score: float,
+    semantic_score: float,
+    influence_score: float,
+    influence_threshold: float,
+    rewrite_applied: str,
+    exclusion_reason: str | None = None,
+) -> str:
+    """Map retrieval evidence to deterministic confidence tiers."""
+
+    semantic_high_threshold = 0.8
+    semantic_medium_threshold = 0.55
+    lexical_high_threshold = 0.85
+
+    excluded_by_threshold = (
+        exclusion_reason == "below_influence_threshold"
+        or (influence_threshold > 0.0 and influence_score < influence_threshold)
+    )
+    fallback_rewrite_used = rewrite_applied != "none"
+
+    if not excluded_by_threshold:
+        if lexical_exact_match or lexical_score >= lexical_high_threshold:
+            return "High"
+        if semantic_score >= semantic_high_threshold:
+            return "High"
+
+    if semantic_score >= semantic_medium_threshold:
+        return "Medium"
+    if fallback_rewrite_used:
+        return "Low"
+
+    # Backward-compatible fallback when only influence score is available.
+    return _derive_memory_confidence(influence_score=influence_score, threshold=influence_threshold)
+
+
 def build_recall_memory_cards(
     *,
     query: str | None,
@@ -234,22 +276,49 @@ def build_recall_memory_cards(
     if isinstance(trace, dict):
         thresholds = trace.get("thresholds_used") if isinstance(trace.get("thresholds_used"), dict) else {}
         threshold = float(thresholds.get("influence_threshold", 0.0) or 0.0)
+    rewrite_applied = str(trace.get("rewrite_applied", "none")) if isinstance(trace, dict) else "none"
 
     query_reason = "You asked to recall related details."
     normalized_query = " ".join(str(query or "").split())
     if normalized_query:
         query_reason = f"It matches your query about {normalized_query[:60]!r}."
+    query_tokens = _tokenize_for_evidence(normalized_query)
 
     cards: list[dict[str, str]] = []
     for idx, memory in enumerate(memories[: max(1, max_cards)]):
         score = 0.0
+        lexical_score = 0.0
+        semantic_score = 0.0
+        exclusion_reason = None
         if idx < len(ranked_selected):
-            score = float(ranked_selected[idx].get("influence_score", 0.0) or 0.0)
+            selected = ranked_selected[idx]
+            score = float(selected.get("influence_score", 0.0) or 0.0)
+            lexical_score = float(selected.get("score_lexical", 0.0) or 0.0)
+            semantic_score = float(selected.get("score_semantic", 0.0) or 0.0)
+            exclusion_reason = str(selected.get("exclusion_reason")) if selected.get("exclusion_reason") else None
+
+        memory_tokens = _tokenize_for_evidence(str(memory.get("content", "")))
+        lexical_exact_match = bool(query_tokens and memory_tokens.intersection(query_tokens))
+        evidence_hint = f"semantic similarity={semantic_score:.2f}"
+        if lexical_exact_match and query_tokens:
+            matched_token = sorted(memory_tokens.intersection(query_tokens))[0]
+            evidence_hint = f"lexical exact match on '{matched_token}'"
+        elif lexical_score > 0.0:
+            evidence_hint = f"lexical score={lexical_score:.2f}"
+
         cards.append(
             {
                 "memory": _truncate_memory_content(str(memory.get("content", ""))),
-                "why_relevant": query_reason,
-                "confidence": _derive_memory_confidence(influence_score=score, threshold=threshold),
+                "why_relevant": f"{query_reason} Evidence: {evidence_hint}.",
+                "confidence": _derive_memory_confidence_from_evidence(
+                    lexical_exact_match=lexical_exact_match,
+                    lexical_score=lexical_score,
+                    semantic_score=semantic_score,
+                    influence_score=score,
+                    influence_threshold=threshold,
+                    rewrite_applied=rewrite_applied,
+                    exclusion_reason=exclusion_reason,
+                ),
             }
         )
     return cards
