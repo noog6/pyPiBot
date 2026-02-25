@@ -876,7 +876,7 @@ def test_retrieve_for_turn_top_level_semantic_enabled_but_provider_disabled_skip
     assert metadata["semantic_enabled"] is False
     assert metadata["semantic_provider_ready"] is False
     assert metadata["semantic_attempted"] is False
-    assert metadata["fallback_reason"] == "openai_provider_disabled"
+    assert metadata["fallback_reason"] == "provider_disabled"
 
     metrics = manager.get_retrieval_health_metrics()
     assert metrics["semantic_provider_attempts"] == 0
@@ -1992,7 +1992,7 @@ def test_semantic_provider_ready_requires_successful_canary(tmp_path) -> None:
     ready, reason = manager._semantic_rerank_readiness()
 
     assert ready is True
-    assert reason == "provider_ready"
+    assert reason == "canary_ready"
 
 
 def test_semantic_provider_ready_reports_canary_timeout(tmp_path) -> None:
@@ -2013,7 +2013,7 @@ def test_semantic_provider_ready_reports_canary_timeout(tmp_path) -> None:
     ready, reason = manager._semantic_rerank_readiness()
 
     assert ready is False
-    assert reason == "canary_timeout"
+    assert reason == "canary_failed:timeout"
 
 
 def test_semantic_provider_ready_canary_bypass_allows_rerank(tmp_path) -> None:
@@ -2053,7 +2053,7 @@ def test_maybe_refresh_canary_updates_reason_without_duplicate_transition_logs(t
         "dimension": 2,
         "error_code": "none",
     }
-    manager._semantic_readiness_reason_last = "provider_ready"
+    manager._semantic_readiness_reason_last = "canary_ready"
 
     canary_outcomes = iter(
         [
@@ -2083,12 +2083,12 @@ def test_maybe_refresh_canary_updates_reason_without_duplicate_transition_logs(t
     ]
     assert len(readiness_logs) == 2
     assert "event=periodic" in readiness_logs[0]
-    assert "previous_reason=provider_ready" in readiness_logs[0]
-    assert "reason=canary_timeout" in readiness_logs[0]
+    assert "previous_reason=canary_ready" in readiness_logs[0]
+    assert "reason=canary_failed:timeout" in readiness_logs[0]
     assert "event=runtime_timeout_streak" in readiness_logs[1]
-    assert "previous_reason=canary_timeout" in readiness_logs[1]
-    assert "reason=provider_ready" in readiness_logs[1]
-    assert manager._semantic_readiness_reason_last == "provider_ready"
+    assert "previous_reason=canary_failed:timeout" in readiness_logs[1]
+    assert "reason=canary_ready" in readiness_logs[1]
+    assert manager._semantic_readiness_reason_last == "canary_ready"
     assert manager._semantic_readiness_transition_count == 2
 
 
@@ -2108,7 +2108,7 @@ def test_semantic_runtime_health_readiness_freshness_advances_after_transition(t
         "dimension": None,
         "error_code": "timeout",
     }
-    manager._semantic_readiness_reason_last = "canary_timeout"
+    manager._semantic_readiness_reason_last = "canary_failed:timeout"
     manager._semantic_readiness_last_transition_monotonic = time.monotonic() - 1.0
     manager._semantic_readiness_transition_count = 1
 
@@ -2147,7 +2147,7 @@ def test_embed_timeout_threshold_refreshes_canary_and_updates_readiness_reason(t
         "dimension": 2,
         "error_code": "none",
     }
-    manager._semantic_readiness_reason_last = "provider_ready"
+    manager._semantic_readiness_reason_last = "canary_ready"
 
     class _TimeoutProvider:
         def embed_text(self, _text: str):
@@ -2167,7 +2167,7 @@ def test_embed_timeout_threshold_refreshes_canary_and_updates_readiness_reason(t
             "dimension": None,
             "error_code": "timeout",
         }
-        manager._semantic_readiness_reason_last = "canary_timeout"
+        manager._semantic_readiness_reason_last = "canary_failed:timeout"
         manager._semantic_canary_last_checked_monotonic = time.monotonic()
         return True
 
@@ -2183,7 +2183,7 @@ def test_embed_timeout_threshold_refreshes_canary_and_updates_readiness_reason(t
     assert result.error_code == "timeout"
     assert calls == ["runtime_timeout_streak"]
     runtime = manager.get_semantic_runtime_health()
-    assert runtime["readiness_reason"] == "canary_timeout"
+    assert runtime["readiness_reason"] == "canary_failed:timeout"
     assert runtime["last_canary_age_ms"] >= 0
 
 
@@ -2264,7 +2264,7 @@ def test_maybe_refresh_canary_repeated_failures_do_not_emit_duplicate_transition
         "dimension": None,
         "error_code": "timeout",
     }
-    manager._semantic_readiness_reason_last = "canary_timeout"
+    manager._semantic_readiness_reason_last = "canary_failed:timeout"
 
     def _fake_run_embedding_canary() -> dict[str, bool | int | float | str | None]:
         state = {
@@ -2322,4 +2322,4 @@ def test_semantic_runtime_health_ready_state_stays_sticky_after_successful_trans
     ready_twice = manager.get_semantic_runtime_health()
     assert ready_once["ready"] is True
     assert ready_twice["ready"] is True
-    assert ready_twice["readiness_reason"] == "provider_ready"
+    assert ready_twice["readiness_reason"] == "canary_ready"

@@ -195,6 +195,15 @@ def _normalize_canary_error_code(raw_error_code: str | None, *, exc: Exception |
     return code if code else "unknown"
 
 
+def _classify_canary_failure_code(code: str | None) -> str:
+    normalized_code = str(code or "").strip().lower()
+    if normalized_code in {"timeout", "auth", "model", "http", "connection", "not_found"}:
+        return f"canary_failed:{normalized_code}"
+    if normalized_code in {"", "unknown"}:
+        return "canary_failed:unknown"
+    return "canary_failed:other"
+
+
 def _invoke_embed_text(
     provider: object,
     *,
@@ -608,7 +617,7 @@ class MemoryManager:
         if provider_name:
             provider_enabled = getattr(self, "_semantic_provider_enabled", {}).get(provider_name)
             if provider_enabled is False:
-                return False, f"{provider_name}_provider_disabled"
+                return False, "provider_disabled"
 
         provider = getattr(self, "_embedding_provider", None)
         if provider is None:
@@ -616,15 +625,22 @@ class MemoryManager:
         if isinstance(provider, NoopEmbeddingProvider):
             return False, "provider_unavailable"
         if not hasattr(provider, "embed_text"):
-            return False, "provider_missing_embed_text"
+            return False, "provider_invalid"
         if bool(getattr(self, "_semantic_canary_bypass", False)):
             return True, "canary_bypassed"
 
         canary_state = getattr(self, "_semantic_canary_last", {}) or {}
+        if not canary_state:
+            return False, "canary_not_run"
+
         if bool(canary_state.get("canary_success", False)):
-            return True, "provider_ready"
-        canary_error = str(canary_state.get("error_code", "not_run") or "not_run")
-        return False, f"canary_{canary_error}"
+            return True, "canary_ready"
+
+        raw_error_code = canary_state.get("error_code")
+        canary_error = str(raw_error_code or "").strip().lower()
+        if canary_error == "not_run" or (not canary_error and not bool(canary_state.get("canary_success", False))):
+            return False, "canary_not_run"
+        return False, _classify_canary_failure_code(canary_error)
 
     def _map_canary_error_code(self, raw_error_code: str | None, *, exc: Exception | None = None) -> str:
         return _normalize_canary_error_code(raw_error_code, exc=exc)

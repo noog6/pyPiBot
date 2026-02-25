@@ -32,7 +32,7 @@ class _FakeMemoryManager:
             "rerank_enabled": True,
             "background_embedding_enabled": True,
             "provider_ready": False,
-            "provider_readiness_reason": "openai_provider_disabled",
+            "provider_readiness_reason": "provider_disabled",
             "canary_success": False,
             "canary_latency_ms": 12,
             "canary_dimension": 0,
@@ -268,11 +268,11 @@ def test_main_logs_semantic_memory_state_at_startup(monkeypatch) -> None:
     assert "Semantic embeddings table available=False" in infos
     assert (
         "Semantic startup summary enabled=True provider=openai model=text-embedding-3-small rerank_enabled=True "
-        "background_embedding_enabled=True provider_ready=False readiness_reason=openai_provider_disabled "
+        "background_embedding_enabled=True provider_ready=False readiness_reason=provider_disabled "
         "provider_timeout_s=10.0 startup_canary_timeout_ms=60 query_timeout_ms=40 write_timeout_ms=75 "
         "effective_timeout_budget_ms=40 max_queries_per_minute=240 max_writes_per_minute=120"
     ) in infos
-    assert "semantic_runtime=offline reason=openai_provider_disabled canary_latency_ms=12" in infos
+    assert "semantic_runtime=offline reason=provider_disabled canary_latency_ms=12" in infos
 
 
 def test_main_realtime_api_init_failure_is_fatal_with_required_marker(monkeypatch) -> None:
