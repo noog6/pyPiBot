@@ -12,7 +12,11 @@ Typical use:
 
 ## 2) When direct store classes are allowed
 
-Direct store classes (`MemoryStore`, `UserProfileStore`, `ResearchBudgetStorage`) are allowed in tests and advanced composition/injection scenarios, but production service wiring should prefer helper constructors from `storage.factories`:
+Production service wiring must use helper constructors from `storage.factories` for default store creation, including `MemoryEmbeddingWorker` (which now defaults through `create_memory_store()`).
+
+Direct constructor injection with concrete store classes (`MemoryStore`, `UserProfileStore`, `ResearchBudgetStorage`) remains allowed only for explicit tests and advanced composition/injection scenarios where the caller intentionally owns persistence setup.
+
+Canonical helpers:
 
 - `create_memory_store()`
 - `create_user_profile_store()`
@@ -25,7 +29,7 @@ These helpers centralize path/config/connection resolution so services do not du
 - `StorageController` owns its SQLite connection and lock for run-scoped storage.
 - `ResearchBudgetStorage` should be created from `create_research_budget_store()` so it shares the `StorageController` connection and lock.
 - `MemoryStore` and `UserProfileStore` own their own SQLite connections/locks (file-backed stores under canonical var-dir resolution).
-- Services should not replace, close, or mutate store internals (`_conn`, `_lock`) outside explicit constructor injection in tests.
+- Services should not replace, close, or mutate store internals (`_conn`, `_lock`) outside explicit constructor injection in tests/composition.
 
 ## 4) Configuration/path rules
 
