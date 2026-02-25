@@ -319,3 +319,56 @@ def test_main_optional_startup_failure_logs_warning_with_marker(monkeypatch) -> 
         in message
         for message in warnings
     )
+
+
+def test_main_logs_structured_shutdown_summary(monkeypatch) -> None:
+    infos: list[str] = []
+
+    class _TimedOutMonitor(_FakeMonitor):
+        def __init__(self) -> None:
+            self._alive = True
+
+        def stop_loop(self) -> None:
+            return None
+
+        def is_loop_alive(self) -> bool:
+            return self._alive
+
+    class _TrackableMotion(_FakeMotionController):
+        def is_control_loop_alive(self) -> bool:
+            return False
+
+    class _TrackableCamera(_FakeCameraController):
+        def is_vision_loop_alive(self) -> bool:
+            return False
+
+    class _StoppedOps(_FakeOpsOrchestrator):
+        def stop_loop(self) -> str:
+            return "stopped"
+
+    def capture_info(message: str, *args) -> None:
+        infos.append(message % args if args else message)
+
+    monkeypatch.setattr(main.ConfigController, "get_instance", lambda: _FakeConfigController())
+    monkeypatch.setattr(main.StorageController, "get_instance", lambda: _FakeStorageController())
+    monkeypatch.setattr(main.MemoryManager, "get_instance", lambda: _FakeMemoryManager())
+    monkeypatch.setattr(main, "RealtimeAPI", _FakeRealtimeAPI)
+    monkeypatch.setattr(main.MotionController, "get_instance", lambda: _TrackableMotion())
+    monkeypatch.setattr(main.CameraController, "get_instance", lambda: _TrackableCamera())
+    monkeypatch.setattr(main.ImuMonitor, "get_instance", lambda: _TimedOutMonitor())
+    monkeypatch.setattr(main.BatteryMonitor, "get_instance", lambda: _TimedOutMonitor())
+    monkeypatch.setattr(main.OpsOrchestrator, "get_instance", lambda: _StoppedOps(loop_alive=False))
+    monkeypatch.setattr(main, "suppress_noisy_stderr", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr(main.logger, "info", capture_info)
+
+    exit_code = main.main([])
+
+    assert exit_code == 0
+    summary_lines = [line for line in infos if line.startswith("shutdown summary=")]
+    assert summary_lines
+    summary_line = summary_lines[-1]
+    assert "'ops_orchestrator': 'stopped'" in summary_line
+    assert "'imu_monitor': 'timed_out'" in summary_line
+    assert "'battery_monitor': 'timed_out'" in summary_line
+    assert "'camera_controller': 'stopped'" in summary_line
+    assert "'motion_controller': 'stopped'" in summary_line
