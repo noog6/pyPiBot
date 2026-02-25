@@ -200,6 +200,76 @@ async def set_output_volume(percent: int, emergency: bool = False) -> dict[str, 
     return tool_runtime.set_output_volume(percent=percent, emergency=emergency)
 
 
+def _truncate_memory_content(content: str, *, max_chars: int = 160) -> str:
+    normalized = " ".join(str(content or "").split())
+    if len(normalized) <= max_chars:
+        return normalized
+    return f"{normalized[: max_chars - 1]}…"
+
+
+def _derive_memory_confidence(*, influence_score: float, threshold: float) -> str:
+    if influence_score >= max(threshold + 2.0, 3.0):
+        return "High"
+    if influence_score >= max(threshold + 0.5, 1.5):
+        return "Medium"
+    return "Low"
+
+
+def build_recall_memory_cards(
+    *,
+    query: str | None,
+    memories: list[dict[str, Any]],
+    trace: dict[str, Any] | None,
+    max_cards: int = 3,
+) -> list[dict[str, str]]:
+    """Create user-facing memory cards without exposing internal IDs."""
+
+    ranking_summary = trace.get("ranking_summary") if isinstance(trace, dict) else []
+    ranked_selected = [
+        item
+        for item in (ranking_summary if isinstance(ranking_summary, list) else [])
+        if isinstance(item, dict) and item.get("selected")
+    ]
+    threshold = 0.0
+    if isinstance(trace, dict):
+        thresholds = trace.get("thresholds_used") if isinstance(trace.get("thresholds_used"), dict) else {}
+        threshold = float(thresholds.get("influence_threshold", 0.0) or 0.0)
+
+    query_reason = "You asked to recall related details."
+    normalized_query = " ".join(str(query or "").split())
+    if normalized_query:
+        query_reason = f"It matches your query about {normalized_query[:60]!r}."
+
+    cards: list[dict[str, str]] = []
+    for idx, memory in enumerate(memories[: max(1, max_cards)]):
+        score = 0.0
+        if idx < len(ranked_selected):
+            score = float(ranked_selected[idx].get("influence_score", 0.0) or 0.0)
+        cards.append(
+            {
+                "memory": _truncate_memory_content(str(memory.get("content", ""))),
+                "why_relevant": query_reason,
+                "confidence": _derive_memory_confidence(influence_score=score, threshold=threshold),
+            }
+        )
+    return cards
+
+
+def render_memory_cards_for_assistant(cards: list[dict[str, str]], *, total_memories: int) -> str:
+    if not cards:
+        return ""
+    lines: list[str] = []
+    for card in cards:
+        lines.append("Relevant memory:")
+        lines.append(f'- "{card.get("memory", "")}"')
+        lines.append("Why it's relevant:")
+        lines.append(f'- "{card.get("why_relevant", "")}"')
+        lines.append(f'Confidence: {card.get("confidence", "Low")}')
+    if total_memories > len(cards):
+        lines.append(f"+ {total_memories - len(cards)} more related memories")
+    return "\n".join(lines)
+
+
 async def remember_memory(
     content: str,
     tags: list[str] | None = None,
@@ -239,7 +309,23 @@ async def recall_memories(
 
     manager = MemoryManager.get_instance()
     memories, trace = manager.recall_memories_with_trace(query=query, limit=limit, scope=scope)
-    payload: dict[str, Any] = {"memories": [memory.__dict__ for memory in memories]}
+    memory_payload = [
+        {
+            "content": memory.content,
+            "tags": list(memory.tags),
+            "importance": memory.importance,
+            "source": memory.source,
+            "pinned": memory.pinned,
+            "needs_review": memory.needs_review,
+        }
+        for memory in memories
+    ]
+    cards = build_recall_memory_cards(query=query, memories=memory_payload, trace=trace)
+    payload: dict[str, Any] = {
+        "memories": memory_payload,
+        "memory_cards": cards,
+        "memory_cards_text": render_memory_cards_for_assistant(cards, total_memories=len(memory_payload)),
+    }
     if trace is not None:
         payload["trace"] = trace
     return payload
