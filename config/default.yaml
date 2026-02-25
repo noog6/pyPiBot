@@ -143,6 +143,11 @@ realtime:
       prefix_padding_ms: 700
       silence_duration_ms: 900
 
+# Startup dependency behavior
+startup:
+  # Keep strict startup by default; when true, Theo can run without a live microphone.
+  allow_audio_input_failure: false
+
 # Realtime websocket shutdown behavior
 websocket_close_timeout_s: 5.0
 

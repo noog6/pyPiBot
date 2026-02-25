@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import nullcontext
 
 import main
+from ai.realtime_api import RealtimeAPIStartupError, StartupDependencyOutcome
 
 
 class _FakeConfigController:
@@ -319,3 +320,83 @@ def test_main_optional_startup_failure_logs_warning_with_marker(monkeypatch) -> 
         in message
         for message in warnings
     )
+
+
+def test_main_audio_startup_failure_is_fatal_in_strict_mode(monkeypatch) -> None:
+    exceptions: list[str] = []
+
+    class _StrictAudioFailingRealtimeAPI:
+        def __init__(self, _prompts) -> None:
+            raise RealtimeAPIStartupError(
+                "audio input initialization failed",
+                outcome=StartupDependencyOutcome(
+                    component="audio_input",
+                    dependency_class="required",
+                    status="fatal",
+                    detail="PyAudio is required for AsyncMicrophone",
+                ),
+            )
+
+    def capture_exception(message: str, *args) -> None:
+        exceptions.append(message % args if args else message)
+
+    monkeypatch.setattr(main.ConfigController, "get_instance", lambda: _FakeConfigController())
+    monkeypatch.setattr(main.StorageController, "get_instance", lambda: _FakeStorageController())
+    monkeypatch.setattr(main.MemoryManager, "get_instance", lambda: _FakeMemoryManager())
+    monkeypatch.setattr(main, "RealtimeAPI", _StrictAudioFailingRealtimeAPI)
+    monkeypatch.setattr(main.logger, "exception", capture_exception)
+
+    exit_code = main.main([])
+
+    assert exit_code == 1
+    assert any(
+        "startup component=audio_input dependency_class=required status=fatal "
+        "detail=PyAudio is required for AsyncMicrophone" in message
+        for message in exceptions
+    )
+
+
+
+def test_main_logs_audio_input_startup_phase(monkeypatch) -> None:
+    infos: list[str] = []
+
+    def capture_info(message: str, *args) -> None:
+        infos.append(message % args if args else message)
+
+    monkeypatch.setattr(main.ConfigController, "get_instance", lambda: _FakeConfigController())
+    monkeypatch.setattr(main.StorageController, "get_instance", lambda: _FakeStorageController())
+    monkeypatch.setattr(main.MemoryManager, "get_instance", lambda: _FakeMemoryManager())
+    monkeypatch.setattr(main, "RealtimeAPI", _FakeRealtimeAPI)
+    monkeypatch.setattr(main.MotionController, "get_instance", lambda: _FakeMotionController())
+    monkeypatch.setattr(main.CameraController, "get_instance", lambda: _FakeCameraController())
+    monkeypatch.setattr(main.ImuMonitor, "get_instance", lambda: _FakeMonitor())
+    monkeypatch.setattr(main.BatteryMonitor, "get_instance", lambda: _FakeMonitor())
+    monkeypatch.setattr(main.OpsOrchestrator, "get_instance", lambda: _FakeOpsOrchestrator())
+    monkeypatch.setattr(main, "suppress_noisy_stderr", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr(main.logger, "info", capture_info)
+
+    exit_code = main.main([])
+
+    assert exit_code == 0
+    assert "startup component=audio_input dependency_class=required status=starting" in infos
+    assert "startup component=audio_input dependency_class=required status=ready" in infos
+
+def test_main_returns_nonzero_when_runtime_websocket_session_fails(monkeypatch) -> None:
+    class _RuntimeFailureRealtimeAPI(_FakeRealtimeAPI):
+        async def run(self) -> None:
+            raise RuntimeError("session connect failed")
+
+    monkeypatch.setattr(main.ConfigController, "get_instance", lambda: _FakeConfigController())
+    monkeypatch.setattr(main.StorageController, "get_instance", lambda: _FakeStorageController())
+    monkeypatch.setattr(main.MemoryManager, "get_instance", lambda: _FakeMemoryManager())
+    monkeypatch.setattr(main, "RealtimeAPI", _RuntimeFailureRealtimeAPI)
+    monkeypatch.setattr(main.MotionController, "get_instance", lambda: _FakeMotionController())
+    monkeypatch.setattr(main.CameraController, "get_instance", lambda: _FakeCameraController())
+    monkeypatch.setattr(main.ImuMonitor, "get_instance", lambda: _FakeMonitor())
+    monkeypatch.setattr(main.BatteryMonitor, "get_instance", lambda: _FakeMonitor())
+    monkeypatch.setattr(main.OpsOrchestrator, "get_instance", lambda: _FakeOpsOrchestrator())
+    monkeypatch.setattr(main, "suppress_noisy_stderr", lambda *args, **kwargs: nullcontext())
+
+    exit_code = main.main([])
+
+    assert exit_code == 1

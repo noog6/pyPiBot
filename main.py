@@ -9,6 +9,7 @@ import logging
 import sys
 
 from ai import RealtimeAPI
+from ai.realtime_api import RealtimeAPIStartupError
 from config import ConfigController
 from core.logging import enable_file_logging, logger
 from hardware import CameraController
@@ -215,11 +216,30 @@ def main(argv: list[str] | None = None) -> int:
     logger.info( ":                                        :" )
     logger.info( "··········································" )
     
-    # Required dependency: runtime cannot continue without RealtimeAPI.
+    # Required dependencies: runtime cannot continue without websocket/session startup.
     try:
         log_startup_status("realtime_api", "required", "starting")
+        log_startup_status("audio_input", "required", "starting")
         realtime_api_instance = RealtimeAPI(prompts)
+        log_startup_status("audio_input", "required", "ready")
         log_startup_status("realtime_api", "required", "ready")
+    except RealtimeAPIStartupError as exc:
+        outcome = exc.outcome
+        log_startup_status(
+            outcome.component,
+            outcome.dependency_class,
+            outcome.status,
+            detail=outcome.detail,
+            level="exception",
+        )
+        log_startup_status(
+            "realtime_api",
+            "required",
+            "fatal",
+            detail=str(exc),
+            level="exception",
+        )
+        return 1
     except Exception as exc:
         log_startup_status(
             "realtime_api",
@@ -339,11 +359,13 @@ def main(argv: list[str] | None = None) -> int:
             level="warning",
         )
 
+    runtime_exit_code = 0
     try:
         asyncio.run(realtime_api_instance.run())
     except KeyboardInterrupt:
         logger.info("Program terminated by user")
     except Exception as exc:
+        runtime_exit_code = 1
         logger.exception("An unexpected error occurred: %s", exc)
     finally:
         if system_context_coordinator is not None:
@@ -392,7 +414,7 @@ def main(argv: list[str] | None = None) -> int:
                 battery_monitor.unregister_event_handler(battery_event_handler)
             battery_monitor.stop_loop()
 
-    return 0
+    return runtime_exit_code
 
 
 if __name__ == "__main__":
