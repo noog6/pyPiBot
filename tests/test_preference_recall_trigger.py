@@ -32,7 +32,8 @@ def test_preference_question_calls_recall_before_response(monkeypatch) -> None:
                 {
                     "content": "User's favorite editor is Vim.",
                 }
-            ]
+            ],
+            "memory_cards_text": "Relevant memory:\n- \"User's favorite editor is Vim.\"\nWhy it's relevant:\n- \"Matches editor preference.\"\nConfidence: High",
         }
 
     async def _fake_send(message: str, _ws, **_kwargs) -> None:
@@ -53,6 +54,75 @@ def test_preference_question_calls_recall_before_response(monkeypatch) -> None:
     assert handled is True
     assert call_order == ["recall", "respond"]
     assert "Vim" in sent_messages[0]
+    assert "Relevant memory:" in sent_messages[0]
+    assert "Confidence: High" in sent_messages[0]
+
+
+def test_preference_recall_response_sanitizes_memory_id_phrasing(monkeypatch) -> None:
+    api = _make_api_stub()
+    sent_messages: list[str] = []
+
+    async def _fake_recall(**_kwargs):
+        return {
+            "memories": [{"content": "User's favorite editor is Vim."}],
+            "memory_cards_text": (
+                "Relevant memory:\n"
+                "- \"Prefers jasmine tea\"\n"
+                "Why it's relevant:\n"
+                "- \"memory #14 matched memory ID: 14\"\n"
+                "Confidence: Medium"
+            ),
+            "memory_cards": [{"confidence": "Medium"}],
+        }
+
+    async def _fake_send(message: str, _ws, **_kwargs) -> None:
+        sent_messages.append(message)
+
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "recall_memories", _fake_recall)
+    monkeypatch.setattr(api, "send_assistant_message", _fake_send)
+
+    handled = asyncio.run(
+        api._maybe_handle_preference_recall_intent(
+            "Which editor do I prefer?",
+            _Ws(),
+            source="text_message",
+        )
+    )
+
+    assert handled is True
+    assert sent_messages
+    assert "Relevant memory:" in sent_messages[0]
+    assert "memory #" not in sent_messages[0].lower()
+    assert "memory id" not in sent_messages[0].lower()
+    assert "id:" not in sent_messages[0].lower()
+
+
+def test_preference_recall_truthfulness_guard_for_checking_phrase(monkeypatch) -> None:
+    api = _make_api_stub()
+    sent_messages: list[str] = []
+    recall_calls = 0
+
+    async def _fake_recall(**_kwargs):
+        nonlocal recall_calls
+        recall_calls += 1
+        return {
+            "memories": [{"content": "User's favorite editor is Vim.", "tags": ["preference"]}],
+            "memory_cards_text": "Relevant memory:\n- \"User's favorite editor is Vim.\"\nWhy it's relevant:\n- \"Matches editor preference.\"\nConfidence: High",
+            "memory_cards": [{"confidence": "High"}],
+        }
+
+    async def _fake_send(message: str, _ws, **_kwargs) -> None:
+        sent_messages.append(message)
+
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "recall_memories", _fake_recall)
+    monkeypatch.setattr(api, "send_assistant_message", _fake_send)
+
+    asyncio.run(api._maybe_handle_preference_recall_intent("Which editor do I prefer?", _Ws(), source="text_message"))
+    asyncio.run(api._maybe_handle_preference_recall_intent("Which editor do I prefer?", _Ws(), source="text_message"))
+
+    assert recall_calls == 1
+    assert sent_messages[0].startswith("I’m checking what I remember.")
+    assert "I’m checking what I remember." not in sent_messages[1]
 
 
 def test_preference_question_empty_recall_returns_saved_yet_message(monkeypatch) -> None:
@@ -87,7 +157,10 @@ def test_preference_recall_uses_cache_within_cooldown(monkeypatch) -> None:
     async def _fake_recall(**_kwargs):
         nonlocal recall_calls
         recall_calls += 1
-        return {"memories": [{"content": "User's favorite editor is Vim."}]}
+        return {
+            "memories": [{"content": "User's favorite editor is Vim."}],
+            "memory_cards_text": "Relevant memory:\n- \"User's favorite editor is Vim.\"\nWhy it's relevant:\n- \"Matches editor preference.\"\nConfidence: High",
+        }
 
     async def _fake_send(_message: str, _ws, **_kwargs) -> None:
         return None
