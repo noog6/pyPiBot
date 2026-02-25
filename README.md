@@ -25,9 +25,10 @@ perception, interaction, and hardware control.
 
 ```
 pyPiBot/
+├── main.py        # Runtime entrypoint
 ├── ai/            # AI provider integrations (realtime API + tools)
 ├── config/        # YAML configuration controller + defaults
-├── core/          # Runtime orchestration and app lifecycle
+├── core/          # Shared runtime support (policies, models, logging, diagnostics)
 ├── hardware/      # GPIO, sensors, and actuator drivers
 ├── interaction/   # Audio input/output and user interaction helpers
 ├── motion/        # Motion controller and keyframe sequencing
