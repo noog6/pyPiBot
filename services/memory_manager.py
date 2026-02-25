@@ -211,7 +211,7 @@ def _normalize_canary_error_code(raw_error_code: str | None, *, exc: Exception |
     code = str(raw_error_code or "").strip().lower()
     if code in {"timeout_wrapper", "timeout_provider"}:
         return code
-    if code in {"timeout", "timeout_backoff"}:
+    if code in {"timeout", "canary_timeout", "timeout_backoff"}:
         return "timeout_wrapper"
     if code in {
         "request_timeout",
@@ -2193,6 +2193,17 @@ def run_embedding_probe_once(
 
     result["latency_ms"] = int((time.perf_counter() - started) * 1000.0)
     status = str(getattr(response, "status", "") or "")
+    response_timeout_budget_ms = getattr(response, "timeout_budget_ms", None)
+    if response_timeout_budget_ms is not None:
+        result["timeout_budget_ms"] = int(max(0, int(response_timeout_budget_ms)))
+    response_timer_start = getattr(response, "timer_start", None)
+    if response_timer_start:
+        result["timer_start"] = str(response_timer_start)
+    if hasattr(response, "observed_elapsed_ms_at_timeout"):
+        observed_elapsed_ms_at_timeout = getattr(response, "observed_elapsed_ms_at_timeout")
+        result["observed_elapsed_ms_at_timeout"] = (
+            int(max(0, int(observed_elapsed_ms_at_timeout))) if observed_elapsed_ms_at_timeout is not None else None
+        )
     vector = getattr(response, "vector", b"")
     if status == "ready" and bool(vector):
         dimension = int(getattr(response, "dimension", 0) or 0)
@@ -2205,10 +2216,11 @@ def run_embedding_probe_once(
     result["dimension"] = None
     result["embedding_emitted"] = False
     raw_error = str(getattr(response, "error_code", "") or status or "unknown")
-    result["error_code"] = _normalize_canary_error_code(raw_error)
+    normalized_error_code = _normalize_canary_error_code(raw_error)
+    result["error_code"] = normalized_error_code
     response_error_class = _sanitize_error_class_name(getattr(response, "error_class", None))
     result["error_class"] = response_error_class or "none"
-    if result["error_code"] == "timeout_provider":
+    if normalized_error_code == "timeout_provider":
         result["timeout_triggered"] = "provider"
     return result
 
