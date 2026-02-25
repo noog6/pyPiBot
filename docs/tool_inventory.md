@@ -1,5 +1,8 @@
 # Tool Inventory
 
+`config/default.yaml -> governance.tool_specs` is the canonical source of tool governance metadata.
+This document is a derived representation for human review and should stay in parity with config.
+
 | Tool | Governance Tier | Side Effects | Sensitivity | Default Confirmation |
 |---|---|---|---|---|
 | `read_battery_voltage` | SAFE | NONE | LOW | NEVER |
