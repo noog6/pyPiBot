@@ -57,6 +57,9 @@ class _FakeRealtimeAPI:
     async def run(self) -> None:
         return None
 
+    def is_ready_for_injections(self) -> bool:
+        return False
+
 
 class _FakeMotionController:
     def start_control_loop(self) -> None:
@@ -115,6 +118,9 @@ class _FakeOpsOrchestrator:
 
     def is_loop_alive(self) -> bool:
         return self._loop_alive
+
+    def has_startup_snapshot_emitted(self) -> bool:
+        return True
 
 
 def test_main_logs_warning_when_ops_shutdown_not_stopped(monkeypatch) -> None:
@@ -255,3 +261,61 @@ def test_main_logs_semantic_memory_state_at_startup(monkeypatch) -> None:
         "effective_timeout_budget_ms=40 max_queries_per_minute=240 max_writes_per_minute=120"
     ) in infos
     assert "embedding_canary success=False latency_ms=12 dimension=0 error_code=auth" in infos
+
+
+def test_main_realtime_api_init_failure_is_fatal_with_required_marker(monkeypatch) -> None:
+    exceptions: list[str] = []
+
+    class _FailingRealtimeAPI:
+        def __init__(self, _prompts) -> None:
+            raise RuntimeError("boom")
+
+    def capture_exception(message: str, *args) -> None:
+        exceptions.append(message % args if args else message)
+
+    monkeypatch.setattr(main.ConfigController, "get_instance", lambda: _FakeConfigController())
+    monkeypatch.setattr(main.StorageController, "get_instance", lambda: _FakeStorageController())
+    monkeypatch.setattr(main.MemoryManager, "get_instance", lambda: _FakeMemoryManager())
+    monkeypatch.setattr(main, "RealtimeAPI", _FailingRealtimeAPI)
+    monkeypatch.setattr(main.logger, "exception", capture_exception)
+
+    exit_code = main.main([])
+
+    assert exit_code == 1
+    assert any(
+        "startup component=realtime_api dependency_class=required status=fatal detail=boom"
+        in message
+        for message in exceptions
+    )
+
+
+def test_main_optional_startup_failure_logs_warning_with_marker(monkeypatch) -> None:
+    warnings: list[str] = []
+
+    class _FailingMotionController(_FakeMotionController):
+        def start_control_loop(self) -> None:
+            raise RuntimeError("motor unavailable")
+
+    def capture_warning(message: str, *args) -> None:
+        warnings.append(message % args if args else message)
+
+    monkeypatch.setattr(main.ConfigController, "get_instance", lambda: _FakeConfigController())
+    monkeypatch.setattr(main.StorageController, "get_instance", lambda: _FakeStorageController())
+    monkeypatch.setattr(main.MemoryManager, "get_instance", lambda: _FakeMemoryManager())
+    monkeypatch.setattr(main, "RealtimeAPI", _FakeRealtimeAPI)
+    monkeypatch.setattr(main.MotionController, "get_instance", lambda: _FailingMotionController())
+    monkeypatch.setattr(main.CameraController, "get_instance", lambda: _FakeCameraController())
+    monkeypatch.setattr(main.ImuMonitor, "get_instance", lambda: _FakeMonitor())
+    monkeypatch.setattr(main.BatteryMonitor, "get_instance", lambda: _FakeMonitor())
+    monkeypatch.setattr(main.OpsOrchestrator, "get_instance", lambda: _FakeOpsOrchestrator())
+    monkeypatch.setattr(main, "suppress_noisy_stderr", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr(main.logger, "warning", capture_warning)
+
+    exit_code = main.main([])
+
+    assert exit_code == 0
+    assert any(
+        "startup component=motion_controller dependency_class=optional status=warning detail=motor unavailable"
+        in message
+        for message in warnings
+    )
