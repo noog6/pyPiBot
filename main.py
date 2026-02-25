@@ -62,6 +62,60 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _normalize_stop_status(stopped: bool) -> str:
+    return "stopped" if stopped else "timed_out"
+
+
+def _stop_imu_monitor_with_status(monitor: ImuMonitor, timeout_s: float = 2.0) -> str:
+    """Thin adapter for uniform stop result reporting in `main` shutdown."""
+
+    try:
+        monitor.stop_loop(timeout_s=timeout_s)
+    except TypeError:
+        monitor.stop_loop()
+    is_alive = getattr(monitor, "is_loop_alive", None)
+    if callable(is_alive):
+        return _normalize_stop_status(not bool(is_alive()))
+    return "stopped"
+
+
+def _stop_battery_monitor_with_status(monitor: BatteryMonitor, timeout_s: float = 2.0) -> str:
+    """Thin adapter for uniform stop result reporting in `main` shutdown."""
+
+    try:
+        monitor.stop_loop(timeout_s=timeout_s)
+    except TypeError:
+        monitor.stop_loop()
+    is_alive = getattr(monitor, "is_loop_alive", None)
+    if callable(is_alive):
+        return _normalize_stop_status(not bool(is_alive()))
+    return "stopped"
+
+
+def _run_stop_with_status(stop_fn, is_alive_fn=None) -> str:
+    """Normalize stop method behavior into `stopped`/`timed_out`/`interrupted`/`error`."""
+
+    try:
+        stop_result = stop_fn()
+    except KeyboardInterrupt:
+        return "interrupted"
+    except Exception:
+        logger.exception("Shutdown stop call failed")
+        return "error"
+
+    if isinstance(stop_result, str):
+        return stop_result
+
+    if callable(is_alive_fn):
+        try:
+            return _normalize_stop_status(not bool(is_alive_fn()))
+        except Exception:
+            logger.exception("Shutdown liveness check failed")
+            return "error"
+
+    return "stopped"
+
+
 def main(argv: list[str] | None = None) -> int:
     """Application entry point.
 
@@ -346,13 +400,25 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         logger.exception("An unexpected error occurred: %s", exc)
     finally:
+        # Lifecycle ownership contract (startup/shutdown):
+        # - main owns RealtimeAPI, MotionController, CameraController, ImuMonitor,
+        #   BatteryMonitor, and OpsOrchestrator start/stop boundaries.
+        # - main owns SystemContextCoordinator and embedding worker startup/shutdown.
+        # - CameraController and MotionController each own their internal thread joins;
+        #   main only invokes stop methods in existing order.
+        # - ImuMonitor and BatteryMonitor own their loop lifecycle internals;
+        #   main collects normalized stop outcomes via thin adapters.
+        shutdown_summary: dict[str, str] = {}
         if system_context_coordinator is not None:
             system_context_coordinator.stop()
+            shutdown_summary["system_context_coordinator"] = "stopped"
         if embedding_worker is not None:
             try:
                 embedding_worker.stop(timeout_s=0.5)
+                shutdown_summary["embedding_worker"] = "stopped"
             except Exception as exc:
                 logger.warning("Failed stopping memory embedding worker: %s", exc)
+                shutdown_summary["embedding_worker"] = "error"
         if ops_orchestrator:
             try:
                 ops_status = ops_orchestrator.stop_loop()
@@ -361,6 +427,7 @@ def main(argv: list[str] | None = None) -> int:
                     "Interrupted while stopping ops orchestrator; continuing shutdown."
                 )
                 ops_status = "interrupted"
+            shutdown_summary["ops_orchestrator"] = ops_status
             if ops_status != "stopped":
                 loop_alive = ops_orchestrator.is_loop_alive()
                 logger.warning(
@@ -375,22 +442,37 @@ def main(argv: list[str] | None = None) -> int:
                         loop_alive,
                     )
         if camera_instance:
-            with suppress_noisy_stderr(
-                "camera shutdown",
-                env_var="THEO_CAMERA_DEBUG",
-                logger=logger,
-            ):
-                camera_instance.stop_vision_loop()
+            def _stop_camera() -> None:
+                with suppress_noisy_stderr(
+                    "camera shutdown",
+                    env_var="THEO_CAMERA_DEBUG",
+                    logger=logger,
+                ):
+                    camera_instance.stop_vision_loop()
+
+            shutdown_summary["camera_controller"] = _run_stop_with_status(
+                _stop_camera,
+                getattr(camera_instance, "is_vision_loop_alive", None),
+            )
         if motion_controller:
-            motion_controller.stop_control_loop()
+            shutdown_summary["motion_controller"] = _run_stop_with_status(
+                motion_controller.stop_control_loop,
+                getattr(motion_controller, "is_control_loop_alive", None),
+            )
         if imu_monitor:
             if imu_event_handler:
                 imu_monitor.unregister_event_handler(imu_event_handler)
-            imu_monitor.stop_loop()
+            shutdown_summary["imu_monitor"] = _run_stop_with_status(
+                lambda: _stop_imu_monitor_with_status(imu_monitor),
+            )
         if battery_monitor:
             if battery_event_handler:
                 battery_monitor.unregister_event_handler(battery_event_handler)
-            battery_monitor.stop_loop()
+            shutdown_summary["battery_monitor"] = _run_stop_with_status(
+                lambda: _stop_battery_monitor_with_status(battery_monitor),
+            )
+
+        logger.info("shutdown summary=%s", shutdown_summary)
 
     return 0
 
