@@ -60,6 +60,9 @@ class _FakeRealtimeAPI:
     async def run(self) -> None:
         return None
 
+    def get_session_health(self) -> dict[str, object]:
+        return {"failures": 0, "last_failure_reason": ""}
+
     def is_ready_for_injections(self) -> bool:
         return False
 
@@ -410,16 +413,18 @@ def test_main_returns_nonzero_when_runtime_websocket_session_fails(monkeypatch) 
     assert exit_code == 1
 
 
-def test_main_returns_nonzero_when_runtime_session_failure_is_swallowed(monkeypatch) -> None:
-    class _SwallowedRuntimeFailureRealtimeAPI(_FakeRealtimeAPI):
+def test_main_returns_nonzero_when_runtime_records_session_failure(monkeypatch) -> None:
+    class _RuntimeRecordedFailureRealtimeAPI(_FakeRealtimeAPI):
         async def run(self) -> None:
-            self._failures += 1
-            self._last_failure_reason = "session connect failed"
+            return None
+
+        def get_session_health(self) -> dict[str, object]:
+            return {"failures": 1, "last_failure_reason": "session closed unexpectedly"}
 
     monkeypatch.setattr(main.ConfigController, "get_instance", lambda: _FakeConfigController())
     monkeypatch.setattr(main.StorageController, "get_instance", lambda: _FakeStorageController())
     monkeypatch.setattr(main.MemoryManager, "get_instance", lambda: _FakeMemoryManager())
-    monkeypatch.setattr(main, "RealtimeAPI", _SwallowedRuntimeFailureRealtimeAPI)
+    monkeypatch.setattr(main, "RealtimeAPI", _RuntimeRecordedFailureRealtimeAPI)
     monkeypatch.setattr(main.MotionController, "get_instance", lambda: _FakeMotionController())
     monkeypatch.setattr(main.CameraController, "get_instance", lambda: _FakeCameraController())
     monkeypatch.setattr(main.ImuMonitor, "get_instance", lambda: _FakeMonitor())
