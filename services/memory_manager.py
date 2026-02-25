@@ -169,6 +169,8 @@ def _map_readiness_reason_to_semantic_error_code(
 
     if reason.startswith("canary_failed:"):
         suffix = reason.split(":", 1)[1].strip()
+        if suffix in {"timeout_wrapper", "timeout_provider"}:
+            return suffix
         if suffix:
             return suffix
     if reason == "canary_not_run":
@@ -207,8 +209,23 @@ def _classify_failure_class_for_readiness(*, readiness_reason: object, semantic_
 
 def _normalize_canary_error_code(raw_error_code: str | None, *, exc: Exception | None = None) -> str:
     code = str(raw_error_code or "").strip().lower()
-    if code in {"timeout", "timeout_backoff", "request_timeout"}:
-        return "timeout"
+    if code in {"timeout_wrapper", "timeout_provider"}:
+        return code
+    if code in {"timeout", "timeout_backoff"}:
+        return "timeout_wrapper"
+    if code in {
+        "request_timeout",
+        "deadline_exceeded",
+        "provider_deadline_exceeded",
+        "provider_timeout",
+        "upstream_timeout",
+        "gateway_timeout",
+    }:
+        return "timeout_provider"
+    if "deadline" in code and "exceed" in code:
+        return "timeout_provider"
+    if "request" in code and "timeout" in code:
+        return "timeout_provider"
     if code in {"missing_api_key", "auth_forbidden", "unauthorized", "forbidden", "invalid_api_key", "auth"}:
         return "auth"
     if code in {"model_not_found", "unknown_model", "invalid_model"}:
@@ -230,8 +247,12 @@ def _normalize_canary_error_code(raw_error_code: str | None, *, exc: Exception |
     exc_name = type(exc).__name__ if exc is not None else ""
     exc_message = str(exc) if exc is not None else ""
     raw = f"{code} {exc_name} {exc_message}".lower()
+    if "deadline exceeded" in raw or "deadline_exceeded" in raw:
+        return "timeout_provider"
+    if "request timeout" in raw or "request_timeout" in raw:
+        return "timeout_provider"
     if "timeout" in raw:
-        return "timeout"
+        return "timeout_wrapper"
     if any(token in raw for token in ["auth", "unauthor", "forbidden", "api key"]):
         return "auth"
     if "model" in raw:
@@ -245,11 +266,29 @@ def _normalize_canary_error_code(raw_error_code: str | None, *, exc: Exception |
 
 def _classify_canary_failure_code(code: str | None) -> str:
     normalized_code = str(code or "").strip().lower()
-    if normalized_code in {"timeout", "auth", "model", "http", "connection", "not_found"}:
+    if normalized_code in {
+        "timeout",
+        "timeout_wrapper",
+        "timeout_provider",
+        "auth",
+        "model",
+        "http",
+        "connection",
+        "not_found",
+    }:
         return f"canary_failed:{normalized_code}"
     if normalized_code in {"", "unknown"}:
         return "canary_failed:unknown"
     return "canary_failed:other"
+
+
+def _semantic_error_compatibility_family(error_code: object) -> str:
+    normalized = str(error_code or "").strip().lower()
+    if normalized in {"timeout_wrapper", "timeout_provider"}:
+        return "timeout"
+    if normalized:
+        return normalized
+    return "unknown"
 
 
 def _invoke_embed_text(
@@ -729,8 +768,19 @@ class MemoryManager:
                     raw_error = str(getattr(result, "error_code", "") or status or "unknown")
                     normalized_error = self._map_canary_error_code(raw_error)
                     canary_state["error_code"] = normalized_error
-                    if normalized_error != raw_error or normalized_error == "unknown":
-                        canary_state["raw_error_code"] = raw_error
+                    canary_state["raw_error_code"] = raw_error
+                    timeout_triggered = getattr(result, "timeout_triggered", None)
+                    if timeout_triggered:
+                        canary_state["timeout_triggered"] = str(timeout_triggered)
+                    observed_elapsed_ms = getattr(result, "observed_elapsed_ms_at_timeout", None)
+                    if observed_elapsed_ms is not None:
+                        canary_state["observed_elapsed_ms_at_timeout"] = int(observed_elapsed_ms)
+                    timeout_budget_ms = getattr(result, "timeout_budget_ms", None)
+                    if timeout_budget_ms is not None:
+                        canary_state["timeout_budget_ms"] = int(timeout_budget_ms)
+                    timer_start = getattr(result, "timer_start", None)
+                    if timer_start:
+                        canary_state["timer_start"] = str(timer_start)
             except Exception as exc:  # noqa: BLE001
                 latency_ms = int((time.perf_counter() - started) * 1000.0)
                 canary_state["latency_ms"] = latency_ms
@@ -991,6 +1041,11 @@ class MemoryManager:
             "canary_latency_ms": int(canary_state.get("latency_ms", 0) or 0),
             "canary_dimension": int(canary_state.get("dimension", 0) or 0),
             "canary_error_code": str(canary_state.get("error_code", "not_run") or "not_run"),
+            "canary_raw_error_code": str(canary_state.get("raw_error_code", "") or ""),
+            "canary_timeout_triggered": str(canary_state.get("timeout_triggered", "") or ""),
+            "canary_observed_elapsed_ms_at_timeout": int(canary_state.get("observed_elapsed_ms_at_timeout", 0) or 0),
+            "canary_timeout_budget_ms": int(canary_state.get("timeout_budget_ms", 0) or 0),
+            "canary_timer_start": str(canary_state.get("timer_start", "") or ""),
             "startup_canary_timeout_ms": int(getattr(self._semantic_config, "startup_canary_timeout_ms", 0)),
             "effective_timeout_budget_ms": int(effective_timeout_budget_ms),
             "startup_canary_bypass": bool(getattr(self, "_semantic_canary_bypass", False)),
@@ -1047,7 +1102,13 @@ class MemoryManager:
                 semantic_error_code=semantic_error_code,
             ),
             "semantic_error_code": semantic_error_code,
+            "semantic_error_compatibility_family": _semantic_error_compatibility_family(semantic_error_code),
             "canary_error_code": canary_error_code,
+            "canary_raw_error_code": str(canary_state.get("raw_error_code", "") or ""),
+            "canary_timeout_triggered": str(canary_state.get("timeout_triggered", "") or ""),
+            "canary_observed_elapsed_ms_at_timeout": int(canary_state.get("observed_elapsed_ms_at_timeout", 0) or 0),
+            "canary_timeout_budget_ms": int(canary_state.get("timeout_budget_ms", 0) or 0),
+            "canary_timer_start": str(canary_state.get("timer_start", "") or ""),
             "canary_latency_ms": canary_latency_ms,
             "canary_age_ms": canary_age_ms,
             "provider_last_error_code": provider_last_error_code,
@@ -1357,16 +1418,21 @@ class MemoryManager:
                 self._shutdown_embedding_executor()
             if crossed_timeout_threshold and not suppress_canary_refresh:
                 self._maybe_refresh_canary(reason="runtime_timeout_streak")
+            observed_elapsed_ms_at_timeout = int((time.monotonic() - started_monotonic) * 1000)
             result = SimpleNamespace(
                 status="error",
                 dimension=0,
                 vector=b"",
                 vector_norm=None,
-                error_code="timeout",
+                error_code="timeout_wrapper",
+                timeout_triggered="wrapper",
+                observed_elapsed_ms_at_timeout=observed_elapsed_ms_at_timeout,
+                timeout_budget_ms=timeout_ms,
+                timer_start="future_wait_start",
             )
             _attach_timing_metadata(result)
             self._semantic_provider_ready_last = False
-            self._semantic_provider_last_error_code = "timeout"
+            self._semantic_provider_last_error_code = "timeout_wrapper"
             return result
 
     def _find_semantic_duplicate(
