@@ -65,7 +65,6 @@ All keys below are under the top-level `research:` block.
 ### Budgeting and cache
 
 - `budget.daily_limit` (default: `50`)
-- `budget.state_file` (legacy migration input only)
 - `cache.dir`
 - `cache.ttl_hours`
 
