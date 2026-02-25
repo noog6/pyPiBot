@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-
 from ai.realtime_api import RealtimeAPI
+from core.logging import logger
 
 
 class _Ws:
@@ -99,3 +99,45 @@ def test_preference_recall_uses_cache_within_cooldown(monkeypatch) -> None:
     asyncio.run(api._maybe_handle_preference_recall_intent("Which editor do I prefer?", _Ws(), source="text_message"))
 
     assert recall_calls == 1
+
+
+def test_preference_question_without_recall_tool_emits_skip_trace(monkeypatch) -> None:
+    api = _make_api_stub()
+    api._tool_call_records = []
+    api._preference_recall_skip_logged_turn_ids = set()
+    api._pending_preference_recall_trace = None
+    api._current_run_id = lambda: "run-123"
+    logged: list[str] = []
+
+    def _fake_info(message: str, *args) -> None:
+        logged.append(message % args if args else message)
+
+    monkeypatch.setattr(logger, "info", _fake_info)
+    api._mark_preference_recall_candidate("Which editor do I prefer?", source="text_message")
+    api._emit_preference_recall_skip_trace_if_needed(turn_id="turn-9")
+
+    assert logged
+    assert "preference_recall_decision_trace" in logged[0]
+    assert "intent=preference_recall" in logged[0]
+    assert "decision=skipped_tool" in logged[0]
+    assert "reason=model_did_not_request_tool" in logged[0]
+    assert "run_id=run-123" in logged[0]
+    assert "turn_id=turn-9" in logged[0]
+
+
+def test_preference_question_with_recall_tool_does_not_emit_skip_trace(monkeypatch) -> None:
+    api = _make_api_stub()
+    api._tool_call_records = [{"name": "recall_memories", "call_id": "c1", "args": {}, "result": {}}]
+    api._preference_recall_skip_logged_turn_ids = set()
+    api._pending_preference_recall_trace = None
+    api._current_run_id = lambda: "run-123"
+    logged: list[str] = []
+
+    def _fake_info(message: str, *args) -> None:
+        logged.append(message % args if args else message)
+
+    monkeypatch.setattr(logger, "info", _fake_info)
+    api._mark_preference_recall_candidate("Which editor do I prefer?", source="text_message")
+    api._emit_preference_recall_skip_trace_if_needed(turn_id="turn-10")
+
+    assert not logged
