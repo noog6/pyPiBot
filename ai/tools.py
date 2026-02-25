@@ -238,8 +238,11 @@ async def recall_memories(
     """Recall stored memories based on a query."""
 
     manager = MemoryManager.get_instance()
-    memories = manager.recall_memories(query=query, limit=limit, scope=scope)
-    return {"memories": [memory.__dict__ for memory in memories]}
+    memories, trace = manager.recall_memories_with_trace(query=query, limit=limit, scope=scope)
+    payload: dict[str, Any] = {"memories": [memory.__dict__ for memory in memories]}
+    if trace is not None:
+        payload["trace"] = trace
+    return payload
 
 
 async def forget_memory(memory_id: int) -> dict[str, Any]:
