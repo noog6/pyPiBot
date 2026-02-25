@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 from services.research.models import ResearchPacket, ResearchRequest
-from services.research.research_transcript import write_research_transcript
+from services.research import research_transcript
+from services.research.research_transcript import (
+    resolve_research_transcript_run_context,
+    write_research_transcript,
+)
 
 
 def test_write_research_transcript_creates_json_and_md(tmp_path: Path) -> None:
@@ -46,3 +51,19 @@ def test_write_research_transcript_creates_json_and_md(tmp_path: Path) -> None:
     md_body = md_path.read_text(encoding="utf-8")
     assert "https://example.com/a" in md_body
     assert "https://example.com/b" in md_body
+
+
+def test_resolve_research_transcript_run_context_reads_storage_info(tmp_path: Path) -> None:
+    run_dir = tmp_path / "log" / "8"
+
+    class _FakeStorage:
+        def get_storage_info(self):
+            return type("StorageInfo", (), {"run_dir": run_dir, "run_id": 8})()
+
+    research_transcript.StorageController._instance = None
+
+    with patch.object(research_transcript.StorageController, "get_instance", return_value=_FakeStorage()):
+        resolved_run_dir, resolved_run_id = resolve_research_transcript_run_context()
+
+    assert resolved_run_dir == run_dir
+    assert resolved_run_id == 8

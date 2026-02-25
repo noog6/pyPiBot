@@ -18,9 +18,9 @@ from services.research.grounding import (
     requires_unverified_sources_only_response,
 )
 from services.research.research_transcript import write_research_transcript
+from services.research.research_transcript import resolve_research_transcript_run_context
 from services.research.service import ResearchService
 from services import tool_runtime
-from storage import StorageController
 
 
 ToolFn = Callable[..., Awaitable[Any]]
@@ -258,11 +258,10 @@ async def perform_research(query: str, context: dict[str, Any] | None = None) ->
     packet = await asyncio.to_thread(service.request_research, request)
     research_id = f"research_{uuid.uuid4().hex}"
 
-    storage = StorageController.get_instance()
-    storage_info = storage.get_storage_info()
+    run_dir, run_id = resolve_research_transcript_run_context()
     transcript_path = write_research_transcript(
-        run_dir=storage_info.run_dir,
-        run_id=storage_info.run_id,
+        run_dir=run_dir,
+        run_id=run_id,
         request=request,
         packet=packet,
         research_id=research_id,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import ai.tools as ai_tools
@@ -17,14 +18,6 @@ class _FakeResearchService:
     def request_research(self, request):
         self.queries.append(request.prompt)
         return self.packet
-
-
-class _FakeStorage:
-    def __init__(self, run_dir: Path) -> None:
-        self._run_dir = run_dir
-
-    def get_storage_info(self):
-        return type("StorageInfo", (), {"run_dir": self._run_dir, "run_id": 42})()
 
 
 def test_perform_research_tool_registered() -> None:
@@ -43,7 +36,12 @@ def test_perform_research_routes_through_packet_flow(monkeypatch, tmp_path: Path
     )
     service = _FakeResearchService(packet)
     monkeypatch.setattr(ai_tools, "_research_service", service)
-    monkeypatch.setattr(ai_tools.StorageController, "get_instance", lambda: _FakeStorage(tmp_path))
+    run_dir = tmp_path / "log" / "42"
+    monkeypatch.setattr(
+        ai_tools,
+        "resolve_research_transcript_run_context",
+        lambda: (run_dir, 42),
+    )
 
     result = asyncio.run(ai_tools.perform_research("find a datasheet", {"source": "tool"}))
 
@@ -55,4 +53,14 @@ def test_perform_research_routes_through_packet_flow(monkeypatch, tmp_path: Path
     assert result["metadata"] == {"provider": "fake", "content_fetch_status": "ok"}
     assert "From the fetched source content" in result["grounding_explanation"]
     assert result["transcript_path"] is not None
-    assert Path(result["transcript_path"]).exists()
+    transcript_path = Path(result["transcript_path"])
+    assert transcript_path.exists()
+    assert transcript_path.parent == run_dir / "research"
+
+    payload = json.loads(transcript_path.read_text(encoding="utf-8"))
+    assert payload["run_id"] == "42"
+    assert payload["request"] == {"query": "find a datasheet", "source": "tool"}
+    assert payload["packet"]["answer_summary"] == result["answer_summary"]
+    assert payload["packet"]["extracted_facts"] == result["extracted_facts"]
+    assert payload["packet"]["sources"] == result["sources"]
+    assert payload["packet"]["metadata"] == result["metadata"]
