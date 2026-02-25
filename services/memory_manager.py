@@ -774,10 +774,14 @@ class MemoryManager:
             "dimension": None,
             "embedding_emitted": False,
             "error_code": "skipped",
+            "raw_error_code": "",
             "timeout_triggered": "none",
+            "observed_elapsed_ms_at_timeout": 0,
             "timeout_budget_ms": int(enforced_timeout_budget_ms),
             "timer_start": "submit_start",
             "queue_delay_ms": None,
+            "submit_to_worker_delay_ms": None,
+            "provider_elapsed_ms": None,
         }
         logger.info(
             "embedding_canary_timeout_budget configured_timeout_ms=%s enforced_timeout_budget_ms=%s",
@@ -806,8 +810,14 @@ class MemoryManager:
                 )
                 canary_state["timer_start"] = "submit_start"
                 queue_delay_ms = getattr(result, "submit_to_worker_delay_ms", None)
-                if queue_delay_ms is not None:
-                    canary_state["queue_delay_ms"] = int(queue_delay_ms)
+                canary_state["submit_to_worker_delay_ms"] = (
+                    int(queue_delay_ms) if queue_delay_ms is not None else None
+                )
+                canary_state["queue_delay_ms"] = canary_state["submit_to_worker_delay_ms"]
+                provider_elapsed_ms = getattr(result, "provider_elapsed_ms", None)
+                canary_state["provider_elapsed_ms"] = (
+                    int(provider_elapsed_ms) if provider_elapsed_ms is not None else None
+                )
                 status = str(getattr(result, "status", "") or "")
                 vector = getattr(result, "vector", b"")
                 if status == "ready" and bool(vector):
@@ -1742,6 +1752,7 @@ class MemoryManager:
             "semantic_query_timeout_ms_used": None,
             "semantic_query_duration_ms": 0,
             "semantic_query_embed_elapsed_ms": 0,
+            "semantic_timeout_source": "none",
             "semantic_result_status": None,
             "semantic_error_code": None,
             "semantic_error_class": None,
@@ -1965,6 +1976,11 @@ class MemoryManager:
                     self._last_turn_retrieval_debug["semantic_error_code"] = error_code
                     self._last_turn_retrieval_debug["semantic_error_class"] = error_class
                     self._last_turn_retrieval_debug["semantic_failure_class"] = failure_class
+                    self._last_turn_retrieval_debug["semantic_timeout_source"] = (
+                        "wrapper"
+                        if error_code == "timeout_wrapper"
+                        else ("provider" if error_code == "timeout_provider" else "none")
+                    )
                     self._last_turn_retrieval_debug["semantic_scoring_skipped_reason"] = (
                         "query_embedding_backoff"
                         if error_code == "timeout_backoff"
@@ -2000,6 +2016,7 @@ class MemoryManager:
                             error_code="semantic_provider_exception",
                             error_class=exception_error_class,
                         ),
+                        "semantic_timeout_source": "none",
                         "semantic_scoring_skipped_reason": "semantic_provider_error",
                         "fallback_reason": "semantic_provider_error",
                     }
@@ -2014,6 +2031,18 @@ class MemoryManager:
                 self._last_turn_retrieval_debug["semantic_error_code"] = semantic_diagnostics["semantic_error_code"]
             if not self._last_turn_retrieval_debug.get("semantic_failure_class"):
                 self._last_turn_retrieval_debug["semantic_failure_class"] = semantic_diagnostics["failure_class"]
+            semantic_error_code_for_timeout_source = str(
+                self._last_turn_retrieval_debug.get("semantic_error_code") or ""
+            ).strip().lower()
+            self._last_turn_retrieval_debug["semantic_timeout_source"] = (
+                "wrapper"
+                if semantic_error_code_for_timeout_source == "timeout_wrapper"
+                else (
+                    "provider"
+                    if semantic_error_code_for_timeout_source == "timeout_provider"
+                    else "none"
+                )
+            )
 
         if self._last_turn_retrieval_debug.get("semantic_scoring_skipped_reason") in {
             "query_embedding_not_ready",
@@ -2171,11 +2200,15 @@ def run_embedding_probe_once(
         "dimension": None,
         "embedding_emitted": False,
         "error_code": "skipped",
+        "raw_error_code": "",
         "error_class": "none",
         "timeout_triggered": "none",
         "timeout_budget_ms": max(0, int(timeout_ms)),
         "observed_elapsed_ms_at_timeout": None,
         "timer_start": "submit_start",
+        "queue_delay_ms": None,
+        "submit_to_worker_delay_ms": None,
+        "provider_elapsed_ms": None,
     }
     if not enabled:
         result["error_code"] = "disabled"
@@ -2215,6 +2248,14 @@ def run_embedding_probe_once(
     response_timeout_budget_ms = getattr(response, "timeout_budget_ms", None)
     if response_timeout_budget_ms is not None:
         result["timeout_budget_ms"] = int(max(0, int(response_timeout_budget_ms)))
+    response_submit_to_worker_delay_ms = getattr(response, "submit_to_worker_delay_ms", None)
+    if response_submit_to_worker_delay_ms is not None:
+        normalized_delay_ms = int(max(0, int(response_submit_to_worker_delay_ms)))
+        result["submit_to_worker_delay_ms"] = normalized_delay_ms
+        result["queue_delay_ms"] = normalized_delay_ms
+    response_provider_elapsed_ms = getattr(response, "provider_elapsed_ms", None)
+    if response_provider_elapsed_ms is not None:
+        result["provider_elapsed_ms"] = int(max(0, int(response_provider_elapsed_ms)))
     response_timer_start = getattr(response, "timer_start", None)
     if response_timer_start:
         result["timer_start"] = str(response_timer_start)
@@ -2237,6 +2278,7 @@ def run_embedding_probe_once(
     raw_error = str(getattr(response, "error_code", "") or status or "unknown")
     normalized_error_code = _normalize_canary_error_code(raw_error)
     result["error_code"] = normalized_error_code
+    result["raw_error_code"] = raw_error
     response_error_class = _sanitize_error_class_name(getattr(response, "error_class", None))
     result["error_class"] = response_error_class or "none"
     if normalized_error_code == "timeout_provider":

@@ -41,6 +41,8 @@ class _FakeMemoryManager:
             "canary_timeout_triggered": "none",
             "canary_timeout_budget_ms": 0,
             "canary_elapsed_ms": 12,
+            "canary_observed_elapsed_ms_at_timeout": 0,
+            "canary_raw_error_code": "",
             "canary_timer_start": "submit_start",
             "canary_queue_delay_ms": 0,
             "max_queries_per_minute": 240,
@@ -279,6 +281,7 @@ def test_main_logs_semantic_memory_state_at_startup(monkeypatch) -> None:
         "effective_timeout_budget_ms=40 max_queries_per_minute=240 max_writes_per_minute=120 "
         "canary_dimension=null canary_embedding_emitted=False canary_error_code=auth "
         "canary_timeout_triggered=none canary_timeout_budget_ms=0 canary_elapsed_ms=12 "
+        "canary_observed_elapsed_ms_at_timeout=0 canary_raw_error_code= "
         "canary_timer_start=submit_start canary_queue_delay_ms=0"
     ) in infos
     assert "semantic_runtime=offline reason=provider_disabled canary_latency_ms=12" in infos

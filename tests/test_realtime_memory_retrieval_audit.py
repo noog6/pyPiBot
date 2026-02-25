@@ -35,7 +35,8 @@ class _FakeManager:
             "semantic_model": "text-embedding-3-small",
             "semantic_query_timeout_ms": 40,
             "semantic_query_duration_ms": 12,
-            "semantic_error_code": "timeout",
+            "semantic_timeout_source": "wrapper",
+            "semantic_error_code": "timeout_wrapper",
             "semantic_error_class": "TimeoutError",
             "semantic_failure_class": "timeout",
             "canary_last_error_code": "timeout",
@@ -92,7 +93,8 @@ def test_prepare_turn_memory_brief_logs_semantic_runtime_health_when_streak_non_
     assert "semantic_model=text-embedding-3-small" in message
     assert "semantic_query_timeout_ms=40" in message
     assert "semantic_query_duration_ms=12" in message
-    assert "semantic_error_code=timeout" in message
+    assert "semantic_timeout_source=wrapper" in message
+    assert "semantic_error_code=timeout_wrapper" in message
     assert "semantic_error_class=TimeoutError" in message
     assert "semantic_failure_class=timeout" in message
     assert "canary_last_error_code=timeout" in message
