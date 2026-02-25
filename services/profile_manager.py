@@ -9,7 +9,8 @@ from typing import Any
 from config import ConfigController
 from services.memory_manager import MemoryManager
 from services.reflection_manager import ReflectionManager
-from storage.user_profiles import UserProfile, UserProfileStore
+from storage.factories import create_user_profile_store
+from storage.user_profiles import UserProfile
 
 
 @dataclass(frozen=True)
@@ -49,7 +50,7 @@ class ProfileManager:
 
         config = ConfigController.get_instance().get_config()
         self._active_user_id = config.get("active_user_id", "default")
-        self._store = UserProfileStore()
+        self._store = create_user_profile_store()
         ProfileManager._instance = self
 
     @classmethod

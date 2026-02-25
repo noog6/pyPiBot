@@ -91,8 +91,8 @@ class ResearchBudgetStorage:
         ts_seconds = ts_int // 1000 if ts_int > 10**11 else ts_int
         return time.strftime("%Y-%m-%d", time.gmtime(ts_seconds))
 
-    def __init__(self) -> None:
-        storage_controller = StorageController.get_instance()
+    def __init__(self, *, storage_controller: StorageController | None = None) -> None:
+        storage_controller = storage_controller or StorageController.get_instance()
         self._conn = storage_controller.conn
         self._lock = storage_controller._lock
         self._initialize_db()

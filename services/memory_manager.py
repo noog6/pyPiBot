@@ -23,6 +23,7 @@ from typing import Callable
 from config import ConfigController
 from services.embedding_provider import EmbeddingProvider, NoopEmbeddingProvider, build_embedding_provider
 from services.memory_embedding_worker import MemoryEmbeddingWorker
+from storage.factories import create_memory_store
 from storage.memories import MemoryEntry, MemoryStore
 
 MAX_CONTENT_LENGTH = 400
@@ -461,7 +462,7 @@ class MemoryManager:
         )
         self._semantic_write_call_timestamps: list[float] = []
         self._semantic_query_call_timestamps: list[float] = []
-        self._store = MemoryStore()
+        self._store = create_memory_store()
         self._embedding_worker: MemoryEmbeddingWorker | None = None
         self._embedding_executor: ThreadPoolExecutor | None = None
         self._embedding_executor_lock = threading.Lock()

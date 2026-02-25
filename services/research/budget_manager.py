@@ -9,6 +9,7 @@ import time
 from typing import Any
 
 from core.logging import logger as LOGGER
+from storage.factories import create_research_budget_store
 from storage.research_budget import ResearchBudgetStorage, UsageEvent, UsageReservation
 
 
@@ -30,7 +31,7 @@ class ResearchBudgetManager:
         )
         self._window_started_at_s = 0.0
         self._window_count = 0
-        self._storage = storage or ResearchBudgetStorage()
+        self._storage = storage or create_research_budget_store()
         digest = hashlib.sha256(str(self._legacy_state_file).encode("utf-8")).hexdigest()[:12]
         self._budget_key = f"research_daily_fetch:{digest}"
         self._legacy_json_present = self._legacy_state_file.exists()
