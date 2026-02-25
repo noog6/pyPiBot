@@ -670,6 +670,8 @@ class RealtimeAPI:
         self._memory_retrieval_suppressed_errors = 0
         self._preference_recall_cooldown_s = self._memory_retrieval_cooldown_s
         self._preference_recall_cache: dict[str, dict[str, Any]] = {}
+        self._pending_preference_recall_trace: dict[str, Any] | None = None
+        self._preference_recall_skip_logged_turn_ids: set[str] = set()
 
         research_cfg = config.get("research") or {}
         self._research_enabled = bool(research_cfg.get("enabled", False))
@@ -1341,6 +1343,7 @@ class RealtimeAPI:
         self._last_user_input_source = source
         if self._is_battery_status_query(clean_text):
             self._last_user_battery_query_time = self._last_user_input_time
+        self._mark_preference_recall_candidate(clean_text, source=source)
         self._prepare_turn_memory_brief(clean_text, source=source)
 
     def _extract_preference_keywords(self, text: str) -> list[str]:
@@ -1376,11 +1379,68 @@ class RealtimeAPI:
             return False, []
         return True, self._extract_preference_keywords(normalized)
 
+    def _build_preference_query_fingerprint(self, *, query: str, source: str) -> str:
+        payload = json.dumps(
+            {
+                "query": " ".join((query or "").lower().split()),
+                "source": str(source or "").strip().lower(),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _mark_preference_recall_candidate(self, text: str, *, source: str) -> None:
+        matched, keywords = self._is_preference_recall_intent(text)
+        if not matched:
+            self._pending_preference_recall_trace = None
+            return
+        query = self._build_preference_recall_query(text.lower(), keywords=keywords)
+        self._pending_preference_recall_trace = {
+            "intent": "preference_recall",
+            "decision": "skipped_tool",
+            "reason": "model_did_not_request_tool",
+            "source": source,
+            "query_fingerprint": self._build_preference_query_fingerprint(query=query, source=source),
+            "query": query,
+        }
+
+    def _clear_preference_recall_candidate(self) -> None:
+        self._pending_preference_recall_trace = None
+
+    def _emit_preference_recall_skip_trace_if_needed(self, *, turn_id: str | None) -> None:
+        pending = self._pending_preference_recall_trace if isinstance(self._pending_preference_recall_trace, dict) else None
+        if not pending:
+            return
+        resolved_turn_id = str(turn_id or "").strip() or "turn-unknown"
+        if resolved_turn_id in self._preference_recall_skip_logged_turn_ids:
+            return
+        recall_invoked = any(
+            isinstance(record, dict) and record.get("name") == "recall_memories"
+            for record in (self._tool_call_records or [])
+        )
+        if recall_invoked:
+            self._clear_preference_recall_candidate()
+            return
+        self._preference_recall_skip_logged_turn_ids.add(resolved_turn_id)
+        logger.info(
+            "preference_recall_decision_trace intent=%s decision=%s reason=%s query_fingerprint=%s run_id=%s turn_id=%s source=%s",
+            pending.get("intent", "preference_recall"),
+            pending.get("decision", "skipped_tool"),
+            pending.get("reason", "model_did_not_request_tool"),
+            pending.get("query_fingerprint", ""),
+            self._current_run_id() or "",
+            resolved_turn_id,
+            pending.get("source", "unknown"),
+        )
+        self._clear_preference_recall_candidate()
+
     async def _maybe_handle_preference_recall_intent(self, text: str, websocket: Any, *, source: str) -> bool:
         matched, keywords = self._is_preference_recall_intent(text)
         if not matched:
             return False
 
+        self._mark_preference_recall_candidate(text, source=source)
         query = self._build_preference_recall_query(text.lower(), keywords=keywords)
         now = time.monotonic()
         cooldown_s = max(0.0, float(getattr(self, "_preference_recall_cooldown_s", 0.0)))
@@ -1401,6 +1461,8 @@ class RealtimeAPI:
         if result_payload is None:
             recall_fn = function_map.get("recall_memories")
             if recall_fn is None:
+                if isinstance(self._pending_preference_recall_trace, dict):
+                    self._pending_preference_recall_trace["reason"] = "policy_skip"
                 logger.warning("Preference recall intent matched but recall_memories tool unavailable.")
                 return False
             result_payload = await recall_fn(
@@ -1422,6 +1484,7 @@ class RealtimeAPI:
                 "I don’t have that saved yet. If you share it, I can remember it for next time.",
                 websocket,
             )
+            self._clear_preference_recall_candidate()
             return True
 
         first_memory = memories[0] if isinstance(memories[0], dict) else {}
@@ -1429,7 +1492,9 @@ class RealtimeAPI:
         if not memory_text:
             memory_text = "I found a saved preference, but it does not include enough detail to quote yet."
         await self.send_assistant_message(memory_text, websocket)
+        self._clear_preference_recall_candidate()
         return True
+
 
     def _should_skip_turn_memory_retrieval(self, user_text: str) -> bool:
         text = user_text.strip()
@@ -5942,6 +6007,8 @@ class RealtimeAPI:
             }
         )
         self._last_tool_call_results = list(self._tool_call_records)
+        if function_name == "recall_memories":
+            self._clear_preference_recall_candidate()
 
         output_payload: dict[str, Any] = {"result": result}
         if action:
@@ -6453,6 +6520,7 @@ class RealtimeAPI:
                 "response": event.get("response"),
                 "rate_limits": self.rate_limits,
             }
+        self._emit_preference_recall_skip_trace_if_needed(turn_id=self._current_response_turn_id)
         phase_is_awaiting_confirmation = (
             self.orchestration_state.phase == OrchestrationPhase.AWAITING_CONFIRMATION
         )
@@ -6526,6 +6594,7 @@ class RealtimeAPI:
                 "response": event.get("response"),
                 "rate_limits": self.rate_limits,
             }
+        self._emit_preference_recall_skip_trace_if_needed(turn_id=self._current_response_turn_id)
         phase_is_awaiting_confirmation = (
             self.orchestration_state.phase == OrchestrationPhase.AWAITING_CONFIRMATION
         )
