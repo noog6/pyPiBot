@@ -7,7 +7,7 @@ import threading
 import time
 from typing import Callable, Iterable
 
-from ai.event_bus import Event, EventBus
+from core.events import Event, EventPublisher
 from config import ConfigController
 from core.logging import logger as LOGGER
 from hardware import ADS1015Sensor
@@ -96,7 +96,7 @@ class BatteryMonitor:
     def unregister_event_handler(self, handler: Callable[[BatteryStatusEvent], None]) -> None:
         self._event_handlers.discard(handler)
 
-    def create_event_bus_handler(self, event_bus: EventBus) -> Callable[[BatteryStatusEvent], None]:
+    def create_event_bus_handler(self, event_bus: EventPublisher) -> Callable[[BatteryStatusEvent], None]:
         last_response_time = 0.0
         last_response_severity: str | None = None
 

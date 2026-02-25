@@ -9,7 +9,7 @@ import threading
 import time
 from typing import Callable, Deque, Iterable
 
-from ai.event_bus import Event, EventBus
+from core.events import Event, EventPublisher
 from core.logging import logger as LOGGER
 from hardware.icm20948_sensor import ICM20948Sensor
 
@@ -128,7 +128,7 @@ class ImuMonitor:
             f"{event_lines}"
         )
 
-    def create_event_bus_handler(self, event_bus: EventBus) -> Callable[[ImuMotionEvent], None]:
+    def create_event_bus_handler(self, event_bus: EventPublisher) -> Callable[[ImuMotionEvent], None]:
         def _handle_imu_event(event: ImuMotionEvent) -> None:
             if event.severity == "warning":
                 priority = "high"
