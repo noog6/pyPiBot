@@ -137,3 +137,51 @@ def test_recall_memories_callers_keep_list_contract(tmp_path) -> None:
 
     assert isinstance(recalls, list)
     assert recalls[0].content == "caller compatibility"
+
+
+def test_recall_cards_exact_lexical_hit_not_low(monkeypatch, tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_manager(store, trace_enabled=True)
+    manager.remember_memory(content="User's favorite editor is Vim.", importance=3)
+
+    monkeypatch.setattr(ai_tools.MemoryManager, "get_instance", lambda: manager)
+    result = asyncio.run(ai_tools.recall_memories(query="Vim", limit=5))
+
+    assert result["memory_cards"]
+    card = result["memory_cards"][0]
+    assert card["confidence"] in {"High", "Medium"}
+    assert card["confidence"] != "Low"
+    assert "lexical exact match" in card["why_relevant"]
+
+
+def test_recall_cards_semantic_only_stays_medium_or_low() -> None:
+    cards = ai_tools.build_recall_memory_cards(
+        query="coding style",
+        memories=[
+            {
+                "content": "Prefers keyboard-first workflows.",
+                "tags": [],
+                "importance": 3,
+                "source": "manual_tool",
+                "pinned": False,
+                "needs_review": False,
+            }
+        ],
+        trace={
+            "rewrite_applied": "none",
+            "thresholds_used": {"influence_threshold": 0.0},
+            "ranking_summary": [
+                {
+                    "selected": True,
+                    "score_lexical": 0.0,
+                    "score_semantic": 0.62,
+                    "influence_score": 0.62,
+                    "exclusion_reason": None,
+                }
+            ],
+        },
+    )
+
+    assert cards
+    assert cards[0]["confidence"] in {"Medium", "Low"}
+    assert "semantic similarity=0.62" in cards[0]["why_relevant"]
