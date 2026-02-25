@@ -10,6 +10,7 @@ import uuid
 from typing import Any
 
 from core.logging import logger
+from storage import StorageController
 
 from services.research.models import ResearchPacket, ResearchRequest
 
@@ -60,6 +61,13 @@ def _extract_source_urls(packet_payload: dict[str, Any] | None) -> list[str]:
         if source_url:
             urls.append(source_url)
     return urls
+
+
+def resolve_research_transcript_run_context() -> tuple[Path, int]:
+    """Return the run-scoped directory/id used for research transcript artifacts."""
+
+    storage_info = StorageController.get_instance().get_storage_info()
+    return storage_info.run_dir, storage_info.run_id
 
 
 def write_research_transcript(
@@ -121,4 +129,3 @@ def write_research_transcript(
     except Exception as exc:  # noqa: BLE001 - writing transcripts must not crash runtime
         logger.warning("research transcript write failed: %s", exc)
         return None
-
