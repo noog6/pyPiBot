@@ -257,3 +257,18 @@ def test_rate_limits_updated_warns_when_bucket_disappears_mid_session(monkeypatc
     assert warning_logs == [
         "Realtime API rate_limits.updated missing expected bucket(s): requests"
     ]
+
+
+def test_resolve_response_create_turn_id_keeps_micro_ack_turn_id() -> None:
+    api = _build_api()
+    api._response_create_turn_counter = 0
+    api._current_response_turn_id = None
+    event = {
+        "type": "response.create",
+        "response": {"metadata": {"origin": "assistant_message", "micro_ack": "true", "micro_ack_turn_id": "turn_1"}},
+    }
+
+    turn_id = api._resolve_response_create_turn_id(origin="assistant_message", response_create_event=event)
+
+    assert turn_id == "turn_1"
+    assert api._current_response_turn_id == "turn_1"

@@ -915,3 +915,31 @@ def test_non_memory_smalltalk_does_not_trigger_recall(monkeypatch) -> None:
     )
 
     assert recall_calls == 0
+
+
+def test_preference_recall_suppression_clears_all_pending_contenders() -> None:
+    api = _make_api_stub()
+    api._sync_pending_response_create_queue = lambda: None
+    api._response_create_queue = deque(
+        [
+            {
+                "turn_id": "turn_1",
+                "origin": "assistant_message",
+                "event": {"type": "response.create", "response": {"metadata": {"input_event_key": "item-1"}}},
+            },
+            {
+                "turn_id": "turn_1",
+                "origin": "tool_output",
+                "event": {"type": "response.create", "response": {"metadata": {"input_event_key": "item-1"}}},
+            },
+        ]
+    )
+    api._pending_response_create = None
+
+    api._clear_pending_response_contenders(
+        turn_id="turn_1",
+        input_event_key="item-1",
+        reason="test",
+    )
+
+    assert list(api._response_create_queue) == []

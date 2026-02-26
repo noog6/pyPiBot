@@ -39,8 +39,11 @@ class _Manager:
 
 
 class _Ws:
-    async def send(self, _payload: str) -> None:
-        return None
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    async def send(self, payload: str) -> None:
+        self.sent.append(payload)
 
 
 class _Mic:
@@ -58,6 +61,7 @@ def _api_stub() -> RealtimeAPI:
     api._confirmation_speech_active = False
     api._audio_playback_busy = False
     api._active_utterance = None
+    api._utterance_counter = 0
     api._assistant_reply_accum = ""
     api.assistant_reply = ""
     api._audio_accum = bytearray()
@@ -79,6 +83,7 @@ def _api_stub() -> RealtimeAPI:
     api._active_response_origin = "unknown"
     api._pending_server_auto_input_event_keys = deque()
     api._track_outgoing_event = lambda *_args, **_kwargs: None
+    api._clear_pending_response_contenders = lambda **_kwargs: None
     api._extract_response_create_metadata = lambda *_args, **_kwargs: {}
     api._extract_response_create_trigger = lambda *_args, **_kwargs: ""
     api._can_release_queued_response_create = lambda *_args, **_kwargs: True
@@ -107,6 +112,7 @@ def _api_stub() -> RealtimeAPI:
     api._maybe_handle_confirmation_decision_timeout = lambda *_args, **_kwargs: asyncio.sleep(0)
     api._last_response_create_ts = None
     api._response_create_debug_trace = False
+    api._debug_vad = False
     return api
 
 
@@ -145,4 +151,22 @@ def test_send_response_create_does_not_schedule_micro_ack_while_deferred() -> No
 
     assert result is False
     assert api._micro_ack_manager.scheduled == []
+    api.loop.close()
+
+
+def test_talk_over_aborts_active_response_and_clears_pending() -> None:
+    api = _api_stub()
+    api._response_in_flight = True
+    api._audio_playback_busy = True
+    api.state_manager.state = InteractionState.SPEAKING
+    cleared: list[dict[str, str | None]] = []
+
+    def _record_clear(*, turn_id: str, input_event_key: str | None, reason: str) -> None:
+        cleared.append({"turn_id": turn_id, "input_event_key": input_event_key, "reason": reason})
+
+    api._clear_pending_response_contenders = _record_clear
+    asyncio.run(api.handle_event({"type": "input_audio_buffer.speech_started"}, api.websocket))
+
+    assert cleared == [{"turn_id": "turn-1", "input_event_key": "", "reason": "talk_over_abort"}]
+    assert '{"type": "response.cancel"}' in api.websocket.sent
     api.loop.close()
