@@ -498,3 +498,62 @@ def test_preference_recall_transcript_path_emits_memory_answer_without_model_fol
     assert "Vim" in message
     assert "Relevant memory:" in message
     assert response_create_calls == []
+
+
+def test_preference_recall_drops_queued_server_auto_response_create(monkeypatch) -> None:
+    api = _make_api_stub()
+    ws = _RecordingWs()
+
+    api.websocket = ws
+    api._current_response_turn_id = "turn_42"
+    api._response_create_queue = deque()
+    api._queued_confirmation_reminder_keys = set()
+    api._pending_response_create = None
+    api._response_done_serial = 0
+    api._response_create_debug_trace = False
+    api._response_schedule_logged_turn_ids = set()
+    api._turn_diagnostic_timestamps = {}
+    api._audio_playback_busy = False
+    api._last_response_create_ts = None
+
+    async def _fake_recall(**_kwargs):
+        return {
+            "memories": [{"content": "User's favorite editor is Vim."}],
+            "memory_cards_text": "Relevant memory:\n- \"User's favorite editor is Vim.\"",
+        }
+
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "recall_memories", _fake_recall)
+
+    api._response_in_flight = True
+    scheduled = asyncio.run(api._send_response_create(ws, {"type": "response.create"}, origin="server_auto"))
+
+    assert scheduled is False
+    assert api._pending_response_create is not None
+
+    handled = asyncio.run(
+        api._maybe_handle_preference_recall_intent(
+            "Which editor do I prefer?",
+            ws,
+            source="input_audio_transcription",
+        )
+    )
+
+    assert handled is True
+    assert api._pending_response_create is None
+    assert list(api._response_create_queue) == []
+
+    api._response_in_flight = False
+    asyncio.run(api._drain_response_create_queue())
+
+    payloads = [json.loads(item) for item in ws.sent]
+    assistant_payloads = [
+        payload
+        for payload in payloads
+        if payload.get("type") == "conversation.item.create"
+        and payload.get("item", {}).get("role") == "assistant"
+    ]
+    response_create_payloads = [payload for payload in payloads if payload.get("type") == "response.create"]
+
+    assert len(assistant_payloads) == 1
+    assert "Vim" in assistant_payloads[0]["item"]["content"][0]["text"]
+    assert response_create_payloads == []
