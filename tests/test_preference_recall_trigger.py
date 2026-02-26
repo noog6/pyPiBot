@@ -27,6 +27,11 @@ def _make_api_stub() -> RealtimeAPI:
     api._pending_response_create_origins = deque()
     api._preference_recall_response_suppression_until = 0.0
     api._preference_recall_suppressed_turns = set()
+    api._preference_recall_suppressed_input_event_keys = set()
+    api._pending_server_auto_input_event_keys = deque(maxlen=64)
+    api._active_server_auto_input_event_key = None
+    api._current_input_event_key = None
+    api._input_event_key_counter = 0
     api._active_response_preference_guarded = False
     api._active_response_confirmation_guarded = False
     api._active_response_id = None
@@ -46,6 +51,7 @@ def _make_api_stub() -> RealtimeAPI:
     api.audio_player = None
     api._active_utterance = None
     api.orchestration_state = type("_Orch", (), {"transition": lambda self, *_args, **_kwargs: None})()
+    api._current_run_id = lambda: "run-test"
     api.state_manager = type(
         "_State",
         (),
@@ -701,3 +707,62 @@ def test_preference_recall_regression_returns_seeded_vim_memory(monkeypatch, tmp
     assert handled is True
     assert sent_messages
     assert "Vim" in sent_messages[0]
+
+def test_preference_recall_cancels_only_matching_server_auto_response(monkeypatch) -> None:
+    api = _make_api_stub()
+    ws = _RecordingWs()
+    sent_messages: list[str] = []
+
+    async def _false(*_args, **_kwargs) -> bool:
+        return False
+
+    async def _handled(*_args, **_kwargs) -> bool:
+        sent_messages.append("handled")
+        await api._suppress_preference_recall_server_auto_response(ws)
+        return True
+
+    api.websocket = ws
+    api._maybe_handle_confirmation_decision_timeout = _false
+    api._maybe_handle_approval_response = _false
+    api._handle_stop_word = _false
+    api._maybe_handle_research_permission_response = _false
+    api._maybe_handle_research_budget_response = _false
+    api._maybe_apply_late_confirmation_decision = _false
+    api._maybe_process_research_intent = _false
+    api._maybe_handle_preference_recall_intent = _handled
+    api._has_active_confirmation_token = lambda: False
+    api._is_awaiting_confirmation_phase = lambda: False
+    api._is_user_approved_interrupt_response = lambda _response: False
+    api._log_user_transcript = lambda *_args, **_kwargs: None
+    api._record_user_input = lambda *_args, **_kwargs: None
+    api._track_outgoing_event = lambda *_args, **_kwargs: None
+
+    # Simulate run-390 ordering where server_auto response.created arrives before recall handling.
+    api._current_response_turn_id = "turn_1"
+    api._pending_server_auto_input_event_keys.append("item-1")
+    api._current_input_event_key = "item-1"
+    asyncio.run(api.handle_event({"type": "response.created", "response": {"id": "r-1"}}, ws))
+
+    asyncio.run(
+        api.handle_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "item-1",
+                "transcript": "Which editor do I prefer?",
+            },
+            ws,
+        )
+    )
+
+    # Next utterance keeps same turn_id but must not be suppressed by stale turn state.
+    api._current_response_turn_id = "turn_1"
+    api._response_in_flight = True
+    api._pending_server_auto_input_event_keys.append("item-2")
+    api._current_input_event_key = "item-2"
+    asyncio.run(api.handle_event({"type": "response.created", "response": {"id": "r-2"}}, ws))
+
+    assert sent_messages == ["handled"]
+    assert ws.sent == ['{"type": "response.cancel"}']
+    assert api._active_server_auto_input_event_key == "item-2"
+    assert "item-1" in api._preference_recall_suppressed_input_event_keys
+    assert "item-2" not in api._preference_recall_suppressed_input_event_keys
