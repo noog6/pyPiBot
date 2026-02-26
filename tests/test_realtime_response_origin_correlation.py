@@ -91,6 +91,31 @@ def test_response_created_origin_correlation_distinguishes_tool_and_server_auto(
     assert list(api._pending_response_create_origins) == []
 
 
+def test_response_created_origin_correlation_prefers_non_micro_ack_for_server_auto(monkeypatch) -> None:
+    api = _build_api()
+    logs: list[str] = []
+    monkeypatch.setattr("ai.realtime_api.log_info", logs.append)
+
+    api._track_outgoing_event(
+        {
+            "type": "response.create",
+            "response": {"metadata": {"origin": "assistant_message", "micro_ack": "true"}},
+        },
+        origin="assistant_message",
+    )
+
+    asyncio.run(
+        api.handle_event(
+            {"type": "response.created", "response": {"id": "resp_vad"}},
+            websocket=None,
+        )
+    )
+
+    origin_logs = [entry for entry in logs if entry.startswith("response.created:")]
+    assert origin_logs == ["response.created: origin=server_auto"]
+    assert list(api._pending_response_create_origins) == [{"origin": "assistant_message", "micro_ack": "true"}]
+
+
 def test_response_created_from_pending_action_with_server_auto_keeps_awaiting_phase(
     monkeypatch,
 ) -> None:

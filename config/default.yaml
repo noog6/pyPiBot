@@ -133,6 +133,12 @@ realtime:
   confirmation_unclear_max_reprompts: 1
   confirmation_reminder_interval_s: 6.0
   confirmation_reminder_max_count: 2
+  micro_ack_enabled: true
+  micro_ack_delay_ms: 450
+  micro_ack_expected_wait_threshold_ms: 700
+  micro_ack_long_wait_second_ack_ms: 4000
+  micro_ack_global_cooldown_ms: 10000
+  micro_ack_per_turn_max: 1
   awaiting_confirmation_allowed_sources:
     - "battery:critical"
     - "imu:critical"
