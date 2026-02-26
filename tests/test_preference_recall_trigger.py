@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections import deque
 from ai.realtime_api import InteractionState, RealtimeAPI
 from core.logging import logger
@@ -339,3 +340,66 @@ def test_preference_recall_short_circuits_server_auto_response(monkeypatch) -> N
     assert api._active_response_preference_guarded is True
     assert api.assistant_reply == ""
     assert ws.sent == ['{"type": "response.cancel"}']
+
+
+def test_preference_recall_transcript_path_emits_memory_answer_without_model_followup(monkeypatch) -> None:
+    api = _make_api_stub()
+    ws = _RecordingWs()
+    response_create_calls: list[dict[str, str]] = []
+
+    async def _fake_recall(**_kwargs):
+        return {
+            "memories": [{"content": "User's favorite editor is Vim."}],
+            "memory_cards_text": (
+                "Relevant memory:\n"
+                '- "User\'s favorite editor is Vim."\n'
+                "Why it's relevant:\n"
+                '- "Matches editor preference."\n'
+                "Confidence: High"
+            ),
+        }
+
+    async def _false(*_args, **_kwargs) -> bool:
+        return False
+
+    async def _capture_response_create(_ws, event, *, origin="unknown", **_kwargs) -> None:
+        response_create_calls.append({"type": event.get("type", ""), "origin": origin})
+
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "recall_memories", _fake_recall)
+    monkeypatch.setattr(api, "_send_response_create", _capture_response_create)
+
+    api.websocket = ws
+    api._maybe_handle_confirmation_decision_timeout = _false
+    api._maybe_handle_approval_response = _false
+    api._handle_stop_word = _false
+    api._maybe_handle_research_permission_response = _false
+    api._maybe_handle_research_budget_response = _false
+    api._maybe_apply_late_confirmation_decision = _false
+    api._maybe_process_research_intent = _false
+    api._has_active_confirmation_token = lambda: False
+    api._is_awaiting_confirmation_phase = lambda: False
+    api._is_user_approved_interrupt_response = lambda _response: False
+    api._log_user_transcript = lambda *_args, **_kwargs: None
+    api._record_user_input = lambda *_args, **_kwargs: None
+    api._track_outgoing_event = lambda *_args, **_kwargs: None
+
+    asyncio.run(
+        api.handle_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "transcript": "Which editor do I prefer?",
+            },
+            ws,
+        )
+    )
+
+    payloads = [json.loads(item) for item in ws.sent]
+    assistant_payloads = [
+        payload for payload in payloads if payload.get("type") == "conversation.item.create"
+    ]
+
+    assert len(assistant_payloads) == 1
+    message = assistant_payloads[0]["item"]["content"][0]["text"]
+    assert "Vim" in message
+    assert "Relevant memory:" in message
+    assert response_create_calls == []

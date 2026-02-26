@@ -1579,6 +1579,7 @@ class RealtimeAPI:
             await self.send_assistant_message(
                 "I don’t have that saved yet. If you share it, I can remember it for next time.",
                 websocket,
+                speak=False,
             )
             turn_timestamps["preference_recall_end"] = time.monotonic()
             handled_logged_turn_ids = getattr(self, "_preference_recall_handled_logged_turn_ids", None)
@@ -1631,7 +1632,7 @@ class RealtimeAPI:
         if self._memory_pin_followup_needed(cards=cards_list, memories=memories, query=query):
             response_lines.append("Want me to pin or rename this memory so it’s easier to recall later?")
 
-        await self.send_assistant_message("\n".join(response_lines), websocket)
+        await self.send_assistant_message("\n".join(response_lines), websocket, speak=False)
         turn_timestamps["preference_recall_end"] = time.monotonic()
         handled_logged_turn_ids = getattr(self, "_preference_recall_handled_logged_turn_ids", None)
         if not isinstance(handled_logged_turn_ids, set):
