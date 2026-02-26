@@ -750,6 +750,7 @@ class RealtimeAPI:
         self._pending_server_auto_input_event_keys: deque[str] = deque(maxlen=64)
         self._active_server_auto_input_event_key: str | None = None
         self._current_input_event_key: str | None = None
+        self._active_input_event_key_by_turn_id: dict[str, str] = {}
         self._input_event_key_counter = 0
         self._synthetic_input_event_counter = 0
         self._response_created_canonical_keys: set[str] = set()
@@ -1851,6 +1852,53 @@ class RealtimeAPI:
     def _current_turn_id_or_unknown(self) -> str:
         turn_id = str(getattr(self, "_current_response_turn_id", "") or "").strip()
         return turn_id or "turn-unknown"
+
+    def _active_input_event_key_for_turn(self, turn_id: str) -> str:
+        active_by_turn = getattr(self, "_active_input_event_key_by_turn_id", None)
+        if not isinstance(active_by_turn, dict):
+            active_by_turn = {}
+            self._active_input_event_key_by_turn_id = active_by_turn
+        return str(active_by_turn.get(turn_id) or "").strip()
+
+    def _log_response_binding_event(self, *, response_key: str, turn_id: str, origin: str) -> None:
+        logger.info(
+            "response_binding run_id=%s active_key=%s response_key=%s turn_id=%s origin=%s",
+            self._current_run_id() or "",
+            self._active_input_event_key_for_turn(turn_id) or "unknown",
+            str(response_key or "").strip() or "unknown",
+            turn_id or "turn-unknown",
+            origin or "unknown",
+        )
+
+    def _clear_stale_pending_server_auto_for_turn(
+        self,
+        *,
+        turn_id: str,
+        active_input_event_key: str,
+        reason: str,
+    ) -> None:
+        pending_server_auto_keys = getattr(self, "_pending_server_auto_input_event_keys", None)
+        if not isinstance(pending_server_auto_keys, deque) or not pending_server_auto_keys:
+            return
+        normalized_active_key = str(active_input_event_key or "").strip()
+        if not normalized_active_key:
+            return
+        kept: deque[str] = deque(maxlen=pending_server_auto_keys.maxlen)
+        dropped = 0
+        for queued_key in pending_server_auto_keys:
+            normalized = str(queued_key or "").strip()
+            if normalized and normalized != normalized_active_key:
+                dropped += 1
+                continue
+            kept.append(normalized)
+        if dropped <= 0:
+            return
+        self._pending_server_auto_input_event_keys = kept
+        self._clear_pending_response_contenders(
+            turn_id=turn_id,
+            input_event_key=normalized_active_key,
+            reason=reason,
+        )
 
     def _canonical_utterance_key(self, *, turn_id: str, input_event_key: str | None) -> str:
         resolved_turn_id = str(turn_id or "").strip() or "turn-unknown"
@@ -6256,20 +6304,69 @@ class RealtimeAPI:
             suppressed_turns = getattr(self, "_preference_recall_suppressed_turns", set())
             suppressed_input_event_keys = getattr(self, "_preference_recall_suppressed_input_event_keys", set())
             if origin == "server_auto":
+                expected_input_event_key = self._active_input_event_key_for_turn(turn_id)
                 input_event_key = None
                 pending_server_auto_keys = getattr(self, "_pending_server_auto_input_event_keys", None)
                 if not isinstance(pending_server_auto_keys, deque):
                     pending_server_auto_keys = deque(maxlen=64)
                     self._pending_server_auto_input_event_keys = pending_server_auto_keys
-                if pending_server_auto_keys:
-                    input_event_key = pending_server_auto_keys.popleft()
-                else:
+                while pending_server_auto_keys:
+                    queued_key = str(pending_server_auto_keys.popleft() or "").strip()
+                    if not queued_key:
+                        continue
+                    if expected_input_event_key and queued_key != expected_input_event_key:
+                        logger.info(
+                            "server_auto_response_mismatch_discard run_id=%s turn_id=%s active_key=%s response_key=%s",
+                            self._current_run_id() or "",
+                            turn_id,
+                            expected_input_event_key,
+                            queued_key,
+                        )
+                        continue
+                    input_event_key = queued_key
+                    break
+                if not input_event_key:
                     current_input_event_key = str(getattr(self, "_current_input_event_key", "") or "").strip()
-                    if current_input_event_key:
+                    if expected_input_event_key and current_input_event_key and current_input_event_key != expected_input_event_key:
+                        logger.info(
+                            "server_auto_response_mismatch_discard run_id=%s turn_id=%s active_key=%s response_key=%s",
+                            self._current_run_id() or "",
+                            turn_id,
+                            expected_input_event_key,
+                            current_input_event_key,
+                        )
+                    elif current_input_event_key:
                         input_event_key = current_input_event_key
+                if expected_input_event_key and input_event_key and input_event_key != expected_input_event_key:
+                    logger.info(
+                        "server_auto_response_mismatch_discard run_id=%s turn_id=%s active_key=%s response_key=%s",
+                        self._current_run_id() or "",
+                        turn_id,
+                        expected_input_event_key,
+                        input_event_key,
+                    )
+                    input_event_key = ""
+                if not input_event_key and expected_input_event_key:
+                    logger.info(
+                        "server_auto_response_stale_ignored run_id=%s turn_id=%s active_key=%s response_id=%s",
+                        self._current_run_id() or "",
+                        turn_id,
+                        expected_input_event_key,
+                        self._active_response_id or "unknown",
+                    )
+                    cancel_event = {"type": "response.cancel"}
+                    log_ws_event("Outgoing", cancel_event)
+                    self._track_outgoing_event(cancel_event, origin="server_auto_binding_guard")
+                    await websocket.send(json.dumps(cancel_event))
+                    return
                 if not input_event_key:
                     input_event_key = self._next_synthetic_input_event_key("server_auto")
                 self._active_server_auto_input_event_key = input_event_key
+                self._log_response_binding_event(
+                    response_key=input_event_key,
+                    turn_id=turn_id,
+                    origin=origin,
+                )
                 if input_event_key:
                     self._mark_transcript_response_outcome(
                         input_event_key=input_event_key,
@@ -6295,6 +6392,11 @@ class RealtimeAPI:
                 current_input_event_key = str(getattr(self, "_current_input_event_key", "") or "").strip()
                 if not current_input_event_key:
                     current_input_event_key = self._next_synthetic_input_event_key(origin)
+                self._log_response_binding_event(
+                    response_key=current_input_event_key,
+                    turn_id=turn_id,
+                    origin=origin,
+                )
                 if current_input_event_key:
                     self._mark_transcript_response_outcome(
                         input_event_key=current_input_event_key,
@@ -6348,6 +6450,12 @@ class RealtimeAPI:
                     reason="response_created",
                     origin=origin,
                 )
+                if origin == "server_auto":
+                    self._clear_stale_pending_server_auto_for_turn(
+                        turn_id=turn_id,
+                        active_input_event_key=active_input_event_key,
+                        reason="response_created_for_active_input",
+                    )
             if pending_confirmation_active:
                 log_info(f"response.created consumed by confirmation flow; origin={origin}")
                 self._active_response_confirmation_guarded = self._should_guard_confirmation_response(
@@ -6457,6 +6565,17 @@ class RealtimeAPI:
             self._log_user_transcript(transcript or "", final=True, event_type=event_type)
             input_event_key = self._resolve_input_event_key(event)
             self._current_input_event_key = input_event_key
+            resolved_turn_id = self._current_turn_id_or_unknown()
+            active_by_turn = getattr(self, "_active_input_event_key_by_turn_id", None)
+            if not isinstance(active_by_turn, dict):
+                active_by_turn = {}
+                self._active_input_event_key_by_turn_id = active_by_turn
+            active_by_turn[resolved_turn_id] = input_event_key
+            self._clear_stale_pending_server_auto_for_turn(
+                turn_id=resolved_turn_id,
+                active_input_event_key=input_event_key,
+                reason="new_transcript_final",
+            )
             memory_intent = self._is_memory_intent(transcript or "")
             logger.info(
                 "memory_intent_classification run_id=%s source=input_audio_transcription input_event_key=%s memory_intent=%s",
@@ -6484,7 +6603,6 @@ class RealtimeAPI:
                 input_event_key,
                 len(pending_server_auto_keys),
             )
-            resolved_turn_id = self._current_turn_id_or_unknown()
             self._maybe_schedule_micro_ack(
                 turn_id=resolved_turn_id,
                 reason="transcript_finalized",
@@ -7663,6 +7781,19 @@ class RealtimeAPI:
         current_input_event_key = str(getattr(self, "_current_input_event_key", "") or "").strip()
         if current_input_event_key:
             metadata.setdefault("input_event_key", current_input_event_key)
+        explicit_parent_key = str(metadata.get("input_event_key") or "").strip()
+        background_behavior_allowed = str(metadata.get("background_behavior_allowed", "")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        if not explicit_parent_key and not background_behavior_allowed:
+            logger.info(
+                "assistant_message_orphan_guarded run_id=%s turn_id=%s origin=assistant_message",
+                self._current_run_id() or "",
+                metadata.get("turn_id") or "turn-unknown",
+            )
+            return
         token = getattr(self, "_pending_confirmation_token", None)
         if token is not None or self._is_awaiting_confirmation_phase():
             metadata.setdefault("approval_flow", "true")

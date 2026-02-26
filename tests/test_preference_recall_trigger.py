@@ -40,6 +40,7 @@ def _make_api_stub() -> RealtimeAPI:
     api._pending_server_auto_input_event_keys = deque(maxlen=64)
     api._active_server_auto_input_event_key = None
     api._current_input_event_key = None
+    api._active_input_event_key_by_turn_id = {}
     api._input_event_key_counter = 0
     api._active_response_preference_guarded = False
     api._active_response_confirmation_guarded = False
@@ -602,6 +603,8 @@ def test_preference_recall_drops_queued_server_auto_response_create(monkeypatch)
 
     api.websocket = ws
     api._current_response_turn_id = "turn_42"
+    api._current_input_event_key = "item-42"
+    api._active_input_event_key_by_turn_id["turn_42"] = "item-42"
     api._response_create_queue = deque()
     api._queued_confirmation_reminder_keys = set()
     api._pending_response_create = None
@@ -853,8 +856,8 @@ def test_preference_recall_cancels_only_matching_server_auto_response(monkeypatc
     asyncio.run(api.handle_event({"type": "response.created", "response": {"id": "r-2"}}, ws))
 
     assert sent_messages == ["handled"]
-    assert ws.sent == ['{"type": "response.cancel"}']
-    assert api._active_server_auto_input_event_key == "item-2"
+    assert ws.sent == ['{"type": "response.cancel"}', '{"type": "response.cancel"}']
+    assert api._active_server_auto_input_event_key == "item-1"
     assert "item-1" in api._preference_recall_suppressed_input_event_keys
     assert "item-2" not in api._preference_recall_suppressed_input_event_keys
 
@@ -1030,3 +1033,100 @@ def test_preference_recall_suppression_clears_all_pending_contenders() -> None:
     )
 
     assert list(api._response_create_queue) == []
+
+
+def test_assistant_message_requires_parent_input_event_key_or_background_flag(monkeypatch) -> None:
+    api = _make_api_stub()
+    ws = _RecordingWs()
+    calls: list[dict[str, str]] = []
+
+    async def _fake_send_response_create(_ws, event, *, origin, **_kwargs):
+        calls.append({"origin": origin, "input_event_key": str(event["response"]["metadata"].get("input_event_key") or "")})
+        return True
+
+    monkeypatch.setattr(api, "_send_response_create", _fake_send_response_create)
+
+    api._current_input_event_key = None
+    asyncio.run(
+        api.send_assistant_message(
+            "camera scene",
+            ws,
+            response_metadata={"trigger": "camera_auto"},
+        )
+    )
+
+    assert calls == []
+
+    asyncio.run(
+        api.send_assistant_message(
+            "camera scene",
+            ws,
+            response_metadata={"trigger": "camera_auto", "input_event_key": "item-current"},
+        )
+    )
+
+    assert calls == [{"origin": "assistant_message", "input_event_key": "item-current"}]
+
+
+def test_server_auto_response_created_binds_to_active_turn_key_after_memory_intent(monkeypatch) -> None:
+    api = _make_api_stub()
+    ws = _RecordingWs()
+    outcome_calls: list[tuple[str, str]] = []
+
+    async def _false(*_args, **_kwargs) -> bool:
+        return False
+
+    api._maybe_handle_confirmation_decision_timeout = _false
+    api._maybe_handle_approval_response = _false
+    api._handle_stop_word = _false
+    api._maybe_handle_research_permission_response = _false
+    api._maybe_handle_research_budget_response = _false
+    api._maybe_apply_late_confirmation_decision = _false
+    api._maybe_process_research_intent = _false
+    api._maybe_handle_preference_recall_intent = _false
+    api._has_active_confirmation_token = lambda: False
+    api._is_awaiting_confirmation_phase = lambda: False
+    api._is_user_approved_interrupt_response = lambda _response: False
+    api._log_user_transcript = lambda *_args, **_kwargs: None
+    api._record_user_input = lambda *_args, **_kwargs: None
+    api._track_outgoing_event = lambda *_args, **_kwargs: None
+
+    def _capture_outcome(*, input_event_key: str, outcome: str, **_kwargs) -> None:
+        outcome_calls.append((input_event_key, outcome))
+
+    monkeypatch.setattr(api, "_mark_transcript_response_outcome", _capture_outcome)
+
+    api._current_response_turn_id = "turn_1"
+    asyncio.run(
+        api.handle_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "item-1",
+                "transcript": "Do you remember my favorite editor?",
+            },
+            ws,
+        )
+    )
+
+    api._pending_server_auto_input_event_keys.append("item-old")
+    asyncio.run(api.handle_event({"type": "response.created", "response": {"id": "resp-1"}}, ws))
+
+    api._current_response_turn_id = "turn_2"
+    asyncio.run(
+        api.handle_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "item-2",
+                "transcript": "Thanks.",
+            },
+            ws,
+        )
+    )
+    api._pending_server_auto_input_event_keys.appendleft("item-1")
+    asyncio.run(api.handle_event({"type": "response.created", "response": {"id": "resp-2"}}, ws))
+
+    assert api._active_input_event_key_by_turn_id["turn_1"] == "item-1"
+    assert api._active_input_event_key_by_turn_id["turn_2"] == "item-2"
+    assert api._active_server_auto_input_event_key == "item-2"
+    assert ("item-2", "response_created") in outcome_calls
+    assert not any(key == "item-1" and outcome == "response_created" for key, outcome in outcome_calls[1:])
