@@ -756,8 +756,11 @@ class RealtimeAPI:
         self._input_event_key_counter = 0
         self._synthetic_input_event_counter = 0
         self._response_created_canonical_keys: set[str] = set()
+        self._response_delivery_ledger: dict[str, str] = {}
         self._response_obligations: dict[str, dict[str, Any]] = {}
         self._already_scheduled_for_input_event_key: set[str] = set()
+        self._active_response_input_event_key: str | None = None
+        self._active_response_canonical_key: str | None = None
         self._suppressed_topics: set[str] = set()
         self._battery_redline_percent = float(battery_response_cfg.get("redline_percent", 10.0))
         self._load_topic_suppression_preferences()
@@ -1935,6 +1938,34 @@ class RealtimeAPI:
 
     def _response_obligation_key(self, *, turn_id: str, input_event_key: str | None) -> str:
         return self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+
+    def _response_delivery_state(self, *, turn_id: str, input_event_key: str | None) -> str | None:
+        ledger = getattr(self, "_response_delivery_ledger", None)
+        if not isinstance(ledger, dict):
+            return None
+        key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+        value = ledger.get(key)
+        return str(value).strip().lower() if isinstance(value, str) else None
+
+    def _set_response_delivery_state(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str | None,
+        state: str,
+    ) -> None:
+        normalized_state = str(state or "").strip().lower()
+        if not normalized_state:
+            return
+        ledger = getattr(self, "_response_delivery_ledger", None)
+        if not isinstance(ledger, dict):
+            ledger = {}
+            self._response_delivery_ledger = ledger
+        key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+        ledger[key] = normalized_state
+
+    def _is_response_already_delivered(self, *, turn_id: str, input_event_key: str | None) -> bool:
+        return self._response_delivery_state(turn_id=turn_id, input_event_key=input_event_key) == "delivered"
 
     def _set_response_obligation(self, *, turn_id: str, input_event_key: str, source: str) -> None:
         obligation_key = self._response_obligation_key(turn_id=turn_id, input_event_key=input_event_key)
@@ -3781,6 +3812,21 @@ class RealtimeAPI:
         suppression_turns = getattr(self, "_preference_recall_suppressed_turns", set())
         canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=current_input_event_key)
         created_keys = getattr(self, "_response_created_canonical_keys", set())
+        if self._is_response_already_delivered(turn_id=turn_id, input_event_key=current_input_event_key):
+            logger.debug(
+                "duplicate_response_prevented run_id=%s turn_id=%s input_event_key=%s reason=already_delivered origin=%s",
+                self._current_run_id() or "",
+                turn_id,
+                current_input_event_key or "unknown",
+                normalized_origin,
+            )
+            if reason == "audio_playback_busy":
+                logger.debug(
+                    "playback_busy_retry_dropped run_id=%s input_event_key=%s reason=already_delivered",
+                    self._current_run_id() or "",
+                    current_input_event_key or "unknown",
+                )
+            return False
         if self._is_preference_recall_lock_blocked(
             turn_id=turn_id,
             input_event_key=current_input_event_key,
@@ -3866,6 +3912,12 @@ class RealtimeAPI:
         if previous is None:
             self._pending_response_create = candidate
             self._sync_pending_response_create_queue()
+            if reason == "audio_playback_busy":
+                logger.debug(
+                    "playback_busy_retry_enqueued run_id=%s input_event_key=%s reason=audio_playback_busy",
+                    self._current_run_id() or "",
+                    current_input_event_key or "unknown",
+                )
             logger.info(
                 "response_create_scheduled turn_id=%s origin=%s reason=%s",
                 candidate.turn_id,
@@ -3892,6 +3944,12 @@ class RealtimeAPI:
         if should_replace:
             self._pending_response_create = candidate
             self._sync_pending_response_create_queue()
+            if reason == "audio_playback_busy":
+                logger.debug(
+                    "playback_busy_retry_enqueued run_id=%s input_event_key=%s reason=audio_playback_busy",
+                    self._current_run_id() or "",
+                    current_input_event_key or "unknown",
+                )
             logger.info(
                 "response_create_replaced turn_id=%s old_origin=%s new_origin=%s reason=%s",
                 candidate.turn_id,
@@ -3965,6 +4023,15 @@ class RealtimeAPI:
         suppression_turns = getattr(self, "_preference_recall_suppressed_turns", set())
         canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=current_input_event_key)
         created_keys = getattr(self, "_response_created_canonical_keys", set())
+        if self._is_response_already_delivered(turn_id=turn_id, input_event_key=current_input_event_key):
+            logger.debug(
+                "duplicate_response_prevented run_id=%s turn_id=%s input_event_key=%s reason=already_delivered origin=%s",
+                self._current_run_id() or "",
+                turn_id,
+                current_input_event_key or "unknown",
+                normalized_origin,
+            )
+            return False
         if self._is_preference_recall_lock_blocked(
             turn_id=turn_id,
             input_event_key=current_input_event_key,
@@ -6397,6 +6464,8 @@ class RealtimeAPI:
             response_id = response.get("id")
             self._active_response_id = str(response_id) if response_id else None
             self._active_response_origin = str(origin)
+            self._active_response_input_event_key = None
+            self._active_response_canonical_key = None
             pending_confirmation_active = self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase()
             self._active_response_preference_guarded = False
             turn_id = self._current_turn_id_or_unknown()
@@ -6474,6 +6543,7 @@ class RealtimeAPI:
                         outcome="response_created",
                     )
                 canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+                resolved_input_event_key = input_event_key
                 logger.info(
                     "server_auto_response_linked run_id=%s response_id=%s turn_id=%s input_event_key=%s canonical_key=%s",
                     self._current_run_id() or "",
@@ -6505,6 +6575,7 @@ class RealtimeAPI:
                     )
                 self._active_server_auto_input_event_key = None
                 canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=current_input_event_key)
+                resolved_input_event_key = current_input_event_key
                 logger.info(
                     "response_created_linked run_id=%s response_id=%s turn_id=%s origin=%s input_event_key=%s canonical_key=%s",
                     self._current_run_id() or "",
@@ -6521,6 +6592,13 @@ class RealtimeAPI:
             consumes_canonical_slot = bool(getattr(self, "_active_response_consumes_canonical_slot", True))
             if consumes_canonical_slot:
                 created_keys.add(canonical_key)
+            self._active_response_input_event_key = str(resolved_input_event_key or "").strip() or None
+            self._active_response_canonical_key = canonical_key
+            self._set_response_delivery_state(
+                turn_id=turn_id,
+                input_event_key=resolved_input_event_key,
+                state="created",
+            )
             suppression_until = float(getattr(self, "_preference_recall_response_suppression_until", 0.0) or 0.0)
             suppression_window_active = suppression_until > time.monotonic()
             active_input_event_key = str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip()
@@ -7987,6 +8065,19 @@ class RealtimeAPI:
         manager = getattr(self, "_micro_ack_manager", None)
         if manager is not None:
             manager.mark_assistant_audio_ended()
+        delivered_turn_id = self._current_turn_id_or_unknown()
+        delivered_input_event_key = str(getattr(self, "_active_response_input_event_key", "") or "").strip()
+        if delivered_input_event_key:
+            self._set_response_delivery_state(
+                turn_id=delivered_turn_id,
+                input_event_key=delivered_input_event_key,
+                state="delivered",
+            )
+            logger.debug(
+                "response_delivery_marked run_id=%s input_event_key=%s",
+                self._current_run_id() or "",
+                delivered_input_event_key,
+            )
         if self._pending_image_stimulus:
             if self.audio_player:
                 self._pending_image_flush_after_playback = True
@@ -8007,6 +8098,8 @@ class RealtimeAPI:
         self._active_response_confirmation_guarded = False
         self._active_response_preference_guarded = False
         self._active_response_origin = "unknown"
+        self._active_response_input_event_key = None
+        self._active_response_canonical_key = None
         self._active_server_auto_input_event_key = None
         current_state = getattr(self.state_manager, "state", InteractionState.IDLE)
         if current_state != InteractionState.LISTENING:
