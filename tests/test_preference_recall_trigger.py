@@ -5,8 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import deque
+from types import SimpleNamespace
+
+import ai.tools as ai_tools
 from ai.realtime_api import InteractionState, RealtimeAPI
 from core.logging import logger
+from services.memory_manager import MemoryManager, MemoryScope
+from storage.memories import MemoryStore
 
 
 class _Ws:
@@ -51,6 +56,31 @@ def _make_api_stub() -> RealtimeAPI:
     )()
     return api
 
+
+
+
+def _make_memory_manager(store: MemoryStore) -> MemoryManager:
+    manager = MemoryManager.__new__(MemoryManager)
+    manager._active_user_id = "default"
+    manager._active_session_id = None
+    manager._default_scope = MemoryScope.USER_GLOBAL
+    manager._store = store
+    manager._embedding_worker = None
+    manager._semantic_config = SimpleNamespace(enabled=False, rerank_enabled=False)
+    manager._last_turn_retrieval_at = {}
+    manager._auto_pin_min_importance = 5
+    manager._auto_pin_requires_review = True
+    manager._auto_reflection_semantic_dedupe_enabled = False
+    manager._auto_reflection_dedupe_recent_limit = 24
+    manager._auto_reflection_dedupe_high_risk_cosine = 0.9
+    manager._auto_reflection_dedupe_policy = "skip_write"
+    manager._auto_reflection_dedupe_importance = 2
+    manager._auto_reflection_dedupe_clear_pin = True
+    manager._auto_reflection_dedupe_needs_review = True
+    manager._auto_reflection_dedupe_apply_to_manual_tool = False
+    manager._recall_trace_enabled = True
+    manager._recall_trace_level = "info"
+    return manager
 
 def test_preference_question_calls_recall_before_response(monkeypatch) -> None:
     api = _make_api_stub()
@@ -180,6 +210,52 @@ def test_preference_question_empty_recall_returns_saved_yet_message(monkeypatch)
 
     assert handled is True
     assert "don’t have that saved yet" in sent_messages[0]
+
+
+def test_preference_question_uses_editor_fallback_query(monkeypatch) -> None:
+    api = _make_api_stub()
+    sent_messages: list[str] = []
+    queries: list[str] = []
+
+    async def _fake_recall(**kwargs):
+        queries.append(kwargs.get("query", ""))
+        if kwargs.get("query") == "editor":
+            return {
+                "memories": [{"content": "User's favorite editor is Vim."}],
+                "memory_cards_text": "Relevant memory:\n- \"User's favorite editor is Vim.\"",
+            }
+        return {"memories": []}
+
+    async def _fake_send(message: str, _ws, **_kwargs) -> None:
+        sent_messages.append(message)
+
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "recall_memories", _fake_recall)
+    monkeypatch.setattr(api, "send_assistant_message", _fake_send)
+
+    handled = asyncio.run(
+        api._maybe_handle_preference_recall_intent(
+            "Which editor do I prefer?",
+            _Ws(),
+            source="text_message",
+        )
+    )
+
+    assert handled is True
+    assert queries[0] != "editor"
+    assert "editor" in queries
+    assert "Vim" in sent_messages[0]
+
+
+def test_preference_recall_query_builder_includes_editor_variants() -> None:
+    api = _make_api_stub()
+
+    matched, keywords = api._is_preference_recall_intent("Which editor do I prefer?")
+    assert matched is True
+
+    query = api._build_preference_recall_query("which editor do i prefer?", keywords=keywords)
+
+    assert "editor" in query
+    assert "user preferred editor" in query
 
 
 
@@ -557,3 +633,71 @@ def test_preference_recall_drops_queued_server_auto_response_create(monkeypatch)
     assert len(assistant_payloads) == 1
     assert "Vim" in assistant_payloads[0]["item"]["content"][0]["text"]
     assert response_create_payloads == []
+
+
+def test_preference_question_falls_back_to_preference_tag_query(monkeypatch) -> None:
+    api = _make_api_stub()
+    sent_messages: list[str] = []
+    queries: list[str] = []
+
+    async def _fake_recall(**kwargs):
+        queries.append(kwargs.get("query", ""))
+        if kwargs.get("query") == "preference":
+            return {
+                "memories": [{"content": "User's favorite editor is Vim.", "tags": ["preference"]}],
+                "memory_cards_text": "Relevant memory:\n- \"User's favorite editor is Vim.\"",
+            }
+        return {"memories": []}
+
+    async def _fake_send(message: str, _ws, **_kwargs) -> None:
+        sent_messages.append(message)
+
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "recall_memories", _fake_recall)
+    monkeypatch.setattr(api, "send_assistant_message", _fake_send)
+
+    handled = asyncio.run(
+        api._maybe_handle_preference_recall_intent(
+            "Which editor do I prefer?",
+            _Ws(),
+            source="text_message",
+        )
+    )
+
+    assert handled is True
+    assert queries[:2]
+    assert queries[1] == "editor"
+    assert "preference" in queries
+    assert "Vim" in sent_messages[0]
+
+
+def test_preference_recall_regression_returns_seeded_vim_memory(monkeypatch, tmp_path) -> None:
+    api = _make_api_stub()
+    sent_messages: list[str] = []
+
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager.remember_memory(
+        content="User's favorite editor is Vim.",
+        tags=["preference", "editor"],
+        importance=4,
+        scope=MemoryScope.USER_GLOBAL,
+    )
+
+    monkeypatch.setattr(ai_tools.MemoryManager, "get_instance", lambda: manager)
+
+    async def _fake_send(message: str, _ws, **_kwargs) -> None:
+        sent_messages.append(message)
+
+    monkeypatch.setattr(api, "send_assistant_message", _fake_send)
+
+    handled = asyncio.run(
+        api._maybe_handle_preference_recall_intent(
+            "Which editor do I prefer?",
+            _Ws(),
+            source="text_message",
+        )
+    )
+
+    assert handled is True
+    assert sent_messages
+    assert "Vim" in sent_messages[0]
