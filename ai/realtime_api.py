@@ -1565,6 +1565,25 @@ class RealtimeAPI:
                 limit=3,
                 scope=str(getattr(self, "_memory_retrieval_scope", MemoryScope.USER_GLOBAL.value)),
             )
+            payload_keys = sorted(result_payload.keys()) if isinstance(result_payload, dict) else []
+            payload_memories = result_payload.get("memories") if isinstance(result_payload, dict) else None
+            payload_items = result_payload.get("items") if isinstance(result_payload, dict) else None
+            payload_cards = result_payload.get("memory_cards") if isinstance(result_payload, dict) else None
+            payload_cards_text = result_payload.get("memory_cards_text") if isinstance(result_payload, dict) else ""
+            logger.info(
+                "preference_recall_tool_result run_id=%s resolved_turn_id=%s query=%s payload_keys=%s "
+                "memories_count=%s cards_count=%s memory_cards_text_len=%s scope=%s",
+                self._current_run_id() or "",
+                resolved_turn_id,
+                query,
+                ",".join(payload_keys),
+                len(payload_memories) if isinstance(payload_memories, list) else (
+                    len(payload_items) if isinstance(payload_items, list) else 0
+                ),
+                len(payload_cards) if isinstance(payload_cards, list) else 0,
+                len(str(payload_cards_text).strip()),
+                str(getattr(self, "_memory_retrieval_scope", MemoryScope.USER_GLOBAL.value)),
+            )
             self._preference_recall_cache[query] = {"timestamp": now, "payload": result_payload}
             logger.info(
                 "Preference recall executed source=%s query=%s keywords=%s",
@@ -1574,6 +1593,10 @@ class RealtimeAPI:
             )
 
         memories = result_payload.get("memories") if isinstance(result_payload, dict) else None
+        if (not isinstance(memories, list) or not memories) and isinstance(result_payload, dict):
+            items = result_payload.get("items")
+            if isinstance(items, list):
+                memories = items
         await self._suppress_preference_recall_server_auto_response(websocket)
         if not isinstance(memories, list) or not memories:
             await self.send_assistant_message(

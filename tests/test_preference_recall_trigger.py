@@ -182,6 +182,37 @@ def test_preference_question_empty_recall_returns_saved_yet_message(monkeypatch)
     assert "don’t have that saved yet" in sent_messages[0]
 
 
+
+
+def test_preference_question_accepts_items_payload(monkeypatch) -> None:
+    api = _make_api_stub()
+    sent_messages: list[str] = []
+
+    async def _fake_recall(**_kwargs):
+        return {
+            "items": [{"content": "User prefers Vim for editing."}],
+            "memory_cards_text": "Relevant memory:\n- \"User prefers Vim for editing.\"",
+        }
+
+    async def _fake_send(message: str, _ws, **_kwargs) -> None:
+        sent_messages.append(message)
+
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "recall_memories", _fake_recall)
+    monkeypatch.setattr(api, "send_assistant_message", _fake_send)
+
+    handled = asyncio.run(
+        api._maybe_handle_preference_recall_intent(
+            "Which editor do I prefer?",
+            _Ws(),
+            source="text_message",
+        )
+    )
+
+    assert handled is True
+    assert sent_messages
+    assert "Vim" in sent_messages[0]
+    assert "don’t have that saved yet" not in sent_messages[0]
+
 def test_preference_recall_uses_cache_within_cooldown(monkeypatch) -> None:
     api = _make_api_stub()
     recall_calls = 0
