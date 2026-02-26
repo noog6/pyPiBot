@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 
 from ai.realtime_api import RealtimeAPI
@@ -18,6 +19,7 @@ def _make_api() -> RealtimeAPI:
     api._current_input_event_key = None
     api._synthetic_input_event_counter = 0
     api._response_created_canonical_keys = set()
+    api._response_delivery_ledger = {}
     api._response_in_flight = False
     api._audio_playback_busy = False
     api._pending_response_create = None
@@ -32,6 +34,7 @@ def _make_api() -> RealtimeAPI:
     api._extract_confirmation_reminder_dedupe_key = lambda event: None
     api._sync_pending_response_create_queue = lambda: None
     api._mark_transcript_response_outcome = lambda **kwargs: None
+    api._can_release_queued_response_create = lambda trigger, metadata: True
     api.state_manager = _FakeStateManager()
     return api
 
@@ -95,4 +98,55 @@ def test_response_create_guard_blocks_default_response_while_preference_lock_act
     )
 
     assert blocked is False
+    assert api._pending_response_create is None
+
+
+def test_audio_playback_busy_retry_dropped_after_delivery() -> None:
+    api = _make_api()
+    api._audio_playback_busy = True
+    api._set_response_delivery_state(
+        turn_id="turn_1",
+        input_event_key="input_evt_1",
+        state="delivered",
+    )
+
+    scheduled = api._schedule_pending_response_create(
+        websocket=None,
+        response_create_event={"type": "response.create", "response": {"metadata": {"input_event_key": "input_evt_1"}}},
+        origin="assistant_message",
+        reason="audio_playback_busy",
+        record_ai_call=False,
+        debug_context=None,
+        memory_brief_note=None,
+    )
+
+    assert scheduled is False
+    assert api._pending_response_create is None
+
+
+def test_audio_playback_busy_retry_enqueues_once_before_delivery() -> None:
+    api = _make_api()
+    api._audio_playback_busy = True
+
+    api._schedule_pending_response_create(
+        websocket=None,
+        response_create_event={"type": "response.create", "response": {"metadata": {"input_event_key": "input_evt_1"}}},
+        origin="assistant_message",
+        reason="audio_playback_busy",
+        record_ai_call=False,
+        debug_context=None,
+        memory_brief_note=None,
+    )
+
+    send_attempts: list[str] = []
+
+    async def _fake_send_response_create(*args, **kwargs):
+        send_attempts.append("sent")
+        return True
+
+    api._send_response_create = _fake_send_response_create
+    api._audio_playback_busy = False
+    asyncio.run(api._drain_response_create_queue())
+
+    assert send_attempts == ["sent"]
     assert api._pending_response_create is None
