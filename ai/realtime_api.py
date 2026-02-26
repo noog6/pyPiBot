@@ -120,6 +120,21 @@ _PREFERENCE_RECALL_MARKERS = (
     "what do i use",
     "which",
 )
+_MEMORY_INTENT_MARKERS = (
+    "remember",
+    "memory",
+    "memories",
+    "recall",
+    "do you know",
+    "what's my name",
+    "what is my name",
+    "my name",
+    "prefer",
+    "preferred",
+    "preference",
+    "favorite",
+    "favourite",
+)
 _PREFERENCE_RECALL_DOMAINS = {
     "editor",
     "ide",
@@ -1467,13 +1482,20 @@ class RealtimeAPI:
         clean_text = text.strip()
         if not clean_text:
             return
+        memory_intent = self._is_memory_intent(clean_text)
         self._last_user_input_text = clean_text
         self._last_user_input_time = time.monotonic()
         self._last_user_input_source = source
         if self._is_battery_status_query(clean_text):
             self._last_user_battery_query_time = self._last_user_input_time
         self._mark_preference_recall_candidate(clean_text, source=source)
-        self._prepare_turn_memory_brief(clean_text, source=source)
+        self._prepare_turn_memory_brief(clean_text, source=source, memory_intent=memory_intent)
+
+    def _is_memory_intent(self, text: str) -> bool:
+        normalized = " ".join((text or "").lower().split())
+        if not normalized:
+            return False
+        return any(marker in normalized for marker in _MEMORY_INTENT_MARKERS)
 
     def _extract_preference_keywords(self, text: str) -> list[str]:
         tokens = re.findall(r"[a-zA-Z][a-zA-Z0-9_+-]{1,}", text.lower())
@@ -1572,6 +1594,8 @@ class RealtimeAPI:
         normalized = " ".join((text or "").lower().split())
         if not normalized:
             return False, []
+        if self._is_memory_intent(normalized):
+            return True, self._extract_preference_keywords(normalized)
         has_marker = any(marker in normalized for marker in _PREFERENCE_RECALL_MARKERS)
         has_domain = any(domain in normalized for domain in _PREFERENCE_RECALL_DOMAINS)
         if not has_marker or not has_domain:
@@ -1962,7 +1986,7 @@ class RealtimeAPI:
         noisy = {"ok", "okay", "thanks", "thank you", "yes", "no", "cool", "nice", "got it"}
         return text.lower() in noisy
 
-    def _prepare_turn_memory_brief(self, user_text: str, *, source: str) -> None:
+    def _prepare_turn_memory_brief(self, user_text: str, *, source: str, memory_intent: bool = False) -> None:
         if self._should_skip_turn_memory_retrieval(user_text):
             self._pending_turn_memory_brief = None
             return
@@ -1980,11 +2004,17 @@ class RealtimeAPI:
                 max_memories=int(getattr(self, "_memory_retrieval_max_memories", 3)),
                 max_chars=int(getattr(self, "_memory_retrieval_max_chars", 450)),
                 cooldown_s=float(getattr(self, "_memory_retrieval_cooldown_s", 10.0)),
+                bypass_cooldown=memory_intent,
                 scope=str(getattr(self, "_memory_retrieval_scope", MemoryScope.USER_GLOBAL.value)),
                 session_id=manager.get_active_session_id(),
             )
             retrieval_debug = manager.get_last_turn_retrieval_debug_metadata()
             if retrieval_debug:
+                if memory_intent:
+                    logger.info(
+                        "turn_memory_retrieval_cooldown_bypassed source=%s cooldown_bypassed_reason=memory_intent",
+                        source,
+                    )
                 semantic_runtime_health = manager.get_semantic_runtime_health()
                 semantic_streak = int(semantic_runtime_health.get("query_embedding_not_ready_streak", 0))
                 semantic_health_suffix = (
@@ -5769,6 +5799,12 @@ class RealtimeAPI:
                     turn_id,
                     input_event_key or "unknown",
                 )
+                if not input_event_key:
+                    logger.info(
+                        "memory_intent_decision_path run_id=%s turn_id=%s decision_path=speculative_server_auto",
+                        self._current_run_id() or "",
+                        turn_id,
+                    )
             else:
                 current_input_event_key = str(getattr(self, "_current_input_event_key", "") or "").strip()
                 if current_input_event_key:
@@ -5901,6 +5937,13 @@ class RealtimeAPI:
             self._log_user_transcript(transcript or "", final=True, event_type=event_type)
             input_event_key = self._resolve_input_event_key(event)
             self._current_input_event_key = input_event_key
+            memory_intent = self._is_memory_intent(transcript or "")
+            logger.info(
+                "memory_intent_classification run_id=%s source=input_audio_transcription input_event_key=%s memory_intent=%s",
+                self._current_run_id() or "",
+                input_event_key,
+                str(memory_intent).lower(),
+            )
             pending_server_auto_keys = getattr(self, "_pending_server_auto_input_event_keys", None)
             if not isinstance(pending_server_auto_keys, deque):
                 pending_server_auto_keys = deque(maxlen=64)
@@ -5945,6 +5988,15 @@ class RealtimeAPI:
                 if suppressed:
                     return
             if transcript:
+                if memory_intent:
+                    decision_path = "upgraded_response" if str(getattr(self, "_active_response_origin", "")).strip().lower() == "server_auto" else "canonical_transcript"
+                    logger.info(
+                        "memory_intent_decision_path run_id=%s turn_id=%s input_event_key=%s decision_path=%s",
+                        self._current_run_id() or "",
+                        resolved_turn_id,
+                        input_event_key,
+                        decision_path,
+                    )
                 self._record_user_input(transcript, source="input_audio_transcription")
                 if await self._maybe_handle_approval_response(transcript, websocket):
                     return

@@ -820,3 +820,98 @@ def test_transcript_watchdog_logs_when_response_not_scheduled(monkeypatch) -> No
         and "input_event_key=item-stalled" in entry
         for entry in info_logs
     )
+
+
+def test_memory_intent_server_auto_race_upgrades_after_transcript(monkeypatch) -> None:
+    api = _make_api_stub()
+    ws = _RecordingWs()
+    sent_messages: list[str] = []
+    queries: list[str] = []
+
+    async def _fake_recall(**kwargs):
+        queries.append(str(kwargs.get("query") or ""))
+        return {
+            "memories": [{"content": "Your eyes are blue."}],
+            "memory_cards_text": "Relevant memory:\n- \"Your eyes are blue.\"",
+        }
+
+    async def _false(*_args, **_kwargs) -> bool:
+        return False
+
+    async def _fake_send(message: str, _ws, **_kwargs) -> None:
+        sent_messages.append(message)
+
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "recall_memories", _fake_recall)
+    monkeypatch.setattr(api, "send_assistant_message", _fake_send)
+
+    api.websocket = ws
+    api._maybe_handle_confirmation_decision_timeout = _false
+    api._maybe_handle_approval_response = _false
+    api._handle_stop_word = _false
+    api._maybe_handle_research_permission_response = _false
+    api._maybe_handle_research_budget_response = _false
+    api._maybe_apply_late_confirmation_decision = _false
+    api._maybe_process_research_intent = _false
+    api._has_active_confirmation_token = lambda: False
+    api._is_awaiting_confirmation_phase = lambda: False
+    api._is_user_approved_interrupt_response = lambda _response: False
+    api._log_user_transcript = lambda *_args, **_kwargs: None
+    api._track_outgoing_event = lambda *_args, **_kwargs: None
+
+    asyncio.run(api.handle_event({"type": "response.created", "response": {"id": "r-1"}}, ws))
+
+    asyncio.run(
+        api.handle_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "item-remember",
+                "transcript": "Do you remember I have blue eyes?",
+            },
+            ws,
+        )
+    )
+
+    assert queries
+    assert any("blue" in query for query in queries)
+    assert sent_messages
+    assert "blue" in sent_messages[0].lower()
+
+
+def test_non_memory_smalltalk_does_not_trigger_recall(monkeypatch) -> None:
+    api = _make_api_stub()
+    recall_calls = 0
+
+    async def _false(*_args, **_kwargs) -> bool:
+        return False
+
+    async def _fake_recall(**_kwargs):
+        nonlocal recall_calls
+        recall_calls += 1
+        return {"memories": []}
+
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "recall_memories", _fake_recall)
+    api._maybe_handle_confirmation_decision_timeout = _false
+    api._maybe_handle_approval_response = _false
+    api._handle_stop_word = _false
+    api._maybe_handle_research_permission_response = _false
+    api._maybe_handle_research_budget_response = _false
+    api._maybe_apply_late_confirmation_decision = _false
+    api._maybe_process_research_intent = _false
+    api._has_active_confirmation_token = lambda: False
+    api._is_awaiting_confirmation_phase = lambda: False
+    api._is_user_approved_interrupt_response = lambda _response: False
+    api._log_user_transcript = lambda *_args, **_kwargs: None
+    api._record_user_input = lambda *_args, **_kwargs: None
+
+    asyncio.run(
+        api.handle_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "item-smalltalk",
+                "transcript": "Nice weather today.",
+            },
+            _Ws(),
+        )
+    )
+
+    assert recall_calls == 0

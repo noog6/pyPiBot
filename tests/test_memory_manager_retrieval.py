@@ -2451,3 +2451,37 @@ def test_semantic_runtime_health_ready_state_stays_sticky_after_successful_trans
     assert ready_once["ready"] is True
     assert ready_twice["ready"] is True
     assert ready_twice["readiness_reason"] == "canary_ready"
+
+
+def test_retrieve_for_turn_can_bypass_cooldown_for_memory_intent(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    now_ms = _now_ms()
+
+    store.append_memory(
+        content="User remembers their eye color is blue.",
+        tags=["profile"],
+        importance=4,
+        user_id="default",
+        timestamp=now_ms,
+    )
+
+    first = manager.retrieve_for_turn(
+        latest_user_utterance="Do you remember my eye color?",
+        user_id="default",
+        max_memories=2,
+        cooldown_s=20.0,
+        now_monotonic=100.0,
+    )
+    second = manager.retrieve_for_turn(
+        latest_user_utterance="Do you remember my eye color?",
+        user_id="default",
+        max_memories=2,
+        cooldown_s=20.0,
+        now_monotonic=101.0,
+        bypass_cooldown=True,
+    )
+
+    assert first is not None
+    assert second is not None
+    assert manager.get_last_turn_retrieval_debug_metadata()["mode"] == "cooldown_bypassed"
