@@ -1482,8 +1482,14 @@ class RealtimeAPI:
         resolved_turn_id = str(turn_id or "").strip() or "turn-unknown"
         if resolved_turn_id in self._preference_recall_skip_logged_turn_ids:
             return
+        if pending.get("intent") != "preference_recall":
+            return
         recall_invoked = any(
-            isinstance(record, dict) and record.get("name") == "recall_memories"
+            isinstance(record, dict)
+            and record.get("name") == "recall_memories"
+            and (
+                str(record.get("turn_id") or "").strip() in {"", resolved_turn_id}
+            )
             for record in (self._tool_call_records or [])
         )
         if recall_invoked:
@@ -1547,6 +1553,7 @@ class RealtimeAPI:
                     {
                         "name": "recall_memories",
                         "source": "preference_recall",
+                        "turn_id": self._current_turn_id_or_unknown(),
                         "query": query,
                     }
                 )
@@ -6247,6 +6254,7 @@ class RealtimeAPI:
                 "call_id": call_id,
                 "args": args,
                 "result": result,
+                "turn_id": self._current_turn_id_or_unknown(),
                 "action_packet": action.to_payload() if action else None,
                 "staging": staging,
                 "timestamp": datetime.utcnow().isoformat(),
