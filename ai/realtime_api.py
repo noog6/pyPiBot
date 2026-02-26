@@ -1454,6 +1454,51 @@ class RealtimeAPI:
         turn_id = str(getattr(self, "_current_response_turn_id", "") or "").strip()
         return turn_id or "turn-unknown"
 
+    def _drop_suppressed_scheduled_response_creates(self, *, turn_id: str, origin: str) -> None:
+        normalized_origin = str(origin or "").strip().lower()
+        if normalized_origin != "server_auto":
+            return
+        if not isinstance(getattr(self, "_queued_confirmation_reminder_keys", None), set):
+            self._queued_confirmation_reminder_keys = set()
+        pending = getattr(self, "_pending_response_create", None)
+        if isinstance(pending, PendingResponseCreate) and pending.turn_id == turn_id:
+            pending_origin = str(getattr(pending, "origin", "") or "").strip().lower()
+            if pending_origin == normalized_origin:
+                self._pending_response_create = None
+                self._sync_pending_response_create_queue()
+                logger.info(
+                    "response_schedule_drop run_id=%s turn_id=%s origin=%s reason=preference_recall_suppressed",
+                    self._current_run_id() or "",
+                    turn_id,
+                    normalized_origin,
+                )
+
+        response_create_queue = getattr(self, "_response_create_queue", None)
+        if not isinstance(response_create_queue, deque):
+            response_create_queue = deque()
+            self._response_create_queue = response_create_queue
+        if not response_create_queue:
+            return
+        kept: deque[dict[str, Any]] = deque()
+        dropped = 0
+        for queued in response_create_queue:
+            queued_turn_id = str(queued.get("turn_id") or "").strip()
+            queued_origin = str(queued.get("origin") or "").strip().lower()
+            if queued_turn_id == turn_id and queued_origin == normalized_origin:
+                dropped += 1
+                continue
+            kept.append(queued)
+        if dropped:
+            self._response_create_queue = kept
+            self._sync_pending_response_create_queue()
+            logger.info(
+                "response_schedule_drop run_id=%s turn_id=%s origin=%s dropped=%s reason=preference_recall_suppressed",
+                self._current_run_id() or "",
+                turn_id,
+                normalized_origin,
+                dropped,
+            )
+
     async def _suppress_preference_recall_server_auto_response(self, websocket: Any) -> None:
         turn_id = self._current_turn_id_or_unknown()
         suppressed_turns = getattr(self, "_preference_recall_suppressed_turns", None)
@@ -1461,6 +1506,7 @@ class RealtimeAPI:
             suppressed_turns = set()
             self._preference_recall_suppressed_turns = suppressed_turns
         suppressed_turns.add(turn_id)
+        self._drop_suppressed_scheduled_response_creates(turn_id=turn_id, origin="server_auto")
         logger.info(
             "preference_recall_response_suppressed run_id=%s turn_id=%s reason=handled_preference_recall",
             self._current_run_id() or "",
@@ -2953,8 +2999,18 @@ class RealtimeAPI:
         memory_brief_note: str | None,
     ) -> bool:
         turn_id = self._resolve_response_create_turn_id(origin=origin, response_create_event=response_create_event)
+        normalized_origin = str(origin or "").strip().lower()
         suppression_turns = getattr(self, "_preference_recall_suppressed_turns", set())
         suppression_active = turn_id in suppression_turns
+        if suppression_active and normalized_origin == "server_auto":
+            self._drop_suppressed_scheduled_response_creates(turn_id=turn_id, origin=normalized_origin)
+            logger.info(
+                "response_schedule_blocked run_id=%s turn_id=%s origin=%s mode=queued reason=preference_recall_suppressed",
+                self._current_run_id() or "",
+                turn_id,
+                normalized_origin,
+            )
+            return False
         schedule_logged_turn_ids = getattr(self, "_response_schedule_logged_turn_ids", None)
         if not isinstance(schedule_logged_turn_ids, set):
             schedule_logged_turn_ids = set()
@@ -3089,8 +3145,18 @@ class RealtimeAPI:
             except Exception as exc:  # pragma: no cover - defensive fail-open
                 logger.warning("Memory brief injection skipped due to error: %s", exc)
         turn_id = self._resolve_response_create_turn_id(origin=origin, response_create_event=response_create_event)
+        normalized_origin = str(origin or "").strip().lower()
         suppression_turns = getattr(self, "_preference_recall_suppressed_turns", set())
         suppression_active = turn_id in suppression_turns
+        if suppression_active and normalized_origin == "server_auto":
+            self._drop_suppressed_scheduled_response_creates(turn_id=turn_id, origin=normalized_origin)
+            logger.info(
+                "response_schedule_blocked run_id=%s turn_id=%s origin=%s mode=direct reason=preference_recall_suppressed",
+                self._current_run_id() or "",
+                turn_id,
+                normalized_origin,
+            )
+            return False
         schedule_logged_turn_ids = getattr(self, "_response_schedule_logged_turn_ids", None)
         if not isinstance(schedule_logged_turn_ids, set):
             schedule_logged_turn_ids = set()
