@@ -723,7 +723,9 @@ class RealtimeAPI:
         self._response_done_serial = 0
         self._active_response_id: str | None = None
         self._active_response_confirmation_guarded = False
+        self._active_response_preference_guarded = False
         self._active_response_origin = "unknown"
+        self._preference_recall_response_suppression_until = 0.0
         self._pending_alternate_intent_override: dict[str, Any] | None = None
         self._last_executed_tool_call: dict[str, Any] | None = None
         self._intent_ledger: dict[str, IntentLedgerEntry] = {}
@@ -1530,6 +1532,7 @@ class RealtimeAPI:
             )
 
         memories = result_payload.get("memories") if isinstance(result_payload, dict) else None
+        self._preference_recall_response_suppression_until = time.monotonic() + 2.5
         if not isinstance(memories, list) or not memories:
             await self.send_assistant_message(
                 "I don’t have that saved yet. If you share it, I can remember it for next time.",
@@ -1566,6 +1569,12 @@ class RealtimeAPI:
         await self.send_assistant_message("\n".join(response_lines), websocket)
         self._clear_preference_recall_candidate()
         return True
+
+    def _is_active_response_guarded(self) -> bool:
+        return bool(
+            getattr(self, "_active_response_confirmation_guarded", False)
+            or getattr(self, "_active_response_preference_guarded", False)
+        )
 
 
     def _should_skip_turn_memory_retrieval(self, user_text: str) -> bool:
@@ -5257,6 +5266,20 @@ class RealtimeAPI:
             self._active_response_id = str(response_id) if response_id else None
             self._active_response_origin = str(origin)
             pending_confirmation_active = self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase()
+            self._active_response_preference_guarded = False
+            suppression_until = float(getattr(self, "_preference_recall_response_suppression_until", 0.0))
+            if origin == "server_auto" and suppression_until > 0.0 and time.monotonic() <= suppression_until:
+                self._active_response_preference_guarded = True
+                self._preference_recall_response_suppression_until = 0.0
+                logger.info(
+                    "PREFERENCE_RECALL_RESPONSE_GUARDED origin=%s response_id=%s",
+                    origin,
+                    self._active_response_id or "unknown",
+                )
+                cancel_event = {"type": "response.cancel"}
+                log_ws_event("Outgoing", cancel_event)
+                self._track_outgoing_event(cancel_event, origin="preference_recall_guard")
+                await websocket.send(json.dumps(cancel_event))
             if pending_confirmation_active:
                 log_info(f"response.created consumed by confirmation flow; origin={origin}")
                 self._active_response_confirmation_guarded = self._should_guard_confirmation_response(
@@ -5304,14 +5327,14 @@ class RealtimeAPI:
         elif event_type == "response.function_call_arguments.done":
             await self.handle_function_call(event, websocket)
         elif event_type == "response.text.delta":
-            if self._active_response_confirmation_guarded:
+            if self._is_active_response_guarded():
                 return
             delta = event.get("delta", "")
             self.assistant_reply += delta
             self._assistant_reply_accum += delta
             self.state_manager.update_state(InteractionState.SPEAKING, "text output")
         elif event_type == "response.output_audio.delta":
-            if self._active_response_confirmation_guarded:
+            if self._is_active_response_guarded():
                 return
             self._audio_playback_busy = True
             audio_data = base64.b64decode(event["delta"])
@@ -5334,7 +5357,7 @@ class RealtimeAPI:
             await self.handle_audio_response_done()
             self.state_manager.update_state(InteractionState.IDLE, "audio output done")
         elif event_type == "response.output_audio_transcript.delta":
-            if self._active_response_confirmation_guarded:
+            if self._is_active_response_guarded():
                 return
             delta = event.get("delta", "")
             self.assistant_reply += delta
@@ -6577,6 +6600,7 @@ class RealtimeAPI:
         was_confirmation_guarded = self._active_response_confirmation_guarded
         self._active_response_id = None
         self._active_response_confirmation_guarded = False
+        self._active_response_preference_guarded = False
         self._active_response_origin = "unknown"
         current_state = getattr(self.state_manager, "state", InteractionState.IDLE)
         if current_state != InteractionState.LISTENING:
@@ -6651,6 +6675,7 @@ class RealtimeAPI:
         self._response_in_flight = False
         self._active_response_id = None
         self._active_response_confirmation_guarded = False
+        self._active_response_preference_guarded = False
         self._active_response_origin = "unknown"
         current_state = getattr(self.state_manager, "state", InteractionState.IDLE)
         if current_state != InteractionState.LISTENING:

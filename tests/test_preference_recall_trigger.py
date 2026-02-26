@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from ai.realtime_api import RealtimeAPI
+from collections import deque
+from ai.realtime_api import InteractionState, RealtimeAPI
 from core.logging import logger
 
 
@@ -17,6 +18,35 @@ def _make_api_stub() -> RealtimeAPI:
     api._preference_recall_cooldown_s = 10.0
     api._preference_recall_cache = {}
     api._memory_retrieval_scope = "user_global"
+    api._pending_response_create_origins = deque()
+    api._preference_recall_response_suppression_until = 0.0
+    api._active_response_preference_guarded = False
+    api._active_response_confirmation_guarded = False
+    api._active_response_id = None
+    api._active_response_origin = "unknown"
+    api._audio_accum = bytearray()
+    api._audio_accum_bytes_target = 9600
+    api._tool_call_records = []
+    api._last_tool_call_results = []
+    api._assistant_reply_accum = ""
+    api.assistant_reply = ""
+    api._reflection_enqueued = False
+    api._response_in_flight = False
+    api.response_in_progress = False
+    api._speaking_started = False
+    api._mic_receive_on_first_audio = False
+    api._last_response_metadata = {}
+    api.audio_player = None
+    api._active_utterance = None
+    api.orchestration_state = type("_Orch", (), {"transition": lambda self, *_args, **_kwargs: None})()
+    api.state_manager = type(
+        "_State",
+        (),
+        {
+            "state": InteractionState.IDLE,
+            "update_state": lambda self, *_args, **_kwargs: None,
+        },
+    )()
     return api
 
 
@@ -240,3 +270,59 @@ def test_preference_recall_records_tool_and_updates_trace(monkeypatch) -> None:
     assert api._tool_call_records[-1]["name"] == "recall_memories"
     assert api._tool_call_records[-1]["source"] == "preference_recall"
     assert "editor" in api._tool_call_records[-1]["query"]
+
+
+class _RecordingWs:
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    async def send(self, payload: str) -> None:
+        self.sent.append(payload)
+
+
+def test_preference_recall_short_circuits_server_auto_response(monkeypatch) -> None:
+    api = _make_api_stub()
+    ws = _RecordingWs()
+    sent_messages: list[str] = []
+
+    async def _false(*_args, **_kwargs) -> bool:
+        return False
+
+    async def _handled(*_args, **_kwargs) -> bool:
+        sent_messages.append("handled")
+        api._preference_recall_response_suppression_until = 9999999999.0
+        return True
+
+    api.websocket = ws
+    api._maybe_handle_confirmation_decision_timeout = _false
+    api._maybe_handle_approval_response = _false
+    api._handle_stop_word = _false
+    api._maybe_handle_research_permission_response = _false
+    api._maybe_handle_research_budget_response = _false
+    api._maybe_apply_late_confirmation_decision = _false
+    api._maybe_process_research_intent = _false
+    api._maybe_handle_preference_recall_intent = _handled
+    api._has_active_confirmation_token = lambda: False
+    api._is_awaiting_confirmation_phase = lambda: False
+    api._is_user_approved_interrupt_response = lambda _response: False
+    api._log_user_transcript = lambda *_args, **_kwargs: None
+    api._record_user_input = lambda *_args, **_kwargs: None
+    api._track_outgoing_event = lambda *_args, **_kwargs: None
+
+    asyncio.run(
+        api.handle_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "transcript": "Which editor do I prefer?",
+            },
+            ws,
+        )
+    )
+
+    asyncio.run(api.handle_event({"type": "response.created", "response": {"id": "r-1"}}, ws))
+    asyncio.run(api.handle_event({"type": "response.text.delta", "delta": "fallback"}, ws))
+
+    assert sent_messages == ["handled"]
+    assert api._active_response_preference_guarded is True
+    assert api.assistant_reply == ""
+    assert ws.sent == ['{"type": "response.cancel"}']
