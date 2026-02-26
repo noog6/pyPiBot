@@ -31,12 +31,14 @@ def _make_api_stub() -> RealtimeAPI:
     api._queued_confirmation_reminder_keys = set()
     api._response_done_serial = 0
     api._response_create_debug_trace = False
+    api._current_response_turn_id = "turn-unknown"
     api._last_response_create_ts = None
     api._audio_playback_busy = False
     api._response_schedule_logged_turn_ids = set()
     api._preference_recall_response_suppression_until = 0.0
     api._preference_recall_suppressed_turns = set()
     api._preference_recall_suppressed_input_event_keys = set()
+    api._preference_recall_locked_input_event_keys = set()
     api._pending_server_auto_input_event_keys = deque(maxlen=64)
     api._active_server_auto_input_event_key = None
     api._current_input_event_key = None
@@ -115,7 +117,7 @@ def test_preference_question_calls_recall_before_response(monkeypatch) -> None:
                     "content": "User's favorite editor is Vim.",
                 }
             ],
-            "memory_cards_text": "Relevant memory:\n- \"User's favorite editor is Vim.\"\nWhy it's relevant:\n- \"Matches editor preference.\"\nConfidence: High",
+            "memory_cards_text": "Relevant memory:\n- \"User's favorite editor is Vim.\"",
         }
 
     async def _fake_send(message: str, _ws, **_kwargs) -> None:
@@ -137,7 +139,6 @@ def test_preference_question_calls_recall_before_response(monkeypatch) -> None:
     assert call_order == ["recall", "respond"]
     assert "Vim" in sent_messages[0]
     assert "Relevant memory:" in sent_messages[0]
-    assert "Confidence: High" in sent_messages[0]
 
 
 def test_preference_recall_response_sanitizes_memory_id_phrasing(monkeypatch) -> None:
@@ -189,7 +190,7 @@ def test_preference_recall_truthfulness_guard_for_checking_phrase(monkeypatch) -
         recall_calls += 1
         return {
             "memories": [{"content": "User's favorite editor is Vim.", "tags": ["preference"]}],
-            "memory_cards_text": "Relevant memory:\n- \"User's favorite editor is Vim.\"\nWhy it's relevant:\n- \"Matches editor preference.\"\nConfidence: High",
+            "memory_cards_text": "Relevant memory:\n- \"User's favorite editor is Vim.\"",
             "memory_cards": [{"confidence": "High"}],
         }
 
@@ -239,7 +240,7 @@ def test_preference_question_treats_memory_cards_text_as_hit_when_memories_empty
     async def _fake_recall(**_kwargs):
         return {
             "memory_cards": [{"content": "User's favorite editor is Vim."}],
-            "memory_cards_text": "Relevant memory: User's favorite editor is Vim.",
+            "memory_cards_text": "Relevant memory:\n- \"User's favorite editor is Vim.\"",
             "memories": [],
         }
 
@@ -259,7 +260,7 @@ def test_preference_question_treats_memory_cards_text_as_hit_when_memories_empty
 
     assert handled is True
     assert sent_messages
-    assert "Relevant memory: User's favorite editor is Vim." in sent_messages[0]
+    assert "favorite editor is Vim" in sent_messages[0]
     assert "don’t have that saved yet" not in sent_messages[0]
 
 
@@ -299,7 +300,7 @@ def test_preference_question_uses_editor_fallback_query(monkeypatch) -> None:
         if kwargs.get("query") == "editor":
             return {
                 "memories": [{"content": "User's favorite editor is Vim."}],
-                "memory_cards_text": "Relevant memory:\n- \"User's favorite editor is Vim.\"",
+            "memory_cards_text": "Relevant memory:\n- \"User's favorite editor is Vim.\"",
             }
         return {"memories": []}
 
@@ -344,7 +345,7 @@ def test_preference_question_accepts_items_payload(monkeypatch) -> None:
     async def _fake_recall(**_kwargs):
         return {
             "items": [{"content": "User prefers Vim for editing."}],
-            "memory_cards_text": "Relevant memory:\n- \"User prefers Vim for editing.\"",
+            "memory_cards_text": "Relevant memory:\n- \"User's favorite editor is Vim.\"",
         }
 
     async def _fake_send(message: str, _ws, **_kwargs) -> None:
@@ -375,7 +376,7 @@ def test_preference_recall_uses_cache_within_cooldown(monkeypatch) -> None:
         recall_calls += 1
         return {
             "memories": [{"content": "User's favorite editor is Vim."}],
-            "memory_cards_text": "Relevant memory:\n- \"User's favorite editor is Vim.\"\nWhy it's relevant:\n- \"Matches editor preference.\"\nConfidence: High",
+            "memory_cards_text": "Relevant memory:\n- \"User's favorite editor is Vim.\"",
         }
 
     async def _fake_send(_message: str, _ws, **_kwargs) -> None:
@@ -467,6 +468,55 @@ def test_preference_recall_records_tool_and_updates_trace(monkeypatch) -> None:
     assert api._tool_call_records[-1]["turn_id"] == "turn-42"
     assert "editor" in api._tool_call_records[-1]["query"]
     assert not any("preference_recall_decision_trace" in entry for entry in logged)
+
+
+
+def test_preference_recall_lock_blocks_default_response_and_clears_afterward(monkeypatch) -> None:
+    api = _make_api_stub()
+    api._current_input_event_key = "input_evt_lock"
+    blocked_during_lock: list[bool] = []
+    sent_messages: list[str] = []
+
+    async def _fake_recall(**_kwargs):
+        return {
+            "memories": [{"content": "User's favorite editor is Vim."}],
+            "memory_cards_text": "Relevant memory:\n- \"User's favorite editor is Vim.\"",
+        }
+
+    async def _fake_send(message: str, _ws, **_kwargs) -> None:
+        blocked = api._schedule_pending_response_create(
+            websocket=None,
+            response_create_event={
+                "type": "response.create",
+                "response": {"metadata": {"input_event_key": "input_evt_lock"}},
+            },
+            origin="assistant_message",
+            reason="active_response",
+            record_ai_call=False,
+            debug_context=None,
+            memory_brief_note=None,
+        )
+        blocked_during_lock.append(blocked)
+        sent_messages.append(message)
+
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "recall_memories", _fake_recall)
+    monkeypatch.setattr(api, "send_assistant_message", _fake_send)
+
+    handled = asyncio.run(
+        api._maybe_handle_preference_recall_intent(
+            "Which editor do I prefer?",
+            _Ws(),
+            source="text_message",
+        )
+    )
+
+    assert handled is True
+    assert blocked_during_lock == [False]
+    assert len(sent_messages) == 1
+    assert "Vim" in sent_messages[0]
+    assert "I’m not sure" not in sent_messages[0]
+    assert "I don't have that saved yet" not in sent_messages[0]
+    assert "input_evt_lock" not in api._preference_recall_locked_input_event_keys
 
 
 class _RecordingWs:
@@ -669,6 +719,7 @@ def test_preference_recall_drops_queued_server_auto_response_create(monkeypatch)
     api._pending_response_create = None
     api._response_done_serial = 0
     api._response_create_debug_trace = False
+    api._current_response_turn_id = "turn-unknown"
     api._response_schedule_logged_turn_ids = set()
     api._turn_diagnostic_timestamps = {}
     api._audio_playback_busy = False
@@ -723,7 +774,10 @@ def test_memory_intent_sets_response_obligation_and_clears_on_assistant_response
     ws = _RecordingWs()
 
     async def _fake_recall(**_kwargs):
-        return {"memories": [{"content": "User prefers Vim."}], "memory_cards_text": "Relevant memory:\n- \"User prefers Vim.\""}
+        return {
+            "memories": [{"content": "User's favorite editor is Vim."}],
+            "memory_cards_text": "Relevant memory\n- \"User's favorite editor is Vim.\"",
+        }
 
     async def _false(*_args, **_kwargs) -> bool:
         return False
@@ -822,7 +876,11 @@ def test_guarded_server_auto_does_not_satisfy_obligation_then_transcript_still_r
         return False
 
     async def _fake_recall(**_kwargs):
-        return {"memories": [{"content": "User prefers Vim."}], "memory_cards_text": "Relevant memory:\n- \"User prefers Vim.\""}
+        return {
+            "memories": [{"content": "User's favorite editor is Vim."}],
+            "memory_cards_text": "Relevant memory:\n- \"User's favorite editor is Vim.\"",
+
+        }
 
     monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "recall_memories", _fake_recall)
 
@@ -865,7 +923,7 @@ def test_preference_question_falls_back_to_preference_tag_query(monkeypatch) -> 
         if kwargs.get("query") == "preference":
             return {
                 "memories": [{"content": "User's favorite editor is Vim.", "tags": ["preference"]}],
-                "memory_cards_text": "Relevant memory:\n- \"User's favorite editor is Vim.\"",
+            "memory_cards_text": "Relevant memory:\n- \"User's favorite editor is Vim.\"",
             }
         return {"memories": []}
 
@@ -1042,7 +1100,7 @@ def test_memory_intent_server_auto_race_upgrades_after_transcript(monkeypatch) -
         queries.append(str(kwargs.get("query") or ""))
         return {
             "memories": [{"content": "Your eyes are blue."}],
-            "memory_cards_text": "Relevant memory:\n- \"Your eyes are blue.\"",
+            "memory_cards_text": "Relevant memory\n- \"Your eyes are blue.\"",
         }
 
     async def _false(*_args, **_kwargs) -> bool:

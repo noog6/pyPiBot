@@ -27,6 +27,7 @@ def _make_api() -> RealtimeAPI:
     api._response_schedule_logged_turn_ids = set()
     api._turn_diagnostic_timestamps = {}
     api._preference_recall_suppressed_turns = set()
+    api._preference_recall_locked_input_event_keys = set()
     api._current_run_id = lambda: "run-395"
     api._extract_confirmation_reminder_dedupe_key = lambda event: None
     api._sync_pending_response_create_queue = lambda: None
@@ -77,3 +78,21 @@ def test_clear_all_pending_response_creates_clears_pending_and_queue() -> None:
 
     assert api._pending_response_create is None
     assert list(api._response_create_queue) == []
+
+
+def test_response_create_guard_blocks_default_response_while_preference_lock_active() -> None:
+    api = _make_api()
+    api._preference_recall_locked_input_event_keys.add("input_evt_1")
+
+    blocked = api._schedule_pending_response_create(
+        websocket=None,
+        response_create_event={"type": "response.create", "response": {"metadata": {"input_event_key": "input_evt_1"}}},
+        origin="assistant_message",
+        reason="active_response",
+        record_ai_call=False,
+        debug_context=None,
+        memory_brief_note=None,
+    )
+
+    assert blocked is False
+    assert api._pending_response_create is None
