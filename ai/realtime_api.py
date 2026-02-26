@@ -672,6 +672,9 @@ class RealtimeAPI:
         self._preference_recall_cache: dict[str, dict[str, Any]] = {}
         self._pending_preference_recall_trace: dict[str, Any] | None = None
         self._preference_recall_skip_logged_turn_ids: set[str] = set()
+        self._preference_recall_handled_logged_turn_ids: set[str] = set()
+        self._response_schedule_logged_turn_ids: set[str] = set()
+        self._turn_diagnostic_timestamps: dict[str, dict[str, float]] = {}
 
         research_cfg = config.get("research") or {}
         self._research_enabled = bool(research_cfg.get("enabled", False))
@@ -1510,6 +1513,13 @@ class RealtimeAPI:
         if not matched:
             return False
 
+        resolved_turn_id = self._current_turn_id_or_unknown()
+        turn_timestamps_store = getattr(self, "_turn_diagnostic_timestamps", None)
+        if not isinstance(turn_timestamps_store, dict):
+            turn_timestamps_store = {}
+            self._turn_diagnostic_timestamps = turn_timestamps_store
+        turn_timestamps = turn_timestamps_store.setdefault(resolved_turn_id, {})
+        turn_timestamps["preference_recall_start"] = time.monotonic()
         self._mark_preference_recall_candidate(text, source=source)
         query = self._build_preference_recall_query(text.lower(), keywords=keywords)
         now = time.monotonic()
@@ -1570,6 +1580,29 @@ class RealtimeAPI:
                 "I don’t have that saved yet. If you share it, I can remember it for next time.",
                 websocket,
             )
+            turn_timestamps["preference_recall_end"] = time.monotonic()
+            handled_logged_turn_ids = getattr(self, "_preference_recall_handled_logged_turn_ids", None)
+            if not isinstance(handled_logged_turn_ids, set):
+                handled_logged_turn_ids = set()
+                self._preference_recall_handled_logged_turn_ids = handled_logged_turn_ids
+            if resolved_turn_id not in handled_logged_turn_ids:
+                handled_logged_turn_ids.add(resolved_turn_id)
+                logger.info(
+                    "preference_recall_handled run_id=%s resolved_turn_id=%s source=%s query=%s",
+                    self._current_run_id() or "",
+                    resolved_turn_id,
+                    source,
+                    query,
+                )
+                logger.debug(
+                    "turn_diagnostic_timestamps run_id=%s turn_id=%s transcript_final_ts=%s preference_recall_start_ts=%s preference_recall_end_ts=%s response_schedule_ts=%s",
+                    self._current_run_id() or "",
+                    resolved_turn_id,
+                    turn_timestamps.get("transcript_final"),
+                    turn_timestamps.get("preference_recall_start"),
+                    turn_timestamps.get("preference_recall_end"),
+                    turn_timestamps.get("response_schedule"),
+                )
             self._clear_preference_recall_candidate()
             return True
 
@@ -1599,6 +1632,29 @@ class RealtimeAPI:
             response_lines.append("Want me to pin or rename this memory so it’s easier to recall later?")
 
         await self.send_assistant_message("\n".join(response_lines), websocket)
+        turn_timestamps["preference_recall_end"] = time.monotonic()
+        handled_logged_turn_ids = getattr(self, "_preference_recall_handled_logged_turn_ids", None)
+        if not isinstance(handled_logged_turn_ids, set):
+            handled_logged_turn_ids = set()
+            self._preference_recall_handled_logged_turn_ids = handled_logged_turn_ids
+        if resolved_turn_id not in handled_logged_turn_ids:
+            handled_logged_turn_ids.add(resolved_turn_id)
+            logger.info(
+                "preference_recall_handled run_id=%s resolved_turn_id=%s source=%s query=%s",
+                self._current_run_id() or "",
+                resolved_turn_id,
+                source,
+                query,
+            )
+            logger.debug(
+                "turn_diagnostic_timestamps run_id=%s turn_id=%s transcript_final_ts=%s preference_recall_start_ts=%s preference_recall_end_ts=%s response_schedule_ts=%s",
+                self._current_run_id() or "",
+                resolved_turn_id,
+                turn_timestamps.get("transcript_final"),
+                turn_timestamps.get("preference_recall_start"),
+                turn_timestamps.get("preference_recall_end"),
+                turn_timestamps.get("response_schedule"),
+            )
         self._clear_preference_recall_candidate()
         return True
 
@@ -2852,6 +2908,36 @@ class RealtimeAPI:
         memory_brief_note: str | None,
     ) -> bool:
         turn_id = self._resolve_response_create_turn_id(origin=origin, response_create_event=response_create_event)
+        suppression_turns = getattr(self, "_preference_recall_suppressed_turns", set())
+        suppression_active = turn_id in suppression_turns
+        schedule_logged_turn_ids = getattr(self, "_response_schedule_logged_turn_ids", None)
+        if not isinstance(schedule_logged_turn_ids, set):
+            schedule_logged_turn_ids = set()
+            self._response_schedule_logged_turn_ids = schedule_logged_turn_ids
+        if turn_id not in schedule_logged_turn_ids:
+            schedule_logged_turn_ids.add(turn_id)
+            turn_timestamps_store = getattr(self, "_turn_diagnostic_timestamps", None)
+            if not isinstance(turn_timestamps_store, dict):
+                turn_timestamps_store = {}
+                self._turn_diagnostic_timestamps = turn_timestamps_store
+            turn_timestamps = turn_timestamps_store.setdefault(turn_id, {})
+            turn_timestamps["response_schedule"] = time.monotonic()
+            logger.info(
+                "response_schedule_marker run_id=%s turn_id=%s origin=%s suppression_active=%s mode=queued",
+                self._current_run_id() or "",
+                turn_id,
+                origin,
+                suppression_active,
+            )
+            logger.debug(
+                "turn_diagnostic_timestamps run_id=%s turn_id=%s transcript_final_ts=%s preference_recall_start_ts=%s preference_recall_end_ts=%s response_schedule_ts=%s",
+                self._current_run_id() or "",
+                turn_id,
+                turn_timestamps.get("transcript_final"),
+                turn_timestamps.get("preference_recall_start"),
+                turn_timestamps.get("preference_recall_end"),
+                turn_timestamps.get("response_schedule"),
+            )
         reminder_key = self._extract_confirmation_reminder_dedupe_key(response_create_event)
         candidate = PendingResponseCreate(
             websocket=websocket,
@@ -2957,6 +3043,37 @@ class RealtimeAPI:
                 await self._send_memory_brief_note(websocket, memory_brief_note)
             except Exception as exc:  # pragma: no cover - defensive fail-open
                 logger.warning("Memory brief injection skipped due to error: %s", exc)
+        turn_id = self._resolve_response_create_turn_id(origin=origin, response_create_event=response_create_event)
+        suppression_turns = getattr(self, "_preference_recall_suppressed_turns", set())
+        suppression_active = turn_id in suppression_turns
+        schedule_logged_turn_ids = getattr(self, "_response_schedule_logged_turn_ids", None)
+        if not isinstance(schedule_logged_turn_ids, set):
+            schedule_logged_turn_ids = set()
+            self._response_schedule_logged_turn_ids = schedule_logged_turn_ids
+        if turn_id not in schedule_logged_turn_ids:
+            schedule_logged_turn_ids.add(turn_id)
+            turn_timestamps_store = getattr(self, "_turn_diagnostic_timestamps", None)
+            if not isinstance(turn_timestamps_store, dict):
+                turn_timestamps_store = {}
+                self._turn_diagnostic_timestamps = turn_timestamps_store
+            turn_timestamps = turn_timestamps_store.setdefault(turn_id, {})
+            turn_timestamps["response_schedule"] = now
+            logger.info(
+                "response_schedule_marker run_id=%s turn_id=%s origin=%s suppression_active=%s mode=direct",
+                self._current_run_id() or "",
+                turn_id,
+                origin,
+                suppression_active,
+            )
+            logger.debug(
+                "turn_diagnostic_timestamps run_id=%s turn_id=%s transcript_final_ts=%s preference_recall_start_ts=%s preference_recall_end_ts=%s response_schedule_ts=%s",
+                self._current_run_id() or "",
+                turn_id,
+                turn_timestamps.get("transcript_final"),
+                turn_timestamps.get("preference_recall_start"),
+                turn_timestamps.get("preference_recall_end"),
+                turn_timestamps.get("response_schedule"),
+            )
         log_ws_event("Outgoing", response_create_event)
         self._track_outgoing_event(response_create_event, origin=origin)
         await websocket.send(json.dumps(response_create_event))
@@ -5301,7 +5418,9 @@ class RealtimeAPI:
             self._active_response_preference_guarded = False
             turn_id = self._current_turn_id_or_unknown()
             suppressed_turns = getattr(self, "_preference_recall_suppressed_turns", set())
-            if origin == "server_auto" and turn_id in suppressed_turns:
+            suppression_until = float(getattr(self, "_preference_recall_response_suppression_until", 0.0) or 0.0)
+            suppression_window_active = suppression_until > time.monotonic()
+            if origin == "server_auto" and (turn_id in suppressed_turns or suppression_window_active):
                 self._active_response_preference_guarded = True
                 logger.info(
                     "PREFERENCE_RECALL_RESPONSE_GUARDED origin=%s response_id=%s",
@@ -5417,6 +5536,13 @@ class RealtimeAPI:
         elif event_type == "conversation.item.input_audio_transcription.completed":
             transcript = self._extract_transcript(event)
             self._log_user_transcript(transcript or "", final=True, event_type=event_type)
+            resolved_turn_id = self._current_turn_id_or_unknown()
+            turn_timestamps_store = getattr(self, "_turn_diagnostic_timestamps", None)
+            if not isinstance(turn_timestamps_store, dict):
+                turn_timestamps_store = {}
+                self._turn_diagnostic_timestamps = turn_timestamps_store
+            turn_timestamps = turn_timestamps_store.setdefault(resolved_turn_id, {})
+            turn_timestamps["transcript_final"] = time.monotonic()
             confirmation_active = self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase()
             if confirmation_active:
                 self._confirmation_asr_pending = False
