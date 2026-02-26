@@ -136,6 +136,7 @@ _PREFERENCE_QUERY_CANONICAL_BY_DOMAIN = {
     "ide": ("preferred editor", "favorite editor", "user preference"),
 }
 _PREFERENCE_QUERY_FALLBACK_CANONICAL = ("user preference", "favorite preference", "preferred setting")
+_PREFERENCE_TAG_FALLBACK_QUERIES = ("preference", "favorite", "preferred")
 _PREFERENCE_KEYWORD_STOPWORDS = {
     "which",
     "what",
@@ -1363,16 +1364,86 @@ class RealtimeAPI:
 
     def _build_preference_recall_query(self, user_text: str, *, keywords: list[str]) -> str:
         canonical = list(_PREFERENCE_QUERY_FALLBACK_CANONICAL)
+        entity_phrases: list[str] = []
         for domain in _PREFERENCE_RECALL_DOMAINS:
             if domain in user_text:
                 canonical = list(_PREFERENCE_QUERY_CANONICAL_BY_DOMAIN.get(domain, canonical))
                 break
+
+        for marker in ("prefer", "preferred", "favorite", "favourite"):
+            for match in re.finditer(rf"\\b{marker}\\b(?P<entity>[^?.!,;:]{{0,40}})", user_text):
+                entity = " ".join(match.group("entity").split())
+                if entity:
+                    entity_phrases.append(entity)
+
+        if "editor" in user_text:
+            canonical.extend(("editor", "user preferred editor"))
+
         ordered_parts: list[str] = []
-        for item in canonical + keywords:
+        for item in canonical + entity_phrases + keywords:
             normalized = item.strip().lower()
             if normalized and normalized not in ordered_parts:
                 ordered_parts.append(normalized)
         return ", ".join(ordered_parts)
+
+    def _preference_recall_memories_from_payload(self, payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return []
+        memories = payload.get("memories")
+        if isinstance(memories, list):
+            return [item for item in memories if isinstance(item, dict)]
+        items = payload.get("items")
+        if isinstance(items, list):
+            return [item for item in items if isinstance(item, dict)]
+        return []
+
+    async def _run_preference_recall_with_fallbacks(
+        self,
+        *,
+        recall_fn: Any,
+        source: str,
+        resolved_turn_id: str,
+        query: str,
+    ) -> tuple[dict[str, Any], bool]:
+        scope = str(getattr(self, "_memory_retrieval_scope", MemoryScope.USER_GLOBAL.value))
+        recall_queries = [query]
+        if "editor" in query:
+            recall_queries.append("editor")
+        recall_queries.extend(_PREFERENCE_TAG_FALLBACK_QUERIES)
+
+        for attempt_index, candidate_query in enumerate(recall_queries):
+            payload = await recall_fn(query=candidate_query, limit=3, scope=scope)
+            payload_keys = sorted(payload.keys()) if isinstance(payload, dict) else []
+            memories = self._preference_recall_memories_from_payload(payload)
+            cards = payload.get("memory_cards") if isinstance(payload, dict) else None
+            cards_count = len(cards) if isinstance(cards, list) else 0
+            logger.info(
+                "preference_recall_tool_result run_id=%s resolved_turn_id=%s query=%s payload_keys=%s "
+                "memories_count=%s cards_count=%s memory_cards_text_len=%s scope=%s attempt=%s source=%s",
+                self._current_run_id() or "",
+                resolved_turn_id,
+                candidate_query,
+                ",".join(payload_keys),
+                len(memories),
+                cards_count,
+                len(str(payload.get("memory_cards_text", "")).strip()) if isinstance(payload, dict) else 0,
+                scope,
+                attempt_index,
+                source,
+            )
+            self._preference_recall_cache[candidate_query] = {"timestamp": time.monotonic(), "payload": payload}
+            if memories:
+                if attempt_index > 0:
+                    logger.info(
+                        "preference_recall_fallback_hit run_id=%s resolved_turn_id=%s primary_query=%s fallback_query=%s scope=%s",
+                        self._current_run_id() or "",
+                        resolved_turn_id,
+                        query,
+                        candidate_query,
+                        scope,
+                    )
+                return payload, True
+        return {"memories": []}, True
 
     def _is_preference_recall_intent(self, text: str) -> tuple[bool, list[str]]:
         normalized = " ".join((text or "").lower().split())
@@ -1627,31 +1698,12 @@ class RealtimeAPI:
             if isinstance(self._pending_preference_recall_trace, dict):
                 self._pending_preference_recall_trace["decision"] = "invoked_tool"
                 self._pending_preference_recall_trace["reason"] = "preference_intent_matched"
-            result_payload = await recall_fn(
+            result_payload, recall_invoked = await self._run_preference_recall_with_fallbacks(
+                recall_fn=recall_fn,
+                source=source,
+                resolved_turn_id=resolved_turn_id,
                 query=query,
-                limit=3,
-                scope=str(getattr(self, "_memory_retrieval_scope", MemoryScope.USER_GLOBAL.value)),
             )
-            payload_keys = sorted(result_payload.keys()) if isinstance(result_payload, dict) else []
-            payload_memories = result_payload.get("memories") if isinstance(result_payload, dict) else None
-            payload_items = result_payload.get("items") if isinstance(result_payload, dict) else None
-            payload_cards = result_payload.get("memory_cards") if isinstance(result_payload, dict) else None
-            payload_cards_text = result_payload.get("memory_cards_text") if isinstance(result_payload, dict) else ""
-            logger.info(
-                "preference_recall_tool_result run_id=%s resolved_turn_id=%s query=%s payload_keys=%s "
-                "memories_count=%s cards_count=%s memory_cards_text_len=%s scope=%s",
-                self._current_run_id() or "",
-                resolved_turn_id,
-                query,
-                ",".join(payload_keys),
-                len(payload_memories) if isinstance(payload_memories, list) else (
-                    len(payload_items) if isinstance(payload_items, list) else 0
-                ),
-                len(payload_cards) if isinstance(payload_cards, list) else 0,
-                len(str(payload_cards_text).strip()),
-                str(getattr(self, "_memory_retrieval_scope", MemoryScope.USER_GLOBAL.value)),
-            )
-            self._preference_recall_cache[query] = {"timestamp": now, "payload": result_payload}
             logger.info(
                 "Preference recall executed source=%s query=%s keywords=%s",
                 source,
@@ -1659,11 +1711,7 @@ class RealtimeAPI:
                 ",".join(keywords),
             )
 
-        memories = result_payload.get("memories") if isinstance(result_payload, dict) else None
-        if (not isinstance(memories, list) or not memories) and isinstance(result_payload, dict):
-            items = result_payload.get("items")
-            if isinstance(items, list):
-                memories = items
+        memories = self._preference_recall_memories_from_payload(result_payload)
         await self._suppress_preference_recall_server_auto_response(websocket)
         if not isinstance(memories, list) or not memories:
             await self.send_assistant_message(
