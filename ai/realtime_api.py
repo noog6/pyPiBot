@@ -730,6 +730,11 @@ class RealtimeAPI:
         self._active_response_preference_guarded = False
         self._active_response_origin = "unknown"
         self._preference_recall_suppressed_turns: set[str] = set()
+        self._preference_recall_suppressed_input_event_keys: set[str] = set()
+        self._pending_server_auto_input_event_keys: deque[str] = deque(maxlen=64)
+        self._active_server_auto_input_event_key: str | None = None
+        self._current_input_event_key: str | None = None
+        self._input_event_key_counter = 0
         self._pending_alternate_intent_override: dict[str, Any] | None = None
         self._last_executed_tool_call: dict[str, Any] | None = None
         self._intent_ledger: dict[str, IntentLedgerEntry] = {}
@@ -1525,6 +1530,21 @@ class RealtimeAPI:
         turn_id = str(getattr(self, "_current_response_turn_id", "") or "").strip()
         return turn_id or "turn-unknown"
 
+    def _next_input_event_key(self) -> str:
+        self._input_event_key_counter += 1
+        return f"input_event_{self._input_event_key_counter}"
+
+    def _resolve_input_event_key(self, event: dict[str, Any]) -> str:
+        candidate_keys = (
+            event.get("item_id"),
+            event.get("event_id"),
+            event.get("id"),
+        )
+        for candidate in candidate_keys:
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        return self._next_input_event_key()
+
     def _drop_suppressed_scheduled_response_creates(self, *, turn_id: str, origin: str) -> None:
         normalized_origin = str(origin or "").strip().lower()
         if normalized_origin != "server_auto":
@@ -1572,18 +1592,29 @@ class RealtimeAPI:
 
     async def _suppress_preference_recall_server_auto_response(self, websocket: Any) -> None:
         turn_id = self._current_turn_id_or_unknown()
+        input_event_key = str(getattr(self, "_current_input_event_key", "") or "").strip()
         suppressed_turns = getattr(self, "_preference_recall_suppressed_turns", None)
         if not isinstance(suppressed_turns, set):
             suppressed_turns = set()
             self._preference_recall_suppressed_turns = suppressed_turns
         suppressed_turns.add(turn_id)
+        suppressed_input_event_keys = getattr(self, "_preference_recall_suppressed_input_event_keys", None)
+        if not isinstance(suppressed_input_event_keys, set):
+            suppressed_input_event_keys = set()
+            self._preference_recall_suppressed_input_event_keys = suppressed_input_event_keys
+        if input_event_key:
+            suppressed_input_event_keys.add(input_event_key)
         self._drop_suppressed_scheduled_response_creates(turn_id=turn_id, origin="server_auto")
         logger.info(
-            "preference_recall_response_suppressed run_id=%s turn_id=%s reason=handled_preference_recall",
+            "preference_recall_response_suppressed run_id=%s turn_id=%s input_event_key=%s reason=handled_preference_recall",
             self._current_run_id() or "",
             turn_id,
+            input_event_key or "unknown",
         )
         if str(getattr(self, "_active_response_origin", "")).strip().lower() != "server_auto":
+            return
+        active_key = str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip()
+        if input_event_key and active_key and active_key != input_event_key:
             return
         if not bool(getattr(self, "_response_in_flight", False)):
             return
@@ -3049,7 +3080,8 @@ class RealtimeAPI:
         turn_id = self._resolve_response_create_turn_id(origin=origin, response_create_event=response_create_event)
         normalized_origin = str(origin or "").strip().lower()
         suppression_turns = getattr(self, "_preference_recall_suppressed_turns", set())
-        suppression_active = turn_id in suppression_turns
+        current_input_event_key = str(getattr(self, "_current_input_event_key", "") or "").strip()
+        suppression_active = turn_id in suppression_turns and not current_input_event_key
         if suppression_active and normalized_origin == "server_auto":
             self._drop_suppressed_scheduled_response_creates(turn_id=turn_id, origin=normalized_origin)
             logger.info(
@@ -3195,7 +3227,8 @@ class RealtimeAPI:
         turn_id = self._resolve_response_create_turn_id(origin=origin, response_create_event=response_create_event)
         normalized_origin = str(origin or "").strip().lower()
         suppression_turns = getattr(self, "_preference_recall_suppressed_turns", set())
-        suppression_active = turn_id in suppression_turns
+        current_input_event_key = str(getattr(self, "_current_input_event_key", "") or "").strip()
+        suppression_active = turn_id in suppression_turns and not current_input_event_key
         if suppression_active and normalized_origin == "server_auto":
             self._drop_suppressed_scheduled_response_creates(turn_id=turn_id, origin=normalized_origin)
             logger.info(
@@ -5577,9 +5610,35 @@ class RealtimeAPI:
             self._active_response_preference_guarded = False
             turn_id = self._current_turn_id_or_unknown()
             suppressed_turns = getattr(self, "_preference_recall_suppressed_turns", set())
+            suppressed_input_event_keys = getattr(self, "_preference_recall_suppressed_input_event_keys", set())
+            if origin == "server_auto":
+                input_event_key = None
+                pending_server_auto_keys = getattr(self, "_pending_server_auto_input_event_keys", None)
+                if not isinstance(pending_server_auto_keys, deque):
+                    pending_server_auto_keys = deque(maxlen=64)
+                    self._pending_server_auto_input_event_keys = pending_server_auto_keys
+                if pending_server_auto_keys:
+                    input_event_key = pending_server_auto_keys.popleft()
+                else:
+                    current_input_event_key = str(getattr(self, "_current_input_event_key", "") or "").strip()
+                    if current_input_event_key:
+                        input_event_key = current_input_event_key
+                self._active_server_auto_input_event_key = input_event_key
+                logger.info(
+                    "server_auto_response_linked run_id=%s response_id=%s turn_id=%s input_event_key=%s",
+                    self._current_run_id() or "",
+                    self._active_response_id or "unknown",
+                    turn_id,
+                    input_event_key or "unknown",
+                )
+            else:
+                self._active_server_auto_input_event_key = None
             suppression_until = float(getattr(self, "_preference_recall_response_suppression_until", 0.0) or 0.0)
             suppression_window_active = suppression_until > time.monotonic()
-            if origin == "server_auto" and (turn_id in suppressed_turns or suppression_window_active):
+            active_input_event_key = str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip()
+            suppression_by_input_event = bool(active_input_event_key and active_input_event_key in suppressed_input_event_keys)
+            suppression_by_turn = turn_id in suppressed_turns and not active_input_event_key
+            if origin == "server_auto" and (suppression_by_turn or suppression_window_active or suppression_by_input_event):
                 self._active_response_preference_guarded = True
                 logger.info(
                     "PREFERENCE_RECALL_RESPONSE_GUARDED origin=%s response_id=%s",
@@ -5695,6 +5754,22 @@ class RealtimeAPI:
         elif event_type == "conversation.item.input_audio_transcription.completed":
             transcript = self._extract_transcript(event)
             self._log_user_transcript(transcript or "", final=True, event_type=event_type)
+            input_event_key = self._resolve_input_event_key(event)
+            self._current_input_event_key = input_event_key
+            pending_server_auto_keys = getattr(self, "_pending_server_auto_input_event_keys", None)
+            if not isinstance(pending_server_auto_keys, deque):
+                pending_server_auto_keys = deque(maxlen=64)
+                self._pending_server_auto_input_event_keys = pending_server_auto_keys
+            active_input_event_key = str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip()
+            has_active_server_auto = str(getattr(self, "_active_response_origin", "")).strip().lower() == "server_auto"
+            if not (has_active_server_auto and active_input_event_key and active_input_event_key == input_event_key):
+                pending_server_auto_keys.append(input_event_key)
+            logger.info(
+                "input_audio_transcription_linked run_id=%s input_event_key=%s pending_server_auto=%s",
+                self._current_run_id() or "",
+                input_event_key,
+                len(pending_server_auto_keys),
+            )
             resolved_turn_id = self._current_turn_id_or_unknown()
             turn_timestamps_store = getattr(self, "_turn_diagnostic_timestamps", None)
             if not isinstance(turn_timestamps_store, dict):
@@ -6916,11 +6991,15 @@ class RealtimeAPI:
         self.response_in_progress = False
         self._response_in_flight = False
         self._preference_recall_suppressed_turns.discard(self._current_turn_id_or_unknown())
+        active_input_event_key = str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip()
+        if active_input_event_key:
+            self._preference_recall_suppressed_input_event_keys.discard(active_input_event_key)
         was_confirmation_guarded = self._active_response_confirmation_guarded
         self._active_response_id = None
         self._active_response_confirmation_guarded = False
         self._active_response_preference_guarded = False
         self._active_response_origin = "unknown"
+        self._active_server_auto_input_event_key = None
         current_state = getattr(self.state_manager, "state", InteractionState.IDLE)
         if current_state != InteractionState.LISTENING:
             self.state_manager.update_state(InteractionState.IDLE, "response done")
@@ -6993,10 +7072,14 @@ class RealtimeAPI:
         self.response_in_progress = False
         self._response_in_flight = False
         self._preference_recall_suppressed_turns.discard(self._current_turn_id_or_unknown())
+        active_input_event_key = str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip()
+        if active_input_event_key:
+            self._preference_recall_suppressed_input_event_keys.discard(active_input_event_key)
         self._active_response_id = None
         self._active_response_confirmation_guarded = False
         self._active_response_preference_guarded = False
         self._active_response_origin = "unknown"
+        self._active_server_auto_input_event_key = None
         current_state = getattr(self.state_manager, "state", InteractionState.IDLE)
         if current_state != InteractionState.LISTENING:
             self.state_manager.update_state(InteractionState.IDLE, "response completed")
