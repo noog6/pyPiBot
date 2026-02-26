@@ -1779,7 +1779,12 @@ class RealtimeAPI:
                 source,
             )
             self._preference_recall_cache[candidate_query] = {"timestamp": time.monotonic(), "payload": payload}
-            if memories:
+            cards_list = cards if isinstance(cards, list) else []
+            memory_cards_text = (
+                str(payload.get("memory_cards_text", "")).strip() if isinstance(payload, dict) else ""
+            )
+            hit = bool(memory_cards_text) or bool(cards_list) or bool(memories)
+            if hit:
                 if attempt_index > 0:
                     logger.info(
                         "preference_recall_fallback_hit run_id=%s resolved_turn_id=%s primary_query=%s fallback_query=%s scope=%s",
@@ -2363,6 +2368,18 @@ class RealtimeAPI:
             )
 
         memories = self._preference_recall_memories_from_payload(result_payload)
+        cards = result_payload.get("memory_cards") if isinstance(result_payload, dict) else None
+        cards_list = cards if isinstance(cards, list) else []
+        memory_cards_text = ""
+        if isinstance(result_payload, dict):
+            memory_cards_text = self._sanitize_memory_cards_text_for_user(
+                str(result_payload.get("memory_cards_text", "")).strip()
+            )
+        hit = (
+            bool(memory_cards_text)
+            or bool(cards_list)
+            or (isinstance(memories, list) and len(memories) > 0)
+        )
         await self._suppress_preference_recall_server_auto_response(websocket)
         replacement_input_event_key = str(getattr(self, "_current_input_event_key", "") or "").strip()
         # preference_recall is an internal tool pathway: suppress server_auto output,
@@ -2378,7 +2395,7 @@ class RealtimeAPI:
             )
             self._clear_preference_recall_candidate()
             return True
-        if not isinstance(memories, list) or not memories:
+        if not hit:
             await self.send_assistant_message(
                 "I don’t have that saved yet. If you share it, I can remember it for next time.",
                 websocket,
@@ -2414,14 +2431,6 @@ class RealtimeAPI:
                 )
             self._clear_preference_recall_candidate()
             return True
-
-        cards = result_payload.get("memory_cards") if isinstance(result_payload, dict) else None
-        cards_list = cards if isinstance(cards, list) else []
-        memory_cards_text = ""
-        if isinstance(result_payload, dict):
-            memory_cards_text = self._sanitize_memory_cards_text_for_user(
-                str(result_payload.get("memory_cards_text", "")).strip()
-            )
 
         response_lines: list[str] = []
         if recall_invoked:
