@@ -1504,6 +1504,18 @@ class RealtimeAPI:
                 logger.warning("Preference recall intent matched but recall_memories tool unavailable.")
                 return False
             recall_invoked = True
+            tool_call_records = getattr(self, "_tool_call_records", None)
+            if isinstance(tool_call_records, list):
+                tool_call_records.append(
+                    {
+                        "name": "recall_memories",
+                        "source": "preference_recall",
+                        "query": query,
+                    }
+                )
+            if isinstance(self._pending_preference_recall_trace, dict):
+                self._pending_preference_recall_trace["decision"] = "invoked_tool"
+                self._pending_preference_recall_trace["reason"] = "preference_intent_matched"
             result_payload = await recall_fn(
                 query=query,
                 limit=3,
