@@ -770,3 +770,53 @@ def test_preference_recall_cancels_only_matching_server_auto_response(monkeypatc
     assert api._active_server_auto_input_event_key == "item-2"
     assert "item-1" in api._preference_recall_suppressed_input_event_keys
     assert "item-2" not in api._preference_recall_suppressed_input_event_keys
+
+
+def test_transcript_watchdog_logs_when_response_not_scheduled(monkeypatch) -> None:
+    api = _make_api_stub()
+    ws = _RecordingWs()
+    info_logs: list[str] = []
+
+    async def _false(*_args, **_kwargs) -> bool:
+        return False
+
+    api._transcript_response_watchdog_timeout_s = 0.5
+    api._response_in_flight = True
+    api._active_response_origin = "server_auto"
+    api._active_response_id = "resp-stuck"
+    api._maybe_handle_confirmation_decision_timeout = _false
+    api._maybe_handle_approval_response = _false
+    api._handle_stop_word = _false
+    api._maybe_handle_research_permission_response = _false
+    api._maybe_handle_research_budget_response = _false
+    api._maybe_apply_late_confirmation_decision = _false
+    api._maybe_process_research_intent = _false
+    api._maybe_handle_preference_recall_intent = _false
+    api._has_active_confirmation_token = lambda: False
+    api._is_awaiting_confirmation_phase = lambda: False
+    api._is_user_approved_interrupt_response = lambda _response: False
+    api._log_user_transcript = lambda *_args, **_kwargs: None
+    api._record_user_input = lambda *_args, **_kwargs: None
+    api._track_outgoing_event = lambda *_args, **_kwargs: None
+
+    monkeypatch.setattr(logger, "info", lambda msg, *args, **kwargs: info_logs.append(msg % args if args else msg))
+
+    async def _run() -> None:
+        await api.handle_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "item-stalled",
+                "transcript": "Theo, do you have any memories related to Vim?",
+            },
+            ws,
+        )
+        await asyncio.sleep(0.65)
+
+    asyncio.run(_run())
+
+    assert any(
+        "response_not_scheduled" in entry
+        and "reason=active_response_in_flight" in entry
+        and "input_event_key=item-stalled" in entry
+        for entry in info_logs
+    )

@@ -754,10 +754,128 @@ class RealtimeAPI:
         self._utterance_counter = 0
         self._active_utterance: dict[str, Any] | None = None
         self._recent_input_levels: deque[dict[str, float]] = deque(maxlen=256)
+        self._transcript_response_watchdog_timeout_s = max(
+            0.5,
+            float(realtime_cfg.get("transcript_response_watchdog_timeout_s", 3.0)),
+        )
+        self._transcript_response_watchdog_tasks: dict[str, asyncio.Task] = {}
+        self._transcript_response_outcome_logged_keys: set[str] = set()
         self._minimum_non_confirmation_duration_ms = int(
             realtime_cfg.get("minimum_non_confirmation_duration_ms", 120)
         )
         self._vad_turn_detection = self._resolve_vad_turn_detection(config)
+
+    def _mark_transcript_response_outcome(
+        self,
+        *,
+        input_event_key: str,
+        turn_id: str,
+        outcome: str,
+        reason: str | None = None,
+        details: str | None = None,
+    ) -> None:
+        normalized_key = str(input_event_key or "").strip()
+        if not normalized_key:
+            return
+        watchdog_tasks = getattr(self, "_transcript_response_watchdog_tasks", None)
+        if not isinstance(watchdog_tasks, dict):
+            watchdog_tasks = {}
+            self._transcript_response_watchdog_tasks = watchdog_tasks
+        task = watchdog_tasks.pop(normalized_key, None)
+        if task is not None and not task.done():
+            task.cancel()
+        if outcome != "response_not_scheduled":
+            return
+        logged_keys = getattr(self, "_transcript_response_outcome_logged_keys", None)
+        if not isinstance(logged_keys, set):
+            logged_keys = set()
+            self._transcript_response_outcome_logged_keys = logged_keys
+        if normalized_key in logged_keys:
+            return
+        logged_keys.add(normalized_key)
+        logger.info(
+            "response_not_scheduled run_id=%s turn_id=%s input_event_key=%s reason=%s details=%s",
+            self._current_run_id() or "",
+            turn_id,
+            normalized_key,
+            reason or "unknown",
+            details or "",
+        )
+
+    async def _watch_transcript_response_outcome(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str,
+        timeout_s: float,
+    ) -> None:
+        try:
+            await asyncio.sleep(timeout_s)
+        except asyncio.CancelledError:
+            return
+        reason = "timeout"
+        details = "response.created missing before timeout"
+        suppression_until = float(getattr(self, "_preference_recall_response_suppression_until", 0.0) or 0.0)
+        if turn_id in getattr(self, "_preference_recall_suppressed_turns", set()):
+            reason = "preference_recall_suppressed"
+            details = "turn suppression active"
+        elif input_event_key in getattr(self, "_preference_recall_suppressed_input_event_keys", set()):
+            reason = "preference_recall_suppressed"
+            details = "input_event suppression active"
+        elif suppression_until > time.monotonic():
+            reason = "preference_recall_suppressed"
+            details = "suppression window active"
+        elif bool(getattr(self, "_response_in_flight", False)):
+            reason = "active_response_in_flight"
+            details = (
+                f"active_origin={getattr(self, '_active_response_origin', 'unknown')} "
+                f"response_id={getattr(self, '_active_response_id', None) or 'unknown'}"
+            )
+        elif bool(getattr(self, "_audio_playback_busy", False)):
+            reason = "audio_playback_busy"
+            details = "audio playback active"
+        elif getattr(self, "_pending_response_create", None) is not None:
+            pending = self._pending_response_create
+            reason = "response_create_queued"
+            details = (
+                f"pending_origin={getattr(pending, 'origin', 'unknown')} "
+                f"pending_reason={getattr(pending, 'reason', 'unknown')}"
+            )
+        elif getattr(getattr(self, "state_manager", None), "state", None) == InteractionState.LISTENING:
+            reason = "listening_state_gate"
+            details = "state_manager is LISTENING"
+        self._mark_transcript_response_outcome(
+            input_event_key=input_event_key,
+            turn_id=turn_id,
+            outcome="response_not_scheduled",
+            reason=reason,
+            details=details,
+        )
+
+    def _start_transcript_response_watchdog(self, *, turn_id: str, input_event_key: str) -> None:
+        normalized_key = str(input_event_key or "").strip()
+        if not normalized_key:
+            return
+        timeout_s = max(0.5, float(getattr(self, "_transcript_response_watchdog_timeout_s", 3.0) or 3.0))
+        watchdog_tasks = getattr(self, "_transcript_response_watchdog_tasks", None)
+        if not isinstance(watchdog_tasks, dict):
+            watchdog_tasks = {}
+            self._transcript_response_watchdog_tasks = watchdog_tasks
+        existing = watchdog_tasks.pop(normalized_key, None)
+        if existing is not None and not existing.done():
+            existing.cancel()
+        logged_keys = getattr(self, "_transcript_response_outcome_logged_keys", None)
+        if not isinstance(logged_keys, set):
+            logged_keys = set()
+            self._transcript_response_outcome_logged_keys = logged_keys
+        logged_keys.discard(normalized_key)
+        watchdog_tasks[normalized_key] = asyncio.create_task(
+            self._watch_transcript_response_outcome(
+                turn_id=turn_id,
+                input_event_key=normalized_key,
+                timeout_s=timeout_s,
+            )
+        )
 
     def _create_microphone(self) -> AsyncMicrophone:
         return AsyncMicrophone(
@@ -3084,6 +3202,13 @@ class RealtimeAPI:
         suppression_active = turn_id in suppression_turns and not current_input_event_key
         if suppression_active and normalized_origin == "server_auto":
             self._drop_suppressed_scheduled_response_creates(turn_id=turn_id, origin=normalized_origin)
+            self._mark_transcript_response_outcome(
+                input_event_key=current_input_event_key,
+                turn_id=turn_id,
+                outcome="response_not_scheduled",
+                reason="preference_recall_suppressed",
+                details="queued response.create blocked",
+            )
             logger.info(
                 "response_schedule_blocked run_id=%s turn_id=%s origin=%s mode=queued reason=preference_recall_suppressed",
                 self._current_run_id() or "",
@@ -3231,6 +3356,13 @@ class RealtimeAPI:
         suppression_active = turn_id in suppression_turns and not current_input_event_key
         if suppression_active and normalized_origin == "server_auto":
             self._drop_suppressed_scheduled_response_creates(turn_id=turn_id, origin=normalized_origin)
+            self._mark_transcript_response_outcome(
+                input_event_key=current_input_event_key,
+                turn_id=turn_id,
+                outcome="response_not_scheduled",
+                reason="preference_recall_suppressed",
+                details="direct response.create blocked",
+            )
             logger.info(
                 "response_schedule_blocked run_id=%s turn_id=%s origin=%s mode=direct reason=preference_recall_suppressed",
                 self._current_run_id() or "",
@@ -5624,6 +5756,12 @@ class RealtimeAPI:
                     if current_input_event_key:
                         input_event_key = current_input_event_key
                 self._active_server_auto_input_event_key = input_event_key
+                if input_event_key:
+                    self._mark_transcript_response_outcome(
+                        input_event_key=input_event_key,
+                        turn_id=turn_id,
+                        outcome="response_created",
+                    )
                 logger.info(
                     "server_auto_response_linked run_id=%s response_id=%s turn_id=%s input_event_key=%s",
                     self._current_run_id() or "",
@@ -5632,6 +5770,13 @@ class RealtimeAPI:
                     input_event_key or "unknown",
                 )
             else:
+                current_input_event_key = str(getattr(self, "_current_input_event_key", "") or "").strip()
+                if current_input_event_key:
+                    self._mark_transcript_response_outcome(
+                        input_event_key=current_input_event_key,
+                        turn_id=turn_id,
+                        outcome="response_created",
+                    )
                 self._active_server_auto_input_event_key = None
             suppression_until = float(getattr(self, "_preference_recall_response_suppression_until", 0.0) or 0.0)
             suppression_window_active = suppression_until > time.monotonic()
@@ -5771,6 +5916,10 @@ class RealtimeAPI:
                 len(pending_server_auto_keys),
             )
             resolved_turn_id = self._current_turn_id_or_unknown()
+            self._start_transcript_response_watchdog(
+                turn_id=resolved_turn_id,
+                input_event_key=input_event_key,
+            )
             turn_timestamps_store = getattr(self, "_turn_diagnostic_timestamps", None)
             if not isinstance(turn_timestamps_store, dict):
                 turn_timestamps_store = {}
