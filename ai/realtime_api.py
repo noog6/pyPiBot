@@ -1453,7 +1453,11 @@ class RealtimeAPI:
 
     async def _suppress_preference_recall_server_auto_response(self, websocket: Any) -> None:
         turn_id = self._current_turn_id_or_unknown()
-        self._preference_recall_suppressed_turns.add(turn_id)
+        suppressed_turns = getattr(self, "_preference_recall_suppressed_turns", None)
+        if not isinstance(suppressed_turns, set):
+            suppressed_turns = set()
+            self._preference_recall_suppressed_turns = suppressed_turns
+        suppressed_turns.add(turn_id)
         logger.info(
             "preference_recall_response_suppressed run_id=%s turn_id=%s reason=handled_preference_recall",
             self._current_run_id() or "",
@@ -1475,8 +1479,14 @@ class RealtimeAPI:
         resolved_turn_id = str(turn_id or "").strip() or "turn-unknown"
         if resolved_turn_id in self._preference_recall_skip_logged_turn_ids:
             return
+        if pending.get("intent") != "preference_recall":
+            return
         recall_invoked = any(
-            isinstance(record, dict) and record.get("name") == "recall_memories"
+            isinstance(record, dict)
+            and record.get("name") == "recall_memories"
+            and (
+                str(record.get("turn_id") or "").strip() in {"", resolved_turn_id}
+            )
             for record in (self._tool_call_records or [])
         )
         if recall_invoked:
@@ -1533,6 +1543,7 @@ class RealtimeAPI:
                     {
                         "name": "recall_memories",
                         "source": "preference_recall",
+                        "turn_id": self._current_turn_id_or_unknown(),
                         "query": query,
                     }
                 )
@@ -5289,7 +5300,8 @@ class RealtimeAPI:
             pending_confirmation_active = self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase()
             self._active_response_preference_guarded = False
             turn_id = self._current_turn_id_or_unknown()
-            if origin == "server_auto" and turn_id in self._preference_recall_suppressed_turns:
+            suppressed_turns = getattr(self, "_preference_recall_suppressed_turns", set())
+            if origin == "server_auto" and turn_id in suppressed_turns:
                 self._active_response_preference_guarded = True
                 logger.info(
                     "PREFERENCE_RECALL_RESPONSE_GUARDED origin=%s response_id=%s",
@@ -6116,6 +6128,7 @@ class RealtimeAPI:
                 "call_id": call_id,
                 "args": args,
                 "result": result,
+                "turn_id": self._current_turn_id_or_unknown(),
                 "action_packet": action.to_payload() if action else None,
                 "staging": staging,
                 "timestamp": datetime.utcnow().isoformat(),

@@ -20,6 +20,7 @@ def _make_api_stub() -> RealtimeAPI:
     api._memory_retrieval_scope = "user_global"
     api._pending_response_create_origins = deque()
     api._preference_recall_response_suppression_until = 0.0
+    api._preference_recall_suppressed_turns = set()
     api._active_response_preference_guarded = False
     api._active_response_confirmation_guarded = False
     api._active_response_id = None
@@ -249,6 +250,10 @@ def test_preference_question_with_recall_tool_does_not_emit_skip_trace(monkeypat
 def test_preference_recall_records_tool_and_updates_trace(monkeypatch) -> None:
     api = _make_api_stub()
     api._tool_call_records = []
+    api._preference_recall_skip_logged_turn_ids = set()
+    api._current_run_id = lambda: "run-456"
+    api._current_response_turn_id = "turn-42"
+    logged: list[str] = []
 
     async def _fake_recall(**_kwargs):
         assert api._pending_preference_recall_trace["decision"] == "invoked_tool"
@@ -261,15 +266,22 @@ def test_preference_recall_records_tool_and_updates_trace(monkeypatch) -> None:
     async def _fake_send(_message: str, _ws, **_kwargs) -> None:
         return None
 
+    def _fake_info(message: str, *args) -> None:
+        logged.append(message % args if args else message)
+
     monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "recall_memories", _fake_recall)
     monkeypatch.setattr(api, "send_assistant_message", _fake_send)
+    monkeypatch.setattr(logger, "info", _fake_info)
 
     handled = asyncio.run(api._maybe_handle_preference_recall_intent("Which editor do I prefer?", _Ws(), source="text_message"))
+    api._emit_preference_recall_skip_trace_if_needed(turn_id="turn-42")
 
     assert handled is True
     assert api._tool_call_records[-1]["name"] == "recall_memories"
     assert api._tool_call_records[-1]["source"] == "preference_recall"
+    assert api._tool_call_records[-1]["turn_id"] == "turn-42"
     assert "editor" in api._tool_call_records[-1]["query"]
+    assert not any("preference_recall_decision_trace" in entry for entry in logged)
 
 
 class _RecordingWs:
@@ -291,6 +303,7 @@ def test_preference_recall_short_circuits_server_auto_response(monkeypatch) -> N
     async def _handled(*_args, **_kwargs) -> bool:
         sent_messages.append("handled")
         api._preference_recall_response_suppression_until = 9999999999.0
+        api._preference_recall_suppressed_turns.add(api._current_turn_id_or_unknown())
         return True
 
     api.websocket = ws
