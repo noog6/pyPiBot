@@ -105,6 +105,8 @@ def _api_stub() -> RealtimeAPI:
         {"phase": OrchestrationPhase.IDLE, "transition": lambda *_args, **_kwargs: None},
     )()
     api._maybe_handle_confirmation_decision_timeout = lambda *_args, **_kwargs: asyncio.sleep(0)
+    api._last_response_create_ts = None
+    api._response_create_debug_trace = False
     return api
 
 
@@ -120,4 +122,27 @@ def test_response_audio_delta_cancels_pending_micro_ack() -> None:
     event = {"type": "response.output_audio.delta", "delta": base64.b64encode(b"abc").decode("ascii")}
     asyncio.run(api.handle_event(event, api.websocket))
     assert ("turn-1", "response_started") in api._micro_ack_manager.cancelled
+    api.loop.close()
+
+
+def test_send_response_create_does_not_schedule_micro_ack_while_deferred() -> None:
+    api = _api_stub()
+    api._audio_playback_busy = True
+    api._resolve_response_create_turn_id = lambda **_kwargs: "turn-1"
+    api._sync_pending_response_create_queue = lambda: None
+    api._extract_confirmation_reminder_dedupe_key = lambda *_args, **_kwargs: None
+    api._response_schedule_logged_turn_ids = set()
+    api._turn_diagnostic_timestamps = {}
+    api._response_done_serial = 0
+
+    result = asyncio.run(
+        api._send_response_create(
+            api.websocket,
+            {"type": "response.create", "response": {"metadata": {"origin": "assistant_message"}}},
+            origin="assistant_message",
+        )
+    )
+
+    assert result is False
+    assert api._micro_ack_manager.scheduled == []
     api.loop.close()

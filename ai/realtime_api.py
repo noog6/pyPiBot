@@ -473,7 +473,7 @@ class RealtimeAPI:
         self._current_response_turn_id: str | None = None
         self._queued_confirmation_reminder_keys: set[str] = set()
         self._pending_confirmation_prompt_latches: set[str] = set()
-        self._pending_response_create_origins: deque[str] = deque(maxlen=64)
+        self._pending_response_create_origins: deque[dict[str, str]] = deque(maxlen=64)
         self._audio_playback_busy = False
         self.function_call: dict[str, Any] | None = None
         self.function_call_args = ""
@@ -1272,15 +1272,51 @@ class RealtimeAPI:
             return
         self._last_outgoing_event_type = str(event_type)
         if event_type == "response.create":
-            self._queue_response_origin(origin)
+            self._queue_response_origin(origin, event)
 
-    def _queue_response_origin(self, origin: str | None) -> None:
+    def _queue_response_origin(self, origin: str | None, event: dict[str, Any] | None = None) -> None:
         normalized_origin = str(origin).strip() if origin else "unknown"
-        self._pending_response_create_origins.append(normalized_origin)
+        response = event.get("response") if isinstance(event, dict) else None
+        metadata = response.get("metadata") if isinstance(response, dict) else None
+        pending_origin = {
+            "origin": normalized_origin,
+            "micro_ack": "true"
+            if isinstance(metadata, dict) and str(metadata.get("micro_ack", "")).strip().lower() == "true"
+            else "false",
+        }
+        self._pending_response_create_origins.append(pending_origin)
 
-    def _consume_response_origin(self) -> str:
+    def _consume_response_origin(self, event: dict[str, Any] | None = None) -> str:
         if self._pending_response_create_origins:
-            return self._pending_response_create_origins.popleft()
+            response = event.get("response") if isinstance(event, dict) else None
+            metadata = response.get("metadata") if isinstance(response, dict) else None
+            is_micro_ack_response = (
+                isinstance(metadata, dict)
+                and str(metadata.get("micro_ack", "")).strip().lower() == "true"
+            )
+            if is_micro_ack_response:
+                preferred_index = next(
+                    (
+                        idx
+                        for idx, pending in enumerate(self._pending_response_create_origins)
+                        if str(pending.get("micro_ack", "")).strip().lower() == "true"
+                    ),
+                    0,
+                )
+            else:
+                preferred_index = next(
+                    (
+                        idx
+                        for idx, pending in enumerate(self._pending_response_create_origins)
+                        if str(pending.get("micro_ack", "")).strip().lower() != "true"
+                    ),
+                    None,
+                )
+                if preferred_index is None:
+                    return "server_auto"
+            pending = self._pending_response_create_origins[preferred_index]
+            del self._pending_response_create_origins[preferred_index]
+            return str(pending.get("origin") or "unknown")
         return "server_auto"
 
     def inject_event(self, event: Event) -> None:
@@ -3488,11 +3524,6 @@ class RealtimeAPI:
         # it contains fresher tool results for the same turn.
         if self._response_in_flight or self._audio_playback_busy:
             queue_reason = "active_response" if self._response_in_flight else "audio_playback_busy"
-            self._maybe_schedule_micro_ack(
-                turn_id=self._current_turn_id_or_unknown(),
-                reason=queue_reason,
-                expected_delay_ms=900,
-            )
             return self._schedule_pending_response_create(
                 websocket=websocket,
                 response_create_event=response_create_event,
@@ -5890,7 +5921,7 @@ class RealtimeAPI:
             source_event=str(event_type or "unknown"),
         )
         if event_type == "response.created":
-            origin = self._consume_response_origin()
+            origin = self._consume_response_origin(event)
             log_info(f"response.created: origin={origin}")
             response = event.get("response") or {}
             response_id = response.get("id")
