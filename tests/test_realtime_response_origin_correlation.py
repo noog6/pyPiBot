@@ -113,7 +113,7 @@ def test_response_created_origin_correlation_prefers_non_micro_ack_for_server_au
 
     origin_logs = [entry for entry in logs if entry.startswith("response.created:")]
     assert origin_logs == ["response.created: origin=server_auto"]
-    assert list(api._pending_response_create_origins) == [{"origin": "assistant_message", "micro_ack": "true"}]
+    assert list(api._pending_response_create_origins) == [{"origin": "assistant_message", "micro_ack": "true", "consumes_canonical_slot": "false"}]
 
 
 def test_response_created_from_pending_action_with_server_auto_keeps_awaiting_phase(
