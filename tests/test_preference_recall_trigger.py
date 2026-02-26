@@ -45,9 +45,11 @@ def _make_api_stub() -> RealtimeAPI:
     api._active_response_preference_guarded = False
     api._active_response_confirmation_guarded = False
     api._response_obligations = {}
+    api._response_created_canonical_keys = set()
     api._already_scheduled_for_input_event_key = set()
     api._active_response_id = None
     api._active_response_origin = "unknown"
+    api._active_response_consumes_canonical_slot = True
     api._audio_accum = bytearray()
     api._audio_accum_bytes_target = 9600
     api._tool_call_records = []
@@ -691,6 +693,67 @@ def test_memory_intent_sets_response_obligation_and_clears_on_assistant_response
 
     asyncio.run(api.handle_event({"type": "response.created", "response": {"id": "r-preference"}}, ws))
 
+    assert api._response_obligations == {}
+
+
+
+def test_memory_intent_micro_ack_does_not_consume_canonical_slot(monkeypatch) -> None:
+    api = _make_api_stub()
+    ws = _RecordingWs()
+    blocked_logs: list[str] = []
+
+    def _capture_info(message: str, *args) -> None:
+        rendered = message % args if args else message
+        if "response_schedule_blocked" in rendered:
+            blocked_logs.append(rendered)
+
+    monkeypatch.setattr(realtime_api.logger, "info", _capture_info)
+
+    turn_id = "turn_1"
+    input_event_key = "item_vim"
+    canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+    api._current_response_turn_id = turn_id
+    api._current_input_event_key = input_event_key
+    api._active_input_event_key_by_turn_id[turn_id] = input_event_key
+    api._set_response_obligation(turn_id=turn_id, input_event_key=input_event_key, source="transcript")
+
+    api._track_outgoing_event(
+        {
+            "type": "response.create",
+            "response": {
+                "metadata": {
+                    "origin": "assistant_message",
+                    "turn_id": turn_id,
+                    "input_event_key": input_event_key,
+                    "micro_ack": "true",
+                    "consumes_canonical_slot": "false",
+                }
+            },
+        },
+        origin="assistant_message",
+    )
+
+    asyncio.run(api.handle_event({"type": "response.created", "response": {"id": "resp_ack", "metadata": {"micro_ack": "true"}}}, ws))
+
+    assert canonical_key not in api._response_created_canonical_keys
+    assert api._response_obligations
+    api._response_in_flight = False
+
+    scheduled = asyncio.run(
+        api._send_response_create(
+            ws,
+            {"type": "response.create", "response": {"metadata": {"turn_id": turn_id, "input_event_key": input_event_key}}},
+            origin="tool_output",
+        )
+    )
+
+    assert scheduled is True
+    assert canonical_key in api._response_obligations
+    assert not any("reason=canonical_response_already_created" in line and "origin=tool_output" in line for line in blocked_logs)
+
+    asyncio.run(api.handle_event({"type": "response.created", "response": {"id": "resp_tool"}}, ws))
+
+    assert canonical_key in api._response_created_canonical_keys
     assert api._response_obligations == {}
 
 

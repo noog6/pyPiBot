@@ -745,6 +745,7 @@ class RealtimeAPI:
         self._active_response_confirmation_guarded = False
         self._active_response_preference_guarded = False
         self._active_response_origin = "unknown"
+        self._active_response_consumes_canonical_slot = True
         self._preference_recall_suppressed_turns: set[str] = set()
         self._preference_recall_suppressed_input_event_keys: set[str] = set()
         self._pending_server_auto_input_event_keys: deque[str] = deque(maxlen=64)
@@ -898,6 +899,7 @@ class RealtimeAPI:
                 response_metadata={
                     "trigger": "micro_ack",
                     "micro_ack": "true",
+                    "consumes_canonical_slot": "false",
                     "micro_ack_turn_id": turn_id,
                     "micro_ack_phrase_id": phrase_id,
                 },
@@ -1286,15 +1288,27 @@ class RealtimeAPI:
         normalized_origin = str(origin).strip() if origin else "unknown"
         response = event.get("response") if isinstance(event, dict) else None
         metadata = response.get("metadata") if isinstance(response, dict) else None
+        consumes_canonical_slot = self._response_consumes_canonical_slot(metadata)
         pending_origin = {
             "origin": normalized_origin,
             "micro_ack": "true"
             if isinstance(metadata, dict) and str(metadata.get("micro_ack", "")).strip().lower() == "true"
             else "false",
+            "consumes_canonical_slot": "true" if consumes_canonical_slot else "false",
         }
         self._pending_response_create_origins.append(pending_origin)
 
+    def _response_consumes_canonical_slot(self, metadata: dict[str, Any] | None) -> bool:
+        if not isinstance(metadata, dict):
+            return True
+        explicit_value = metadata.get("consumes_canonical_slot")
+        if explicit_value is not None:
+            normalized = str(explicit_value).strip().lower()
+            return normalized in {"1", "true", "yes"}
+        return str(metadata.get("micro_ack", "")).strip().lower() != "true"
+
     def _consume_response_origin(self, event: dict[str, Any] | None = None) -> str:
+        self._active_response_consumes_canonical_slot = True
         if self._pending_response_create_origins:
             response = event.get("response") if isinstance(event, dict) else None
             metadata = response.get("metadata") if isinstance(response, dict) else None
@@ -1321,10 +1335,17 @@ class RealtimeAPI:
                     None,
                 )
                 if preferred_index is None:
+                    self._active_response_consumes_canonical_slot = self._response_consumes_canonical_slot(metadata)
                     return "server_auto"
             pending = self._pending_response_create_origins[preferred_index]
             del self._pending_response_create_origins[preferred_index]
+            self._active_response_consumes_canonical_slot = (
+                str(pending.get("consumes_canonical_slot", "")).strip().lower() == "true"
+            )
             return str(pending.get("origin") or "unknown")
+        response = event.get("response") if isinstance(event, dict) else None
+        metadata = response.get("metadata") if isinstance(response, dict) else None
+        self._active_response_consumes_canonical_slot = self._response_consumes_canonical_slot(metadata)
         return "server_auto"
 
     def inject_event(self, event: Event) -> None:
@@ -3725,10 +3746,15 @@ class RealtimeAPI:
         )
         response_metadata = self._extract_response_create_metadata(response_create_event)
         normalized_origin = str(origin or "").strip().lower()
+        consumes_canonical_slot = self._response_consumes_canonical_slot(response_metadata)
         suppression_turns = getattr(self, "_preference_recall_suppressed_turns", set())
         canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=current_input_event_key)
         created_keys = getattr(self, "_response_created_canonical_keys", set())
-        if canonical_key in created_keys and not self._response_has_safety_override(response_create_event):
+        if (
+            consumes_canonical_slot
+            and canonical_key in created_keys
+            and not self._response_has_safety_override(response_create_event)
+        ):
             logger.info(
                 "response_schedule_blocked run_id=%s turn_id=%s origin=%s mode=queued reason=canonical_response_already_created canonical_key=%s",
                 self._current_run_id() or "",
@@ -3897,10 +3923,15 @@ class RealtimeAPI:
         )
         response_metadata = self._extract_response_create_metadata(response_create_event)
         normalized_origin = str(origin or "").strip().lower()
+        consumes_canonical_slot = self._response_consumes_canonical_slot(response_metadata)
         suppression_turns = getattr(self, "_preference_recall_suppressed_turns", set())
         canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=current_input_event_key)
         created_keys = getattr(self, "_response_created_canonical_keys", set())
-        if canonical_key in created_keys and not self._response_has_safety_override(response_create_event):
+        if (
+            consumes_canonical_slot
+            and canonical_key in created_keys
+            and not self._response_has_safety_override(response_create_event)
+        ):
             logger.info(
                 "response_schedule_blocked run_id=%s turn_id=%s origin=%s mode=direct reason=canonical_response_already_created canonical_key=%s",
                 self._current_run_id() or "",
@@ -6418,15 +6449,19 @@ class RealtimeAPI:
             if not isinstance(created_keys, set):
                 created_keys = set()
                 self._response_created_canonical_keys = created_keys
-            created_keys.add(canonical_key)
+            consumes_canonical_slot = bool(getattr(self, "_active_response_consumes_canonical_slot", True))
+            if consumes_canonical_slot:
+                created_keys.add(canonical_key)
             suppression_until = float(getattr(self, "_preference_recall_response_suppression_until", 0.0) or 0.0)
             suppression_window_active = suppression_until > time.monotonic()
             active_input_event_key = str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip()
+            obligation_input_event_key = active_input_event_key if origin == "server_auto" else current_input_event_key
             suppression_by_input_event = bool(active_input_event_key and active_input_event_key in suppressed_input_event_keys)
             suppression_by_turn = turn_id in suppressed_turns and not active_input_event_key
             if origin == "server_auto" and (suppression_by_turn or suppression_window_active or suppression_by_input_event):
                 self._active_response_preference_guarded = True
-                created_keys.discard(canonical_key)
+                if consumes_canonical_slot:
+                    created_keys.discard(canonical_key)
                 self._mark_transcript_response_outcome(
                     input_event_key=active_input_event_key,
                     turn_id=turn_id,
@@ -6444,12 +6479,13 @@ class RealtimeAPI:
                 self._track_outgoing_event(cancel_event, origin="preference_recall_guard")
                 await websocket.send(json.dumps(cancel_event))
             else:
-                self._clear_response_obligation(
-                    turn_id=turn_id,
-                    input_event_key=active_input_event_key if origin == "server_auto" else current_input_event_key,
-                    reason="response_created",
-                    origin=origin,
-                )
+                if consumes_canonical_slot:
+                    self._clear_response_obligation(
+                        turn_id=turn_id,
+                        input_event_key=obligation_input_event_key,
+                        reason="response_created",
+                        origin=origin,
+                    )
                 if origin == "server_auto":
                     self._clear_stale_pending_server_auto_for_turn(
                         turn_id=turn_id,
