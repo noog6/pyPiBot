@@ -214,3 +214,29 @@ def test_preference_question_with_recall_tool_does_not_emit_skip_trace(monkeypat
     api._emit_preference_recall_skip_trace_if_needed(turn_id="turn-10")
 
     assert not logged
+
+
+def test_preference_recall_records_tool_and_updates_trace(monkeypatch) -> None:
+    api = _make_api_stub()
+    api._tool_call_records = []
+
+    async def _fake_recall(**_kwargs):
+        assert api._pending_preference_recall_trace["decision"] == "invoked_tool"
+        assert api._pending_preference_recall_trace["reason"] == "preference_intent_matched"
+        return {
+            "memories": [{"content": "User's favorite editor is Vim."}],
+            "memory_cards_text": "Relevant memory:\n- \"User's favorite editor is Vim.\"",
+        }
+
+    async def _fake_send(_message: str, _ws, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "recall_memories", _fake_recall)
+    monkeypatch.setattr(api, "send_assistant_message", _fake_send)
+
+    handled = asyncio.run(api._maybe_handle_preference_recall_intent("Which editor do I prefer?", _Ws(), source="text_message"))
+
+    assert handled is True
+    assert api._tool_call_records[-1]["name"] == "recall_memories"
+    assert api._tool_call_records[-1]["source"] == "preference_recall"
+    assert "editor" in api._tool_call_records[-1]["query"]
