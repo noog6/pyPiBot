@@ -55,6 +55,7 @@ from ai.governance import (
 from ai.orchestration import OrchestrationPhase, OrchestrationState
 from ai.event_bus import Event, EventBus
 from ai.event_injector import EventInjector
+from ai.micro_ack_manager import MicroAckConfig, MicroAckManager
 from ai.utils import (
     PREFIX_PADDING_MS,
     RUN_TIME_TABLE_LOG_JSON,
@@ -779,6 +780,122 @@ class RealtimeAPI:
             realtime_cfg.get("minimum_non_confirmation_duration_ms", 120)
         )
         self._vad_turn_detection = self._resolve_vad_turn_detection(config)
+        self._micro_ack_manager = self._build_micro_ack_manager(realtime_cfg)
+
+    def _build_micro_ack_manager(self, realtime_cfg: dict[str, Any]) -> MicroAckManager:
+        cfg = MicroAckConfig(
+            enabled=bool(realtime_cfg.get("micro_ack_enabled", True)),
+            delay_ms=max(150, int(realtime_cfg.get("micro_ack_delay_ms", 450))),
+            expected_wait_threshold_ms=max(
+                350,
+                int(realtime_cfg.get("micro_ack_expected_wait_threshold_ms", 700)),
+            ),
+            long_wait_second_ack_ms=max(
+                0,
+                int(realtime_cfg.get("micro_ack_long_wait_second_ack_ms", 4000)),
+            ),
+            global_cooldown_ms=max(
+                1000,
+                int(realtime_cfg.get("micro_ack_global_cooldown_ms", 10000)),
+            ),
+            per_turn_max=max(1, int(realtime_cfg.get("micro_ack_per_turn_max", 1))),
+        )
+        return MicroAckManager(
+            config=cfg,
+            on_emit=self._emit_micro_ack,
+            on_log=self._log_micro_ack_event,
+            suppression_reason=self._micro_ack_suppression_reason,
+        )
+
+    def _log_micro_ack_event(self, event: str, turn_id: str, reason: str, delay_ms: int | None) -> None:
+        run_id = self._current_run_id() or ""
+        if event == "scheduled":
+            logger.info(
+                "micro_ack_scheduled run_id=%s turn_id=%s reason=%s delay_ms=%s",
+                run_id,
+                turn_id,
+                reason,
+                delay_ms if delay_ms is not None else "",
+            )
+            return
+        if event == "emitted":
+            logger.info(
+                "micro_ack_emitted run_id=%s turn_id=%s phrase_id=%s",
+                run_id,
+                turn_id,
+                reason,
+            )
+            return
+        if event == "cancelled":
+            logger.info(
+                "micro_ack_cancelled run_id=%s turn_id=%s reason=%s",
+                run_id,
+                turn_id,
+                reason,
+            )
+            return
+        logger.debug(
+            "micro_ack_suppressed run_id=%s turn_id=%s reason=%s",
+            run_id,
+            turn_id,
+            reason,
+        )
+
+    def _micro_ack_suppression_reason(self) -> str | None:
+        manager = getattr(self, "_micro_ack_manager", None)
+        if manager is None:
+            return "disabled"
+        baseline_reason = manager.suppression_baseline_reason()
+        if baseline_reason:
+            return baseline_reason
+        current_state = getattr(getattr(self, "state_manager", None), "state", None)
+        if current_state == InteractionState.LISTENING:
+            return "listening_state"
+        if bool(getattr(self, "_confirmation_speech_active", False)):
+            return "speech_active"
+        return None
+
+    def _maybe_schedule_micro_ack(
+        self,
+        *,
+        turn_id: str,
+        reason: str,
+        expected_delay_ms: int | None = None,
+    ) -> None:
+        manager = getattr(self, "_micro_ack_manager", None)
+        if manager is None or self.loop is None:
+            return
+        manager.maybe_schedule(
+            turn_id=turn_id,
+            reason=reason,
+            loop=self.loop,
+            expected_delay_ms=expected_delay_ms,
+        )
+
+    def _cancel_micro_ack(self, *, turn_id: str, reason: str) -> None:
+        manager = getattr(self, "_micro_ack_manager", None)
+        if manager is None:
+            return
+        manager.cancel(turn_id=turn_id, reason=reason)
+
+    def _emit_micro_ack(self, turn_id: str, phrase_id: str, phrase: str) -> None:
+        websocket = getattr(self, "websocket", None)
+        if websocket is None or self.loop is None:
+            return
+
+        async def _emit() -> None:
+            await self.send_assistant_message(
+                phrase,
+                websocket,
+                response_metadata={
+                    "trigger": "micro_ack",
+                    "micro_ack": "true",
+                    "micro_ack_turn_id": turn_id,
+                    "micro_ack_phrase_id": phrase_id,
+                },
+            )
+
+        self.loop.create_task(_emit())
 
     def _mark_transcript_response_outcome(
         self,
@@ -866,6 +983,12 @@ class RealtimeAPI:
             reason=reason,
             details=details,
         )
+        if reason in {"audio_playback_busy", "response_create_queued", "timeout"}:
+            self._maybe_schedule_micro_ack(
+                turn_id=turn_id,
+                reason=f"watchdog_{reason}",
+                expected_delay_ms=900,
+            )
 
     def _start_transcript_response_watchdog(self, *, turn_id: str, input_event_key: str) -> None:
         normalized_key = str(input_event_key or "").strip()
@@ -3365,6 +3488,11 @@ class RealtimeAPI:
         # it contains fresher tool results for the same turn.
         if self._response_in_flight or self._audio_playback_busy:
             queue_reason = "active_response" if self._response_in_flight else "audio_playback_busy"
+            self._maybe_schedule_micro_ack(
+                turn_id=self._current_turn_id_or_unknown(),
+                reason=queue_reason,
+                expected_delay_ms=900,
+            )
             return self._schedule_pending_response_create(
                 websocket=websocket,
                 response_create_event=response_create_event,
@@ -5771,6 +5899,7 @@ class RealtimeAPI:
             pending_confirmation_active = self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase()
             self._active_response_preference_guarded = False
             turn_id = self._current_turn_id_or_unknown()
+            self._cancel_micro_ack(turn_id=turn_id, reason="response_created")
             suppressed_turns = getattr(self, "_preference_recall_suppressed_turns", set())
             suppressed_input_event_keys = getattr(self, "_preference_recall_suppressed_input_event_keys", set())
             if origin == "server_auto":
@@ -5879,6 +6008,7 @@ class RealtimeAPI:
         elif event_type == "response.text.delta":
             if self._is_active_response_guarded():
                 return
+            self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
             delta = event.get("delta", "")
             self.assistant_reply += delta
             self._assistant_reply_accum += delta
@@ -5886,6 +6016,7 @@ class RealtimeAPI:
         elif event_type == "response.output_audio.delta":
             if self._is_active_response_guarded():
                 return
+            self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
             self._audio_playback_busy = True
             audio_data = base64.b64decode(event["delta"])
             self._audio_accum.extend(audio_data)
@@ -5959,6 +6090,11 @@ class RealtimeAPI:
                 len(pending_server_auto_keys),
             )
             resolved_turn_id = self._current_turn_id_or_unknown()
+            self._maybe_schedule_micro_ack(
+                turn_id=resolved_turn_id,
+                reason="transcript_finalized",
+                expected_delay_ms=700,
+            )
             self._start_transcript_response_watchdog(
                 turn_id=resolved_turn_id,
                 input_event_key=input_event_key,
@@ -6043,6 +6179,12 @@ class RealtimeAPI:
                     )
         elif event_type == "input_audio_buffer.speech_started":
             logger.info("Speech detected, listening...")
+            manager = getattr(self, "_micro_ack_manager", None)
+            if manager is not None:
+                manager.on_user_speech_started()
+                if self.state_manager.state == InteractionState.SPEAKING or self._audio_playback_busy:
+                    manager.mark_talk_over_incident()
+                manager.cancel_all(reason="speech_active")
             self._utterance_counter += 1
             self._active_utterance = {
                 "utterance_id": self._utterance_counter,
@@ -6072,6 +6214,9 @@ class RealtimeAPI:
                 )
             self.state_manager.update_state(InteractionState.LISTENING, "speech started")
         elif event_type == "input_audio_buffer.speech_stopped":
+            manager = getattr(self, "_micro_ack_manager", None)
+            if manager is not None:
+                manager.on_user_speech_ended()
             if self._active_utterance is not None:
                 self._active_utterance["t_stop"] = time.monotonic()
                 self._active_utterance["duration_ms"] = (
@@ -6084,6 +6229,11 @@ class RealtimeAPI:
                 self._confirmation_asr_pending = True
                 self._mark_confirmation_activity(reason="speech_stopped")
             await self.handle_speech_stopped(websocket)
+            self._maybe_schedule_micro_ack(
+                turn_id=self._current_turn_id_or_unknown(),
+                reason="speech_stopped",
+                expected_delay_ms=700,
+            )
             self.state_manager.update_state(InteractionState.THINKING, "speech stopped")
         elif event_type == "input_audio_buffer.committed":
             self._refresh_utterance_audio_levels()
@@ -7181,6 +7331,9 @@ class RealtimeAPI:
             self._audio_accum.clear()
         if self.audio_player:
             self.audio_player.close_response()
+        manager = getattr(self, "_micro_ack_manager", None)
+        if manager is not None:
+            manager.mark_assistant_audio_ended()
         if self._pending_image_stimulus:
             if self.audio_player:
                 self._pending_image_flush_after_playback = True
@@ -7188,6 +7341,7 @@ class RealtimeAPI:
                 await self._flush_pending_image_stimulus("audio response done")
 
     async def handle_response_done(self, event: dict[str, Any] | None = None) -> None:
+        self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_done")
         self._response_done_serial += 1
         self.response_in_progress = False
         self._response_in_flight = False
@@ -7270,6 +7424,7 @@ class RealtimeAPI:
             await self._flush_pending_image_stimulus("response done")
 
     async def handle_response_completed(self, event: dict[str, Any] | None = None) -> None:
+        self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_completed")
         self.response_in_progress = False
         self._response_in_flight = False
         self._preference_recall_suppressed_turns.discard(self._current_turn_id_or_unknown())

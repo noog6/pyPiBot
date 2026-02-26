@@ -50,6 +50,28 @@ State cues and timing thresholds are configured in `config/default.yaml` under
 
 Use `config/override.yaml` to customize these settings per deployment.
 
+## Micro-Acks During Slow Thinking Windows
+
+Theo can emit a very short "micro-ack" (for example, "One sec—checking.") when a user
+utterance has ended and the real answer is likely to take longer than usual.
+
+Guardrails:
+
+- Emit at most once per turn by default, with a global cooldown.
+- Suppress while user speech is active, in `LISTENING`, or when talk-over risk is elevated.
+- Schedule on a short timer and cancel if the real answer starts quickly.
+- Treat micro-acks as non-substantive acknowledgements; they must not trigger tool calls,
+  confirmation loops, or memory persistence.
+
+Relevant realtime config keys:
+
+- `realtime.micro_ack_enabled`
+- `realtime.micro_ack_delay_ms`
+- `realtime.micro_ack_expected_wait_threshold_ms`
+- `realtime.micro_ack_long_wait_second_ack_ms`
+- `realtime.micro_ack_global_cooldown_ms`
+- `realtime.micro_ack_per_turn_max`
+
 ## Approval Prompts & Stop Words
 
 When a tool call requires confirmation, the realtime agent presents a structured
