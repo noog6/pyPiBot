@@ -26,6 +26,14 @@ def _make_api_stub() -> RealtimeAPI:
     api._preference_recall_cache = {}
     api._memory_retrieval_scope = "user_global"
     api._pending_response_create_origins = deque()
+    api._pending_response_create = None
+    api._response_create_queue = deque()
+    api._queued_confirmation_reminder_keys = set()
+    api._response_done_serial = 0
+    api._response_create_debug_trace = False
+    api._last_response_create_ts = None
+    api._audio_playback_busy = False
+    api._response_schedule_logged_turn_ids = set()
     api._preference_recall_response_suppression_until = 0.0
     api._preference_recall_suppressed_turns = set()
     api._preference_recall_suppressed_input_event_keys = set()
@@ -35,6 +43,8 @@ def _make_api_stub() -> RealtimeAPI:
     api._input_event_key_counter = 0
     api._active_response_preference_guarded = False
     api._active_response_confirmation_guarded = False
+    api._response_obligations = {}
+    api._already_scheduled_for_input_event_key = set()
     api._active_response_id = None
     api._active_response_origin = "unknown"
     api._audio_accum = bytearray()
@@ -583,7 +593,7 @@ def test_preference_recall_transcript_path_emits_memory_answer_without_model_fol
     message = assistant_payloads[0]["item"]["content"][0]["text"]
     assert "Vim" in message
     assert "Relevant memory:" in message
-    assert response_create_calls == []
+    assert response_create_calls == [{"type": "response.create", "origin": "assistant_message"}]
 
 
 def test_preference_recall_drops_queued_server_auto_response_create(monkeypatch) -> None:
@@ -625,8 +635,9 @@ def test_preference_recall_drops_queued_server_auto_response_create(monkeypatch)
     )
 
     assert handled is True
-    assert api._pending_response_create is None
-    assert list(api._response_create_queue) == []
+    assert api._pending_response_create is not None
+    assert api._pending_response_create.origin == "assistant_message"
+    assert list(api._response_create_queue)
 
     api._response_in_flight = False
     asyncio.run(api._drain_response_create_queue())
@@ -642,7 +653,83 @@ def test_preference_recall_drops_queued_server_auto_response_create(monkeypatch)
 
     assert len(assistant_payloads) == 1
     assert "Vim" in assistant_payloads[0]["item"]["content"][0]["text"]
-    assert response_create_payloads == []
+    assert len(response_create_payloads) == 1
+
+
+def test_memory_intent_sets_response_obligation_and_clears_on_assistant_response(monkeypatch) -> None:
+    api = _make_api_stub()
+    ws = _RecordingWs()
+
+    async def _fake_recall(**_kwargs):
+        return {"memories": [{"content": "User prefers Vim."}], "memory_cards_text": "Relevant memory:\n- \"User prefers Vim.\""}
+
+    async def _false(*_args, **_kwargs) -> bool:
+        return False
+
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "recall_memories", _fake_recall)
+
+    api.websocket = ws
+    api._maybe_handle_confirmation_decision_timeout = _false
+    api._maybe_handle_approval_response = _false
+    api._handle_stop_word = _false
+    api._maybe_handle_research_permission_response = _false
+    api._maybe_handle_research_budget_response = _false
+    api._maybe_apply_late_confirmation_decision = _false
+    api._maybe_process_research_intent = _false
+    api._has_active_confirmation_token = lambda: False
+    api._is_awaiting_confirmation_phase = lambda: False
+    api._is_user_approved_interrupt_response = lambda _response: False
+    api._log_user_transcript = lambda *_args, **_kwargs: None
+    api._record_user_input = lambda *_args, **_kwargs: None
+
+    asyncio.run(api.handle_event({"type": "conversation.item.input_audio_transcription.completed", "transcript": "Which editor do I prefer?"}, ws))
+
+    assert api._response_obligations
+
+    asyncio.run(api.handle_event({"type": "response.created", "response": {"id": "r-preference"}}, ws))
+
+    assert api._response_obligations == {}
+
+
+def test_guarded_server_auto_does_not_satisfy_obligation_then_transcript_still_responds(monkeypatch) -> None:
+    api = _make_api_stub()
+    ws = _RecordingWs()
+
+    async def _false(*_args, **_kwargs) -> bool:
+        return False
+
+    async def _fake_recall(**_kwargs):
+        return {"memories": [{"content": "User prefers Vim."}], "memory_cards_text": "Relevant memory:\n- \"User prefers Vim.\""}
+
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "recall_memories", _fake_recall)
+
+    api.websocket = ws
+    api._maybe_handle_confirmation_decision_timeout = _false
+    api._maybe_handle_approval_response = _false
+    api._handle_stop_word = _false
+    api._maybe_handle_research_permission_response = _false
+    api._maybe_handle_research_budget_response = _false
+    api._maybe_apply_late_confirmation_decision = _false
+    api._maybe_process_research_intent = _false
+    api._has_active_confirmation_token = lambda: False
+    api._is_awaiting_confirmation_phase = lambda: False
+    api._is_user_approved_interrupt_response = lambda _response: False
+    api._log_user_transcript = lambda *_args, **_kwargs: None
+    api._record_user_input = lambda *_args, **_kwargs: None
+
+    api._pending_server_auto_input_event_keys.append("input_event_1")
+    api._preference_recall_suppressed_input_event_keys.add("input_event_1")
+    asyncio.run(api.handle_event({"type": "response.created", "response": {"id": "r-guarded"}}, ws))
+
+    asyncio.run(api.handle_event({"type": "conversation.item.input_audio_transcription.completed", "transcript": "Which editor do I prefer?"}, ws))
+
+    payloads = [json.loads(item) for item in ws.sent]
+    assistant_items = [payload for payload in payloads if payload.get("type") == "conversation.item.create"]
+
+    assert any(payload.get("type") == "response.cancel" for payload in payloads)
+    assert len(assistant_items) == 1
+    assert api._pending_response_create is not None
+    assert api._pending_response_create.origin == "assistant_message"
 
 
 def test_preference_question_falls_back_to_preference_tag_query(monkeypatch) -> None:
