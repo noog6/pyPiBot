@@ -7137,6 +7137,15 @@ class RealtimeAPI:
 
     async def handle_error(self, event: dict[str, Any], websocket: Any) -> None:
         error_message = event.get("error", {}).get("message", "")
+        if "no active response found" in error_message.lower():
+            logger.info(
+                "response_cancel_noop run_id=%s turn_id=%s reason=no_active_response",
+                self._current_run_id() or "",
+                self._current_turn_id_or_unknown(),
+            )
+            logger.debug("Ignoring cancellation error with no active response: %s", error_message)
+            return
+
         log_error(f"Error: {error_message}")
         if "buffer is empty" in error_message:
             logger.info("Received 'buffer is empty' error, no audio data sent.")
@@ -7144,13 +7153,6 @@ class RealtimeAPI:
             logger.warning("Received 'active response' error despite response.create serialization.")
             self.response_in_progress = True
             self._response_in_flight = True
-        elif "no active response found" in error_message.lower():
-            logger.info(
-                "response_cancel_noop run_id=%s turn_id=%s reason=no_active_response",
-                self._current_run_id() or "",
-                self._current_turn_id_or_unknown(),
-            )
-            logger.debug("Ignoring cancellation error with no active response: %s", error_message)
         else:
             logger.error("Unhandled error: %s", error_message)
 
