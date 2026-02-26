@@ -748,6 +748,7 @@ class RealtimeAPI:
         self._active_response_consumes_canonical_slot = True
         self._preference_recall_suppressed_turns: set[str] = set()
         self._preference_recall_suppressed_input_event_keys: set[str] = set()
+        self._preference_recall_locked_input_event_keys: set[str] = set()
         self._pending_server_auto_input_event_keys: deque[str] = deque(maxlen=64)
         self._active_server_auto_input_event_key: str | None = None
         self._current_input_event_key: str | None = None
@@ -2308,6 +2309,19 @@ class RealtimeAPI:
             return False
 
         resolved_turn_id = self._current_turn_id_or_unknown()
+        replacement_input_event_key = str(getattr(self, "_current_input_event_key", "") or "").strip()
+        locked_input_event_keys = getattr(self, "_preference_recall_locked_input_event_keys", None)
+        if not isinstance(locked_input_event_keys, set):
+            locked_input_event_keys = set()
+            self._preference_recall_locked_input_event_keys = locked_input_event_keys
+        if replacement_input_event_key:
+            locked_input_event_keys.add(replacement_input_event_key)
+            logger.debug(
+                "preference_recall_lock_set run_id=%s input_event_key=%s reason=intent_matched",
+                self._current_run_id() or "",
+                replacement_input_event_key,
+            )
+
         turn_timestamps_store = getattr(self, "_turn_diagnostic_timestamps", None)
         if not isinstance(turn_timestamps_store, dict):
             turn_timestamps_store = {}
@@ -2315,89 +2329,142 @@ class RealtimeAPI:
         turn_timestamps = turn_timestamps_store.setdefault(resolved_turn_id, {})
         turn_timestamps["preference_recall_start"] = time.monotonic()
         self._mark_preference_recall_candidate(text, source=source)
-        query = self._build_preference_recall_query(text.lower(), keywords=keywords)
-        now = time.monotonic()
-        cooldown_s = max(0.0, float(getattr(self, "_preference_recall_cooldown_s", 0.0)))
-        cached = self._preference_recall_cache.get(query)
-        result_payload: dict[str, Any] | None = None
-        recall_invoked = False
-        if (
-            cached
-            and cooldown_s > 0.0
-            and now - float(cached.get("timestamp", 0.0)) < cooldown_s
-        ):
-            result_payload = cached.get("payload") if isinstance(cached.get("payload"), dict) else None
-            logger.info(
-                "Preference recall reused cached result source=%s query=%s cooldown_s=%.2f",
-                source,
-                query,
-                cooldown_s,
-            )
-        if result_payload is None:
-            recall_fn = function_map.get("recall_memories")
-            if recall_fn is None:
-                if isinstance(self._pending_preference_recall_trace, dict):
-                    self._pending_preference_recall_trace["reason"] = "policy_skip"
-                logger.warning("Preference recall intent matched but recall_memories tool unavailable.")
-                return False
-            recall_invoked = True
-            tool_call_records = getattr(self, "_tool_call_records", None)
-            if isinstance(tool_call_records, list):
-                tool_call_records.append(
-                    {
-                        "name": "recall_memories",
-                        "source": "preference_recall",
-                        "turn_id": self._current_turn_id_or_unknown(),
-                        "query": query,
-                    }
+        try:
+            query = self._build_preference_recall_query(text.lower(), keywords=keywords)
+            now = time.monotonic()
+            cooldown_s = max(0.0, float(getattr(self, "_preference_recall_cooldown_s", 0.0)))
+            cached = self._preference_recall_cache.get(query)
+            result_payload: dict[str, Any] | None = None
+            recall_invoked = False
+            if (
+                cached
+                and cooldown_s > 0.0
+                and now - float(cached.get("timestamp", 0.0)) < cooldown_s
+            ):
+                result_payload = cached.get("payload") if isinstance(cached.get("payload"), dict) else None
+                logger.info(
+                    "Preference recall reused cached result source=%s query=%s cooldown_s=%.2f",
+                    source,
+                    query,
+                    cooldown_s,
                 )
-            if isinstance(self._pending_preference_recall_trace, dict):
-                self._pending_preference_recall_trace["decision"] = "invoked_tool"
-                self._pending_preference_recall_trace["reason"] = "preference_intent_matched"
-            result_payload, recall_invoked = await self._run_preference_recall_with_fallbacks(
-                recall_fn=recall_fn,
-                source=source,
-                resolved_turn_id=resolved_turn_id,
-                query=query,
-            )
-            logger.info(
-                "Preference recall executed source=%s query=%s keywords=%s",
-                source,
-                query,
-                ",".join(keywords),
-            )
+            if result_payload is None:
+                recall_fn = function_map.get("recall_memories")
+                if recall_fn is None:
+                    if isinstance(self._pending_preference_recall_trace, dict):
+                        self._pending_preference_recall_trace["reason"] = "policy_skip"
+                    logger.warning("Preference recall intent matched but recall_memories tool unavailable.")
+                    return False
+                recall_invoked = True
+                tool_call_records = getattr(self, "_tool_call_records", None)
+                if isinstance(tool_call_records, list):
+                    tool_call_records.append(
+                        {
+                            "name": "recall_memories",
+                            "source": "preference_recall",
+                            "turn_id": self._current_turn_id_or_unknown(),
+                            "query": query,
+                        }
+                    )
+                if isinstance(self._pending_preference_recall_trace, dict):
+                    self._pending_preference_recall_trace["decision"] = "invoked_tool"
+                    self._pending_preference_recall_trace["reason"] = "preference_intent_matched"
+                result_payload, recall_invoked = await self._run_preference_recall_with_fallbacks(
+                    recall_fn=recall_fn,
+                    source=source,
+                    resolved_turn_id=resolved_turn_id,
+                    query=query,
+                )
+                logger.info(
+                    "Preference recall executed source=%s query=%s keywords=%s",
+                    source,
+                    query,
+                    ",".join(keywords),
+                )
 
-        memories = self._preference_recall_memories_from_payload(result_payload)
-        cards = result_payload.get("memory_cards") if isinstance(result_payload, dict) else None
-        cards_list = cards if isinstance(cards, list) else []
-        memory_cards_text = ""
-        if isinstance(result_payload, dict):
-            memory_cards_text = self._sanitize_memory_cards_text_for_user(
-                str(result_payload.get("memory_cards_text", "")).strip()
+            memories = self._preference_recall_memories_from_payload(result_payload)
+            cards = result_payload.get("memory_cards") if isinstance(result_payload, dict) else None
+            cards_list = cards if isinstance(cards, list) else []
+            memory_cards_text = ""
+            if isinstance(result_payload, dict):
+                memory_cards_text = self._sanitize_memory_cards_text_for_user(
+                    str(result_payload.get("memory_cards_text", "")).strip()
+                )
+            hit = (
+                bool(memory_cards_text)
+                or bool(cards_list)
+                or (isinstance(memories, list) and len(memories) > 0)
             )
-        hit = (
-            bool(memory_cards_text)
-            or bool(cards_list)
-            or (isinstance(memories, list) and len(memories) > 0)
-        )
-        await self._suppress_preference_recall_server_auto_response(websocket)
-        replacement_input_event_key = str(getattr(self, "_current_input_event_key", "") or "").strip()
-        # preference_recall is an internal tool pathway: suppress server_auto output,
-        # then guarantee a replacement assistant response for this input_event_key.
-        if replacement_input_event_key and self._is_input_event_key_already_scheduled(
-            input_event_key=replacement_input_event_key
-        ):
-            logger.info(
-                "preference_recall_replacement_skip run_id=%s turn_id=%s input_event_key=%s reason=already_scheduled_for_input_event_key",
-                self._current_run_id() or "",
-                resolved_turn_id,
-                replacement_input_event_key,
-            )
-            self._clear_preference_recall_candidate()
-            return True
-        if not hit:
+            await self._suppress_preference_recall_server_auto_response(websocket)
+            # preference_recall is an internal tool pathway: suppress server_auto output,
+            # then guarantee a replacement assistant response for this input_event_key.
+            if replacement_input_event_key and self._is_input_event_key_already_scheduled(
+                input_event_key=replacement_input_event_key
+            ):
+                logger.info(
+                    "preference_recall_replacement_skip run_id=%s turn_id=%s input_event_key=%s reason=already_scheduled_for_input_event_key",
+                    self._current_run_id() or "",
+                    resolved_turn_id,
+                    replacement_input_event_key,
+                )
+                self._clear_preference_recall_candidate()
+                return True
+            if not hit:
+                await self.send_assistant_message(
+                    "I don’t have that saved yet. If you share it, I can remember it for next time.",
+                    websocket,
+                    response_metadata={
+                        "turn_id": resolved_turn_id,
+                        "input_event_key": replacement_input_event_key,
+                        "trigger": "preference_recall",
+                    },
+                )
+                self._mark_input_event_key_scheduled(input_event_key=replacement_input_event_key)
+                turn_timestamps["preference_recall_end"] = time.monotonic()
+                handled_logged_turn_ids = getattr(self, "_preference_recall_handled_logged_turn_ids", None)
+                if not isinstance(handled_logged_turn_ids, set):
+                    handled_logged_turn_ids = set()
+                    self._preference_recall_handled_logged_turn_ids = handled_logged_turn_ids
+                if resolved_turn_id not in handled_logged_turn_ids:
+                    handled_logged_turn_ids.add(resolved_turn_id)
+                    logger.info(
+                        "preference_recall_handled run_id=%s resolved_turn_id=%s source=%s query=%s",
+                        self._current_run_id() or "",
+                        resolved_turn_id,
+                        source,
+                        query,
+                    )
+                    logger.debug(
+                        "turn_diagnostic_timestamps run_id=%s turn_id=%s transcript_final_ts=%s preference_recall_start_ts=%s preference_recall_end_ts=%s response_schedule_ts=%s",
+                        self._current_run_id() or "",
+                        resolved_turn_id,
+                        turn_timestamps.get("transcript_final"),
+                        turn_timestamps.get("preference_recall_start"),
+                        turn_timestamps.get("preference_recall_end"),
+                        turn_timestamps.get("response_schedule"),
+                    )
+                self._clear_preference_recall_candidate()
+                return True
+
+            response_lines: list[str] = []
+            if recall_invoked:
+                response_lines.append("I’m checking what I remember.")
+            if memory_cards_text:
+                response_lines.append(memory_cards_text)
+            else:
+                first_memory = memories[0] if isinstance(memories[0], dict) else {}
+                memory_text = str(first_memory.get("content", "")).strip()
+                if not memory_text:
+                    memory_text = "I found a saved preference, but it does not include enough detail to quote yet."
+                response_lines.append(f'Relevant memory: "{memory_text}"')
+                response_lines.append("Why it's relevant: " + '"It matches your preference question."')
+                response_lines.append("Confidence: medium")
+
+            if self._memory_pin_followup_needed(cards=cards_list, memories=memories, query=query):
+                response_lines.append("Want me to pin or rename this memory so it’s easier to recall later?")
+
             await self.send_assistant_message(
-                "I don’t have that saved yet. If you share it, I can remember it for next time.",
+                "\n".join(response_lines),
                 websocket,
                 response_metadata={
                     "turn_id": resolved_turn_id,
@@ -2431,59 +2498,14 @@ class RealtimeAPI:
                 )
             self._clear_preference_recall_candidate()
             return True
-
-        response_lines: list[str] = []
-        if recall_invoked:
-            response_lines.append("I’m checking what I remember.")
-        if memory_cards_text:
-            response_lines.append(memory_cards_text)
-        else:
-            first_memory = memories[0] if isinstance(memories[0], dict) else {}
-            memory_text = str(first_memory.get("content", "")).strip()
-            if not memory_text:
-                memory_text = "I found a saved preference, but it does not include enough detail to quote yet."
-            response_lines.append(f'Relevant memory: "{memory_text}"')
-            response_lines.append("Why it's relevant: " + '"It matches your preference question."')
-            response_lines.append("Confidence: medium")
-
-        if self._memory_pin_followup_needed(cards=cards_list, memories=memories, query=query):
-            response_lines.append("Want me to pin or rename this memory so it’s easier to recall later?")
-
-        await self.send_assistant_message(
-            "\n".join(response_lines),
-            websocket,
-            response_metadata={
-                "turn_id": resolved_turn_id,
-                "input_event_key": replacement_input_event_key,
-                "trigger": "preference_recall",
-            },
-        )
-        self._mark_input_event_key_scheduled(input_event_key=replacement_input_event_key)
-        turn_timestamps["preference_recall_end"] = time.monotonic()
-        handled_logged_turn_ids = getattr(self, "_preference_recall_handled_logged_turn_ids", None)
-        if not isinstance(handled_logged_turn_ids, set):
-            handled_logged_turn_ids = set()
-            self._preference_recall_handled_logged_turn_ids = handled_logged_turn_ids
-        if resolved_turn_id not in handled_logged_turn_ids:
-            handled_logged_turn_ids.add(resolved_turn_id)
-            logger.info(
-                "preference_recall_handled run_id=%s resolved_turn_id=%s source=%s query=%s",
-                self._current_run_id() or "",
-                resolved_turn_id,
-                source,
-                query,
-            )
-            logger.debug(
-                "turn_diagnostic_timestamps run_id=%s turn_id=%s transcript_final_ts=%s preference_recall_start_ts=%s preference_recall_end_ts=%s response_schedule_ts=%s",
-                self._current_run_id() or "",
-                resolved_turn_id,
-                turn_timestamps.get("transcript_final"),
-                turn_timestamps.get("preference_recall_start"),
-                turn_timestamps.get("preference_recall_end"),
-                turn_timestamps.get("response_schedule"),
-            )
-        self._clear_preference_recall_candidate()
-        return True
+        finally:
+            if replacement_input_event_key:
+                locked_input_event_keys.discard(replacement_input_event_key)
+                logger.debug(
+                    "preference_recall_lock_cleared run_id=%s input_event_key=%s reason=completed",
+                    self._current_run_id() or "",
+                    replacement_input_event_key,
+                )
 
     def _is_active_response_guarded(self) -> bool:
         return bool(
@@ -3759,6 +3781,13 @@ class RealtimeAPI:
         suppression_turns = getattr(self, "_preference_recall_suppressed_turns", set())
         canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=current_input_event_key)
         created_keys = getattr(self, "_response_created_canonical_keys", set())
+        if self._is_preference_recall_lock_blocked(
+            turn_id=turn_id,
+            input_event_key=current_input_event_key,
+            normalized_origin=normalized_origin,
+            response_metadata=response_metadata,
+        ):
+            return False
         if (
             consumes_canonical_slot
             and canonical_key in created_keys
@@ -3936,6 +3965,13 @@ class RealtimeAPI:
         suppression_turns = getattr(self, "_preference_recall_suppressed_turns", set())
         canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=current_input_event_key)
         created_keys = getattr(self, "_response_created_canonical_keys", set())
+        if self._is_preference_recall_lock_blocked(
+            turn_id=turn_id,
+            input_event_key=current_input_event_key,
+            normalized_origin=normalized_origin,
+            response_metadata=response_metadata,
+        ):
+            return False
         if (
             consumes_canonical_slot
             and canonical_key in created_keys
@@ -4164,6 +4200,30 @@ class RealtimeAPI:
         if isinstance(trigger, str) and trigger.strip():
             return trigger.strip().lower()
         return "unknown"
+
+    def _is_preference_recall_lock_blocked(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str,
+        normalized_origin: str,
+        response_metadata: dict[str, Any],
+    ) -> bool:
+        if normalized_origin == "preference_recall":
+            return False
+        trigger = self._extract_response_create_trigger(response_metadata)
+        if trigger == "preference_recall":
+            return False
+        locked_input_event_keys = getattr(self, "_preference_recall_locked_input_event_keys", set())
+        if input_event_key and input_event_key in locked_input_event_keys:
+            logger.debug(
+                "preference_recall_default_response_blocked run_id=%s turn_id=%s input_event_key=%s reason=locked",
+                self._current_run_id() or "",
+                turn_id,
+                input_event_key,
+            )
+            return True
+        return False
 
     def _is_awaiting_confirmation_phase(self) -> bool:
         if getattr(self, "_pending_confirmation_token", None) is not None:
