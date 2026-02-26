@@ -1972,6 +1972,7 @@ class MemoryManager:
         max_memories: int = 4,
         max_chars: int = 450,
         cooldown_s: float = 0.0,
+        bypass_cooldown: bool = False,
         now_monotonic: float | None = None,
         scope: MemoryScopeInput | None = None,
         session_id: str | None = None,
@@ -2058,11 +2059,13 @@ class MemoryManager:
         timestamp = now_monotonic if now_monotonic is not None else time.monotonic()
         cooldown_key = (effective_user_id, resolved_scope, resolved_session_id)
         self._last_turn_retrieval_debug["scope"] = resolved_scope.value
-        if cooldown_s > 0.0:
+        if cooldown_s > 0.0 and not bypass_cooldown:
             last_retrieval = self._last_turn_retrieval_at.get(cooldown_key)
             if last_retrieval is not None and timestamp - last_retrieval < cooldown_s:
                 self._last_turn_retrieval_debug.update({"mode": "cooldown", "cooldown_skipped": True})
                 return None
+        if cooldown_s > 0.0 and bypass_cooldown:
+            self._last_turn_retrieval_debug["mode"] = "cooldown_bypassed"
 
         bounded_max_memories = _clamp(max_memories, 1, MAX_RECALL_LIMIT)
         bounded_max_chars = _clamp(max_chars, 80, 4000)
