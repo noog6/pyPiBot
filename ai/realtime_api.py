@@ -751,6 +751,11 @@ class RealtimeAPI:
         self._active_server_auto_input_event_key: str | None = None
         self._current_input_event_key: str | None = None
         self._input_event_key_counter = 0
+        self._synthetic_input_event_counter = 0
+        self._response_created_canonical_keys: set[str] = set()
+        self._suppressed_topics: set[str] = set()
+        self._battery_redline_percent = float(battery_response_cfg.get("redline_percent", 10.0))
+        self._load_topic_suppression_preferences()
         self._pending_alternate_intent_override: dict[str, Any] | None = None
         self._last_executed_tool_call: dict[str, Any] | None = None
         self._intent_ledger: dict[str, IntentLedgerEntry] = {}
@@ -1335,16 +1340,21 @@ class RealtimeAPI:
             return
         message, request_response = self._format_event_for_injection(event)
         bypass_response_suppression = False
+        safety_override = False
         if event.source == "battery":
             request_response = self._should_request_battery_response(event, fallback=request_response)
             bypass_response_suppression = request_response and self._is_battery_query_context_active()
+            safety_override = request_response and self._is_battery_safety_override(event)
         elif event.request_response is not None:
             request_response = event.request_response
+        if event.source in {"battery", "imu", "camera", "ops", "health"} and event.request_response is None:
+            request_response = bool(request_response) and safety_override
         self._log_injection_event(event, request_response)
         self._send_text_message(
             message,
             request_response=request_response,
             bypass_response_suppression=bypass_response_suppression,
+            safety_override=safety_override,
         )
 
     def _log_injection_event(self, event: Event, request_response: bool) -> None:
@@ -1370,6 +1380,7 @@ class RealtimeAPI:
         request_response: bool = True,
         *,
         bypass_response_suppression: bool = False,
+        safety_override: bool = False,
     ) -> None:
         if not self.loop:
             logger.debug("Unable to send message; event loop unavailable.")
@@ -1379,6 +1390,7 @@ class RealtimeAPI:
                 message,
                 request_response=request_response,
                 bypass_response_suppression=bypass_response_suppression,
+                safety_override=safety_override,
             ),
             self.loop,
         )
@@ -1436,7 +1448,8 @@ class RealtimeAPI:
 
     def _format_event_for_injection(self, event: Event) -> tuple[str, bool]:
         if event.content:
-            return event.content, True
+            default_response = event.source not in {"battery", "imu", "camera", "ops", "health"}
+            return event.content, default_response
         if event.source == "imu":
             metadata = event.metadata
             return (
@@ -1469,7 +1482,8 @@ class RealtimeAPI:
                 f"delta_percent={delta_percent:.1f} rapid_drop={str(rapid_drop).lower()}",
                 False,
             )
-        return f"{event.source} event: {event.metadata}", True
+        default_response = event.source not in {"battery", "imu", "camera", "ops", "health"}
+        return f"{event.source} event: {event.metadata}", default_response
 
 
     def _should_request_battery_response(self, event: Event, *, fallback: bool = False) -> bool:
@@ -1477,6 +1491,10 @@ class RealtimeAPI:
         severity = str(metadata.get("severity", "info"))
         event_type = str(metadata.get("event_type", "status"))
         transition = str(metadata.get("transition", "steady"))
+
+        if "battery" in getattr(self, "_suppressed_topics", set()) and not self._is_battery_safety_override(event):
+            logger.info("battery_response_suppressed reason=topic_suppression")
+            return False
 
         if event_type == "clear" or severity == "info":
             return self._is_battery_query_context_active()
@@ -1647,6 +1665,7 @@ class RealtimeAPI:
         self._last_user_input_source = source
         if self._is_battery_status_query(clean_text):
             self._last_user_battery_query_time = self._last_user_input_time
+        self._update_topic_suppression_from_user_text(clean_text)
         self._mark_preference_recall_candidate(clean_text, source=source)
         self._prepare_turn_memory_brief(clean_text, source=source, memory_intent=memory_intent)
 
@@ -1833,9 +1852,92 @@ class RealtimeAPI:
 
     def _canonical_utterance_key(self, *, turn_id: str, input_event_key: str | None) -> str:
         resolved_turn_id = str(turn_id or "").strip() or "turn-unknown"
-        resolved_input_event_key = str(input_event_key or "").strip() or "unknown"
+        resolved_input_event_key = str(input_event_key or "").strip() or f"synthetic:{resolved_turn_id}"
         run_id = str(self._current_run_id() or "").strip() or "run-unknown"
         return f"{run_id}:{resolved_turn_id}:{resolved_input_event_key}"
+
+    def _next_synthetic_input_event_key(self, origin: str) -> str:
+        counter = int(getattr(self, "_synthetic_input_event_counter", 0)) + 1
+        self._synthetic_input_event_counter = counter
+        normalized_origin = str(origin or "unknown").strip().lower() or "unknown"
+        return f"synthetic_{normalized_origin}_{counter}"
+
+    def _ensure_response_create_correlation(
+        self,
+        *,
+        response_create_event: dict[str, Any],
+        origin: str,
+        turn_id: str,
+    ) -> str:
+        response_payload = response_create_event.setdefault("response", {})
+        metadata = response_payload.setdefault("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+            response_payload["metadata"] = metadata
+        input_event_key = str(
+            metadata.get("input_event_key")
+            or getattr(self, "_current_input_event_key", "")
+            or ""
+        ).strip()
+        if not input_event_key:
+            input_event_key = self._next_synthetic_input_event_key(origin)
+            metadata["input_event_key"] = input_event_key
+        metadata.setdefault("turn_id", turn_id)
+        return input_event_key
+
+    def _response_has_safety_override(self, response_create_event: dict[str, Any]) -> bool:
+        metadata = self._extract_response_create_metadata(response_create_event)
+        return str(metadata.get("safety_override", "")).strip().lower() in {"true", "1", "yes"}
+
+    def _load_topic_suppression_preferences(self) -> None:
+        profile_manager = getattr(self, "profile_manager", None)
+        if profile_manager is None:
+            return
+        try:
+            profile = profile_manager.load_active_profile()
+        except Exception:
+            return
+        prefs = profile.preferences if isinstance(profile.preferences, dict) else {}
+        suppressed = prefs.get("suppressed_topics")
+        if not isinstance(suppressed, list):
+            return
+        self._suppressed_topics = {str(topic).strip().lower() for topic in suppressed if str(topic).strip()}
+
+    def _persist_topic_suppression_preferences(self) -> None:
+        profile_manager = getattr(self, "profile_manager", None)
+        if profile_manager is None:
+            return
+        try:
+            profile = profile_manager.load_active_profile()
+            prefs = dict(profile.preferences or {})
+            prefs["suppressed_topics"] = sorted(self._suppressed_topics)
+            profile_manager.update_active_profile_fields(preferences=prefs)
+        except Exception as exc:
+            logger.debug("topic_suppression_persist_failed error=%s", exc)
+
+    def _update_topic_suppression_from_user_text(self, text: str) -> None:
+        normalized = " ".join((text or "").strip().lower().split())
+        if not normalized:
+            return
+        if "stop talking about battery" in normalized:
+            if "battery" not in self._suppressed_topics:
+                self._suppressed_topics.add("battery")
+                self._persist_topic_suppression_preferences()
+                logger.info("topic_suppression_updated topic=battery suppressed=true")
+            return
+        if "resume talking about battery" in normalized or "you can talk about battery" in normalized:
+            if "battery" in self._suppressed_topics:
+                self._suppressed_topics.discard("battery")
+                self._persist_topic_suppression_preferences()
+                logger.info("topic_suppression_updated topic=battery suppressed=false")
+
+    def _is_battery_safety_override(self, event: Event) -> bool:
+        metadata = event.metadata or {}
+        severity = str(metadata.get("severity", "")).strip().lower()
+        if severity != "critical":
+            return False
+        percent = float(metadata.get("percent_of_range", 1.0)) * 100.0
+        return percent <= self._battery_redline_percent
 
     def _next_input_event_key(self) -> str:
         self._input_event_key_counter += 1
@@ -1905,6 +2007,21 @@ class RealtimeAPI:
                 normalized_input_event_key or "unknown",
                 removed_pending,
                 dropped,
+                reason,
+            )
+
+    def _clear_all_pending_response_creates(self, *, reason: str) -> None:
+        removed_pending = 1 if self._pending_response_create is not None else 0
+        removed_queued = len(self._response_create_queue)
+        self._pending_response_create = None
+        self._response_create_queue.clear()
+        self._sync_pending_response_create_queue()
+        if removed_pending or removed_queued:
+            logger.info(
+                "response_contenders_cleared run_id=%s turn_id=all input_event_key=all removed_pending=%s removed_queued=%s reason=%s",
+                self._current_run_id() or "",
+                removed_pending,
+                removed_queued,
                 reason,
             )
 
@@ -3473,11 +3590,25 @@ class RealtimeAPI:
         memory_brief_note: str | None,
     ) -> bool:
         turn_id = self._resolve_response_create_turn_id(origin=origin, response_create_event=response_create_event)
+        current_input_event_key = self._ensure_response_create_correlation(
+            response_create_event=response_create_event,
+            origin=origin,
+            turn_id=turn_id,
+        )
         response_metadata = self._extract_response_create_metadata(response_create_event)
         normalized_origin = str(origin or "").strip().lower()
         suppression_turns = getattr(self, "_preference_recall_suppressed_turns", set())
-        current_input_event_key = str(response_metadata.get("input_event_key") or getattr(self, "_current_input_event_key", "") or "").strip()
         canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=current_input_event_key)
+        created_keys = getattr(self, "_response_created_canonical_keys", set())
+        if canonical_key in created_keys and not self._response_has_safety_override(response_create_event):
+            logger.info(
+                "response_schedule_blocked run_id=%s turn_id=%s origin=%s mode=queued reason=canonical_response_already_created canonical_key=%s",
+                self._current_run_id() or "",
+                turn_id,
+                normalized_origin,
+                canonical_key,
+            )
+            return False
         suppression_active = turn_id in suppression_turns and not current_input_event_key
         if suppression_active and normalized_origin == "server_auto":
             self._drop_suppressed_scheduled_response_creates(turn_id=turn_id, origin=normalized_origin)
@@ -3631,11 +3762,25 @@ class RealtimeAPI:
             except Exception as exc:  # pragma: no cover - defensive fail-open
                 logger.warning("Memory brief injection skipped due to error: %s", exc)
         turn_id = self._resolve_response_create_turn_id(origin=origin, response_create_event=response_create_event)
+        current_input_event_key = self._ensure_response_create_correlation(
+            response_create_event=response_create_event,
+            origin=origin,
+            turn_id=turn_id,
+        )
         response_metadata = self._extract_response_create_metadata(response_create_event)
         normalized_origin = str(origin or "").strip().lower()
         suppression_turns = getattr(self, "_preference_recall_suppressed_turns", set())
-        current_input_event_key = str(response_metadata.get("input_event_key") or getattr(self, "_current_input_event_key", "") or "").strip()
         canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=current_input_event_key)
+        created_keys = getattr(self, "_response_created_canonical_keys", set())
+        if canonical_key in created_keys and not self._response_has_safety_override(response_create_event):
+            logger.info(
+                "response_schedule_blocked run_id=%s turn_id=%s origin=%s mode=direct reason=canonical_response_already_created canonical_key=%s",
+                self._current_run_id() or "",
+                turn_id,
+                normalized_origin,
+                canonical_key,
+            )
+            return False
         suppression_active = turn_id in suppression_turns and not current_input_event_key
         if suppression_active and normalized_origin == "server_auto":
             self._drop_suppressed_scheduled_response_creates(turn_id=turn_id, origin=normalized_origin)
@@ -6041,6 +6186,8 @@ class RealtimeAPI:
                     current_input_event_key = str(getattr(self, "_current_input_event_key", "") or "").strip()
                     if current_input_event_key:
                         input_event_key = current_input_event_key
+                if not input_event_key:
+                    input_event_key = self._next_synthetic_input_event_key("server_auto")
                 self._active_server_auto_input_event_key = input_event_key
                 if input_event_key:
                     self._mark_transcript_response_outcome(
@@ -6065,6 +6212,8 @@ class RealtimeAPI:
                     )
             else:
                 current_input_event_key = str(getattr(self, "_current_input_event_key", "") or "").strip()
+                if not current_input_event_key:
+                    current_input_event_key = self._next_synthetic_input_event_key(origin)
                 if current_input_event_key:
                     self._mark_transcript_response_outcome(
                         input_event_key=current_input_event_key,
@@ -6082,6 +6231,11 @@ class RealtimeAPI:
                     current_input_event_key or "unknown",
                     canonical_key,
                 )
+            created_keys = getattr(self, "_response_created_canonical_keys", None)
+            if not isinstance(created_keys, set):
+                created_keys = set()
+                self._response_created_canonical_keys = created_keys
+            created_keys.add(canonical_key)
             suppression_until = float(getattr(self, "_preference_recall_response_suppression_until", 0.0) or 0.0)
             suppression_window_active = suppression_until > time.monotonic()
             active_input_event_key = str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip()
@@ -6326,6 +6480,7 @@ class RealtimeAPI:
                     manager.mark_talk_over_incident()
                 manager.cancel_all(reason="speech_active")
             if talk_over_active:
+                self._clear_all_pending_response_creates(reason="talk_over_abort")
                 turn_id = self._current_turn_id_or_unknown()
                 input_event_key = str(getattr(self, "_current_input_event_key", "") or "").strip()
                 self._clear_pending_response_contenders(
@@ -7723,6 +7878,7 @@ class RealtimeAPI:
         request_response: bool = True,
         *,
         bypass_response_suppression: bool = False,
+        safety_override: bool = False,
     ) -> None:
         self._record_user_input(text_message, source="text_message")
         if await self._handle_stop_word(text_message, self.websocket, source="text_message"):
@@ -7768,6 +7924,7 @@ class RealtimeAPI:
                 metadata={
                     "text_length": len(text_message),
                     "bypass_limits": bypass_response_suppression,
+                    "safety_override": safety_override,
                 },
                 priority=self._get_injection_priority("text_message"),
             )
@@ -7894,6 +8051,8 @@ class RealtimeAPI:
             "stimulus": json.dumps(metadata, sort_keys=True),
             "origin": "injection",
         }
+        if bool(metadata.get("safety_override", False)):
+            response_metadata["safety_override"] = "true"
         if self._has_active_confirmation_token():
             response_metadata["approval_flow"] = "true"
         memory_brief_note = self._consume_pending_memory_brief_note()

@@ -41,6 +41,9 @@ def _make_api_stub() -> RealtimeAPI:
     api._injection_response_trigger_timestamps = {}
     api._injection_response_timestamps = []
     api._pending_research_request = None
+    api._suppressed_topics = set()
+    api._battery_redline_percent = 10.0
+    api._synthetic_input_event_counter = 0
     return api
 
 
@@ -111,6 +114,25 @@ def test_battery_query_context_allows_response() -> None:
         metadata={"severity": "info", "event_type": "status", "transition": "steady_info"},
     )
     assert api._should_request_battery_response(info_event, fallback=False) is True
+
+
+def test_battery_topic_suppression_blocks_non_redline_alerts() -> None:
+    api = _make_api_stub()
+    api._record_user_input("stop talking about battery", source="text_message")
+
+    suppressed_warning = Event(
+        source="battery",
+        kind="status",
+        metadata={"severity": "warning", "event_type": "status", "percent_of_range": 0.30},
+    )
+    assert api._should_request_battery_response(suppressed_warning, fallback=False) is False
+
+    redline_critical = Event(
+        source="battery",
+        kind="status",
+        metadata={"severity": "critical", "event_type": "status", "percent_of_range": 0.05},
+    )
+    assert api._should_request_battery_response(redline_critical, fallback=False) is True
 
 
 def test_send_text_message_battery_bypass_sets_metadata() -> None:
