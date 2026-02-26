@@ -8,6 +8,7 @@ from collections import deque
 from types import SimpleNamespace
 
 import ai.tools as ai_tools
+import ai.realtime_api as realtime_api
 from ai.realtime_api import InteractionState, RealtimeAPI
 from core.logging import logger
 from services.memory_manager import MemoryManager, MemoryScope
@@ -505,9 +506,11 @@ def test_handle_error_treats_no_active_response_cancel_as_noop(monkeypatch) -> N
     api = _make_api_stub()
     info_logs: list[str] = []
     error_logs: list[str] = []
+    emitted_error_events: list[str] = []
 
     monkeypatch.setattr(logger, "info", lambda msg, *args, **kwargs: info_logs.append(msg % args if args else msg))
     monkeypatch.setattr(logger, "error", lambda msg, *args, **kwargs: error_logs.append(msg % args if args else msg))
+    monkeypatch.setattr(realtime_api, "log_error", lambda message: emitted_error_events.append(message))
 
     asyncio.run(
         api.handle_error(
@@ -518,6 +521,7 @@ def test_handle_error_treats_no_active_response_cancel_as_noop(monkeypatch) -> N
 
     assert any("response_cancel_noop" in entry and "reason=no_active_response" in entry for entry in info_logs)
     assert not any("Unhandled error" in entry for entry in error_logs)
+    assert not emitted_error_events
 
 def test_preference_recall_transcript_path_emits_memory_answer_without_model_followup(monkeypatch) -> None:
     api = _make_api_stub()
