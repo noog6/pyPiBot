@@ -373,6 +373,70 @@ def test_preference_recall_short_circuits_server_auto_response(monkeypatch) -> N
     assert ws.sent == ['{"type": "response.cancel"}']
 
 
+
+
+class _FailingCancelWs:
+    def __init__(self, error_message: str) -> None:
+        self.error_message = error_message
+        self.sent: list[str] = []
+
+    async def send(self, payload: str) -> None:
+        self.sent.append(payload)
+        if payload == '{"type": "response.cancel"}':
+            raise RuntimeError(self.error_message)
+
+
+def test_preference_recall_cancel_no_active_response_is_noop(monkeypatch) -> None:
+    api = _make_api_stub()
+    api._active_response_origin = "server_auto"
+    api._response_in_flight = True
+    sent_messages: list[str] = []
+
+    async def _fake_recall(**_kwargs):
+        return {"memories": [{"content": "User prefers Vim."}]}
+
+    async def _fake_send(message: str, _ws, **_kwargs) -> None:
+        sent_messages.append(message)
+
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "recall_memories", _fake_recall)
+    monkeypatch.setattr(api, "send_assistant_message", _fake_send)
+
+    ws = _FailingCancelWs("Cancellation failed: no active response found")
+    info_logs: list[str] = []
+    monkeypatch.setattr(logger, "info", lambda msg, *args, **kwargs: info_logs.append(msg % args if args else msg))
+
+    handled = asyncio.run(
+        api._maybe_handle_preference_recall_intent(
+            "Which editor do I prefer?",
+            ws,
+            source="text_message",
+        )
+    )
+
+    assert handled is True
+    assert sent_messages
+    assert "Vim" in sent_messages[0]
+    assert any("response_cancel_noop" in entry and "reason=no_active_response" in entry for entry in info_logs)
+
+
+def test_handle_error_treats_no_active_response_cancel_as_noop(monkeypatch) -> None:
+    api = _make_api_stub()
+    info_logs: list[str] = []
+    error_logs: list[str] = []
+
+    monkeypatch.setattr(logger, "info", lambda msg, *args, **kwargs: info_logs.append(msg % args if args else msg))
+    monkeypatch.setattr(logger, "error", lambda msg, *args, **kwargs: error_logs.append(msg % args if args else msg))
+
+    asyncio.run(
+        api.handle_error(
+            {"error": {"message": "Cancellation failed: no active response found"}},
+            _Ws(),
+        )
+    )
+
+    assert any("response_cancel_noop" in entry and "reason=no_active_response" in entry for entry in info_logs)
+    assert not any("Unhandled error" in entry for entry in error_logs)
+
 def test_preference_recall_transcript_path_emits_memory_answer_without_model_followup(monkeypatch) -> None:
     api = _make_api_stub()
     ws = _RecordingWs()

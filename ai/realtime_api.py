@@ -1473,7 +1473,28 @@ class RealtimeAPI:
         cancel_event = {"type": "response.cancel"}
         log_ws_event("Outgoing", cancel_event)
         self._track_outgoing_event(cancel_event, origin="preference_recall_guard")
-        await websocket.send(json.dumps(cancel_event))
+        try:
+            await websocket.send(json.dumps(cancel_event))
+        except Exception as exc:
+            message = str(exc)
+            if "no active response found" in message.lower():
+                logger.info(
+                    "response_cancel_noop run_id=%s turn_id=%s reason=no_active_response",
+                    self._current_run_id() or "",
+                    turn_id,
+                )
+                logger.debug(
+                    "response_cancel_noop_detail run_id=%s turn_id=%s error=%s",
+                    self._current_run_id() or "",
+                    turn_id,
+                    message,
+                )
+                return
+            logger.exception(
+                "response_cancel_failed run_id=%s turn_id=%s origin=preference_recall_guard",
+                self._current_run_id() or "",
+                turn_id,
+            )
 
     def _emit_preference_recall_skip_trace_if_needed(self, *, turn_id: str | None) -> None:
         pending = self._pending_preference_recall_trace if isinstance(self._pending_preference_recall_trace, dict) else None
@@ -6926,6 +6947,13 @@ class RealtimeAPI:
             logger.warning("Received 'active response' error despite response.create serialization.")
             self.response_in_progress = True
             self._response_in_flight = True
+        elif "no active response found" in error_message.lower():
+            logger.info(
+                "response_cancel_noop run_id=%s turn_id=%s reason=no_active_response",
+                self._current_run_id() or "",
+                self._current_turn_id_or_unknown(),
+            )
+            logger.debug("Ignoring cancellation error with no active response: %s", error_message)
         else:
             logger.error("Unhandled error: %s", error_message)
 
