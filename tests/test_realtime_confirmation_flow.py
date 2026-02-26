@@ -71,6 +71,12 @@ def _make_api_stub() -> RealtimeAPI:
     api._active_response_confirmation_guarded = False
     api._active_response_origin = "unknown"
     api._active_response_id = None
+    api._preference_recall_suppressed_turns = set()
+    api._pending_preference_recall_trace = None
+    api._preference_recall_cache = {}
+    api._preference_recall_cooldown_s = 0.0
+    api._memory_retrieval_scope = "user_global"
+    api._current_run_id = lambda: "run-test"
     api._confirmation_timeout_markers = {}
     api._confirmation_timeout_causes = {}
     api._recent_confirmation_outcomes = {}
@@ -120,8 +126,29 @@ def _make_api_stub() -> RealtimeAPI:
     api._intent_state_ttl_s = 300.0
     api._debug_governance_decisions = False
     api._active_utterance = None
+    api.audio_player = None
+    api._audio_accum = bytearray()
+    api._mic_receive_on_first_audio = False
+    api._speaking_started = False
+    api._assistant_reply_accum = ""
+    api._tool_call_records = []
+    api._last_tool_call_results = []
+    api._last_response_metadata = {}
+    api._reflection_enqueued = False
+    api._pending_image_stimulus = None
+    api._pending_image_flush_after_playback = False
+    api._maybe_enqueue_reflection = lambda *_args, **_kwargs: None
+    api._is_user_approved_interrupt_response = lambda *_args, **_kwargs: False
     api.mic = _Mic()
     return api
+
+
+class _CollectingWs:
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+
+    async def send(self, payload: str) -> None:
+        self.sent.append(json.loads(payload))
 
 
 def _configure_budget_storage(monkeypatch, tmp_path):
@@ -2630,6 +2657,85 @@ def test_response_created_server_auto_pending_suppresses_spoken_output_when_remi
     assert api._active_response_confirmation_guarded is False
     assert api.assistant_reply == ""
     assert sent_messages == []
+
+
+def test_preference_recall_cancels_in_flight_server_auto_response() -> None:
+    api = _make_api_stub()
+    api.websocket = _CollectingWs()
+    api._active_response_origin = "server_auto"
+    api._response_in_flight = True
+    api._current_response_turn_id = "turn_388"
+    api._is_preference_recall_intent = lambda *_args, **_kwargs: (True, ["preference"])
+
+    async def _recall_memories(**_kwargs):
+        return {"memories": []}
+
+    async def _assistant(*_args, **_kwargs):
+        return None
+
+    api.send_assistant_message = _assistant
+
+    import ai.realtime_api as realtime_module
+
+    prior = realtime_module.function_map.get("recall_memories")
+    realtime_module.function_map["recall_memories"] = _recall_memories
+    try:
+        handled = asyncio.run(
+            api._maybe_handle_preference_recall_intent(
+                "what preference do you remember",
+                api.websocket,
+                source="input_audio_transcription",
+            )
+        )
+    finally:
+        if prior is None:
+            realtime_module.function_map.pop("recall_memories", None)
+        else:
+            realtime_module.function_map["recall_memories"] = prior
+
+    assert handled is True
+    assert {event.get("type") for event in api.websocket.sent} == {"response.cancel"}
+    assert "turn_388" in api._preference_recall_suppressed_turns
+
+
+def test_preference_recall_marks_turn_to_suppress_future_server_auto_created() -> None:
+    api = _make_api_stub()
+    api.websocket = _CollectingWs()
+    api._current_response_turn_id = "turn_389"
+    api._response_in_flight = False
+    api._is_preference_recall_intent = lambda *_args, **_kwargs: (True, ["preference"])
+
+    async def _recall_memories(**_kwargs):
+        return {"memories": [{"content": "You prefer concise updates."}]}
+
+    async def _assistant(*_args, **_kwargs):
+        return None
+
+    api.send_assistant_message = _assistant
+    api._pending_response_create_origins = deque(["server_auto"])
+
+    import ai.realtime_api as realtime_module
+
+    prior = realtime_module.function_map.get("recall_memories")
+    realtime_module.function_map["recall_memories"] = _recall_memories
+    try:
+        handled = asyncio.run(
+            api._maybe_handle_preference_recall_intent(
+                "what's my preference",
+                api.websocket,
+                source="input_audio_transcription",
+            )
+        )
+        asyncio.run(api.handle_event({"type": "response.created", "response": {"id": "resp_after"}}, api.websocket))
+    finally:
+        if prior is None:
+            realtime_module.function_map.pop("recall_memories", None)
+        else:
+            realtime_module.function_map["recall_memories"] = prior
+
+    assert handled is True
+    assert api._active_response_preference_guarded is True
+    assert api.websocket.sent[-1].get("type") == "response.cancel"
 
 
 def test_send_confirmation_reminder_respects_interval_and_max_count() -> None:

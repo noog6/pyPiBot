@@ -725,7 +725,7 @@ class RealtimeAPI:
         self._active_response_confirmation_guarded = False
         self._active_response_preference_guarded = False
         self._active_response_origin = "unknown"
-        self._preference_recall_response_suppression_until = 0.0
+        self._preference_recall_suppressed_turns: set[str] = set()
         self._pending_alternate_intent_override: dict[str, Any] | None = None
         self._last_executed_tool_call: dict[str, Any] | None = None
         self._intent_ledger: dict[str, IntentLedgerEntry] = {}
@@ -1447,6 +1447,27 @@ class RealtimeAPI:
     def _clear_preference_recall_candidate(self) -> None:
         self._pending_preference_recall_trace = None
 
+    def _current_turn_id_or_unknown(self) -> str:
+        turn_id = str(getattr(self, "_current_response_turn_id", "") or "").strip()
+        return turn_id or "turn-unknown"
+
+    async def _suppress_preference_recall_server_auto_response(self, websocket: Any) -> None:
+        turn_id = self._current_turn_id_or_unknown()
+        self._preference_recall_suppressed_turns.add(turn_id)
+        logger.info(
+            "preference_recall_response_suppressed run_id=%s turn_id=%s reason=handled_preference_recall",
+            self._current_run_id() or "",
+            turn_id,
+        )
+        if str(getattr(self, "_active_response_origin", "")).strip().lower() != "server_auto":
+            return
+        if not bool(getattr(self, "_response_in_flight", False)):
+            return
+        cancel_event = {"type": "response.cancel"}
+        log_ws_event("Outgoing", cancel_event)
+        self._track_outgoing_event(cancel_event, origin="preference_recall_guard")
+        await websocket.send(json.dumps(cancel_event))
+
     def _emit_preference_recall_skip_trace_if_needed(self, *, turn_id: str | None) -> None:
         pending = self._pending_preference_recall_trace if isinstance(self._pending_preference_recall_trace, dict) else None
         if not pending:
@@ -1532,7 +1553,7 @@ class RealtimeAPI:
             )
 
         memories = result_payload.get("memories") if isinstance(result_payload, dict) else None
-        self._preference_recall_response_suppression_until = time.monotonic() + 2.5
+        await self._suppress_preference_recall_server_auto_response(websocket)
         if not isinstance(memories, list) or not memories:
             await self.send_assistant_message(
                 "I don’t have that saved yet. If you share it, I can remember it for next time.",
@@ -5267,10 +5288,9 @@ class RealtimeAPI:
             self._active_response_origin = str(origin)
             pending_confirmation_active = self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase()
             self._active_response_preference_guarded = False
-            suppression_until = float(getattr(self, "_preference_recall_response_suppression_until", 0.0))
-            if origin == "server_auto" and suppression_until > 0.0 and time.monotonic() <= suppression_until:
+            turn_id = self._current_turn_id_or_unknown()
+            if origin == "server_auto" and turn_id in self._preference_recall_suppressed_turns:
                 self._active_response_preference_guarded = True
-                self._preference_recall_response_suppression_until = 0.0
                 logger.info(
                     "PREFERENCE_RECALL_RESPONSE_GUARDED origin=%s response_id=%s",
                     origin,
@@ -6597,6 +6617,7 @@ class RealtimeAPI:
         self._response_done_serial += 1
         self.response_in_progress = False
         self._response_in_flight = False
+        self._preference_recall_suppressed_turns.discard(self._current_turn_id_or_unknown())
         was_confirmation_guarded = self._active_response_confirmation_guarded
         self._active_response_id = None
         self._active_response_confirmation_guarded = False
@@ -6673,6 +6694,7 @@ class RealtimeAPI:
     async def handle_response_completed(self, event: dict[str, Any] | None = None) -> None:
         self.response_in_progress = False
         self._response_in_flight = False
+        self._preference_recall_suppressed_turns.discard(self._current_turn_id_or_unknown())
         self._active_response_id = None
         self._active_response_confirmation_guarded = False
         self._active_response_preference_guarded = False
