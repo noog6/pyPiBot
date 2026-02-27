@@ -948,6 +948,14 @@ class RealtimeAPI:
             reason or "unknown",
             details or "",
         )
+        self._log_response_site_debug(
+            site="response_not_scheduled",
+            turn_id=turn_id,
+            input_event_key=normalized_key,
+            canonical_key=self._canonical_utterance_key(turn_id=turn_id, input_event_key=normalized_key),
+            origin=str(getattr(self, "_active_response_origin", "") or "unknown").strip() or "unknown",
+            trigger=reason or "unknown",
+        )
 
     async def _watch_transcript_response_outcome(
         self,
@@ -2019,6 +2027,51 @@ class RealtimeAPI:
             existing_response_id or "",
         )
 
+    def _log_response_site_debug(
+        self,
+        *,
+        site: str,
+        turn_id: str,
+        input_event_key: str | None,
+        canonical_key: str | None,
+        origin: str,
+        trigger: str,
+    ) -> None:
+        normalized_input_event_key = str(input_event_key or "").strip()
+        resolved_canonical_key = str(canonical_key or "").strip() or self._canonical_utterance_key(
+            turn_id=turn_id,
+            input_event_key=normalized_input_event_key,
+        )
+        obligations = getattr(self, "_response_obligations", None)
+        obligation_present = (
+            isinstance(obligations, dict)
+            and self._response_obligation_key(
+                turn_id=turn_id,
+                input_event_key=normalized_input_event_key,
+            )
+            in obligations
+        )
+        suppression_reason = self._resptrace_suppression_reason(
+            turn_id=turn_id,
+            input_event_key=normalized_input_event_key,
+        )
+        logger.debug(
+            "%s run_id=%s turn_id=%s input_event_key=%s canonical_key=%s origin=%s trigger=%s "
+            "queue_len=%s pending_server_auto=%s suppression_active=%s obligation_present=%s response_done_serial=%s",
+            site,
+            self._current_run_id() or "",
+            turn_id,
+            normalized_input_event_key or "unknown",
+            resolved_canonical_key,
+            origin,
+            trigger,
+            len(getattr(self, "_response_create_queue", deque()) or ()),
+            len(getattr(self, "_pending_server_auto_input_event_keys", deque()) or ()),
+            suppression_reason != "none",
+            obligation_present,
+            self._response_done_serial,
+        )
+
     def _set_response_obligation(self, *, turn_id: str, input_event_key: str, source: str) -> None:
         obligation_key = self._response_obligation_key(turn_id=turn_id, input_event_key=input_event_key)
         obligations = getattr(self, "_response_obligations", None)
@@ -2352,6 +2405,14 @@ class RealtimeAPI:
             self._current_run_id() or "",
             turn_id,
             input_event_key or "unknown",
+        )
+        self._log_response_site_debug(
+            site="preference_recall_response_suppressed",
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            canonical_key=self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key),
+            origin="server_auto",
+            trigger="handled_preference_recall",
         )
         pending_after = 1 if isinstance(getattr(self, "_pending_response_create", None), PendingResponseCreate) else 0
         queue_after = len(getattr(self, "_response_create_queue", deque()) or ())
@@ -4063,6 +4124,14 @@ class RealtimeAPI:
                 candidate.origin,
                 reason,
             )
+            self._log_response_site_debug(
+                site="response_create_scheduled",
+                turn_id=turn_id,
+                input_event_key=current_input_event_key,
+                canonical_key=canonical_key,
+                origin=normalized_origin,
+                trigger=reason,
+            )
             logger.debug(
                 "[RESPTRACE] response_create_request run_id=%s turn_id=%s origin=%s trigger_reason=%s input_event_key=%s "
                 "canonical_key=%s sent_now=false scheduled=true replaced=false queue_len=%s pending_server_auto_len=%s "
@@ -4112,6 +4181,14 @@ class RealtimeAPI:
                 previous.origin,
                 candidate.origin,
                 replacement_reason,
+            )
+            self._log_response_site_debug(
+                site="response_create_replaced",
+                turn_id=turn_id,
+                input_event_key=current_input_event_key,
+                canonical_key=canonical_key,
+                origin=normalized_origin,
+                trigger=replacement_reason,
             )
             logger.debug(
                 "[RESPTRACE] response_create_request run_id=%s turn_id=%s origin=%s trigger_reason=%s input_event_key=%s "
@@ -6920,6 +6997,14 @@ class RealtimeAPI:
                     input_event_key or "unknown",
                     canonical_key,
                 )
+                self._log_response_site_debug(
+                    site="server_auto_response_linked",
+                    turn_id=turn_id,
+                    input_event_key=input_event_key,
+                    canonical_key=canonical_key,
+                    origin=origin,
+                    trigger="response_created",
+                )
                 if not input_event_key:
                     logger.info(
                         "memory_intent_decision_path run_id=%s turn_id=%s decision_path=speculative_server_auto",
@@ -7016,6 +7101,14 @@ class RealtimeAPI:
                     "PREFERENCE_RECALL_RESPONSE_GUARDED origin=%s response_id=%s",
                     origin,
                     self._active_response_id or "unknown",
+                )
+                self._log_response_site_debug(
+                    site="PREFERENCE_RECALL_RESPONSE_GUARDED",
+                    turn_id=turn_id,
+                    input_event_key=active_input_event_key,
+                    canonical_key=canonical_key,
+                    origin=origin,
+                    trigger="preference_recall_suppressed",
                 )
                 cancel_event = {"type": "response.cancel"}
                 log_ws_event("Outgoing", cancel_event)
