@@ -4343,7 +4343,58 @@ class RealtimeAPI:
         )
         return True
 
-    async def _drain_response_create_queue(self) -> None:
+    async def _drain_response_create_queue(self, source_trigger: str | None = None) -> None:
+        source_candidate = source_trigger
+        if source_candidate is None:
+            source_candidate = getattr(self, "_response_create_queue_drain_source", "explicit_caller")
+        self._response_create_queue_drain_source = "explicit_caller"
+        normalized_source_trigger = str(source_candidate or "").strip().lower()
+        if normalized_source_trigger not in {"response_done", "playback_complete"}:
+            normalized_source_trigger = "explicit_caller"
+
+        selected_pending_origin = "none"
+        selected_pending_turn_id = "none"
+        selected_pending_input_event_key = "unknown"
+        selected_pending_canonical_key = "unknown"
+        selected_pending_trigger = "none"
+        selected_pending_enqueued_done_serial = "none"
+        selected_pending_serial_relation = "none"
+        drain_result = "none"
+
+        def _serial_relation(serial: int | None) -> str:
+            if serial is None:
+                return "none"
+            if serial < self._response_done_serial:
+                return "older"
+            if serial > self._response_done_serial:
+                return "newer"
+            return "equal"
+
+        def _emit_drain_trace(*, stage: str, queue_len_before_value: int, queue_len_after_value: int) -> None:
+            logger.debug(
+                "[RESPTRACE] queue_drain_%s source_trigger=%s run_id=%s turn_id=%s input_event_key=%s canonical_key=%s "
+                "queue_len_before=%s queue_len_after=%s selected_pending_origin=%s selected_pending_turn_id=%s "
+                "selected_pending_input_event_key=%s selected_pending_canonical_key=%s selected_pending_trigger=%s "
+                "enqueued_done_serial=%s enqueued_done_serial_relation=%s response_done_serial=%s drain_result=%s",
+                stage,
+                normalized_source_trigger,
+                self._current_run_id() or "",
+                trace_turn_id,
+                trace_input_event_key or "unknown",
+                trace_canonical_key,
+                queue_len_before_value,
+                queue_len_after_value,
+                selected_pending_origin,
+                selected_pending_turn_id,
+                selected_pending_input_event_key,
+                selected_pending_canonical_key,
+                selected_pending_trigger,
+                selected_pending_enqueued_done_serial,
+                selected_pending_serial_relation,
+                self._response_done_serial,
+                drain_result,
+            )
+
         current_state = getattr(self.state_manager, "state", InteractionState.IDLE)
         queue_len_before = len(getattr(self, "_response_create_queue", deque()) or ())
         trace_turn_id = self._current_turn_id_or_unknown()
@@ -4352,27 +4403,21 @@ class RealtimeAPI:
             turn_id=trace_turn_id,
             input_event_key=trace_input_event_key,
         )
+        _emit_drain_trace(
+            stage="pre",
+            queue_len_before_value=queue_len_before,
+            queue_len_after_value=queue_len_before,
+        )
         if (
             self._response_in_flight
             or self._audio_playback_busy
             or current_state == InteractionState.LISTENING
         ):
-            logger.debug(
-                "[RESPTRACE] queue_drain run_id=%s turn_id=%s input_event_key=%s canonical_key=%s queue_len_before=%s "
-                "picked_origin=%s picked_turn_id=%s picked_input_event_key=%s skipped_reason=%s queue_len_after=%s "
-                "active_key_for_turn=%s response_done_serial=%s",
-                self._current_run_id() or "",
-                trace_turn_id,
-                trace_input_event_key or "unknown",
-                trace_canonical_key,
-                queue_len_before,
-                "none",
-                "none",
-                "unknown",
-                "state_or_flight_gate",
-                queue_len_before,
-                self._active_input_event_key_for_turn(trace_turn_id) or "unknown",
-                self._response_done_serial,
+            drain_result = "state_or_flight_gate"
+            _emit_drain_trace(
+                stage="post",
+                queue_len_before_value=queue_len_before,
+                queue_len_after_value=queue_len_before,
             )
             return
 
@@ -4394,6 +4439,17 @@ class RealtimeAPI:
                 picked_origin = str(queued.get("origin") or "unknown")
                 picked_turn_id = str(queued.get("turn_id") or "turn-unknown")
                 picked_input_event_key = str(metadata.get("input_event_key") or "").strip() or "unknown"
+                enqueued_done_serial_value = int(queued.get("enqueued_done_serial") or self._response_done_serial)
+                selected_pending_origin = picked_origin
+                selected_pending_turn_id = picked_turn_id
+                selected_pending_input_event_key = picked_input_event_key
+                selected_pending_canonical_key = self._canonical_utterance_key(
+                    turn_id=picked_turn_id,
+                    input_event_key=str(metadata.get("input_event_key") or "").strip(),
+                )
+                selected_pending_trigger = queued_trigger
+                selected_pending_enqueued_done_serial = str(enqueued_done_serial_value)
+                selected_pending_serial_relation = _serial_relation(enqueued_done_serial_value)
                 self._pending_response_create = PendingResponseCreate(
                     websocket=queued["websocket"],
                     event=queued["event"],
@@ -4405,32 +4461,32 @@ class RealtimeAPI:
                     debug_context=queued.get("debug_context"),
                     memory_brief_note=queued.get("memory_brief_note"),
                     queued_reminder_key=self._queued_response_reminder_key(queued),
-                    enqueued_done_serial=int(queued.get("enqueued_done_serial") or self._response_done_serial),
+                    enqueued_done_serial=enqueued_done_serial_value,
                 )
                 break
         if self._pending_response_create is None:
-            logger.debug(
-                "[RESPTRACE] queue_drain run_id=%s turn_id=%s input_event_key=%s canonical_key=%s queue_len_before=%s "
-                "picked_origin=%s picked_turn_id=%s picked_input_event_key=%s skipped_reason=%s queue_len_after=%s "
-                "active_key_for_turn=%s response_done_serial=%s",
-                self._current_run_id() or "",
-                trace_turn_id,
-                trace_input_event_key or "unknown",
-                trace_canonical_key,
-                queue_len_before,
-                picked_origin,
-                picked_turn_id,
-                picked_input_event_key,
-                skipped_reason,
-                len(getattr(self, "_response_create_queue", deque()) or ()),
-                self._active_input_event_key_for_turn(trace_turn_id) or "unknown",
-                self._response_done_serial,
+            drain_result = skipped_reason if skipped_reason != "none" else "no_pending"
+            _emit_drain_trace(
+                stage="post",
+                queue_len_before_value=queue_len_before,
+                queue_len_after_value=len(getattr(self, "_response_create_queue", deque()) or ()),
             )
             return
 
         pending = self._pending_response_create
         response_metadata = self._extract_response_create_metadata(pending.event)
         queued_trigger = self._extract_response_create_trigger(response_metadata)
+        pending_input_event_key = str(response_metadata.get("input_event_key") or "").strip()
+        selected_pending_origin = pending.origin
+        selected_pending_turn_id = pending.turn_id
+        selected_pending_input_event_key = pending_input_event_key or "unknown"
+        selected_pending_canonical_key = self._canonical_utterance_key(
+            turn_id=pending.turn_id,
+            input_event_key=pending_input_event_key,
+        )
+        selected_pending_trigger = queued_trigger
+        selected_pending_enqueued_done_serial = str(pending.enqueued_done_serial)
+        selected_pending_serial_relation = _serial_relation(pending.enqueued_done_serial)
         if not self._can_release_queued_response_create(queued_trigger, response_metadata):
             if pending.reason != "legacy_queue_hydration":
                 self._sync_pending_response_create_queue()
@@ -4439,25 +4495,11 @@ class RealtimeAPI:
                 pending.origin,
                 queued_trigger,
             )
-            logger.debug(
-                "[RESPTRACE] queue_drain run_id=%s turn_id=%s input_event_key=%s canonical_key=%s queue_len_before=%s "
-                "picked_origin=%s picked_turn_id=%s picked_input_event_key=%s skipped_reason=%s queue_len_after=%s "
-                "active_key_for_turn=%s response_done_serial=%s",
-                self._current_run_id() or "",
-                pending.turn_id,
-                str(response_metadata.get("input_event_key") or "").strip() or "unknown",
-                self._canonical_utterance_key(
-                    turn_id=pending.turn_id,
-                    input_event_key=str(response_metadata.get("input_event_key") or "").strip(),
-                ),
-                queue_len_before,
-                pending.origin,
-                pending.turn_id,
-                str(response_metadata.get("input_event_key") or "").strip() or "unknown",
-                "release_gate_blocked",
-                len(getattr(self, "_response_create_queue", deque()) or ()),
-                self._active_input_event_key_for_turn(pending.turn_id) or "unknown",
-                self._response_done_serial,
+            drain_result = "release_gate_blocked"
+            _emit_drain_trace(
+                stage="post",
+                queue_len_before_value=queue_len_before,
+                queue_len_after_value=len(getattr(self, "_response_create_queue", deque()) or ()),
             )
             return
 
@@ -4472,23 +4514,11 @@ class RealtimeAPI:
             debug_context=pending.debug_context,
             memory_brief_note=pending.memory_brief_note,
         )
-        pending_input_event_key = str(response_metadata.get("input_event_key") or "").strip()
-        logger.debug(
-            "[RESPTRACE] queue_drain run_id=%s turn_id=%s input_event_key=%s canonical_key=%s queue_len_before=%s "
-            "picked_origin=%s picked_turn_id=%s picked_input_event_key=%s skipped_reason=%s queue_len_after=%s "
-            "active_key_for_turn=%s response_done_serial=%s",
-            self._current_run_id() or "",
-            pending.turn_id,
-            pending_input_event_key or "unknown",
-            self._canonical_utterance_key(turn_id=pending.turn_id, input_event_key=pending_input_event_key),
-            queue_len_before,
-            pending.origin,
-            pending.turn_id,
-            pending_input_event_key or "unknown",
-            "sent_to_send_response_create",
-            len(getattr(self, "_response_create_queue", deque()) or ()),
-            self._active_input_event_key_for_turn(pending.turn_id) or "unknown",
-            self._response_done_serial,
+        drain_result = "sent_to_send_response_create"
+        _emit_drain_trace(
+            stage="post",
+            queue_len_before_value=queue_len_before,
+            queue_len_after_value=len(getattr(self, "_response_create_queue", deque()) or ()),
         )
 
 
@@ -6551,6 +6581,7 @@ class RealtimeAPI:
 
         self.mic.start_recording()
         if self._response_create_queue:
+            self._response_create_queue_drain_source = "playback_complete"
             asyncio.create_task(self._drain_response_create_queue())
         if self._pending_image_flush_after_playback and self._pending_image_stimulus:
             self._pending_image_flush_after_playback = False
@@ -8556,6 +8587,7 @@ class RealtimeAPI:
             ):
                 await self._maybe_emit_confirmation_reminder(self.websocket, reason="response_done_fallback")
             self._recover_confirmation_guard_microphone("response_done")
+        self._response_create_queue_drain_source = "response_done"
         await self._drain_response_create_queue()
         if self._pending_image_stimulus and not self._pending_image_flush_after_playback:
             await self._flush_pending_image_stimulus("response done")
@@ -8637,6 +8669,7 @@ class RealtimeAPI:
                 OrchestrationPhase.IDLE,
                 reason="reflection enqueued",
             )
+        self._response_create_queue_drain_source = "explicit_caller"
         await self._drain_response_create_queue()
         if self._pending_image_stimulus and not self._pending_image_flush_after_playback:
             await self._flush_pending_image_stimulus("response completed")
