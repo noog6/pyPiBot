@@ -1940,8 +1940,14 @@ class RealtimeAPI:
     def _resptrace_suppression_reason(self, *, turn_id: str, input_event_key: str) -> str:
         suppression_until = float(getattr(self, "_preference_recall_response_suppression_until", 0.0) or 0.0)
         suppression_window_active = suppression_until > time.monotonic()
-        suppressed_turns = getattr(self, "_preference_recall_suppressed_turns", set())
-        suppressed_input_event_keys = getattr(self, "_preference_recall_suppressed_input_event_keys", set())
+        suppressed_turns = getattr(self, "_preference_recall_suppressed_turns", None)
+        if not isinstance(suppressed_turns, set):
+            suppressed_turns = set()
+            self._preference_recall_suppressed_turns = suppressed_turns
+        suppressed_input_event_keys = getattr(self, "_preference_recall_suppressed_input_event_keys", None)
+        if not isinstance(suppressed_input_event_keys, set):
+            suppressed_input_event_keys = set()
+            self._preference_recall_suppressed_input_event_keys = suppressed_input_event_keys
         if input_event_key and input_event_key in suppressed_input_event_keys:
             return "input_event_suppressed"
         if turn_id in suppressed_turns:
@@ -8496,6 +8502,22 @@ class RealtimeAPI:
     async def handle_response_done(self, event: dict[str, Any] | None = None) -> None:
         turn_id = self._current_turn_id_or_unknown()
         done_input_event_key = str(getattr(self, "_active_response_input_event_key", "") or "").strip()
+        active_response_id_before_clear = getattr(self, "_active_response_id", None)
+        active_response_origin_before_clear = getattr(self, "_active_response_origin", "unknown")
+        active_response_input_event_key_before_clear = getattr(self, "_active_response_input_event_key", None)
+        active_response_canonical_key_before_clear = getattr(self, "_active_response_canonical_key", None)
+        suppressed_turns = getattr(self, "_preference_recall_suppressed_turns", None)
+        if not isinstance(suppressed_turns, set):
+            suppressed_turns = set()
+            self._preference_recall_suppressed_turns = suppressed_turns
+        suppressed_input_event_keys = getattr(self, "_preference_recall_suppressed_input_event_keys", None)
+        if not isinstance(suppressed_input_event_keys, set):
+            suppressed_input_event_keys = set()
+            self._preference_recall_suppressed_input_event_keys = suppressed_input_event_keys
+        obligations = getattr(self, "_response_obligations", {})
+        obligation_count_before_clear = len(obligations) if isinstance(obligations, dict) else 0
+        pending_queue_len_before_clear = len(getattr(self, "_response_create_queue", deque()) or ())
+        current_state_before_cleanup = getattr(self.state_manager, "state", InteractionState.IDLE)
         self._cancel_micro_ack(turn_id=turn_id, reason="response_done")
         self._response_done_serial += 1
         self.response_in_progress = False
@@ -8511,8 +8533,29 @@ class RealtimeAPI:
                     input_event_key=done_input_event_key,
                     state="done",
                 )
-        self._preference_recall_suppressed_turns.discard(self._current_turn_id_or_unknown())
+        suppressed_turn_id = self._current_turn_id_or_unknown()
+        suppressed_turn_present_before = suppressed_turn_id in suppressed_turns
+        logger.debug(
+            "[RESPTRACE] response_done_cleanup_before run_id=%s active_response_id=%s "
+            "active_response_origin=%s active_response_input_event_key=%s active_response_canonical_key=%s "
+            "suppressed_turns_count=%s suppressed_keys_count=%s suppressed_turn_present_before=%s "
+            "obligation_count_before=%s pending_queue_len=%s response_done_serial=%s state=%s",
+            self._current_run_id() or "",
+            active_response_id_before_clear,
+            active_response_origin_before_clear,
+            active_response_input_event_key_before_clear,
+            active_response_canonical_key_before_clear,
+            len(suppressed_turns),
+            len(suppressed_input_event_keys),
+            suppressed_turn_present_before,
+            obligation_count_before_clear,
+            pending_queue_len_before_clear,
+            self._response_done_serial,
+            current_state_before_cleanup,
+        )
+        self._preference_recall_suppressed_turns.discard(suppressed_turn_id)
         active_input_event_key = str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip()
+        active_input_event_key_present_before = bool(active_input_event_key and active_input_event_key in suppressed_input_event_keys)
         if active_input_event_key:
             self._preference_recall_suppressed_input_event_keys.discard(active_input_event_key)
         was_confirmation_guarded = self._active_response_confirmation_guarded
@@ -8523,6 +8566,24 @@ class RealtimeAPI:
         self._active_response_input_event_key = None
         self._active_response_canonical_key = None
         self._active_server_auto_input_event_key = None
+        obligations_after_cleanup = getattr(self, "_response_obligations", {})
+        obligation_count_after_clear = len(obligations_after_cleanup) if isinstance(obligations_after_cleanup, dict) else 0
+        logger.debug(
+            "[RESPTRACE] response_done_cleanup_after run_id=%s removed_suppressed_turn=%s "
+            "removed_suppressed_input_event_key=%s suppressed_turns_count=%s suppressed_keys_count=%s "
+            "obligation_count_before=%s obligation_count_after=%s pending_queue_len=%s response_done_serial=%s state=%s",
+            self._current_run_id() or "",
+            suppressed_turn_present_before and suppressed_turn_id not in self._preference_recall_suppressed_turns,
+            active_input_event_key_present_before
+            and active_input_event_key not in self._preference_recall_suppressed_input_event_keys,
+            len(suppressed_turns),
+            len(suppressed_input_event_keys),
+            obligation_count_before_clear,
+            obligation_count_after_clear,
+            len(getattr(self, "_response_create_queue", deque()) or ()),
+            self._response_done_serial,
+            getattr(self.state_manager, "state", InteractionState.IDLE),
+        )
         current_state = getattr(self.state_manager, "state", InteractionState.IDLE)
         if current_state != InteractionState.LISTENING:
             self.state_manager.update_state(InteractionState.IDLE, "response done")
