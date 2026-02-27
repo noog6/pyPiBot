@@ -8470,11 +8470,16 @@ class RealtimeAPI:
         self.response_in_progress = False
         self._response_in_flight = False
         if done_input_event_key and bool(getattr(self, "_active_response_consumes_canonical_slot", True)):
-            self._set_response_delivery_state(
+            existing_delivery_state = self._response_delivery_state(
                 turn_id=turn_id,
                 input_event_key=done_input_event_key,
-                state="done",
             )
+            if existing_delivery_state != "cancelled":
+                self._set_response_delivery_state(
+                    turn_id=turn_id,
+                    input_event_key=done_input_event_key,
+                    state="done",
+                )
         self._preference_recall_suppressed_turns.discard(self._current_turn_id_or_unknown())
         active_input_event_key = str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip()
         if active_input_event_key:
@@ -8562,11 +8567,16 @@ class RealtimeAPI:
         self.response_in_progress = False
         self._response_in_flight = False
         if done_input_event_key and bool(getattr(self, "_active_response_consumes_canonical_slot", True)):
-            self._set_response_delivery_state(
+            existing_delivery_state = self._response_delivery_state(
                 turn_id=turn_id,
                 input_event_key=done_input_event_key,
-                state="done",
             )
+            if existing_delivery_state != "cancelled":
+                self._set_response_delivery_state(
+                    turn_id=turn_id,
+                    input_event_key=done_input_event_key,
+                    state="done",
+                )
         self._preference_recall_suppressed_turns.discard(self._current_turn_id_or_unknown())
         active_input_event_key = str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip()
         if active_input_event_key:

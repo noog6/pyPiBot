@@ -279,3 +279,31 @@ def test_editor_path_single_assistant_create_with_guarded_server_auto(monkeypatc
 
     assert len(assistant_creates) == 1
     assert len(cancels) >= 1
+
+
+def test_response_done_preserves_cancelled_canonical_slot() -> None:
+    api = _make_api_stub()
+    turn_id = "turn_1"
+    input_event_key = "item_editor"
+    api._active_input_event_key_by_turn_id[turn_id] = input_event_key
+    api._active_response_input_event_key = input_event_key
+    api._set_response_delivery_state(turn_id=turn_id, input_event_key=input_event_key, state="cancelled")
+    api._drain_response_create_queue = lambda: asyncio.sleep(0)
+
+    asyncio.run(api.handle_response_done())
+
+    assert api._response_delivery_state(turn_id=turn_id, input_event_key=input_event_key) == "cancelled"
+
+
+def test_response_completed_preserves_cancelled_canonical_slot() -> None:
+    api = _make_api_stub()
+    turn_id = "turn_1"
+    input_event_key = "item_editor"
+    api._active_input_event_key_by_turn_id[turn_id] = input_event_key
+    api._active_response_input_event_key = input_event_key
+    api._set_response_delivery_state(turn_id=turn_id, input_event_key=input_event_key, state="cancelled")
+    api._drain_response_create_queue = lambda: asyncio.sleep(0)
+
+    asyncio.run(api.handle_response_completed())
+
+    assert api._response_delivery_state(turn_id=turn_id, input_event_key=input_event_key) == "cancelled"
