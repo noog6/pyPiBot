@@ -2025,6 +2025,7 @@ class RealtimeAPI:
         if not isinstance(obligations, dict):
             obligations = {}
             self._response_obligations = obligations
+        obligation_present_before = obligation_key in obligations
         obligations[obligation_key] = {
             "turn_id": turn_id,
             "input_event_key": input_event_key,
@@ -2039,15 +2040,17 @@ class RealtimeAPI:
             source,
         )
         logger.debug(
-            "[RESPTRACE] obligation_set run_id=%s obligation_key=%s turn_id=%s input_event_key=%s canonical_key=%s "
-            "set_source=%s total_obligations=%s",
+            "[RESPTRACE] obligation_set run_id=%s turn_id=%s input_event_key=%s canonical_key=%s source=%s "
+            "obligation_present_before=%s obligation_present_after=%s total_obligations=%s obligation_key=%s",
             self._current_run_id() or "",
-            obligation_key,
             turn_id,
             input_event_key or "unknown",
             self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key),
             source,
+            obligation_present_before,
+            obligation_key in obligations,
             len(obligations),
+            obligation_key,
         )
 
     def _clear_response_obligation(
@@ -2062,27 +2065,33 @@ class RealtimeAPI:
         obligations = getattr(self, "_response_obligations", None)
         if not isinstance(obligations, dict):
             return
+        obligation_present_before = obligation_key in obligations
         obligation = obligations.pop(obligation_key, None)
         if obligation is None:
             return
+        normalized_input_event_key = str(input_event_key or "").strip() or "unknown"
         logger.info(
             "response_obligation_cleared run_id=%s turn_id=%s input_event_key=%s origin=%s reason=%s",
             self._current_run_id() or "",
             turn_id,
-            str(input_event_key or "").strip() or "unknown",
+            normalized_input_event_key,
             origin,
             reason,
         )
         logger.debug(
-            "[RESPTRACE] obligation_cleared run_id=%s obligation_key=%s turn_id=%s input_event_key=%s canonical_key=%s "
-            "clear_source=%s total_obligations=%s",
+            "[RESPTRACE] obligation_cleared run_id=%s turn_id=%s input_event_key=%s canonical_key=%s origin=%s "
+            "obligation_present_before=%s obligation_present_after=%s total_obligations=%s obligation_key=%s "
+            "reason=%s",
             self._current_run_id() or "",
-            obligation_key,
             turn_id,
-            str(input_event_key or "").strip() or "unknown",
+            normalized_input_event_key,
             self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key),
             origin,
+            obligation_present_before,
+            obligation_key in obligations,
             len(obligations),
+            obligation_key,
+            reason,
         )
 
     def _mark_input_event_key_scheduled(self, *, input_event_key: str) -> None:
@@ -7014,6 +7023,15 @@ class RealtimeAPI:
                 await websocket.send(json.dumps(cancel_event))
             else:
                 if consumes_canonical_slot:
+                    logger.debug(
+                        "[RESPTRACE] response_created_clear_obligation run_id=%s turn_id=%s origin=%s "
+                        "obligation_input_event_key=%s canonical_key=%s",
+                        self._current_run_id() or "",
+                        turn_id,
+                        origin,
+                        str(obligation_input_event_key or "").strip() or "unknown",
+                        canonical_key,
+                    )
                     self._clear_response_obligation(
                         turn_id=turn_id,
                         input_event_key=obligation_input_event_key,
