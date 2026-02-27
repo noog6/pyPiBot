@@ -757,6 +757,7 @@ class RealtimeAPI:
         self._synthetic_input_event_counter = 0
         self._response_created_canonical_keys: set[str] = set()
         self._response_delivery_ledger: dict[str, str] = {}
+        self._response_id_by_canonical_key: dict[str, str] = {}
         self._response_obligations: dict[str, dict[str, Any]] = {}
         self._already_scheduled_for_input_event_key: set[str] = set()
         self._active_response_input_event_key: str | None = None
@@ -1936,6 +1937,19 @@ class RealtimeAPI:
         run_id = str(self._current_run_id() or "").strip() or "run-unknown"
         return f"{run_id}:{resolved_turn_id}:{resolved_input_event_key}"
 
+    def _resptrace_suppression_reason(self, *, turn_id: str, input_event_key: str) -> str:
+        suppression_until = float(getattr(self, "_preference_recall_response_suppression_until", 0.0) or 0.0)
+        suppression_window_active = suppression_until > time.monotonic()
+        suppressed_turns = getattr(self, "_preference_recall_suppressed_turns", set())
+        suppressed_input_event_keys = getattr(self, "_preference_recall_suppressed_input_event_keys", set())
+        if input_event_key and input_event_key in suppressed_input_event_keys:
+            return "input_event_suppressed"
+        if turn_id in suppressed_turns:
+            return "turn_suppressed"
+        if suppression_window_active:
+            return "suppression_window_active"
+        return "none"
+
     def _response_obligation_key(self, *, turn_id: str, input_event_key: str | None) -> str:
         return self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
 
@@ -1967,6 +1981,38 @@ class RealtimeAPI:
     def _is_response_already_delivered(self, *, turn_id: str, input_event_key: str | None) -> bool:
         return self._response_delivery_state(turn_id=turn_id, input_event_key=input_event_key) == "delivered"
 
+    def _single_flight_block_reason(self, *, turn_id: str, input_event_key: str | None) -> str | None:
+        state = self._response_delivery_state(turn_id=turn_id, input_event_key=input_event_key)
+        if state == "created":
+            return "already_created"
+        if state in {"delivered", "done"}:
+            return "already_done"
+        return None
+
+    def _log_response_create_blocked(
+        self,
+        *,
+        turn_id: str,
+        origin: str,
+        input_event_key: str | None,
+        canonical_key: str,
+        block_reason: str,
+    ) -> None:
+        existing_response_id = str(
+            getattr(self, "_response_id_by_canonical_key", {}).get(canonical_key) or ""
+        ).strip()
+        logger.debug(
+            "[RESPTRACE] response_create_blocked run_id=%s turn_id=%s origin=%s input_event_key=%s canonical_key=%s "
+            "block_reason=%s existing_response_id=%s",
+            self._current_run_id() or "",
+            turn_id,
+            origin,
+            str(input_event_key or "").strip() or "unknown",
+            canonical_key,
+            block_reason,
+            existing_response_id or "",
+        )
+
     def _set_response_obligation(self, *, turn_id: str, input_event_key: str, source: str) -> None:
         obligation_key = self._response_obligation_key(turn_id=turn_id, input_event_key=input_event_key)
         obligations = getattr(self, "_response_obligations", None)
@@ -1985,6 +2031,17 @@ class RealtimeAPI:
             turn_id,
             input_event_key or "unknown",
             source,
+        )
+        logger.debug(
+            "[RESPTRACE] obligation_set run_id=%s obligation_key=%s turn_id=%s input_event_key=%s canonical_key=%s "
+            "set_source=%s total_obligations=%s",
+            self._current_run_id() or "",
+            obligation_key,
+            turn_id,
+            input_event_key or "unknown",
+            self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key),
+            source,
+            len(obligations),
         )
 
     def _clear_response_obligation(
@@ -2009,6 +2066,17 @@ class RealtimeAPI:
             str(input_event_key or "").strip() or "unknown",
             origin,
             reason,
+        )
+        logger.debug(
+            "[RESPTRACE] obligation_cleared run_id=%s obligation_key=%s turn_id=%s input_event_key=%s canonical_key=%s "
+            "clear_source=%s total_obligations=%s",
+            self._current_run_id() or "",
+            obligation_key,
+            turn_id,
+            str(input_event_key or "").strip() or "unknown",
+            self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key),
+            origin,
+            len(obligations),
         )
 
     def _mark_input_event_key_scheduled(self, *, input_event_key: str) -> None:
@@ -2245,6 +2313,8 @@ class RealtimeAPI:
     async def _suppress_preference_recall_server_auto_response(self, websocket: Any) -> None:
         turn_id = self._current_turn_id_or_unknown()
         input_event_key = str(getattr(self, "_current_input_event_key", "") or "").strip()
+        pending_before = 1 if isinstance(getattr(self, "_pending_response_create", None), PendingResponseCreate) else 0
+        queue_before = len(getattr(self, "_response_create_queue", deque()) or ())
         suppressed_turns = getattr(self, "_preference_recall_suppressed_turns", None)
         if not isinstance(suppressed_turns, set):
             suppressed_turns = set()
@@ -2267,6 +2337,24 @@ class RealtimeAPI:
             self._current_run_id() or "",
             turn_id,
             input_event_key or "unknown",
+        )
+        pending_after = 1 if isinstance(getattr(self, "_pending_response_create", None), PendingResponseCreate) else 0
+        queue_after = len(getattr(self, "_response_create_queue", deque()) or ())
+        active_server_auto_key = str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip() or "unknown"
+        canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+        logger.debug(
+            "[RESPTRACE] suppression_applied run_id=%s turn_id=%s input_event_key=%s canonical_key=%s "
+            "suppressed_turns_count=%s suppressed_keys_count=%s removed_pending_count=%s removed_queued_count=%s "
+            "active_server_auto_key=%s",
+            self._current_run_id() or "",
+            turn_id,
+            input_event_key or "unknown",
+            canonical_key,
+            len(suppressed_turns),
+            len(suppressed_input_event_keys),
+            max(0, pending_before - pending_after),
+            max(0, queue_before - queue_after),
+            active_server_auto_key,
         )
         if str(getattr(self, "_active_response_origin", "")).strip().lower() != "server_auto":
             return
@@ -3812,6 +3900,42 @@ class RealtimeAPI:
         suppression_turns = getattr(self, "_preference_recall_suppressed_turns", set())
         canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=current_input_event_key)
         created_keys = getattr(self, "_response_created_canonical_keys", set())
+        if consumes_canonical_slot:
+            single_flight_block_reason = self._single_flight_block_reason(
+                turn_id=turn_id,
+                input_event_key=current_input_event_key,
+            )
+            if single_flight_block_reason:
+                self._log_response_create_blocked(
+                    turn_id=turn_id,
+                    origin=normalized_origin,
+                    input_event_key=current_input_event_key,
+                    canonical_key=canonical_key,
+                    block_reason=single_flight_block_reason,
+                )
+                return False
+        obligation_present = self._response_obligation_key(
+            turn_id=turn_id,
+            input_event_key=current_input_event_key,
+        ) in getattr(self, "_response_obligations", {})
+        pending_server_auto_len = len(getattr(self, "_pending_server_auto_input_event_keys", deque()) or ())
+        logger.debug(
+            "[RESPTRACE] response_create_request run_id=%s turn_id=%s origin=%s trigger_reason=%s input_event_key=%s "
+            "canonical_key=%s sent_now=false scheduled=false replaced=false queue_len=%s pending_server_auto_len=%s "
+            "suppression_active=%s suppression_reason=%s obligation_present=%s response_done_serial=%s",
+            self._current_run_id() or "",
+            turn_id,
+            normalized_origin,
+            reason,
+            current_input_event_key or "unknown",
+            canonical_key,
+            len(getattr(self, "_response_create_queue", deque()) or ()),
+            pending_server_auto_len,
+            bool(turn_id in suppression_turns),
+            self._resptrace_suppression_reason(turn_id=turn_id, input_event_key=current_input_event_key),
+            obligation_present,
+            self._response_done_serial,
+        )
         if self._is_response_already_delivered(turn_id=turn_id, input_event_key=current_input_event_key):
             logger.debug(
                 "duplicate_response_prevented run_id=%s turn_id=%s input_event_key=%s reason=already_delivered origin=%s",
@@ -3924,6 +4048,23 @@ class RealtimeAPI:
                 candidate.origin,
                 reason,
             )
+            logger.debug(
+                "[RESPTRACE] response_create_request run_id=%s turn_id=%s origin=%s trigger_reason=%s input_event_key=%s "
+                "canonical_key=%s sent_now=false scheduled=true replaced=false queue_len=%s pending_server_auto_len=%s "
+                "suppression_active=%s suppression_reason=%s obligation_present=%s response_done_serial=%s",
+                self._current_run_id() or "",
+                turn_id,
+                normalized_origin,
+                reason,
+                current_input_event_key or "unknown",
+                canonical_key,
+                len(getattr(self, "_response_create_queue", deque()) or ()),
+                len(getattr(self, "_pending_server_auto_input_event_keys", deque()) or ()),
+                bool(turn_id in suppression_turns),
+                self._resptrace_suppression_reason(turn_id=turn_id, input_event_key=current_input_event_key),
+                obligation_present,
+                self._response_done_serial,
+            )
             return False
 
         should_replace = False
@@ -3957,12 +4098,46 @@ class RealtimeAPI:
                 candidate.origin,
                 replacement_reason,
             )
+            logger.debug(
+                "[RESPTRACE] response_create_request run_id=%s turn_id=%s origin=%s trigger_reason=%s input_event_key=%s "
+                "canonical_key=%s sent_now=false scheduled=true replaced=true queue_len=%s pending_server_auto_len=%s "
+                "suppression_active=%s suppression_reason=%s obligation_present=%s response_done_serial=%s",
+                self._current_run_id() or "",
+                turn_id,
+                normalized_origin,
+                replacement_reason,
+                current_input_event_key or "unknown",
+                canonical_key,
+                len(getattr(self, "_response_create_queue", deque()) or ()),
+                len(getattr(self, "_pending_server_auto_input_event_keys", deque()) or ()),
+                bool(turn_id in suppression_turns),
+                self._resptrace_suppression_reason(turn_id=turn_id, input_event_key=current_input_event_key),
+                obligation_present,
+                self._response_done_serial,
+            )
         else:
             logger.info(
                 "response_create_dropped turn_id=%s origin=%s reason=%s",
                 candidate.turn_id,
                 candidate.origin,
                 "lower_priority_than_pending",
+            )
+            logger.debug(
+                "[RESPTRACE] response_create_request run_id=%s turn_id=%s origin=%s trigger_reason=%s input_event_key=%s "
+                "canonical_key=%s sent_now=false scheduled=false replaced=false queue_len=%s pending_server_auto_len=%s "
+                "suppression_active=%s suppression_reason=%s obligation_present=%s response_done_serial=%s",
+                self._current_run_id() or "",
+                turn_id,
+                normalized_origin,
+                "lower_priority_than_pending",
+                current_input_event_key or "unknown",
+                canonical_key,
+                len(getattr(self, "_response_create_queue", deque()) or ()),
+                len(getattr(self, "_pending_server_auto_input_event_keys", deque()) or ()),
+                bool(turn_id in suppression_turns),
+                self._resptrace_suppression_reason(turn_id=turn_id, input_event_key=current_input_event_key),
+                obligation_present,
+                self._response_done_serial,
             )
         return False
 
@@ -4023,6 +4198,42 @@ class RealtimeAPI:
         suppression_turns = getattr(self, "_preference_recall_suppressed_turns", set())
         canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=current_input_event_key)
         created_keys = getattr(self, "_response_created_canonical_keys", set())
+        if consumes_canonical_slot:
+            single_flight_block_reason = self._single_flight_block_reason(
+                turn_id=turn_id,
+                input_event_key=current_input_event_key,
+            )
+            if single_flight_block_reason:
+                self._log_response_create_blocked(
+                    turn_id=turn_id,
+                    origin=normalized_origin,
+                    input_event_key=current_input_event_key,
+                    canonical_key=canonical_key,
+                    block_reason=single_flight_block_reason,
+                )
+                return False
+        obligation_present = self._response_obligation_key(
+            turn_id=turn_id,
+            input_event_key=current_input_event_key,
+        ) in getattr(self, "_response_obligations", {})
+        pending_server_auto_len = len(getattr(self, "_pending_server_auto_input_event_keys", deque()) or ())
+        logger.debug(
+            "[RESPTRACE] response_create_request run_id=%s turn_id=%s origin=%s trigger_reason=%s input_event_key=%s "
+            "canonical_key=%s sent_now=false scheduled=false replaced=false queue_len=%s pending_server_auto_len=%s "
+            "suppression_active=%s suppression_reason=%s obligation_present=%s response_done_serial=%s",
+            self._current_run_id() or "",
+            turn_id,
+            normalized_origin,
+            "direct_send",
+            current_input_event_key or "unknown",
+            canonical_key,
+            len(getattr(self, "_response_create_queue", deque()) or ()),
+            pending_server_auto_len,
+            bool(turn_id in suppression_turns),
+            self._resptrace_suppression_reason(turn_id=turn_id, input_event_key=current_input_event_key),
+            obligation_present,
+            self._response_done_serial,
+        )
         if self._is_response_already_delivered(turn_id=turn_id, input_event_key=current_input_event_key):
             logger.debug(
                 "duplicate_response_prevented run_id=%s turn_id=%s input_event_key=%s reason=already_delivered origin=%s",
@@ -4102,22 +4313,73 @@ class RealtimeAPI:
         log_ws_event("Outgoing", response_create_event)
         self._track_outgoing_event(response_create_event, origin=origin)
         await websocket.send(json.dumps(response_create_event))
+        if consumes_canonical_slot:
+            self._set_response_delivery_state(
+                turn_id=turn_id,
+                input_event_key=current_input_event_key,
+                state="created",
+            )
         self._mark_input_event_key_scheduled(input_event_key=current_input_event_key)
         self._last_response_create_ts = now
         self._response_in_flight = True
         if record_ai_call:
             self._record_ai_call()
+        logger.debug(
+            "[RESPTRACE] response_create_request run_id=%s turn_id=%s origin=%s trigger_reason=%s input_event_key=%s "
+            "canonical_key=%s sent_now=true scheduled=false replaced=false queue_len=%s pending_server_auto_len=%s "
+            "suppression_active=%s suppression_reason=%s obligation_present=%s response_done_serial=%s",
+            self._current_run_id() or "",
+            turn_id,
+            normalized_origin,
+            "direct_send",
+            current_input_event_key or "unknown",
+            canonical_key,
+            len(getattr(self, "_response_create_queue", deque()) or ()),
+            len(getattr(self, "_pending_server_auto_input_event_keys", deque()) or ()),
+            bool(turn_id in suppression_turns),
+            self._resptrace_suppression_reason(turn_id=turn_id, input_event_key=current_input_event_key),
+            obligation_present,
+            self._response_done_serial,
+        )
         return True
 
     async def _drain_response_create_queue(self) -> None:
         current_state = getattr(self.state_manager, "state", InteractionState.IDLE)
+        queue_len_before = len(getattr(self, "_response_create_queue", deque()) or ())
+        trace_turn_id = self._current_turn_id_or_unknown()
+        trace_input_event_key = str(getattr(self, "_current_input_event_key", "") or "").strip()
+        trace_canonical_key = self._canonical_utterance_key(
+            turn_id=trace_turn_id,
+            input_event_key=trace_input_event_key,
+        )
         if (
             self._response_in_flight
             or self._audio_playback_busy
             or current_state == InteractionState.LISTENING
         ):
+            logger.debug(
+                "[RESPTRACE] queue_drain run_id=%s turn_id=%s input_event_key=%s canonical_key=%s queue_len_before=%s "
+                "picked_origin=%s picked_turn_id=%s picked_input_event_key=%s skipped_reason=%s queue_len_after=%s "
+                "active_key_for_turn=%s response_done_serial=%s",
+                self._current_run_id() or "",
+                trace_turn_id,
+                trace_input_event_key or "unknown",
+                trace_canonical_key,
+                queue_len_before,
+                "none",
+                "none",
+                "unknown",
+                "state_or_flight_gate",
+                queue_len_before,
+                self._active_input_event_key_for_turn(trace_turn_id) or "unknown",
+                self._response_done_serial,
+            )
             return
 
+        picked_origin = "none"
+        picked_turn_id = "none"
+        picked_input_event_key = "unknown"
+        skipped_reason = "none"
         if self._pending_response_create is None and self._response_create_queue:
             self._dedupe_queued_confirmation_reminders()
             queue_len = len(self._response_create_queue)
@@ -4127,7 +4389,11 @@ class RealtimeAPI:
                 queued_trigger = self._extract_response_create_trigger(metadata)
                 if not self._can_release_queued_response_create(queued_trigger, metadata):
                     self._response_create_queue.append(queued)
+                    skipped_reason = "release_gate_blocked"
                     continue
+                picked_origin = str(queued.get("origin") or "unknown")
+                picked_turn_id = str(queued.get("turn_id") or "turn-unknown")
+                picked_input_event_key = str(metadata.get("input_event_key") or "").strip() or "unknown"
                 self._pending_response_create = PendingResponseCreate(
                     websocket=queued["websocket"],
                     event=queued["event"],
@@ -4143,6 +4409,23 @@ class RealtimeAPI:
                 )
                 break
         if self._pending_response_create is None:
+            logger.debug(
+                "[RESPTRACE] queue_drain run_id=%s turn_id=%s input_event_key=%s canonical_key=%s queue_len_before=%s "
+                "picked_origin=%s picked_turn_id=%s picked_input_event_key=%s skipped_reason=%s queue_len_after=%s "
+                "active_key_for_turn=%s response_done_serial=%s",
+                self._current_run_id() or "",
+                trace_turn_id,
+                trace_input_event_key or "unknown",
+                trace_canonical_key,
+                queue_len_before,
+                picked_origin,
+                picked_turn_id,
+                picked_input_event_key,
+                skipped_reason,
+                len(getattr(self, "_response_create_queue", deque()) or ()),
+                self._active_input_event_key_for_turn(trace_turn_id) or "unknown",
+                self._response_done_serial,
+            )
             return
 
         pending = self._pending_response_create
@@ -4155,6 +4438,26 @@ class RealtimeAPI:
                 "Deferring queued response.create origin=%s trigger=%s while awaiting confirmation.",
                 pending.origin,
                 queued_trigger,
+            )
+            logger.debug(
+                "[RESPTRACE] queue_drain run_id=%s turn_id=%s input_event_key=%s canonical_key=%s queue_len_before=%s "
+                "picked_origin=%s picked_turn_id=%s picked_input_event_key=%s skipped_reason=%s queue_len_after=%s "
+                "active_key_for_turn=%s response_done_serial=%s",
+                self._current_run_id() or "",
+                pending.turn_id,
+                str(response_metadata.get("input_event_key") or "").strip() or "unknown",
+                self._canonical_utterance_key(
+                    turn_id=pending.turn_id,
+                    input_event_key=str(response_metadata.get("input_event_key") or "").strip(),
+                ),
+                queue_len_before,
+                pending.origin,
+                pending.turn_id,
+                str(response_metadata.get("input_event_key") or "").strip() or "unknown",
+                "release_gate_blocked",
+                len(getattr(self, "_response_create_queue", deque()) or ()),
+                self._active_input_event_key_for_turn(pending.turn_id) or "unknown",
+                self._response_done_serial,
             )
             return
 
@@ -4169,6 +4472,25 @@ class RealtimeAPI:
             debug_context=pending.debug_context,
             memory_brief_note=pending.memory_brief_note,
         )
+        pending_input_event_key = str(response_metadata.get("input_event_key") or "").strip()
+        logger.debug(
+            "[RESPTRACE] queue_drain run_id=%s turn_id=%s input_event_key=%s canonical_key=%s queue_len_before=%s "
+            "picked_origin=%s picked_turn_id=%s picked_input_event_key=%s skipped_reason=%s queue_len_after=%s "
+            "active_key_for_turn=%s response_done_serial=%s",
+            self._current_run_id() or "",
+            pending.turn_id,
+            pending_input_event_key or "unknown",
+            self._canonical_utterance_key(turn_id=pending.turn_id, input_event_key=pending_input_event_key),
+            queue_len_before,
+            pending.origin,
+            pending.turn_id,
+            pending_input_event_key or "unknown",
+            "sent_to_send_response_create",
+            len(getattr(self, "_response_create_queue", deque()) or ()),
+            self._active_input_event_key_for_turn(pending.turn_id) or "unknown",
+            self._response_done_serial,
+        )
+
 
     def _extract_confirmation_reminder_dedupe_key(
         self,
@@ -6589,16 +6911,39 @@ class RealtimeAPI:
             if not isinstance(created_keys, set):
                 created_keys = set()
                 self._response_created_canonical_keys = created_keys
+            created_keys_size_before = len(created_keys)
             consumes_canonical_slot = bool(getattr(self, "_active_response_consumes_canonical_slot", True))
             if consumes_canonical_slot:
                 created_keys.add(canonical_key)
+            created_keys_size_after = len(created_keys)
+            logger.debug(
+                "[RESPTRACE] response_created run_id=%s turn_id=%s origin=%s response_id=%s resolved_input_event_key=%s "
+                "canonical_key=%s consumes_canonical_slot=%s created_keys_size_before=%s created_keys_size_after=%s "
+                "active_key_for_turn=%s",
+                self._current_run_id() or "",
+                turn_id,
+                origin,
+                self._active_response_id or "unknown",
+                str(resolved_input_event_key or "").strip() or "unknown",
+                canonical_key,
+                consumes_canonical_slot,
+                created_keys_size_before,
+                created_keys_size_after,
+                self._active_input_event_key_for_turn(turn_id) or "unknown",
+            )
             self._active_response_input_event_key = str(resolved_input_event_key or "").strip() or None
             self._active_response_canonical_key = canonical_key
-            self._set_response_delivery_state(
-                turn_id=turn_id,
-                input_event_key=resolved_input_event_key,
-                state="created",
-            )
+            if consumes_canonical_slot:
+                self._set_response_delivery_state(
+                    turn_id=turn_id,
+                    input_event_key=resolved_input_event_key,
+                    state="created",
+                )
+                response_id_by_key = getattr(self, "_response_id_by_canonical_key", None)
+                if not isinstance(response_id_by_key, dict):
+                    response_id_by_key = {}
+                    self._response_id_by_canonical_key = response_id_by_key
+                response_id_by_key[canonical_key] = str(self._active_response_id or "")
             suppression_until = float(getattr(self, "_preference_recall_response_suppression_until", 0.0) or 0.0)
             suppression_window_active = suppression_until > time.monotonic()
             active_input_event_key = str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip()
@@ -6615,6 +6960,11 @@ class RealtimeAPI:
                     outcome="response_not_scheduled",
                     reason="preference_recall_suppressed",
                     details="guarded server_auto response cancelled",
+                )
+                self._set_response_delivery_state(
+                    turn_id=turn_id,
+                    input_event_key=active_input_event_key,
+                    state="cancelled",
                 )
                 logger.info(
                     "PREFERENCE_RECALL_RESPONSE_GUARDED origin=%s response_id=%s",
@@ -7982,6 +8332,34 @@ class RealtimeAPI:
             metadata.setdefault("approval_flow", "true")
             if token is not None:
                 metadata.setdefault("confirmation_token", token.id)
+        trace_turn_id = str(metadata.get("turn_id") or self._current_turn_id_or_unknown())
+        trace_input_event_key = str(metadata.get("input_event_key") or "").strip()
+        trace_canonical_key = self._canonical_utterance_key(
+            turn_id=trace_turn_id,
+            input_event_key=trace_input_event_key,
+        )
+        trigger_reason = str(metadata.get("trigger") or "assistant_message")
+        obligation_present = self._response_obligation_key(
+            turn_id=trace_turn_id,
+            input_event_key=trace_input_event_key,
+        ) in getattr(self, "_response_obligations", {})
+        logger.debug(
+            "[RESPTRACE] response_create_request run_id=%s turn_id=%s origin=%s trigger_reason=%s input_event_key=%s "
+            "canonical_key=%s sent_now=false scheduled=false replaced=false queue_len=%s pending_server_auto_len=%s "
+            "suppression_active=%s suppression_reason=%s obligation_present=%s response_done_serial=%s",
+            self._current_run_id() or "",
+            trace_turn_id,
+            "assistant_message",
+            trigger_reason,
+            trace_input_event_key or "unknown",
+            trace_canonical_key,
+            len(getattr(self, "_response_create_queue", deque()) or ()),
+            len(getattr(self, "_pending_server_auto_input_event_keys", deque()) or ()),
+            bool(trace_turn_id in getattr(self, "_preference_recall_suppressed_turns", set())),
+            self._resptrace_suppression_reason(turn_id=trace_turn_id, input_event_key=trace_input_event_key),
+            obligation_present,
+            self._response_done_serial,
+        )
         await self._send_response_create(
             websocket,
             {"type": "response.create", "response": {"metadata": metadata}},
@@ -8085,10 +8463,18 @@ class RealtimeAPI:
                 await self._flush_pending_image_stimulus("audio response done")
 
     async def handle_response_done(self, event: dict[str, Any] | None = None) -> None:
-        self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_done")
+        turn_id = self._current_turn_id_or_unknown()
+        done_input_event_key = str(getattr(self, "_active_response_input_event_key", "") or "").strip()
+        self._cancel_micro_ack(turn_id=turn_id, reason="response_done")
         self._response_done_serial += 1
         self.response_in_progress = False
         self._response_in_flight = False
+        if done_input_event_key and bool(getattr(self, "_active_response_consumes_canonical_slot", True)):
+            self._set_response_delivery_state(
+                turn_id=turn_id,
+                input_event_key=done_input_event_key,
+                state="done",
+            )
         self._preference_recall_suppressed_turns.discard(self._current_turn_id_or_unknown())
         active_input_event_key = str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip()
         if active_input_event_key:
@@ -8170,9 +8556,17 @@ class RealtimeAPI:
             await self._flush_pending_image_stimulus("response done")
 
     async def handle_response_completed(self, event: dict[str, Any] | None = None) -> None:
-        self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_completed")
+        turn_id = self._current_turn_id_or_unknown()
+        done_input_event_key = str(getattr(self, "_active_response_input_event_key", "") or "").strip()
+        self._cancel_micro_ack(turn_id=turn_id, reason="response_completed")
         self.response_in_progress = False
         self._response_in_flight = False
+        if done_input_event_key and bool(getattr(self, "_active_response_consumes_canonical_slot", True)):
+            self._set_response_delivery_state(
+                turn_id=turn_id,
+                input_event_key=done_input_event_key,
+                state="done",
+            )
         self._preference_recall_suppressed_turns.discard(self._current_turn_id_or_unknown())
         active_input_event_key = str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip()
         if active_input_event_key:

@@ -1308,3 +1308,41 @@ def test_server_auto_response_created_binds_to_active_turn_key_after_memory_inte
     assert api._active_server_auto_input_event_key == "item-2"
     assert ("item-2", "response_created") in outcome_calls
     assert not any(key == "item-1" and outcome == "response_created" for key, outcome in outcome_calls[1:])
+
+
+def test_resptrace_logs_for_scheduled_and_drained_response_create(monkeypatch) -> None:
+    api = _make_api_stub()
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_response_turn_id = "turn_1"
+    api._current_input_event_key = "item-resptrace"
+    api._active_input_event_key_by_turn_id["turn_1"] = "item-resptrace"
+    api._response_in_flight = True
+    debug_logs: list[str] = []
+
+    monkeypatch.setattr(
+        logger,
+        "debug",
+        lambda msg, *args, **kwargs: debug_logs.append(msg % args if args else msg),
+    )
+
+    async def _run() -> None:
+        await api.send_assistant_message(
+            "trace this",
+            ws,
+            response_metadata={
+                "turn_id": "turn_1",
+                "input_event_key": "item-resptrace",
+                "trigger": "preference_recall",
+            },
+        )
+        api._response_in_flight = False
+        await api._drain_response_create_queue()
+
+    asyncio.run(_run())
+
+    log_text = "\n".join(debug_logs)
+    assert "[RESPTRACE] response_create_request" in log_text
+    assert "input_event_key=item-resptrace" in log_text
+    assert "scheduled=true" in log_text
+    assert "[RESPTRACE] queue_drain" in log_text
