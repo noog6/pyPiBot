@@ -289,7 +289,7 @@ def test_micro_ack_reason_maps_to_expected_category() -> None:
     api.loop.close()
 
 
-def test_response_audio_delta_logs_transition_once_then_steady_state_debug(monkeypatch) -> None:
+def test_response_audio_delta_allow_logs_are_debug(monkeypatch) -> None:
     api = _api_stub()
     api._active_response_canonical_key = "run-1:turn-1:item-1"
     api._active_response_origin = "assistant_message"
@@ -316,7 +316,7 @@ def test_response_audio_delta_logs_transition_once_then_steady_state_debug(monke
     steady_state_logs = [entry for entry in lifecycle_logs if "state=audio_started" in entry[1]]
 
     assert len(transition_logs) == 1
-    assert transition_logs[0][0] == 20
+    assert transition_logs[0][0] == 10
     assert len(steady_state_logs) == 2
     assert all(entry[0] == 10 for entry in steady_state_logs)
     api.loop.close()
