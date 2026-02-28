@@ -758,6 +758,7 @@ class RealtimeAPI:
         self._response_created_canonical_keys: set[str] = set()
         self._response_delivery_ledger: dict[str, str] = {}
         self._response_id_by_canonical_key: dict[str, str] = {}
+        self._canonical_response_lifecycle_state: dict[str, dict[str, bool]] = {}
         self._response_obligations: dict[str, dict[str, Any]] = {}
         self._already_scheduled_for_input_event_key: set[str] = set()
         self._active_response_input_event_key: str | None = None
@@ -1985,6 +1986,12 @@ class RealtimeAPI:
             if new_canonical_key not in response_id_by_key:
                 response_id_by_key[new_canonical_key] = response_id
 
+        lifecycle_state = getattr(self, "_canonical_response_lifecycle_state", None)
+        if isinstance(lifecycle_state, dict) and old_canonical_key in lifecycle_state:
+            old_state = lifecycle_state.pop(old_canonical_key)
+            if new_canonical_key not in lifecycle_state:
+                lifecycle_state[new_canonical_key] = old_state
+
         if str(getattr(self, "_active_response_input_event_key", "") or "").strip() == active_key:
             self._active_response_input_event_key = normalized_replacement
         if str(getattr(self, "_active_response_canonical_key", "") or "").strip() == old_canonical_key:
@@ -2269,6 +2276,29 @@ class RealtimeAPI:
     def _response_has_safety_override(self, response_create_event: dict[str, Any]) -> bool:
         metadata = self._extract_response_create_metadata(response_create_event)
         return str(metadata.get("safety_override", "")).strip().lower() in {"true", "1", "yes"}
+
+    def _response_is_explicit_multipart(self, metadata: dict[str, Any] | None) -> bool:
+        if not isinstance(metadata, dict):
+            return False
+        return str(metadata.get("explicit_multipart", "")).strip().lower() in {"true", "1", "yes"}
+
+    def _canonical_lifecycle_state(self, canonical_key: str) -> dict[str, bool]:
+        lifecycle_state = getattr(self, "_canonical_response_lifecycle_state", None)
+        if not isinstance(lifecycle_state, dict):
+            lifecycle_state = {}
+            self._canonical_response_lifecycle_state = lifecycle_state
+        normalized_canonical_key = str(canonical_key or "").strip()
+        if not normalized_canonical_key:
+            return {}
+        existing = lifecycle_state.get(normalized_canonical_key)
+        if not isinstance(existing, dict):
+            existing = {}
+            lifecycle_state[normalized_canonical_key] = existing
+        return existing
+
+    def _canonical_first_audio_started(self, canonical_key: str) -> bool:
+        state = self._canonical_lifecycle_state(canonical_key)
+        return bool(state.get("first_audio_started", False))
 
     def _load_topic_suppression_preferences(self) -> None:
         profile_manager = getattr(self, "profile_manager", None)
@@ -4109,6 +4139,19 @@ class RealtimeAPI:
             return False
         if (
             consumes_canonical_slot
+            and self._canonical_first_audio_started(canonical_key)
+            and not self._response_is_explicit_multipart(response_metadata)
+        ):
+            logger.info(
+                "response_schedule_blocked run_id=%s turn_id=%s origin=%s mode=queued reason=canonical_audio_already_started canonical_key=%s",
+                self._current_run_id() or "",
+                turn_id,
+                normalized_origin,
+                canonical_key,
+            )
+            return False
+        if (
+            consumes_canonical_slot
             and canonical_key in created_keys
             and not self._response_has_safety_override(response_create_event)
         ):
@@ -4414,6 +4457,19 @@ class RealtimeAPI:
             normalized_origin=normalized_origin,
             response_metadata=response_metadata,
         ):
+            return False
+        if (
+            consumes_canonical_slot
+            and self._canonical_first_audio_started(canonical_key)
+            and not self._response_is_explicit_multipart(response_metadata)
+        ):
+            logger.info(
+                "response_schedule_blocked run_id=%s turn_id=%s origin=%s mode=direct reason=canonical_audio_already_started canonical_key=%s",
+                self._current_run_id() or "",
+                turn_id,
+                normalized_origin,
+                canonical_key,
+            )
             return False
         if (
             consumes_canonical_slot
@@ -7136,6 +7192,7 @@ class RealtimeAPI:
             self._active_response_input_event_key = str(resolved_input_event_key or "").strip() or None
             self._active_response_canonical_key = canonical_key
             if consumes_canonical_slot:
+                self._canonical_lifecycle_state(canonical_key).setdefault("first_audio_started", False)
                 self._set_response_delivery_state(
                     turn_id=turn_id,
                     input_event_key=resolved_input_event_key,
@@ -7266,6 +7323,9 @@ class RealtimeAPI:
             if self._is_active_response_guarded():
                 return
             self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
+            active_canonical_key = str(getattr(self, "_active_response_canonical_key", "") or "").strip()
+            if active_canonical_key:
+                self._canonical_lifecycle_state(active_canonical_key)["first_audio_started"] = True
             self._audio_playback_busy = True
             audio_data = base64.b64decode(event["delta"])
             self._audio_accum.extend(audio_data)
