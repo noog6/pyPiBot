@@ -60,7 +60,10 @@ class MicroAckManager:
         *,
         config: MicroAckConfig,
         on_emit: Callable[[MicroAckContext, str, str], None],
-        on_log: Callable[[str, str, str, int | None], None],
+        on_log: Callable[
+            [str, str, str, int | None, str | None, str | None, str | None, str | None, str | None],
+            None,
+        ],
         suppression_reason: Callable[[], str | None],
         now_fn: Callable[[], float] | None = None,
         rng: random.Random | None = None,
@@ -102,6 +105,30 @@ class MicroAckManager:
             ),
         }
 
+    def _log(
+        self,
+        event: str,
+        turn_id: str,
+        reason: str,
+        delay_ms: int | None,
+        context: MicroAckContext | None,
+    ) -> None:
+        self._on_log(
+            event,
+            turn_id,
+            reason,
+            delay_ms,
+            (
+                context.category.value
+                if context and isinstance(context.category, MicroAckCategory)
+                else (str(context.category) if context else None)
+            ),
+            context.channel if context else None,
+            context.intent if context else None,
+            context.action if context else None,
+            context.tool_call_id if context else None,
+        )
+
     def on_user_speech_started(self) -> None:
         self._last_user_speech_started_ts = self._now()
 
@@ -138,34 +165,34 @@ class MicroAckManager:
         scope_key = self._scope_key(context)
         self._expire_ttl_state()
         if not self._config.enabled:
-            self._on_log("suppressed", turn_id, "disabled", None)
+            self._log("suppressed", turn_id, "disabled", None, context)
             return
         if expected_delay_ms is not None and expected_delay_ms < self._config.expected_wait_threshold_ms:
-            self._on_log("suppressed", turn_id, "predicted_fast_response", expected_delay_ms)
+            self._log("suppressed", turn_id, "predicted_fast_response", expected_delay_ms, context)
             return
         if not self._is_channel_enabled(context.channel):
-            self._on_log("suppressed", turn_id, "channel_disabled", None)
+            self._log("suppressed", turn_id, "channel_disabled", None, context)
             return
         scope_history = self._emitted_scope_history.get(scope_key, deque())
         if len(scope_history) >= self._config.per_turn_max:
-            self._on_log("suppressed", turn_id, "already_emitted", None)
+            self._log("suppressed", turn_id, "already_emitted", None, context)
             return
         if dedupe_key in self._emitted_at_by_dedupe_key:
-            self._on_log("suppressed", turn_id, "duplicate_within_ttl", None)
+            self._log("suppressed", turn_id, "duplicate_within_ttl", None, context)
             return
         if dedupe_key in self._scheduled:
-            self._on_log("suppressed", turn_id, "already_scheduled", None)
+            self._log("suppressed", turn_id, "already_scheduled", None, context)
             return
         suppress = self._suppression_reason()
         if suppress:
-            self._on_log("suppressed", turn_id, suppress, None)
+            self._log("suppressed", turn_id, suppress, None, context)
             return
 
         delay_s = max(0.01, self._config.delay_ms / 1000.0)
         handle = loop.call_later(delay_s, self._emit_if_allowed, context, reason, loop)
         self._scheduled[dedupe_key] = _ScheduledMicroAck(context=context, reason=reason, handle=handle)
         self._scheduled_reason[dedupe_key] = reason
-        self._on_log("scheduled", turn_id, reason, self._config.delay_ms)
+        self._log("scheduled", turn_id, reason, self._config.delay_ms, context)
 
     def cancel(self, *, turn_id: str, reason: str) -> None:
         keys_for_turn = [key for key, item in self._scheduled.items() if item.context.turn_id == turn_id]
@@ -175,7 +202,7 @@ class MicroAckManager:
             if scheduled is None:
                 continue
             scheduled.handle.cancel()
-            self._on_log("cancelled", turn_id, reason, None)
+            self._log("cancelled", turn_id, reason, None, scheduled.context)
 
     def cancel_all(self, *, reason: str) -> None:
         for key in list(self._scheduled.keys()):
@@ -184,7 +211,7 @@ class MicroAckManager:
             if scheduled is None:
                 continue
             scheduled.handle.cancel()
-            self._on_log("cancelled", scheduled.context.turn_id, reason, None)
+            self._log("cancelled", scheduled.context.turn_id, reason, None, scheduled.context)
 
     def _emit_if_allowed(self, context: MicroAckContext, reason: str, loop: asyncio.AbstractEventLoop) -> None:
         turn_id = context.turn_id
@@ -196,29 +223,29 @@ class MicroAckManager:
 
         suppress = self._suppression_reason()
         if suppress:
-            self._on_log("suppressed", turn_id, suppress, None)
+            self._log("suppressed", turn_id, suppress, None, context)
             return
 
         scope_history = self._emitted_scope_history.get(scope_key, deque())
         if len(scope_history) >= self._config.per_turn_max:
-            self._on_log("suppressed", turn_id, "already_emitted", None)
+            self._log("suppressed", turn_id, "already_emitted", None, context)
             return
         if dedupe_key in self._emitted_at_by_dedupe_key:
-            self._on_log("suppressed", turn_id, "duplicate_within_ttl", None)
+            self._log("suppressed", turn_id, "duplicate_within_ttl", None, context)
             return
 
         now = self._now()
         if self._last_micro_ack_ts is not None:
             elapsed_ms = (now - self._last_micro_ack_ts) * 1000.0
             if elapsed_ms < self._config.global_cooldown_ms:
-                self._on_log("suppressed", turn_id, "cooldown", int(elapsed_ms))
+                self._log("suppressed", turn_id, "cooldown", int(elapsed_ms), context)
                 return
         channel_last_ts = self._last_micro_ack_ts_by_channel.get(context.channel)
         if channel_last_ts is not None:
             elapsed_channel_ms = (now - channel_last_ts) * 1000.0
             channel_cooldown_ms = self._channel_cooldown_ms(context.channel)
             if elapsed_channel_ms < channel_cooldown_ms:
-                self._on_log("suppressed", turn_id, "channel_cooldown", int(elapsed_channel_ms))
+                self._log("suppressed", turn_id, "channel_cooldown", int(elapsed_channel_ms), context)
                 return
 
         phrase_id, phrase = self._select_phrase(context=context, dedupe_key=dedupe_key)
@@ -229,14 +256,14 @@ class MicroAckManager:
         self._last_micro_ack_ts = now
         self._last_micro_ack_ts_by_channel[context.channel] = now
         self._on_emit(context, phrase_id, phrase)
-        self._on_log("emitted", turn_id, phrase_id, None)
+        self._log("emitted", turn_id, phrase_id, None, context)
 
         if len(scope_history) < self._config.per_turn_max and self._config.long_wait_second_ack_ms > 0:
             delay_s = self._config.long_wait_second_ack_ms / 1000.0
             handle = loop.call_later(delay_s, self._emit_if_allowed, context, "long_wait", loop)
             self._scheduled[dedupe_key] = _ScheduledMicroAck(context=context, reason="long_wait", handle=handle)
             self._scheduled_reason[dedupe_key] = "long_wait"
-            self._on_log("scheduled", turn_id, "long_wait", self._config.long_wait_second_ack_ms)
+            self._log("scheduled", turn_id, "long_wait", self._config.long_wait_second_ack_ms, context)
 
     def _expire_ttl_state(self) -> None:
         now = self._now()
