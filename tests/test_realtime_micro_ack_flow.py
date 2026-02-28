@@ -15,8 +15,11 @@ class _Manager:
         self.cancelled: list[tuple[str, str]] = []
         self.speech_started = 0
         self.speech_ended = 0
+        self.suppression_reason = None
 
     def maybe_schedule(self, *, turn_id: str, reason: str, loop, expected_delay_ms=None) -> None:
+        if callable(self.suppression_reason) and self.suppression_reason():
+            return
         self.scheduled.append((turn_id, reason, expected_delay_ms))
 
     def cancel(self, *, turn_id: str, reason: str) -> None:
@@ -150,6 +153,18 @@ def test_send_response_create_does_not_schedule_micro_ack_while_deferred() -> No
     )
 
     assert result is False
+    assert api._micro_ack_manager.scheduled == []
+    api.loop.close()
+
+
+def test_maybe_schedule_micro_ack_suppressed_during_pending_confirmation() -> None:
+    api = _api_stub()
+    api._micro_ack_manager.suppression_reason = api._micro_ack_suppression_reason
+    api._has_active_confirmation_token = lambda: True
+    api._is_awaiting_confirmation_phase = lambda: False
+
+    api._maybe_schedule_micro_ack(turn_id="turn-1", reason="speech_stopped", expected_delay_ms=900)
+
     assert api._micro_ack_manager.scheduled == []
     api.loop.close()
 
