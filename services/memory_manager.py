@@ -250,6 +250,8 @@ def _normalize_canary_error_code(raw_error_code: str | None, *, exc: Exception |
         "upstream_timeout",
         "gateway_timeout",
     }:
+        if code == "request_timeout":
+            return "timeout"
         return "timeout_provider"
     if "deadline" in code and "exceed" in code:
         return "timeout_provider"
@@ -782,7 +784,10 @@ class MemoryManager:
         return False, _classify_canary_failure_code(canary_error)
 
     def _map_canary_error_code(self, raw_error_code: str | None, *, exc: Exception | None = None) -> str:
-        return _normalize_canary_error_code(raw_error_code, exc=exc)
+        normalized = _normalize_canary_error_code(raw_error_code, exc=exc)
+        if normalized == "timeout" and "request_timeout" in str(raw_error_code or "").strip().lower():
+            return "timeout_provider"
+        return normalized
 
     def _compute_startup_canary_budget_ms(self, *, safety_margin_ms: int = 1) -> int:
         configured_timeout_ms = int(getattr(self._semantic_config, "startup_canary_timeout_ms", 0) or 0)
@@ -2545,6 +2550,8 @@ def run_embedding_probe_once(
     result["embedding_emitted"] = False
     raw_error = str(getattr(response, "error_code", "") or status or "unknown")
     normalized_error_code = _normalize_canary_error_code(raw_error)
+    if normalized_error_code == "timeout" and "request_timeout" in raw_error.lower():
+        normalized_error_code = "timeout_provider"
     result["error_code"] = normalized_error_code
     result["raw_error_code"] = raw_error
     response_error_class = _sanitize_error_class_name(getattr(response, "error_class", None))
