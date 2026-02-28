@@ -347,6 +347,39 @@ def test_server_auto_synthetic_key_rebound_blocks_stale_assistant_message_releas
 
     assert assistant_creates == []
 
+
+
+def test_preference_recall_preserves_parent_input_event_key_during_active_response() -> None:
+    api = _make_api_stub()
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._response_in_flight = True
+    api._preference_recall_suppressed_input_event_keys.add("item_pants")
+
+    captured: list[dict[str, object]] = []
+
+    async def _capture_send_response_create(websocket, response_create_event, **_kwargs):
+        captured.append(response_create_event)
+        return True
+
+    api._send_response_create = _capture_send_response_create
+
+    asyncio.run(
+        api.send_assistant_message(
+            "Yes, your pants are gray.",
+            ws,
+            response_metadata={
+                "turn_id": "turn_1",
+                "input_event_key": "item_pants",
+                "trigger": "preference_recall",
+            },
+        )
+    )
+
+    assert len(captured) == 1
+    metadata = ((captured[0].get("response") or {}).get("metadata") or {})
+    assert metadata.get("input_event_key") == "item_pants"
+
 def test_response_done_preserves_cancelled_canonical_slot() -> None:
     api = _make_api_stub()
     turn_id = "turn_1"
