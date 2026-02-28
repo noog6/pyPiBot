@@ -6,6 +6,7 @@ import asyncio
 from collections import deque
 
 from ai.realtime_api import RealtimeAPI
+from core.logging import logger
 
 
 class _FakeStateManager:
@@ -150,3 +151,39 @@ def test_audio_playback_busy_retry_enqueues_once_before_delivery() -> None:
 
     assert send_attempts == ["sent"]
     assert api._pending_response_create is None
+
+
+def test_run_411_watchdog_skips_audio_busy_retry_after_delivered_answer(monkeypatch) -> None:
+    api = _make_api()
+    info_logs: list[str] = []
+    scheduled_micro_acks: list[dict[str, object]] = []
+
+    api._audio_playback_busy = True
+    api._transcript_response_watchdog_tasks = {}
+    api._transcript_response_outcome_logged_keys = set()
+    api._mark_transcript_response_outcome = RealtimeAPI._mark_transcript_response_outcome.__get__(api, RealtimeAPI)
+    api._log_response_site_debug = lambda **_kwargs: None
+    api._maybe_schedule_micro_ack = lambda **kwargs: scheduled_micro_acks.append(kwargs)
+    api._set_response_delivery_state(turn_id="turn_1", input_event_key="input_evt_1", state="delivered")
+
+    monkeypatch.setattr(logger, "info", lambda msg, *args, **kwargs: info_logs.append(msg % args if args else msg))
+
+    asyncio.run(
+        api._watch_transcript_response_outcome(
+            turn_id="turn_1",
+            input_event_key="input_evt_1",
+            timeout_s=0.01,
+        )
+    )
+
+    assert scheduled_micro_acks == []
+    assert any(
+        "response_not_scheduled" in entry
+        and "input_event_key=input_evt_1" in entry
+        and "reason=already_handled" in entry
+        for entry in info_logs
+    )
+    assert not any(
+        "response_create_scheduled" in entry and "reason=audio_playback_busy" in entry
+        for entry in info_logs
+    )
