@@ -839,8 +839,40 @@ class RealtimeAPI:
         self._minimum_non_confirmation_duration_ms = int(
             realtime_cfg.get("minimum_non_confirmation_duration_ms", 120)
         )
+        self._micro_ack_channel_mode = str(realtime_cfg.get("micro_ack_channel_mode", "text_and_audio")).strip().lower()
+        if self._micro_ack_channel_mode not in {"text_only", "text_and_audio"}:
+            self._micro_ack_channel_mode = "text_and_audio"
+        self._micro_ack_runtime_mode = str(
+            realtime_cfg.get("micro_ack_runtime_mode", realtime_cfg.get("micro_ack_quiet_mode", "normal"))
+        ).strip().lower()
+        if self._micro_ack_runtime_mode not in {"normal", "quiet", "verbose"}:
+            self._micro_ack_runtime_mode = "normal"
+        self._micro_ack_channel_policy = self._load_micro_ack_channel_policy(realtime_cfg)
         self._vad_turn_detection = self._resolve_vad_turn_detection(config)
         self._micro_ack_manager = self._build_micro_ack_manager(realtime_cfg)
+
+    @staticmethod
+    def _load_micro_ack_channel_policy(realtime_cfg: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        raw = realtime_cfg.get("micro_ack_channels")
+        if not isinstance(raw, dict):
+            raw = {}
+        defaults: dict[str, dict[str, Any]] = {
+            "voice": {"enabled": True, "cooldown_ms": 10000, "speak": True},
+            "text": {"enabled": True, "cooldown_ms": 1000, "speak": False},
+        }
+        policy = {channel: values.copy() for channel, values in defaults.items()}
+        for channel, candidate in raw.items():
+            if not isinstance(channel, str) or not isinstance(candidate, dict):
+                continue
+            merged = policy.get(channel, {"enabled": True, "cooldown_ms": 10000, "speak": channel == "voice"})
+            if "enabled" in candidate:
+                merged["enabled"] = bool(candidate.get("enabled"))
+            if "cooldown_ms" in candidate:
+                merged["cooldown_ms"] = max(0, int(candidate.get("cooldown_ms", 0)))
+            if "speak" in candidate:
+                merged["speak"] = bool(candidate.get("speak"))
+            policy[channel] = merged
+        return policy
 
     def _build_micro_ack_manager(self, realtime_cfg: dict[str, Any]) -> MicroAckManager:
         cfg = MicroAckConfig(
@@ -859,6 +891,14 @@ class RealtimeAPI:
                 int(realtime_cfg.get("micro_ack_global_cooldown_ms", 10000)),
             ),
             per_turn_max=max(1, int(realtime_cfg.get("micro_ack_per_turn_max", 1))),
+            channel_enabled={
+                channel: bool(values.get("enabled", True))
+                for channel, values in self._micro_ack_channel_policy.items()
+            },
+            channel_cooldown_ms={
+                channel: max(0, int(values.get("cooldown_ms", 0)))
+                for channel, values in self._micro_ack_channel_policy.items()
+            },
         )
         return MicroAckManager(
             config=cfg,
@@ -988,11 +1028,13 @@ class RealtimeAPI:
         websocket = getattr(self, "websocket", None)
         if websocket is None or self.loop is None:
             return
+        speak = self._should_speak_micro_ack(context.channel)
 
         async def _emit() -> None:
             await self.send_assistant_message(
                 phrase,
                 websocket,
+                speak=speak,
                 response_metadata={
                     "trigger": "micro_ack",
                     "micro_ack": "true",
@@ -1008,6 +1050,18 @@ class RealtimeAPI:
             )
 
         self.loop.create_task(_emit())
+
+    def _should_speak_micro_ack(self, channel: str) -> bool:
+        if self._micro_ack_runtime_mode == "quiet":
+            return False
+        if self._micro_ack_channel_mode == "text_only":
+            return False
+        channel_policy = self._micro_ack_channel_policy.get(channel, {})
+        if not bool(channel_policy.get("enabled", True)):
+            return False
+        if self._micro_ack_runtime_mode == "verbose":
+            return True
+        return bool(channel_policy.get("speak", channel == "voice"))
 
     def _mark_transcript_response_outcome(
         self,

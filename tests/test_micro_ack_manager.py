@@ -146,3 +146,49 @@ def test_different_channels_have_separate_limits() -> None:
 
     assert [context.channel for context, *_ in emits] == ["voice", "text"]
     loop.close()
+
+
+def test_per_channel_cooldown_blocks_same_channel_only() -> None:
+    loop = asyncio.new_event_loop()
+    emits: list[tuple[MicroAckContext, str, str]] = []
+    logs: list[tuple[str, str, str, int | None]] = []
+
+    manager = MicroAckManager(
+        config=MicroAckConfig(
+            delay_ms=10,
+            global_cooldown_ms=0,
+            per_turn_max=3,
+            dedupe_ttl_ms=0,
+            long_wait_second_ack_ms=0,
+            channel_cooldown_ms={"voice": 1000, "text": 0},
+        ),
+        on_emit=lambda context, phrase_id, phrase: emits.append((context, phrase_id, phrase)),
+        on_log=lambda event, turn_id, reason, delay_ms: logs.append((event, turn_id, reason, delay_ms)),
+        suppression_reason=lambda: None,
+        rng=random.Random(7),
+    )
+
+    manager.maybe_schedule(
+        context=_context(turn_id="turn-1", channel="voice", category="speech", intent="weather"),
+        reason="speech_stopped",
+        loop=loop,
+        expected_delay_ms=900,
+    )
+    loop.run_until_complete(asyncio.sleep(0.02))
+    manager.maybe_schedule(
+        context=_context(turn_id="turn-2", channel="voice", category="watchdog", intent="stocks"),
+        reason="watchdog",
+        loop=loop,
+        expected_delay_ms=900,
+    )
+    manager.maybe_schedule(
+        context=_context(turn_id="turn-3", channel="text", category="watchdog", intent="stocks"),
+        reason="watchdog",
+        loop=loop,
+        expected_delay_ms=900,
+    )
+    loop.run_until_complete(asyncio.sleep(0.02))
+
+    assert [context.channel for context, *_ in emits] == ["voice", "text"]
+    assert any(event == "suppressed" and reason == "channel_cooldown" for event, _turn, reason, _ in logs)
+    loop.close()
