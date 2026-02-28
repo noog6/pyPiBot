@@ -24,6 +24,7 @@ class _Manager:
 
     def cancel(self, *, turn_id: str, reason: str) -> None:
         self.cancelled.append((turn_id, reason))
+        self.scheduled = [item for item in self.scheduled if item[0] != turn_id]
 
     def cancel_all(self, *, reason: str) -> None:
         self.cancelled.append(("*", reason))
@@ -61,6 +62,7 @@ def _api_stub() -> RealtimeAPI:
     api.loop = asyncio.new_event_loop()
     api.websocket = _Ws()
     api._micro_ack_manager = _Manager()
+    api._pending_micro_ack_by_turn_channel = {}
     api._confirmation_speech_active = False
     api._audio_playback_busy = False
     api._active_utterance = None
@@ -319,4 +321,31 @@ def test_response_audio_delta_allow_logs_are_debug(monkeypatch) -> None:
     assert transition_logs[0][0] == 10
     assert len(steady_state_logs) == 2
     assert all(entry[0] == 10 for entry in steady_state_logs)
+    api.loop.close()
+
+
+def test_same_turn_speech_stopped_then_transcript_finalized_schedules_once() -> None:
+    api = _api_stub()
+
+    api._micro_ack_manager.suppression_reason = api._micro_ack_suppression_reason
+    api._active_input_event_key_by_turn_id = {"turn-1": "ie-1"}
+
+    api._maybe_schedule_micro_ack(
+        turn_id="turn-1",
+        category=api._micro_ack_category_for_reason("speech_stopped"),
+        channel="voice",
+        reason="speech_stopped",
+        expected_delay_ms=700,
+    )
+    api._maybe_schedule_micro_ack(
+        turn_id="turn-1",
+        category=api._micro_ack_category_for_reason("transcript_finalized"),
+        channel="voice",
+        reason="transcript_finalized",
+        expected_delay_ms=700,
+    )
+
+    assert api._micro_ack_manager.scheduled == [
+        ("turn-1", "latency_mask", "transcript_finalized", 700)
+    ]
     api.loop.close()

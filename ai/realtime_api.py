@@ -253,6 +253,13 @@ class CanonicalResponseState:
     obligation: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class PendingMicroAckMarker:
+    category: MicroAckCategory | str
+    priority: int
+    reason: str
+
+
 class ConfirmationState(str, Enum):
     IDLE = "idle"
     PENDING_PROMPT = "pending_prompt"
@@ -858,6 +865,7 @@ class RealtimeAPI:
         self._micro_ack_channel_policy = self._load_micro_ack_channel_policy(realtime_cfg)
         self._vad_turn_detection = self._resolve_vad_turn_detection(config)
         self._micro_ack_suppress_until_ts = 0.0
+        self._pending_micro_ack_by_turn_channel: dict[tuple[str, str], PendingMicroAckMarker] = {}
         self._micro_ack_manager = self._build_micro_ack_manager(realtime_cfg)
 
     @staticmethod
@@ -984,6 +992,8 @@ class RealtimeAPI:
                 tool_call_id_value,
             )
             return
+        if event in {"emitted", "cancelled", "suppressed"} and channel_value:
+            self._clear_pending_micro_ack_marker(turn_id=turn_id, channel=channel_value, reason=event)
         logger.debug(
             "micro_ack_suppressed run_id=%s turn_id=%s reason=%s category=%s channel=%s intent=%s action=%s tool_call_id=%s",
             run_id,
@@ -1033,6 +1043,43 @@ class RealtimeAPI:
                     return metadata
         return {}
 
+    @staticmethod
+    def _micro_ack_category_priority(category: MicroAckCategory | str) -> int:
+        if isinstance(category, MicroAckCategory):
+            normalized = category.value
+        else:
+            normalized = str(category or "").strip().lower()
+        priorities = {
+            MicroAckCategory.START_OF_WORK.value: 1,
+            MicroAckCategory.LATENCY_MASK.value: 2,
+            MicroAckCategory.FAILURE_FALLBACK.value: 3,
+            MicroAckCategory.SAFETY_GATE.value: 4,
+        }
+        return priorities.get(normalized, 0)
+
+    def _clear_pending_micro_ack_marker(
+        self,
+        *,
+        turn_id: str,
+        channel: str | None = None,
+        reason: str,
+    ) -> None:
+        markers = getattr(self, "_pending_micro_ack_by_turn_channel", None)
+        if not isinstance(markers, dict) or not markers:
+            return
+        if channel is not None:
+            markers.pop((turn_id, channel), None)
+            return
+        for key in [pending_key for pending_key in markers if pending_key[0] == turn_id]:
+            markers.pop(key, None)
+
+    def _clear_stale_pending_micro_ack_markers_for_turn_transition(self, *, next_turn_id: str) -> None:
+        markers = getattr(self, "_pending_micro_ack_by_turn_channel", None)
+        if not isinstance(markers, dict) or not markers:
+            return
+        for key in [pending_key for pending_key in markers if pending_key[0] != next_turn_id]:
+            markers.pop(key, None)
+
     def _maybe_schedule_micro_ack(
         self,
         *,
@@ -1048,6 +1095,18 @@ class RealtimeAPI:
         manager = getattr(self, "_micro_ack_manager", None)
         if manager is None or self.loop is None:
             return
+        markers = getattr(self, "_pending_micro_ack_by_turn_channel", None)
+        if not isinstance(markers, dict):
+            markers = {}
+            self._pending_micro_ack_by_turn_channel = markers
+        marker_key = (turn_id, channel)
+        incoming_priority = self._micro_ack_category_priority(category)
+        existing_marker = markers.get(marker_key)
+        if isinstance(existing_marker, PendingMicroAckMarker):
+            if incoming_priority <= existing_marker.priority:
+                return
+            manager.cancel(turn_id=turn_id, reason=f"micro_ack_replaced:{reason}")
+            markers.pop(marker_key, None)
         metadata = self._micro_ack_correlation_metadata()
         metadata_intent = str(metadata.get("intent") or metadata.get("normalized_intent") or "").strip() or None
         metadata_action = str(metadata.get("action") or metadata.get("trigger") or "").strip() or None
@@ -1064,6 +1123,11 @@ class RealtimeAPI:
             intent=intent or metadata_intent,
             action=action or metadata_action or canonical_key,
             tool_call_id=tool_call_id or metadata_tool_call_id,
+        )
+        markers[marker_key] = PendingMicroAckMarker(
+            category=category,
+            priority=incoming_priority,
+            reason=reason,
         )
         try:
             manager.maybe_schedule(
@@ -1094,6 +1158,7 @@ class RealtimeAPI:
         return MicroAckCategory.LATENCY_MASK
 
     def _cancel_micro_ack(self, *, turn_id: str, reason: str) -> None:
+        self._clear_pending_micro_ack_marker(turn_id=turn_id, reason=reason)
         manager = getattr(self, "_micro_ack_manager", None)
         if manager is None:
             return
@@ -2172,6 +2237,7 @@ class RealtimeAPI:
             input_event_key=input_event_key,
             utterance_seq=utterance_seq,
         )
+        self._clear_stale_pending_micro_ack_markers_for_turn_transition(next_turn_id=context.turn_id)
         self._utterance_context = context
         self._current_response_turn_id = context.turn_id
         self._current_input_event_key = context.input_event_key or None
