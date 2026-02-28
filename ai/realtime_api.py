@@ -8906,14 +8906,6 @@ class RealtimeAPI:
             metadata.setdefault("input_event_key", context_hint.input_event_key)
         trigger_reason = str(metadata.get("trigger") or "").strip().lower()
         explicit_parent_key = str(metadata.get("input_event_key") or "").strip()
-        if (
-            trigger_reason == "preference_recall"
-            and bool(getattr(self, "_response_in_flight", False))
-            and explicit_parent_key
-            and explicit_parent_key in getattr(self, "_preference_recall_suppressed_input_event_keys", set())
-        ):
-            explicit_parent_key = self._next_synthetic_input_event_key("preference_recall")
-            metadata["input_event_key"] = explicit_parent_key
         background_behavior_allowed = str(metadata.get("background_behavior_allowed", "")).strip().lower() in {
             "1",
             "true",
