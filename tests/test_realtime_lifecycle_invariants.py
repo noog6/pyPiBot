@@ -4,6 +4,8 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
+from ai.realtime_api import RealtimeAPI
+
 
 class _FakeEventDispatcher:
     def __init__(self) -> None:
@@ -109,3 +111,49 @@ def test_guarded_server_auto_cancel_precedes_first_accepted_audio_delta() -> Non
     assert cancel_event_index < first_accepted_delta_index
     assert dispatcher.first_audible_delta_response_id() == accepted_response_id
     assert dispatcher.audible_delta_count == 1
+
+
+def test_startup_prompt_and_user_audio_use_distinct_turn_and_canonical_keys() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._response_create_turn_counter = 0
+    api._current_response_turn_id = None
+    api._current_input_event_key = None
+    api._synthetic_input_event_counter = 0
+    api._active_input_event_key_by_turn_id = {}
+    api._current_run_id = lambda: "run-lifecycle-test"
+
+    startup_response_create = {"type": "response.create", "response": {"metadata": {}}}
+    startup_turn_id = api._resolve_response_create_turn_id(
+        origin="prompt",
+        response_create_event=startup_response_create,
+    )
+    startup_input_event_key = api._ensure_response_create_correlation(
+        response_create_event=startup_response_create,
+        origin="prompt",
+        turn_id=startup_turn_id,
+    )
+
+    user_turn_id = "turn_2"
+    user_input_event_key = "item-user-audio-1"
+    api._active_input_event_key_by_turn_id[startup_turn_id] = startup_input_event_key
+    api._active_input_event_key_by_turn_id[user_turn_id] = user_input_event_key
+
+    startup_canonical_key = api._canonical_utterance_key(
+        turn_id=startup_turn_id,
+        input_event_key=startup_input_event_key,
+    )
+    user_canonical_key = api._canonical_utterance_key(
+        turn_id=user_turn_id,
+        input_event_key=user_input_event_key,
+    )
+    user_canonical_with_startup_key = api._canonical_utterance_key(
+        turn_id=user_turn_id,
+        input_event_key=startup_input_event_key,
+    )
+
+    assert user_turn_id != startup_turn_id
+    assert startup_input_event_key.startswith("synthetic_prompt_")
+    assert user_canonical_key != startup_canonical_key
+    assert user_canonical_key != user_canonical_with_startup_key
+    assert set(api._active_input_event_key_by_turn_id.keys()) == {startup_turn_id, user_turn_id}
+    assert api._active_input_event_key_by_turn_id[startup_turn_id] != api._active_input_event_key_by_turn_id[user_turn_id]
