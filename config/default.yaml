@@ -139,6 +139,17 @@ realtime:
   micro_ack_long_wait_second_ack_ms: 4000
   micro_ack_global_cooldown_ms: 10000
   micro_ack_per_turn_max: 1
+  micro_ack_channel_mode: "text_and_audio"
+  micro_ack_runtime_mode: "normal"
+  micro_ack_channels:
+    voice:
+      enabled: true
+      cooldown_ms: 10000
+      speak: true
+    text:
+      enabled: true
+      cooldown_ms: 1500
+      speak: false
   awaiting_confirmation_allowed_sources:
     - "battery:critical"
     - "imu:critical"

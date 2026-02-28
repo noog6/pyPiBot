@@ -17,10 +17,10 @@ class _Manager:
         self.speech_ended = 0
         self.suppression_reason = None
 
-    def maybe_schedule(self, *, turn_id: str, reason: str, loop, expected_delay_ms=None) -> None:
+    def maybe_schedule(self, *, context, reason: str, loop, expected_delay_ms=None) -> None:
         if callable(self.suppression_reason) and self.suppression_reason():
             return
-        self.scheduled.append((turn_id, reason, expected_delay_ms))
+        self.scheduled.append((context.turn_id, reason, expected_delay_ms))
 
     def cancel(self, *, turn_id: str, reason: str) -> None:
         self.cancelled.append((turn_id, reason))
@@ -92,7 +92,9 @@ def _api_stub() -> RealtimeAPI:
     api._can_release_queued_response_create = lambda *_args, **_kwargs: True
     api._response_create_queue = deque()
     api._pending_response_create = None
+    api._queued_confirmation_reminder_keys = set()
     api._response_done_serial = 0
+    api._response_create_turn_counter = 0
     api._drain_response_create_queue = lambda: asyncio.sleep(0)
     api._flush_pending_image_stimulus = lambda *_args, **_kwargs: asyncio.sleep(0)
     api._pending_image_stimulus = None
@@ -116,6 +118,13 @@ def _api_stub() -> RealtimeAPI:
     api._last_response_create_ts = None
     api._response_create_debug_trace = False
     api._debug_vad = False
+
+    api._micro_ack_channel_mode = "text_and_audio"
+    api._micro_ack_runtime_mode = "normal"
+    api._micro_ack_channel_policy = {
+        "voice": {"enabled": True, "cooldown_ms": 10000, "speak": True},
+        "text": {"enabled": True, "cooldown_ms": 1000, "speak": False},
+    }
     return api
 
 
@@ -163,7 +172,13 @@ def test_maybe_schedule_micro_ack_suppressed_during_pending_confirmation() -> No
     api._has_active_confirmation_token = lambda: True
     api._is_awaiting_confirmation_phase = lambda: False
 
-    api._maybe_schedule_micro_ack(turn_id="turn-1", reason="speech_stopped", expected_delay_ms=900)
+    api._maybe_schedule_micro_ack(
+        turn_id="turn-1",
+        category="speech",
+        channel="voice",
+        reason="speech_stopped",
+        expected_delay_ms=900,
+    )
 
     assert api._micro_ack_manager.scheduled == []
     api.loop.close()
@@ -184,4 +199,36 @@ def test_talk_over_aborts_active_response_and_clears_pending() -> None:
 
     assert cleared == [{"turn_id": "turn-1", "input_event_key": "", "reason": "talk_over_abort"}]
     assert '{"type": "response.cancel"}' in api.websocket.sent
+    api.loop.close()
+
+
+def test_emit_micro_ack_respects_quiet_mode() -> None:
+    api = _api_stub()
+    calls: list[bool] = []
+
+    async def _capture_send(_message, _websocket, *, speak=True, response_metadata=None, utterance_context=None):
+        calls.append(speak)
+
+    api.send_assistant_message = _capture_send
+    api._micro_ack_runtime_mode = "quiet"
+    api._emit_micro_ack(type("Ctx", (), {"turn_id": "turn-1", "channel": "voice", "category": "speech", "intent": None, "action": None, "tool_call_id": None})(), "p1", "One sec")
+    api.loop.run_until_complete(asyncio.sleep(0))
+
+    assert calls == [False]
+    api.loop.close()
+
+
+def test_emit_micro_ack_respects_text_only_channel_mode() -> None:
+    api = _api_stub()
+    calls: list[bool] = []
+
+    async def _capture_send(_message, _websocket, *, speak=True, response_metadata=None, utterance_context=None):
+        calls.append(speak)
+
+    api.send_assistant_message = _capture_send
+    api._micro_ack_channel_mode = "text_only"
+    api._emit_micro_ack(type("Ctx", (), {"turn_id": "turn-1", "channel": "voice", "category": "speech", "intent": None, "action": None, "tool_call_id": None})(), "p1", "One sec")
+    api.loop.run_until_complete(asyncio.sleep(0))
+
+    assert calls == [False]
     api.loop.close()

@@ -21,6 +21,8 @@ class MicroAckConfig:
     anti_chatter_after_assistant_audio_end_ms: int = 1500
     talk_over_risk_window_ms: int = 6000
     dedupe_ttl_ms: int = 8000
+    channel_enabled: dict[str, bool] | None = None
+    channel_cooldown_ms: dict[str, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -67,6 +69,7 @@ class MicroAckManager:
         self._scheduled: dict[str, _ScheduledMicroAck] = {}
         self._scheduled_reason: dict[str, str] = {}
         self._last_micro_ack_ts: float | None = None
+        self._last_micro_ack_ts_by_channel: dict[str, float] = {}
         self._last_user_speech_started_ts: float | None = None
         self._last_user_speech_ended_ts: float | None = None
         self._last_assistant_audio_end_ts: float | None = None
@@ -120,12 +123,18 @@ class MicroAckManager:
         if expected_delay_ms is not None and expected_delay_ms < self._config.expected_wait_threshold_ms:
             self._on_log("suppressed", turn_id, "predicted_fast_response", expected_delay_ms)
             return
+        if not self._is_channel_enabled(context.channel):
+            self._on_log("suppressed", turn_id, "channel_disabled", None)
+            return
         scope_history = self._emitted_scope_history.get(scope_key, deque())
         if len(scope_history) >= self._config.per_turn_max:
             self._on_log("suppressed", turn_id, "already_emitted", None)
             return
         if dedupe_key in self._emitted_at_by_dedupe_key:
             self._on_log("suppressed", turn_id, "duplicate_within_ttl", None)
+            return
+        if not self._is_channel_enabled(context.channel):
+            self._on_log("suppressed", turn_id, "channel_disabled", None)
             return
         if dedupe_key in self._scheduled:
             self._on_log("suppressed", turn_id, "already_scheduled", None)
@@ -187,6 +196,13 @@ class MicroAckManager:
             if elapsed_ms < self._config.global_cooldown_ms:
                 self._on_log("suppressed", turn_id, "cooldown", int(elapsed_ms))
                 return
+        channel_last_ts = self._last_micro_ack_ts_by_channel.get(context.channel)
+        if channel_last_ts is not None:
+            elapsed_channel_ms = (now - channel_last_ts) * 1000.0
+            channel_cooldown_ms = self._channel_cooldown_ms(context.channel)
+            if elapsed_channel_ms < channel_cooldown_ms:
+                self._on_log("suppressed", turn_id, "channel_cooldown", int(elapsed_channel_ms))
+                return
 
         phrase_id, phrase = self._rng.choice(self._phrases)
         emitted_at = self._now()
@@ -194,6 +210,7 @@ class MicroAckManager:
         scope_history.append(emitted_at)
         self._emitted_scope_history[scope_key] = scope_history
         self._last_micro_ack_ts = now
+        self._last_micro_ack_ts_by_channel[context.channel] = now
         self._on_emit(context, phrase_id, phrase)
         self._on_log("emitted", turn_id, phrase_id, None)
 
@@ -243,3 +260,12 @@ class MicroAckManager:
             if elapsed_ms < self._config.anti_chatter_after_assistant_audio_end_ms:
                 return "anti_chatter"
         return None
+
+    def _is_channel_enabled(self, channel: str) -> bool:
+        mapping = self._config.channel_enabled or {}
+        return bool(mapping.get(channel, True))
+
+    def _channel_cooldown_ms(self, channel: str) -> int:
+        mapping = self._config.channel_cooldown_ms or {}
+        configured = int(mapping.get(channel, self._config.global_cooldown_ms))
+        return max(0, configured)
