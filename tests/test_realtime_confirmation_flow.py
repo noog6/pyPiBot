@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from ai.governance import ActionPacket, build_normalized_idempotency_key
 from ai.orchestration import OrchestrationPhase
-from ai.realtime_api import ConfirmationState, PendingConfirmationToken, RealtimeAPI
+from ai.realtime_api import ConfirmationState, PendingConfirmationToken, RealtimeAPI, UtteranceContext
 from interaction import InteractionState
 from services.research import OpenAIResearchService
 from services.research import ResearchRequest
@@ -3811,9 +3811,9 @@ def test_confirmation_reminder_emits_while_generic_micro_ack_is_suppressed() -> 
         def suppression_baseline_reason(self):
             return None
 
-        def maybe_schedule(self, *, turn_id: str, reason: str, loop, expected_delay_ms=None):
+        def maybe_schedule(self, *, context, reason: str, loop, expected_delay_ms=None):
             if api._micro_ack_suppression_reason() is None:
-                self.scheduled.append((turn_id, reason, expected_delay_ms))
+                self.scheduled.append((context.turn_id, reason, expected_delay_ms))
 
     api._micro_ack_manager = _Manager()
     api.loop = asyncio.new_event_loop()
@@ -3825,7 +3825,13 @@ def test_confirmation_reminder_emits_while_generic_micro_ack_is_suppressed() -> 
 
     api.send_assistant_message = _send_assistant_message
 
-    api._maybe_schedule_micro_ack(turn_id="turn-1", reason="speech_stopped", expected_delay_ms=900)
+    api._maybe_schedule_micro_ack(
+        turn_id="turn-1",
+        reason="speech_stopped",
+        category=api._micro_ack_category_for_reason("speech_stopped"),
+        channel="text",
+        expected_delay_ms=900,
+    )
     assert api._micro_ack_manager.scheduled == []
 
     asyncio.run(api._maybe_emit_confirmation_reminder(api.websocket, reason="test_reminder"))
@@ -3833,3 +3839,126 @@ def test_confirmation_reminder_emits_while_generic_micro_ack_is_suppressed() -> 
     assert len(sent_messages) == 1
     assert sent_messages[0]["metadata"].get("trigger") == "confirmation_reminder"
     api.loop.close()
+
+
+def _response_create_metadata_events(sent_events: list[dict]) -> list[dict[str, str]]:
+    metadata_events: list[dict[str, str]] = []
+    for event in sent_events:
+        if event.get("type") != "response.create":
+            continue
+        response = event.get("response")
+        if not isinstance(response, dict):
+            continue
+        metadata = response.get("metadata")
+        if isinstance(metadata, dict):
+            metadata_events.append(metadata)
+    return metadata_events
+
+
+def test_confirmation_prompt_emits_before_any_generic_micro_ack() -> None:
+    api = _make_api_stub()
+    websocket = _CollectingWs()
+    api.websocket = websocket
+    api._pending_confirmation_token = _build_confirmation_token(kind="tool_governance", token_id="tok_order")
+    api._build_utterance_context = lambda **_kwargs: UtteranceContext(
+        turn_id="turn-order",
+        input_event_key="evt-order",
+        canonical_key="turn-order:evt-order",
+        utterance_seq=1,
+    )
+    api._governance = type("Gov", (), {"describe_tool": lambda *_args, **_kwargs: {"dry_run_supported": True}})()
+    action = ActionPacket(
+        id="call_order",
+        tool_name="perform_research",
+        tool_args={"query": "ordering"},
+        tier=2,
+        what="Run research",
+        why="Need latest status",
+        impact="Read only",
+        rollback="None",
+        alternatives=["skip"],
+        confidence=0.91,
+        cost="low",
+        risk_flags=[],
+        requires_confirmation=True,
+    )
+
+    api._maybe_schedule_micro_ack(
+        turn_id="turn-order",
+        reason="confirmation_prompt",
+        category=api._micro_ack_category_for_reason("confirmation_prompt"),
+        channel="text",
+        expected_delay_ms=200,
+    )
+    asyncio.run(
+        api._request_tool_confirmation(
+            action,
+            "needs_confirmation",
+            websocket,
+            {"valid": True},
+            action_summary="tool=perform_research",
+            confirm_reason="risk_check",
+        )
+    )
+
+    metadata_events = _response_create_metadata_events(websocket.sent)
+    assert metadata_events
+    assert metadata_events[0].get("approval_flow") == "true"
+    assert metadata_events[0].get("confirmation_token") == "tok_order"
+    assert all(event.get("micro_ack") != "true" for event in metadata_events)
+
+
+def test_confirmation_deny_emits_no_generic_micro_ack_for_intent() -> None:
+    api = _make_api_stub()
+    websocket = _CollectingWs()
+    api.websocket = websocket
+    api._pending_action = _build_pending_action()
+    api._pending_confirmation_token = _build_confirmation_token(
+        kind="tool_governance",
+        pending_action=api._pending_action,
+        token_id="tok_deny",
+    )
+    api._confirmation_state = ConfirmationState.AWAITING_DECISION
+    api._awaiting_confirmation_completion = False
+    api._handle_stop_word = lambda *_args, **_kwargs: asyncio.sleep(0, result=False)
+    api._build_utterance_context = lambda **_kwargs: UtteranceContext(
+        turn_id="turn-deny",
+        input_event_key="evt-deny",
+        canonical_key="turn-deny:evt-deny",
+        utterance_seq=1,
+    )
+
+    consumed = asyncio.run(api._maybe_handle_approval_response("no", websocket))
+
+    assert consumed is True
+    metadata_events = _response_create_metadata_events(websocket.sent)
+    assert all(event.get("micro_ack") != "true" for event in metadata_events)
+
+
+def test_confirmation_reminder_and_generic_micro_ack_do_not_co_emit() -> None:
+    api = _make_api_stub()
+    websocket = _CollectingWs()
+    api.websocket = websocket
+    api._pending_confirmation_token = _build_confirmation_token(kind="tool_governance", token_id="tok_window")
+    api._build_utterance_context = lambda **_kwargs: UtteranceContext(
+        turn_id="turn-window",
+        input_event_key="evt-window",
+        canonical_key="turn-window:evt-window",
+        utterance_seq=1,
+    )
+
+    api._maybe_schedule_micro_ack(
+        turn_id="turn-window",
+        reason="speech_stopped",
+        category=api._micro_ack_category_for_reason("speech_stopped"),
+        channel="text",
+        expected_delay_ms=150,
+    )
+    asyncio.run(api._maybe_emit_confirmation_reminder(websocket, reason="test_window"))
+
+    metadata_events = _response_create_metadata_events(websocket.sent)
+    reminder_events = [event for event in metadata_events if event.get("trigger") == "confirmation_reminder"]
+    assert len(reminder_events) == 1
+    assert reminder_events[0].get("approval_flow") == "true"
+    assert reminder_events[0].get("confirmation_token") == "tok_window"
+    assert all(event.get("micro_ack") != "true" for event in metadata_events)
