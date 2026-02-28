@@ -46,6 +46,7 @@ from interaction import (
 from ai.tools import function_map, tools
 from ai.interaction_lifecycle_controller import (
     InteractionLifecycleController,
+    InteractionLifecycleState,
     LifecycleDecisionAction,
 )
 from ai.interaction_lifecycle_policy import (
@@ -5110,6 +5111,12 @@ class RealtimeAPI:
             normalized_origin=normalized_origin,
             response_metadata=response_metadata,
         )
+        if self._drop_response_create_for_terminal_state(
+            turn_id=turn_id,
+            input_event_key=current_input_event_key,
+            origin=origin,
+        ):
+            return False
         decision = self._lifecycle_policy().decide_response_create(
             response_in_flight=bool(self._response_in_flight),
             audio_playback_busy=bool(self._audio_playback_busy),
@@ -5347,13 +5354,21 @@ class RealtimeAPI:
                 queued = self._response_create_queue.popleft()
                 metadata = self._extract_response_create_metadata(queued.get("event") or {})
                 queued_trigger = self._extract_response_create_trigger(metadata)
+                picked_turn_id = str(queued.get("turn_id") or "turn-unknown")
+                picked_origin = str(queued.get("origin") or "unknown")
+                picked_input_event_key = str(metadata.get("input_event_key") or "").strip()
+                if self._drop_response_create_for_terminal_state(
+                    turn_id=picked_turn_id,
+                    input_event_key=picked_input_event_key,
+                    origin=picked_origin,
+                ):
+                    skipped_reason = "canonical_terminal_state"
+                    continue
                 if not self._can_release_queued_response_create(queued_trigger, metadata):
                     self._response_create_queue.append(queued)
                     skipped_reason = "release_gate_blocked"
                     continue
-                picked_origin = str(queued.get("origin") or "unknown")
-                picked_turn_id = str(queued.get("turn_id") or "turn-unknown")
-                picked_input_event_key = str(metadata.get("input_event_key") or "").strip() or "unknown"
+                picked_input_event_key = picked_input_event_key or "unknown"
                 enqueued_done_serial_value = int(queued.get("enqueued_done_serial") or self._response_done_serial)
                 selected_pending_origin = picked_origin
                 selected_pending_turn_id = picked_turn_id
@@ -5411,6 +5426,23 @@ class RealtimeAPI:
                 queued_trigger,
             )
             drain_result = "release_gate_blocked"
+            _emit_drain_trace(
+                stage="post",
+                queue_len_before_value=queue_len_before,
+                queue_len_after_value=len(getattr(self, "_response_create_queue", deque()) or ()),
+            )
+            return
+
+        if self._drop_response_create_for_terminal_state(
+            turn_id=pending.turn_id,
+            input_event_key=pending_input_event_key,
+            origin=pending.origin,
+        ):
+            self._pending_response_create = None
+            if pending.reason != "legacy_queue_hydration":
+                self._sync_pending_response_create_queue()
+            drain_result = "dropped_terminal_state"
+            skipped_reason = "canonical_terminal_state"
             _emit_drain_trace(
                 stage="post",
                 queue_len_before_value=queue_len_before,
@@ -5579,6 +5611,45 @@ class RealtimeAPI:
             return True
         approval_flow = str(metadata.get("approval_flow", "")).strip().lower()
         return approval_flow in {"true", "1", "yes"}
+
+    def _drop_response_create_for_terminal_state(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str,
+        origin: str,
+    ) -> bool:
+        canonical_key = self._canonical_utterance_key(
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+        )
+        prior_state = self._lifecycle_controller().state_for(canonical_key)
+        if prior_state not in {
+            InteractionLifecycleState.DONE,
+            InteractionLifecycleState.REPLACED,
+            InteractionLifecycleState.CANCELLED,
+        }:
+            return False
+        prior_state_value = prior_state.value
+        logger.info(
+            "response_dropped_terminal_state run_id=%s turn_id=%s canonical_key=%s prior_state=%s",
+            self._current_run_id() or "",
+            turn_id,
+            canonical_key,
+            prior_state_value,
+        )
+        self._mark_transcript_response_outcome(
+            input_event_key=input_event_key,
+            turn_id=turn_id,
+            outcome="response_not_scheduled",
+            reason="canonical_delivery_terminal_state",
+            details=(
+                "canonical delivery terminal state "
+                f"origin={str(origin or '').strip().lower() or 'unknown'} "
+                f"prior_state={prior_state_value}"
+            ),
+        )
+        return True
 
     def _is_user_approved_interrupt_response(self, response_payload: dict[str, Any]) -> bool:
         metadata = response_payload.get("metadata") if isinstance(response_payload, dict) else None
