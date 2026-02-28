@@ -516,6 +516,130 @@ def test_drain_response_create_queue_waits_for_audio_playback_complete() -> None
     assert len(api._response_create_queue) == 1
 
 
+def test_handle_response_done_emits_queue_drain_pre_and_post_debug_logs(monkeypatch) -> None:
+    api = _make_api_stub()
+    api._response_create_queue.append(
+        {
+            "websocket": api.websocket,
+            "event": {"type": "response.create"},
+            "origin": "tool_output",
+            "record_ai_call": False,
+            "debug_context": None,
+        }
+    )
+    debug_logs: list[str] = []
+
+    monkeypatch.setattr(
+        "ai.realtime_api.logger.debug",
+        lambda message, *args: debug_logs.append(message % args if args else message),
+    )
+
+    async def _send_response_create(*_args, **_kwargs):
+        return True
+
+    api._send_response_create = _send_response_create
+
+    asyncio.run(api.handle_response_done({"type": "response.done"}))
+
+    pre_logs = [
+        line
+        for line in debug_logs
+        if "[RESPTRACE] queue_drain_pre" in line and "source_trigger=response_done" in line
+    ]
+    post_logs = [
+        line
+        for line in debug_logs
+        if "[RESPTRACE] queue_drain_post" in line and "source_trigger=response_done" in line
+    ]
+
+    assert pre_logs
+    assert post_logs
+    for field in (
+        "run_id=",
+        "turn_id=",
+        "input_event_key=",
+        "canonical_key=",
+        "queue_len_before=",
+        "queue_len_after=",
+        "picked_origin=",
+        "picked_turn_id=",
+        "picked_input_event_key=",
+        "skipped_reason=",
+        "response_done_serial=",
+    ):
+        assert field in pre_logs[-1]
+        assert field in post_logs[-1]
+
+
+def test_on_playback_complete_emits_queue_drain_pre_and_post_debug_logs(monkeypatch) -> None:
+    api = _make_api_stub()
+    api.exit_event = type("_Event", (), {"is_set": lambda self: False})()
+    api.mic = type(
+        "_PlaybackMic",
+        (),
+        {
+            "stop_receiving": lambda self: None,
+            "start_recording": lambda self: None,
+        },
+    )()
+    api.mic_send_suppress_until = 0.0
+    api._response_create_queue.append(
+        {
+            "websocket": api.websocket,
+            "event": {"type": "response.create"},
+            "origin": "assistant_message",
+            "record_ai_call": False,
+            "debug_context": None,
+        }
+    )
+    debug_logs: list[str] = []
+
+    monkeypatch.setattr(
+        "ai.realtime_api.logger.debug",
+        lambda message, *args: debug_logs.append(message % args if args else message),
+    )
+
+    async def _send_response_create(*_args, **_kwargs):
+        return True
+
+    api._send_response_create = _send_response_create
+
+    async def _run() -> None:
+        api._on_playback_complete()
+        await asyncio.sleep(0)
+
+    asyncio.run(_run())
+
+    pre_logs = [
+        line
+        for line in debug_logs
+        if "[RESPTRACE] queue_drain_pre" in line and "source_trigger=playback_complete" in line
+    ]
+    post_logs = [
+        line
+        for line in debug_logs
+        if "[RESPTRACE] queue_drain_post" in line and "source_trigger=playback_complete" in line
+    ]
+
+    assert pre_logs
+    assert post_logs
+    for field in (
+        "run_id=",
+        "turn_id=",
+        "input_event_key=",
+        "canonical_key=",
+        "queue_len_before=",
+        "queue_len_after=",
+        "picked_origin=",
+        "picked_turn_id=",
+        "picked_input_event_key=",
+        "skipped_reason=",
+        "response_done_serial=",
+    ):
+        assert field in pre_logs[-1]
+        assert field in post_logs[-1]
+
+
 def test_drain_response_create_queue_waits_until_not_listening() -> None:
     api = _make_api_stub()
     api.state_manager.state = InteractionState.LISTENING

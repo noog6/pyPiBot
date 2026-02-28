@@ -4452,6 +4452,7 @@ class RealtimeAPI:
         selected_pending_enqueued_done_serial = "none"
         selected_pending_serial_relation = "none"
         drain_result = "none"
+        skipped_reason = "none"
 
         def _serial_relation(serial: int | None) -> str:
             if serial is None:
@@ -4465,8 +4466,8 @@ class RealtimeAPI:
         def _emit_drain_trace(*, stage: str, queue_len_before_value: int, queue_len_after_value: int) -> None:
             logger.debug(
                 "[RESPTRACE] queue_drain_%s source_trigger=%s run_id=%s turn_id=%s input_event_key=%s canonical_key=%s "
-                "queue_len_before=%s queue_len_after=%s selected_pending_origin=%s selected_pending_turn_id=%s "
-                "selected_pending_input_event_key=%s selected_pending_canonical_key=%s selected_pending_trigger=%s "
+                "queue_len_before=%s queue_len_after=%s picked_origin=%s picked_turn_id=%s "
+                "picked_input_event_key=%s picked_canonical_key=%s selected_pending_trigger=%s skipped_reason=%s "
                 "enqueued_done_serial=%s enqueued_done_serial_relation=%s response_done_serial=%s drain_result=%s",
                 stage,
                 normalized_source_trigger,
@@ -4481,6 +4482,7 @@ class RealtimeAPI:
                 selected_pending_input_event_key,
                 selected_pending_canonical_key,
                 selected_pending_trigger,
+                skipped_reason,
                 selected_pending_enqueued_done_serial,
                 selected_pending_serial_relation,
                 self._response_done_serial,
@@ -4513,10 +4515,6 @@ class RealtimeAPI:
             )
             return
 
-        picked_origin = "none"
-        picked_turn_id = "none"
-        picked_input_event_key = "unknown"
-        skipped_reason = "none"
         if self._pending_response_create is None and self._response_create_queue:
             self._dedupe_queued_confirmation_reminders()
             queue_len = len(self._response_create_queue)
