@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections import defaultdict
 from pathlib import Path
@@ -36,6 +37,14 @@ class _FakeEventDispatcher:
 
     def first_audible_delta_response_id(self) -> str | None:
         return self._first_audible_response_id
+
+
+class _FakeWebsocket:
+    def __init__(self) -> None:
+        self.sent_payloads: list[dict[str, object]] = []
+
+    async def send(self, payload: str) -> None:
+        self.sent_payloads.append(json.loads(payload))
 
 
 def _load_stream_fixture() -> dict[str, object]:
@@ -113,7 +122,7 @@ def test_guarded_server_auto_cancel_precedes_first_accepted_audio_delta() -> Non
     assert dispatcher.audible_delta_count == 1
 
 
-def test_startup_prompt_and_user_audio_use_distinct_turn_and_canonical_keys() -> None:
+def test_startup_prompt_speech_started_and_assistant_message_preserve_turn_key_boundaries() -> None:
     api = RealtimeAPI.__new__(RealtimeAPI)
     api._response_create_turn_counter = 0
     api._current_response_turn_id = None
@@ -133,8 +142,18 @@ def test_startup_prompt_and_user_audio_use_distinct_turn_and_canonical_keys() ->
         turn_id=startup_turn_id,
     )
 
-    user_turn_id = "turn_2"
-    user_input_event_key = "item-user-audio-1"
+    # Simulate speech_started lifecycle branch (deterministic direct methods only).
+    api._utterance_counter = 0
+    api._utterance_counter += 1
+    user_turn_id = api._next_response_turn_id()
+    with api._utterance_context_scope(turn_id=user_turn_id, input_event_key="", utterance_seq=api._utterance_counter):
+        pass
+
+    transcript_event = {
+        "type": "conversation.item.input_audio_transcription.completed",
+        "item_id": "item-user-audio-1",
+    }
+    user_input_event_key = api._resolve_input_event_key(transcript_event)
     api._active_input_event_key_by_turn_id[startup_turn_id] = startup_input_event_key
     api._active_input_event_key_by_turn_id[user_turn_id] = user_input_event_key
 
@@ -151,9 +170,44 @@ def test_startup_prompt_and_user_audio_use_distinct_turn_and_canonical_keys() ->
         input_event_key=startup_input_event_key,
     )
 
+    assert startup_turn_id == "turn_1"
+    assert user_turn_id == "turn_2"
     assert user_turn_id != startup_turn_id
     assert startup_input_event_key.startswith("synthetic_prompt_")
+    assert startup_input_event_key != user_input_event_key
     assert user_canonical_key != startup_canonical_key
     assert user_canonical_key != user_canonical_with_startup_key
     assert set(api._active_input_event_key_by_turn_id.keys()) == {startup_turn_id, user_turn_id}
-    assert api._active_input_event_key_by_turn_id[startup_turn_id] != api._active_input_event_key_by_turn_id[user_turn_id]
+    assert api._active_input_event_key_by_turn_id[startup_turn_id] == startup_input_event_key
+    assert api._active_input_event_key_by_turn_id[user_turn_id] == user_input_event_key
+
+    websocket = _FakeWebsocket()
+    scheduled_responses: list[dict[str, object]] = []
+
+    async def _fake_send_response_create(_websocket, event, *, origin, utterance_context, **_kwargs) -> None:
+        scheduled_responses.append(
+            {
+                "origin": origin,
+                "turn_id": utterance_context.turn_id,
+                "input_event_key": utterance_context.input_event_key,
+                "metadata": event["response"]["metadata"],
+            }
+        )
+
+    api._send_response_create = _fake_send_response_create
+    api._current_run_id = lambda: "run-lifecycle-test"
+    api._pending_confirmation_token = None
+    api._is_awaiting_confirmation_phase = lambda: False
+
+    # Guard applies when assistant_message has no explicit parent key.
+    asyncio.run(api.send_assistant_message("guard me", websocket, utterance_context=None))
+    assert len(scheduled_responses) == 0
+
+    # With current turn context (from speech_started + transcript key), assistant_message is allowed.
+    assistant_context = api._build_utterance_context(turn_id=user_turn_id, input_event_key=user_input_event_key)
+    asyncio.run(api.send_assistant_message("speak", websocket, utterance_context=assistant_context))
+
+    assert len(scheduled_responses) == 1
+    assert scheduled_responses[0]["origin"] == "assistant_message"
+    assert scheduled_responses[0]["turn_id"] == user_turn_id
+    assert scheduled_responses[0]["input_event_key"] == user_input_event_key
