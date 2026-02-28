@@ -163,7 +163,13 @@ _PREFERENCE_QUERY_CANONICAL_BY_DOMAIN = {
 }
 _PREFERENCE_QUERY_FALLBACK_CANONICAL = ("user preference", "favorite preference", "preferred setting")
 _PREFERENCE_TAG_FALLBACK_QUERIES = ("preference", "favorite", "preferred")
-_MICRO_ACK_CONFIRMATION_ALLOWLIST: frozenset[str] = frozenset()
+_MICRO_ACK_CONFIRMATION_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "watchdog_confirmation_pending",
+        "watchdog_permission_pending",
+        "watchdog_approval_pending",
+    }
+)
 _PREFERENCE_KEYWORD_STOPWORDS = {
     "which",
     "what",

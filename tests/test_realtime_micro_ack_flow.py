@@ -184,6 +184,50 @@ def test_maybe_schedule_micro_ack_suppressed_during_pending_confirmation() -> No
     api.loop.close()
 
 
+def test_micro_ack_suppression_reason_blocks_non_safety_reason_while_confirmation_pending() -> None:
+    api = _api_stub()
+    api._has_active_confirmation_token = lambda: True
+    api._pending_micro_ack_reason = "speech_stopped"
+
+    assert api._micro_ack_suppression_reason() == "confirmation_pending"
+    api.loop.close()
+
+
+def test_micro_ack_suppression_reason_allows_allowlisted_safety_gate_reason() -> None:
+    api = _api_stub()
+    api._has_active_confirmation_token = lambda: True
+    api._pending_micro_ack_reason = "watchdog_confirmation_pending"
+
+    assert api._micro_ack_suppression_reason() is None
+    api.loop.close()
+
+
+def test_allowlisted_confirmation_safety_gate_does_not_enable_duplicate_generic_micro_ack() -> None:
+    api = _api_stub()
+    api._micro_ack_manager.suppression_reason = api._micro_ack_suppression_reason
+    api._has_active_confirmation_token = lambda: True
+
+    api._maybe_schedule_micro_ack(
+        turn_id="turn-1",
+        category="safety_gate",
+        channel="voice",
+        reason="watchdog_confirmation_pending",
+        expected_delay_ms=900,
+    )
+    api._maybe_schedule_micro_ack(
+        turn_id="turn-1",
+        category="start_of_work",
+        channel="voice",
+        reason="speech_stopped",
+        expected_delay_ms=900,
+    )
+
+    assert api._micro_ack_manager.scheduled == [
+        ("turn-1", "safety_gate", "watchdog_confirmation_pending", 900)
+    ]
+    api.loop.close()
+
+
 def test_talk_over_aborts_active_response_and_clears_pending() -> None:
     api = _api_stub()
     api._response_in_flight = True
