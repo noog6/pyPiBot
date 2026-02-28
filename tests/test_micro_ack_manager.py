@@ -154,7 +154,14 @@ def test_different_channels_have_separate_limits() -> None:
     emits: list[tuple[MicroAckContext, str, str]] = []
 
     manager = MicroAckManager(
-        config=MicroAckConfig(delay_ms=10, global_cooldown_ms=1, per_turn_max=1, dedupe_ttl_ms=5000, long_wait_second_ack_ms=0),
+        config=MicroAckConfig(
+            delay_ms=10,
+            global_cooldown_ms=1,
+            global_cooldown_scope="channel",
+            per_turn_max=1,
+            dedupe_ttl_ms=5000,
+            long_wait_second_ack_ms=0,
+        ),
         on_emit=lambda context, phrase_id, phrase: emits.append((context, phrase_id, phrase)),
         on_log=lambda *_args: None,
         suppression_reason=lambda: None,
@@ -167,6 +174,66 @@ def test_different_channels_have_separate_limits() -> None:
     loop.run_until_complete(asyncio.sleep(0.02))
 
     assert [context.channel for context, *_ in emits] == ["voice", "text"]
+    loop.close()
+
+
+def test_global_cooldown_scope_channel_allows_voice_then_text() -> None:
+    loop = asyncio.new_event_loop()
+    emits: list[tuple[MicroAckContext, str, str]] = []
+
+    manager = MicroAckManager(
+        config=MicroAckConfig(
+            delay_ms=10,
+            global_cooldown_ms=1000,
+            global_cooldown_scope="channel",
+            per_turn_max=3,
+            dedupe_ttl_ms=0,
+            long_wait_second_ack_ms=0,
+            channel_cooldown_ms={"voice": 1000, "text": 1000},
+        ),
+        on_emit=lambda context, phrase_id, phrase: emits.append((context, phrase_id, phrase)),
+        on_log=lambda *_args: None,
+        suppression_reason=lambda: None,
+        rng=random.Random(7),
+    )
+
+    manager.maybe_schedule(context=_context(turn_id="turn-1", channel="voice", intent="help"), reason="speech_stopped", loop=loop, expected_delay_ms=900)
+    loop.run_until_complete(asyncio.sleep(0.02))
+    manager.maybe_schedule(context=_context(turn_id="turn-2", channel="text", intent="help"), reason="speech_stopped", loop=loop, expected_delay_ms=900)
+    loop.run_until_complete(asyncio.sleep(0.02))
+
+    assert [context.channel for context, *_ in emits] == ["voice", "text"]
+    loop.close()
+
+
+def test_global_cooldown_scope_all_blocks_voice_then_text() -> None:
+    loop = asyncio.new_event_loop()
+    emits: list[tuple[MicroAckContext, str, str]] = []
+    logs: list[tuple[str, str, str, int | None, str | None, str | None, str | None, str | None, str | None]] = []
+
+    manager = MicroAckManager(
+        config=MicroAckConfig(
+            delay_ms=10,
+            global_cooldown_ms=1000,
+            global_cooldown_scope="all",
+            per_turn_max=3,
+            dedupe_ttl_ms=0,
+            long_wait_second_ack_ms=0,
+            channel_cooldown_ms={"voice": 0, "text": 0},
+        ),
+        on_emit=lambda context, phrase_id, phrase: emits.append((context, phrase_id, phrase)),
+        on_log=lambda event, turn_id, reason, delay_ms, category, channel, intent, action, tool_call_id: logs.append((event, turn_id, reason, delay_ms, category, channel, intent, action, tool_call_id)),
+        suppression_reason=lambda: None,
+        rng=random.Random(7),
+    )
+
+    manager.maybe_schedule(context=_context(turn_id="turn-1", channel="voice", intent="help"), reason="speech_stopped", loop=loop, expected_delay_ms=900)
+    loop.run_until_complete(asyncio.sleep(0.02))
+    manager.maybe_schedule(context=_context(turn_id="turn-2", channel="text", intent="help"), reason="speech_stopped", loop=loop, expected_delay_ms=900)
+    loop.run_until_complete(asyncio.sleep(0.02))
+
+    assert [context.channel for context, *_ in emits] == ["voice"]
+    assert any(event == "suppressed" and reason == "cooldown" and channel == "text" for event, _turn, reason, _delay, _category, channel, _intent, _action, _tool_call_id in logs)
     loop.close()
 
 

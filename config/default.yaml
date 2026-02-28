@@ -138,6 +138,9 @@ realtime:
   micro_ack_expected_wait_threshold_ms: 700
   micro_ack_long_wait_second_ack_ms: 4000
   micro_ack_global_cooldown_ms: 10000
+  # Scope for global cooldown: "all" preserves legacy cross-channel suppression;
+  # set to "channel" to scope global cooldown per channel by default.
+  micro_ack_global_cooldown_scope: "all"
   micro_ack_category_cooldown_ms:
     latency_mask: 10000
     start_of_work: 0

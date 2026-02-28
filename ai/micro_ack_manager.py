@@ -25,6 +25,7 @@ class MicroAckConfig:
     expected_wait_threshold_ms: int = 700
     long_wait_second_ack_ms: int = 4000
     global_cooldown_ms: int = 10000
+    global_cooldown_scope: str = "channel"
     per_turn_max: int = 1
     anti_chatter_after_assistant_audio_end_ms: int = 1500
     talk_over_risk_window_ms: int = 6000
@@ -246,17 +247,18 @@ class MicroAckManager:
             return
 
         now = self._now()
-        if self._last_micro_ack_ts is not None:
-            elapsed_ms = (now - self._last_micro_ack_ts) * 1000.0
-            if elapsed_ms < self._config.global_cooldown_ms:
-                self._log("suppressed", turn_id, "cooldown", int(elapsed_ms), context)
-                return
         channel_last_ts = self._last_micro_ack_ts_by_channel.get(context.channel)
         if channel_last_ts is not None:
             elapsed_channel_ms = (now - channel_last_ts) * 1000.0
             channel_cooldown_ms = self._channel_cooldown_ms(context.channel)
             if elapsed_channel_ms < channel_cooldown_ms:
                 self._log("suppressed", turn_id, "channel_cooldown", int(elapsed_channel_ms), context)
+                return
+
+        if self._global_cooldown_scope() == "all" and self._last_micro_ack_ts is not None:
+            elapsed_ms = (now - self._last_micro_ack_ts) * 1000.0
+            if elapsed_ms < self._config.global_cooldown_ms:
+                self._log("suppressed", turn_id, "cooldown", int(elapsed_ms), context)
                 return
         category_key = self._category_key(context.category)
         category_last_ts = self._last_micro_ack_ts_by_category.get(category_key)
@@ -343,6 +345,12 @@ class MicroAckManager:
         mapping = self._config.channel_cooldown_ms or {}
         configured = int(mapping.get(channel, self._config.global_cooldown_ms))
         return max(0, configured)
+
+    def _global_cooldown_scope(self) -> str:
+        configured = str(getattr(self._config, "global_cooldown_scope", "channel")).strip().lower()
+        if configured in {"all", "channel"}:
+            return configured
+        return "channel"
 
     @staticmethod
     def _category_key(category: MicroAckCategory | str) -> str:
