@@ -925,6 +925,10 @@ class RealtimeAPI:
         normalized_key = str(input_event_key or "").strip()
         if not normalized_key:
             return
+        delivery_state = self._response_delivery_state(turn_id=turn_id, input_event_key=normalized_key)
+        if delivery_state in {"delivered", "done"} and reason == "audio_playback_busy":
+            reason = "already_handled"
+            details = f"canonical_delivery_state={delivery_state}"
         watchdog_tasks = getattr(self, "_transcript_response_watchdog_tasks", None)
         if not isinstance(watchdog_tasks, dict):
             watchdog_tasks = {}
@@ -987,6 +991,9 @@ class RealtimeAPI:
                 f"active_origin={getattr(self, '_active_response_origin', 'unknown')} "
                 f"response_id={getattr(self, '_active_response_id', None) or 'unknown'}"
             )
+        elif self._response_delivery_state(turn_id=turn_id, input_event_key=input_event_key) in {"delivered", "done"}:
+            reason = "already_handled"
+            details = "canonical delivery terminal state"
         elif bool(getattr(self, "_audio_playback_busy", False)):
             reason = "audio_playback_busy"
             details = "audio playback active"
