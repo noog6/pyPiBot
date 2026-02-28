@@ -6,7 +6,7 @@ import random
 from ai.micro_ack_manager import MicroAckCategory, MicroAckConfig, MicroAckContext, MicroAckManager
 
 
-def _context(*, turn_id: str, category: str = "speech", channel: str = "voice", intent: str | None = None) -> MicroAckContext:
+def _context(*, turn_id: str, category: str | MicroAckCategory = "speech", channel: str = "voice", intent: str | None = None) -> MicroAckContext:
     return MicroAckContext(
         category=category,
         channel=channel,
@@ -237,6 +237,72 @@ def test_category_drives_phrase_family() -> None:
 
     assert emits
     assert emits[0][1].startswith("start_of_work_")
+    loop.close()
+
+
+def test_per_category_cooldown_blocks_same_category_only() -> None:
+    loop = asyncio.new_event_loop()
+    emits: list[tuple[MicroAckContext, str, str]] = []
+    logs: list[tuple[str, str, str, int | None, str | None, str | None, str | None, str | None, str | None]] = []
+
+    manager = MicroAckManager(
+        config=MicroAckConfig(
+            delay_ms=10,
+            global_cooldown_ms=0,
+            per_turn_max=3,
+            dedupe_ttl_ms=0,
+            long_wait_second_ack_ms=0,
+            category_cooldown_ms={
+                MicroAckCategory.LATENCY_MASK.value: 1000,
+                MicroAckCategory.START_OF_WORK.value: 0,
+            },
+        ),
+        on_emit=lambda context, phrase_id, phrase: emits.append((context, phrase_id, phrase)),
+        on_log=lambda event, turn_id, reason, delay_ms, category, channel, intent, action, tool_call_id: logs.append((event, turn_id, reason, delay_ms, category, channel, intent, action, tool_call_id)),
+        suppression_reason=lambda: None,
+    )
+
+    manager.maybe_schedule(
+        context=_context(
+            turn_id="turn-1",
+            channel="voice",
+            category=MicroAckCategory.LATENCY_MASK,
+            intent="weather",
+        ),
+        reason="transcript_finalized",
+        loop=loop,
+        expected_delay_ms=900,
+    )
+    loop.run_until_complete(asyncio.sleep(0.02))
+    manager.maybe_schedule(
+        context=_context(
+            turn_id="turn-2",
+            channel="voice",
+            category=MicroAckCategory.LATENCY_MASK,
+            intent="stocks",
+        ),
+        reason="transcript_finalized",
+        loop=loop,
+        expected_delay_ms=900,
+    )
+    manager.maybe_schedule(
+        context=_context(
+            turn_id="turn-3",
+            channel="voice",
+            category=MicroAckCategory.START_OF_WORK,
+            intent="stocks",
+        ),
+        reason="speech_stopped",
+        loop=loop,
+        expected_delay_ms=900,
+    )
+    loop.run_until_complete(asyncio.sleep(0.02))
+
+    assert [context.category for context, *_ in emits] == [MicroAckCategory.LATENCY_MASK, MicroAckCategory.START_OF_WORK]
+    assert any(
+        event == "suppressed" and reason == "category_cooldown" and category == MicroAckCategory.LATENCY_MASK.value
+        for event, _turn, reason, _delay, category, _channel, _intent, _action, _tool_call_id in logs
+    )
     loop.close()
 
 

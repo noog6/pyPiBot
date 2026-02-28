@@ -881,6 +881,15 @@ class RealtimeAPI:
         return policy
 
     def _build_micro_ack_manager(self, realtime_cfg: dict[str, Any]) -> MicroAckManager:
+        raw_category_cooldowns = realtime_cfg.get("micro_ack_category_cooldown_ms")
+        category_cooldown_ms: dict[str, int] = {}
+        if isinstance(raw_category_cooldowns, dict):
+            for category, cooldown_ms in raw_category_cooldowns.items():
+                category_key = str(category).strip()
+                if not category_key:
+                    continue
+                category_cooldown_ms[category_key] = max(0, int(cooldown_ms))
+
         cfg = MicroAckConfig(
             enabled=bool(realtime_cfg.get("micro_ack_enabled", True)),
             delay_ms=max(150, int(realtime_cfg.get("micro_ack_delay_ms", 450))),
@@ -905,6 +914,7 @@ class RealtimeAPI:
                 channel: max(0, int(values.get("cooldown_ms", 0)))
                 for channel, values in self._micro_ack_channel_policy.items()
             },
+            category_cooldown_ms=category_cooldown_ms,
         )
         return MicroAckManager(
             config=cfg,
