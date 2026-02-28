@@ -1945,6 +1945,62 @@ class RealtimeAPI:
         run_id = str(self._current_run_id() or "").strip() or "run-unknown"
         return f"{run_id}:{resolved_turn_id}:{resolved_input_event_key}"
 
+    def _is_synthetic_input_event_key(self, input_event_key: str | None) -> bool:
+        normalized = str(input_event_key or "").strip().lower()
+        return normalized.startswith("synthetic_")
+
+    def _rebind_active_response_correlation_key(
+        self,
+        *,
+        turn_id: str,
+        replacement_input_event_key: str,
+    ) -> None:
+        normalized_replacement = str(replacement_input_event_key or "").strip()
+        if not normalized_replacement:
+            return
+        if str(getattr(self, "_active_response_origin", "")).strip().lower() != "server_auto":
+            return
+        if not bool(getattr(self, "_response_in_flight", False)):
+            return
+        active_key = str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip()
+        if not self._is_synthetic_input_event_key(active_key):
+            return
+        old_canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=active_key)
+        new_canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=normalized_replacement)
+        if old_canonical_key == new_canonical_key:
+            return
+
+        created_keys = getattr(self, "_response_created_canonical_keys", None)
+        if isinstance(created_keys, set) and old_canonical_key in created_keys:
+            created_keys.discard(old_canonical_key)
+            created_keys.add(new_canonical_key)
+
+        ledger = getattr(self, "_response_delivery_ledger", None)
+        if isinstance(ledger, dict) and old_canonical_key in ledger and new_canonical_key not in ledger:
+            ledger[new_canonical_key] = ledger.pop(old_canonical_key)
+
+        response_id_by_key = getattr(self, "_response_id_by_canonical_key", None)
+        if isinstance(response_id_by_key, dict) and old_canonical_key in response_id_by_key:
+            response_id = response_id_by_key.pop(old_canonical_key)
+            if new_canonical_key not in response_id_by_key:
+                response_id_by_key[new_canonical_key] = response_id
+
+        if str(getattr(self, "_active_response_input_event_key", "") or "").strip() == active_key:
+            self._active_response_input_event_key = normalized_replacement
+        if str(getattr(self, "_active_response_canonical_key", "") or "").strip() == old_canonical_key:
+            self._active_response_canonical_key = new_canonical_key
+        self._active_server_auto_input_event_key = normalized_replacement
+        logger.debug(
+            "[RESPTRACE] response_key_rebound run_id=%s turn_id=%s old_input_event_key=%s new_input_event_key=%s "
+            "old_canonical_key=%s new_canonical_key=%s",
+            self._current_run_id() or "",
+            turn_id,
+            active_key,
+            normalized_replacement,
+            old_canonical_key,
+            new_canonical_key,
+        )
+
     def _resptrace_suppression_reason(self, *, turn_id: str, input_event_key: str) -> str:
         suppression_until = float(getattr(self, "_preference_recall_response_suppression_until", 0.0) or 0.0)
         suppression_window_active = suppression_until > time.monotonic()
@@ -7267,6 +7323,10 @@ class RealtimeAPI:
                 active_by_turn = {}
                 self._active_input_event_key_by_turn_id = active_by_turn
             active_by_turn[resolved_turn_id] = input_event_key
+            self._rebind_active_response_correlation_key(
+                turn_id=resolved_turn_id,
+                replacement_input_event_key=input_event_key,
+            )
             self._clear_stale_pending_server_auto_for_turn(
                 turn_id=resolved_turn_id,
                 active_input_event_key=input_event_key,
