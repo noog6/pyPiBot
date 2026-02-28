@@ -916,6 +916,7 @@ class RealtimeAPI:
                 1000,
                 int(realtime_cfg.get("micro_ack_global_cooldown_ms", 10000)),
             ),
+            global_cooldown_scope=str(realtime_cfg.get("micro_ack_global_cooldown_scope", "channel")).strip().lower(),
             per_turn_max=max(1, int(realtime_cfg.get("micro_ack_per_turn_max", 1))),
             channel_enabled={
                 channel: bool(values.get("enabled", True))
