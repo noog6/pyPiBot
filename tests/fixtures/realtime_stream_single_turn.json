@@ -1,0 +1,136 @@
+{
+  "description": "Deterministic fake realtime stream covering suppression/cancel and queued assistant message replay.",
+  "events": [
+    {
+      "seq": 1,
+      "type": "speech_stopped",
+      "utterance_id": "utt_single",
+      "canonical_key": "run-501:turn-1:item-memory"
+    },
+    {
+      "seq": 2,
+      "type": "response.created",
+      "response_id": "resp_server_auto_1",
+      "origin": "server_auto",
+      "utterance_id": "utt_single",
+      "canonical_key": "run-501:turn-1:item-memory"
+    },
+    {
+      "seq": 3,
+      "type": "transcript.completed",
+      "intent": "memory",
+      "utterance_id": "utt_single",
+      "canonical_key": "run-501:turn-1:item-memory"
+    },
+    {
+      "seq": 4,
+      "type": "response.created",
+      "response_id": "resp_assistant_queued",
+      "origin": "assistant_message",
+      "queued": true,
+      "utterance_id": "utt_single",
+      "canonical_key": "run-501:turn-1:item-memory",
+      "metadata": {
+        "explicit_multipart": false
+      }
+    },
+    {
+      "seq": 5,
+      "type": "response.cancelled",
+      "response_id": "resp_server_auto_1",
+      "reason": "suppression_before_audio",
+      "utterance_id": "utt_single",
+      "canonical_key": "run-501:turn-1:item-memory"
+    },
+    {
+      "seq": 6,
+      "type": "response.created",
+      "response_id": "resp_assistant_final",
+      "origin": "assistant_message",
+      "utterance_id": "utt_single",
+      "canonical_key": "run-501:turn-1:item-memory",
+      "metadata": {
+        "explicit_multipart": false
+      }
+    },
+    {
+      "seq": 7,
+      "type": "response.audio_started",
+      "response_id": "resp_assistant_final",
+      "utterance_id": "utt_single",
+      "canonical_key": "run-501:turn-1:item-memory"
+    },
+    {
+      "seq": 8,
+      "type": "response.done",
+      "response_id": "resp_assistant_final",
+      "origin": "assistant_message",
+      "utterance_id": "utt_single",
+      "canonical_key": "run-501:turn-1:item-memory",
+      "metadata": {
+        "explicit_multipart": false
+      }
+    },
+    {
+      "seq": 9,
+      "type": "speech_stopped",
+      "utterance_id": "utt_multipart",
+      "canonical_key": "run-501:turn-2:item-story"
+    },
+    {
+      "seq": 10,
+      "type": "response.created",
+      "response_id": "resp_story_part_1",
+      "origin": "assistant_message",
+      "utterance_id": "utt_multipart",
+      "canonical_key": "run-501:turn-2:item-story",
+      "metadata": {
+        "explicit_multipart": true,
+        "part": 1
+      }
+    },
+    {
+      "seq": 11,
+      "type": "response.audio_started",
+      "response_id": "resp_story_part_1",
+      "utterance_id": "utt_multipart",
+      "canonical_key": "run-501:turn-2:item-story"
+    },
+    {
+      "seq": 12,
+      "type": "response.done",
+      "response_id": "resp_story_part_1",
+      "origin": "assistant_message",
+      "utterance_id": "utt_multipart",
+      "canonical_key": "run-501:turn-2:item-story",
+      "metadata": {
+        "explicit_multipart": true,
+        "part": 1
+      }
+    },
+    {
+      "seq": 13,
+      "type": "response.created",
+      "response_id": "resp_story_part_2",
+      "origin": "assistant_message",
+      "utterance_id": "utt_multipart",
+      "canonical_key": "run-501:turn-2:item-story",
+      "metadata": {
+        "explicit_multipart": true,
+        "part": 2
+      }
+    },
+    {
+      "seq": 14,
+      "type": "response.done",
+      "response_id": "resp_story_part_2",
+      "origin": "assistant_message",
+      "utterance_id": "utt_multipart",
+      "canonical_key": "run-501:turn-2:item-story",
+      "metadata": {
+        "explicit_multipart": true,
+        "part": 2
+      }
+    }
+  ]
+}
