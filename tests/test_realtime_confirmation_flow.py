@@ -3841,6 +3841,56 @@ def test_confirmation_reminder_emits_while_generic_micro_ack_is_suppressed() -> 
     api.loop.close()
 
 
+def test_confirmation_pending_allows_safety_gate_micro_ack_without_consuming_canonical_slot() -> None:
+    api = _make_api_stub()
+    api._pending_confirmation_token = _build_confirmation_token(kind="tool_governance")
+    api.loop = asyncio.new_event_loop()
+    api._micro_ack_runtime_mode = "normal"
+    api._micro_ack_channel_mode = "text_and_audio"
+    api._micro_ack_channel_policy = {
+        "voice": {"enabled": True, "cooldown_ms": 10000, "speak": True},
+        "text": {"enabled": True, "cooldown_ms": 1000, "speak": False},
+    }
+
+    sent_messages: list[dict[str, dict[str, str]]] = []
+
+    async def _send_assistant_message(message: str, _websocket, *, response_metadata=None, **_kwargs):
+        sent_messages.append({"message": message, "metadata": response_metadata or {}})
+
+    api.send_assistant_message = _send_assistant_message
+
+    class _Manager:
+        def __init__(self) -> None:
+            self._sent = False
+
+        def suppression_baseline_reason(self):
+            return None
+
+        def maybe_schedule(self, *, context, reason: str, loop, expected_delay_ms=None):
+            if api._micro_ack_suppression_reason() is not None or self._sent:
+                return
+            self._sent = True
+            api._emit_micro_ack(context, "watchdog_confirmation_pending", "One sec while I confirm that.")
+
+    api._micro_ack_manager = _Manager()
+
+    api._maybe_schedule_micro_ack(
+        turn_id="turn-1",
+        reason="watchdog_confirmation_pending",
+        category=api._micro_ack_category_for_reason("watchdog_confirmation_pending"),
+        channel="text",
+        expected_delay_ms=900,
+    )
+    api.loop.run_until_complete(asyncio.sleep(0))
+
+    assert len(sent_messages) == 1
+    metadata = sent_messages[0]["metadata"]
+    assert metadata.get("trigger") == "micro_ack"
+    assert metadata.get("consumes_canonical_slot") == "false"
+    assert "canonical_key" not in metadata
+    api.loop.close()
+
+
 def _response_create_metadata_events(sent_events: list[dict]) -> list[dict[str, str]]:
     metadata_events: list[dict[str, str]] = []
     for event in sent_events:
