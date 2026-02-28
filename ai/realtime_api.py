@@ -773,6 +773,7 @@ class RealtimeAPI:
         self._response_delivery_ledger: dict[str, str] = {}
         self._response_id_by_canonical_key: dict[str, str] = {}
         self._canonical_response_lifecycle_state: dict[str, dict[str, bool]] = {}
+        self._lifecycle_canonical_timeline: dict[str, deque[str]] = {}
         self._interaction_lifecycle_controller = InteractionLifecycleController()
         self._response_obligations: dict[str, dict[str, Any]] = {}
         self._already_scheduled_for_input_event_key: set[str] = set()
@@ -2083,6 +2084,14 @@ class RealtimeAPI:
             if new_canonical_key not in lifecycle_state:
                 lifecycle_state[new_canonical_key] = old_state
         self._lifecycle_controller().on_replaced(old_canonical_key, new_canonical_key)
+        self._log_lifecycle_event(
+            turn_id=turn_id,
+            input_event_key=normalized_replacement,
+            canonical_key=new_canonical_key,
+            origin="server_auto",
+            response_id=getattr(self, "_active_response_id", None),
+            decision="transition_replaced",
+        )
 
         if str(getattr(self, "_active_response_input_event_key", "") or "").strip() == active_key:
             self._active_response_input_event_key = normalized_replacement
@@ -2178,16 +2187,17 @@ class RealtimeAPI:
         existing_response_id = str(
             getattr(self, "_response_id_by_canonical_key", {}).get(canonical_key) or ""
         ).strip()
-        logger.debug(
-            "[RESPTRACE] response_create_blocked run_id=%s turn_id=%s origin=%s input_event_key=%s canonical_key=%s "
-            "block_reason=%s existing_response_id=%s",
-            self._current_run_id() or "",
-            turn_id,
-            origin,
-            str(input_event_key or "").strip() or "unknown",
-            canonical_key,
-            block_reason,
-            existing_response_id or "",
+        self._log_lifecycle_event(
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            canonical_key=canonical_key,
+            origin=origin,
+            response_id=existing_response_id,
+            decision=f"guard_blocked:{block_reason}",
+        )
+        self._debug_dump_canonical_key_timeline(
+            canonical_key=canonical_key,
+            trigger=f"response_create_blocked:{block_reason}",
         )
 
     def _log_response_site_debug(
@@ -2395,6 +2405,74 @@ class RealtimeAPI:
             existing = {}
             lifecycle_state[normalized_canonical_key] = existing
         return existing
+
+    def _append_lifecycle_timeline_event(self, *, canonical_key: str, entry: str) -> None:
+        normalized_canonical_key = str(canonical_key or "").strip()
+        if not normalized_canonical_key:
+            return
+        timeline_store = getattr(self, "_lifecycle_canonical_timeline", None)
+        if not isinstance(timeline_store, dict):
+            timeline_store = {}
+            self._lifecycle_canonical_timeline = timeline_store
+        timeline = timeline_store.get(normalized_canonical_key)
+        if not isinstance(timeline, deque):
+            timeline = deque(maxlen=64)
+            timeline_store[normalized_canonical_key] = timeline
+        timeline.append(entry)
+
+    def _debug_dump_canonical_key_timeline(self, *, canonical_key: str, trigger: str) -> None:
+        normalized_canonical_key = str(canonical_key or "").strip()
+        if not normalized_canonical_key:
+            return
+        timeline_store = getattr(self, "_lifecycle_canonical_timeline", None)
+        timeline = timeline_store.get(normalized_canonical_key) if isinstance(timeline_store, dict) else None
+        if not isinstance(timeline, deque):
+            return
+        logger.debug(
+            "lifecycle_timeline_dump run_id=%s canonical_key=%s trigger=%s events=%s",
+            self._current_run_id() or "",
+            normalized_canonical_key,
+            trigger,
+            json.dumps(list(timeline), separators=(",", ":")),
+        )
+
+    def _log_lifecycle_event(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str | None,
+        canonical_key: str,
+        origin: str,
+        response_id: str | None,
+        decision: str,
+    ) -> None:
+        resolved_turn_id = str(turn_id or "").strip() or "turn-unknown"
+        resolved_input_event_key = str(input_event_key or "").strip() or "unknown"
+        resolved_canonical_key = str(canonical_key or "").strip() or self._canonical_utterance_key(
+            turn_id=resolved_turn_id,
+            input_event_key=resolved_input_event_key,
+        )
+        resolved_origin = str(origin or "").strip() or "unknown"
+        resolved_response_id = str(response_id or "").strip() or "none"
+        resolved_decision = str(decision or "").strip() or "unknown"
+        logger.info(
+            "lifecycle_event run_id=%s turn_id=%s input_event_key=%s canonical_key=%s origin=%s response_id=%s decision=%s",
+            self._current_run_id() or "",
+            resolved_turn_id,
+            resolved_input_event_key,
+            resolved_canonical_key,
+            resolved_origin,
+            resolved_response_id,
+            resolved_decision,
+        )
+        self._append_lifecycle_timeline_event(
+            canonical_key=resolved_canonical_key,
+            entry=(
+                f"decision={resolved_decision};origin={resolved_origin};"
+                f"response_id={resolved_response_id};turn_id={resolved_turn_id};"
+                f"input_event_key={resolved_input_event_key}"
+            ),
+        )
 
     def _canonical_first_audio_started(self, canonical_key: str) -> bool:
         if self._lifecycle_controller().audio_started(canonical_key):
@@ -7240,14 +7318,6 @@ class RealtimeAPI:
                     )
                 canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
                 resolved_input_event_key = input_event_key
-                logger.info(
-                    "server_auto_response_linked run_id=%s response_id=%s turn_id=%s input_event_key=%s canonical_key=%s",
-                    self._current_run_id() or "",
-                    self._active_response_id or "unknown",
-                    turn_id,
-                    input_event_key or "unknown",
-                    canonical_key,
-                )
                 self._log_response_site_debug(
                     site="server_auto_response_linked",
                     turn_id=turn_id,
@@ -7280,15 +7350,6 @@ class RealtimeAPI:
                 self._active_server_auto_input_event_key = None
                 canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=current_input_event_key)
                 resolved_input_event_key = current_input_event_key
-                logger.info(
-                    "response_created_linked run_id=%s response_id=%s turn_id=%s origin=%s input_event_key=%s canonical_key=%s",
-                    self._current_run_id() or "",
-                    self._active_response_id or "unknown",
-                    turn_id,
-                    origin,
-                    current_input_event_key or "unknown",
-                    canonical_key,
-                )
             with self._utterance_context_scope(
                 turn_id=turn_id,
                 input_event_key=resolved_input_event_key,
@@ -7329,11 +7390,31 @@ class RealtimeAPI:
                 lifecycle_canonical_key,
                 origin=origin,
             )
+            self._log_lifecycle_event(
+                turn_id=turn_id,
+                input_event_key=resolved_input_event_key,
+                canonical_key=lifecycle_canonical_key,
+                origin=origin,
+                response_id=self._active_response_id,
+                decision=f"response_created_{lifecycle_created_decision.action.value}:{lifecycle_created_decision.reason}",
+            )
             if lifecycle_created_decision.action is LifecycleDecisionAction.CANCEL:
+                self._debug_dump_canonical_key_timeline(
+                    canonical_key=lifecycle_canonical_key,
+                    trigger="response_created_cancelled",
+                )
                 cancel_event = {"type": "response.cancel"}
                 log_ws_event("Outgoing", cancel_event)
                 self._track_outgoing_event(cancel_event, origin="interaction_lifecycle_controller")
                 self._lifecycle_controller().on_cancel_sent(lifecycle_canonical_key)
+                self._log_lifecycle_event(
+                    turn_id=turn_id,
+                    input_event_key=resolved_input_event_key,
+                    canonical_key=lifecycle_canonical_key,
+                    origin=origin,
+                    response_id=self._active_response_id,
+                    decision="transition_cancel_sent:interaction_lifecycle_controller",
+                )
                 if websocket is not None:
                     await websocket.send(json.dumps(cancel_event))
                 return
@@ -7417,6 +7498,14 @@ class RealtimeAPI:
                 log_ws_event("Outgoing", cancel_event)
                 self._track_outgoing_event(cancel_event, origin="preference_recall_guard")
                 self._lifecycle_controller().on_cancel_sent(canonical_key)
+                self._log_lifecycle_event(
+                    turn_id=turn_id,
+                    input_event_key=active_input_event_key,
+                    canonical_key=canonical_key,
+                    origin=origin,
+                    response_id=self._active_response_id,
+                    decision=f"guard_cancel_sent:{replacement_reason}",
+                )
                 await websocket.send(json.dumps(cancel_event))
             else:
                 if consumes_canonical_slot:
@@ -7506,7 +7595,19 @@ class RealtimeAPI:
                 return
             if active_canonical_key:
                 audio_decision = self._lifecycle_controller().on_audio_delta(active_canonical_key)
+                self._log_lifecycle_event(
+                    turn_id=self._current_turn_id_or_unknown(),
+                    input_event_key=getattr(self, "_active_response_input_event_key", None),
+                    canonical_key=active_canonical_key,
+                    origin=getattr(self, "_active_response_origin", "unknown"),
+                    response_id=getattr(self, "_active_response_id", None),
+                    decision=f"audio_delta_{audio_decision.action.value}:{audio_decision.reason}",
+                )
                 if audio_decision.action is LifecycleDecisionAction.CANCEL:
+                    self._debug_dump_canonical_key_timeline(
+                        canonical_key=active_canonical_key,
+                        trigger="audio_delta_cancelled",
+                    )
                     return
             self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
             if active_canonical_key:
@@ -8994,6 +9095,18 @@ class RealtimeAPI:
         self._response_in_flight = False
         if done_input_event_key and bool(getattr(self, "_active_response_consumes_canonical_slot", True)):
             self._lifecycle_controller().on_response_done(done_canonical_key)
+            self._log_lifecycle_event(
+                turn_id=turn_id,
+                input_event_key=done_input_event_key,
+                canonical_key=done_canonical_key,
+                origin=active_response_origin_before_clear,
+                response_id=active_response_id_before_clear,
+                decision="transition_done:response_done",
+            )
+            self._debug_dump_canonical_key_timeline(
+                canonical_key=done_canonical_key,
+                trigger="response_done",
+            )
             existing_delivery_state = self._response_delivery_state(
                 turn_id=turn_id,
                 input_event_key=done_input_event_key,
@@ -9156,6 +9269,18 @@ class RealtimeAPI:
                 input_event_key=done_input_event_key,
             )
             self._lifecycle_controller().on_response_done(done_canonical_key)
+            self._log_lifecycle_event(
+                turn_id=turn_id,
+                input_event_key=done_input_event_key,
+                canonical_key=done_canonical_key,
+                origin=getattr(self, "_active_response_origin", "unknown"),
+                response_id=getattr(self, "_active_response_id", None),
+                decision="transition_done:response_completed",
+            )
+            self._debug_dump_canonical_key_timeline(
+                canonical_key=done_canonical_key,
+                trigger="response_completed",
+            )
             existing_delivery_state = self._response_delivery_state(
                 turn_id=turn_id,
                 input_event_key=done_input_event_key,
