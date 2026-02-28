@@ -946,6 +946,8 @@ class RealtimeAPI:
         intent: str | None,
         action: str | None,
         tool_call_id: str | None,
+        dedupe_fingerprint: str | None,
+        suppression_source: str | None,
     ) -> None:
         run_id = self._current_run_id() or ""
         category_value = category or ""
@@ -953,9 +955,11 @@ class RealtimeAPI:
         intent_value = intent or ""
         action_value = action or ""
         tool_call_id_value = tool_call_id or ""
+        dedupe_fingerprint_value = dedupe_fingerprint or ""
+        suppression_source_value = suppression_source or ""
         if event == "scheduled":
             logger.info(
-                "micro_ack_scheduled run_id=%s turn_id=%s reason=%s delay_ms=%s category=%s channel=%s intent=%s action=%s tool_call_id=%s",
+                "micro_ack_scheduled run_id=%s turn_id=%s reason=%s delay_ms=%s category=%s channel=%s intent=%s action=%s tool_call_id=%s dedupe_fp=%s",
                 run_id,
                 turn_id,
                 reason,
@@ -965,11 +969,12 @@ class RealtimeAPI:
                 intent_value,
                 action_value,
                 tool_call_id_value,
+                dedupe_fingerprint_value,
             )
             return
         if event == "emitted":
             logger.info(
-                "micro_ack_emitted run_id=%s turn_id=%s phrase_id=%s category=%s channel=%s intent=%s action=%s tool_call_id=%s",
+                "micro_ack_emitted run_id=%s turn_id=%s phrase_id=%s category=%s channel=%s intent=%s action=%s tool_call_id=%s dedupe_fp=%s",
                 run_id,
                 turn_id,
                 reason,
@@ -978,6 +983,7 @@ class RealtimeAPI:
                 intent_value,
                 action_value,
                 tool_call_id_value,
+                dedupe_fingerprint_value,
             )
             return
         if event == "cancelled":
@@ -996,7 +1002,7 @@ class RealtimeAPI:
         if event in {"emitted", "cancelled", "suppressed"} and channel_value:
             self._clear_pending_micro_ack_marker(turn_id=turn_id, channel=channel_value, reason=event)
         logger.debug(
-            "micro_ack_suppressed run_id=%s turn_id=%s reason=%s category=%s channel=%s intent=%s action=%s tool_call_id=%s",
+            "micro_ack_suppressed run_id=%s turn_id=%s reason=%s category=%s channel=%s intent=%s action=%s tool_call_id=%s dedupe_fp=%s suppression_source=%s",
             run_id,
             turn_id,
             reason,
@@ -1005,6 +1011,8 @@ class RealtimeAPI:
             intent_value,
             action_value,
             tool_call_id_value,
+            dedupe_fingerprint_value,
+            suppression_source_value,
         )
 
     def _micro_ack_suppression_reason(self) -> str | None:

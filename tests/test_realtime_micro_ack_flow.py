@@ -291,6 +291,75 @@ def test_micro_ack_reason_maps_to_expected_category() -> None:
     api.loop.close()
 
 
+def test_log_micro_ack_event_includes_dedupe_fingerprint_and_suppression_source(monkeypatch) -> None:
+    api = _api_stub()
+    info_messages: list[str] = []
+    debug_messages: list[str] = []
+
+    def _capture_info(message, *args, **kwargs):
+        _ = kwargs
+        info_messages.append(message % args)
+        return None
+
+    def _capture_debug(message, *args, **kwargs):
+        _ = kwargs
+        debug_messages.append(message % args)
+        return None
+
+    monkeypatch.setattr("ai.realtime_api.logger.info", _capture_info)
+    monkeypatch.setattr("ai.realtime_api.logger.debug", _capture_debug)
+
+    api._log_micro_ack_event(
+        "scheduled",
+        "turn-1",
+        "speech_stopped",
+        700,
+        "start_of_work",
+        "voice",
+        None,
+        None,
+        None,
+        "a1b2c3d4",
+        None,
+    )
+    api._log_micro_ack_event(
+        "emitted",
+        "turn-1",
+        "start_of_work_on_it",
+        None,
+        "start_of_work",
+        "voice",
+        None,
+        None,
+        None,
+        "a1b2c3d4",
+        None,
+    )
+    api._log_micro_ack_event(
+        "suppressed",
+        "turn-1",
+        "confirmation_pending",
+        None,
+        "start_of_work",
+        "voice",
+        None,
+        None,
+        None,
+        "a1b2c3d4",
+        "confirmation",
+    )
+
+    assert any("micro_ack_scheduled" in msg and "dedupe_fp=a1b2c3d4" in msg for msg in info_messages)
+    assert any("micro_ack_emitted" in msg and "dedupe_fp=a1b2c3d4" in msg for msg in info_messages)
+    assert any(
+        "micro_ack_suppressed" in msg
+        and "dedupe_fp=a1b2c3d4" in msg
+        and "suppression_source=confirmation" in msg
+        for msg in debug_messages
+    )
+    api.loop.close()
+
+
 def test_response_audio_delta_allow_logs_are_debug(monkeypatch) -> None:
     api = _api_stub()
     api._active_response_canonical_key = "run-1:turn-1:item-1"
