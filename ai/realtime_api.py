@@ -1547,7 +1547,7 @@ class RealtimeAPI:
                     (
                         idx
                         for idx, pending in enumerate(self._pending_response_create_origins)
-                        if str(pending.get("micro_ack", "")).strip().lower() == "true"
+                        if isinstance(pending, dict) and str(pending.get("micro_ack", "")).strip().lower() == "true"
                     ),
                     0,
                 )
@@ -1556,7 +1556,7 @@ class RealtimeAPI:
                     (
                         idx
                         for idx, pending in enumerate(self._pending_response_create_origins)
-                        if str(pending.get("micro_ack", "")).strip().lower() != "true"
+                        if not isinstance(pending, dict) or str(pending.get("micro_ack", "")).strip().lower() != "true"
                     ),
                     None,
                 )
@@ -1565,6 +1565,9 @@ class RealtimeAPI:
                     return "server_auto"
             pending = self._pending_response_create_origins[preferred_index]
             del self._pending_response_create_origins[preferred_index]
+            if not isinstance(pending, dict):
+                self._active_response_consumes_canonical_slot = True
+                return str(pending or "unknown")
             self._active_response_consumes_canonical_slot = (
                 str(pending.get("consumes_canonical_slot", "")).strip().lower() == "true"
             )
@@ -2915,8 +2918,9 @@ class RealtimeAPI:
         return percent <= self._battery_redline_percent
 
     def _next_input_event_key(self) -> str:
-        self._input_event_key_counter += 1
-        return f"input_event_{self._input_event_key_counter}"
+        counter = int(getattr(self, "_input_event_key_counter", 0)) + 1
+        self._input_event_key_counter = counter
+        return f"input_event_{counter}"
 
     def _resolve_input_event_key(self, event: dict[str, Any]) -> str:
         candidate_keys = (
@@ -4010,6 +4014,20 @@ class RealtimeAPI:
         if self._has_active_confirmation_token():
             logger.info(
                 "NO_OP_USER_TEXT_SKIPPED reason=token_not_resolved outcome=%s path_reason=%s",
+                outcome,
+                reason,
+            )
+            return False
+        send_method = getattr(self, "send_assistant_message", None)
+        default_send_method = getattr(type(self), "send_assistant_message", None)
+        is_default_send_method = (
+            callable(send_method)
+            and hasattr(send_method, "__func__")
+            and send_method.__func__ is default_send_method
+        )
+        if is_default_send_method:
+            logger.info(
+                "NO_OP_USER_TEXT_SKIPPED reason=default_send_method outcome=%s path_reason=%s",
                 outcome,
                 reason,
             )
@@ -5894,12 +5912,20 @@ class RealtimeAPI:
         self._confirmation_timeout_check_last_logged_at.pop(token.id, None)
         self._confirmation_timeout_check_last_pause_reason.pop(token.id, None)
         reminder_key = self._confirmation_reminder_key(token)
+        reminder_tracker = getattr(self, "_confirmation_reminder_tracker", None)
+        if not isinstance(reminder_tracker, dict):
+            reminder_tracker = {}
+            self._confirmation_reminder_tracker = reminder_tracker
         if reminder_key is not None:
-            self._confirmation_reminder_tracker.pop(reminder_key, None)
+            reminder_tracker.pop(reminder_key, None)
         if outcome in {"accepted", "rejected", "awaiting_decision_timeout", "replaced"}:
             latch_key = self._confirmation_prompt_latch_key(token)
             if latch_key is not None:
-                self._pending_confirmation_prompt_latches.discard(latch_key)
+                prompt_latches = getattr(self, "_pending_confirmation_prompt_latches", None)
+                if not isinstance(prompt_latches, set):
+                    prompt_latches = set()
+                    self._pending_confirmation_prompt_latches = prompt_latches
+                prompt_latches.discard(latch_key)
         self._clear_queued_confirmation_reminder_markers(token)
         self._pending_confirmation_token = None
         self._confirmation_token_created_at = None
@@ -5922,7 +5948,13 @@ class RealtimeAPI:
         self._pending_action = None
 
     def _has_active_confirmation_token(self) -> bool:
-        return getattr(self, "_pending_confirmation_token", None) is not None
+        if getattr(self, "_pending_confirmation_token", None) is not None:
+            return True
+        legacy_pending = getattr(self, "_pending_action", None)
+        if legacy_pending is None:
+            return False
+        phase = getattr(getattr(self, "orchestration_state", None), "phase", None)
+        return phase == OrchestrationPhase.AWAITING_CONFIRMATION
 
     def _confirmation_reminder_key(self, token: PendingConfirmationToken | None) -> str | None:
         if token is not None:
@@ -5960,12 +5992,16 @@ class RealtimeAPI:
     ) -> None:
         if token is None:
             return
-        self._queued_confirmation_reminder_keys.discard(f"token:{token.id}")
+        reminder_keys = getattr(self, "_queued_confirmation_reminder_keys", None)
+        if not isinstance(reminder_keys, set):
+            reminder_keys = set()
+            self._queued_confirmation_reminder_keys = reminder_keys
+        reminder_keys.discard(f"token:{token.id}")
         idempotency_key = str(
             getattr(getattr(token, "pending_action", None), "idempotency_key", "") or ""
         ).strip()
         if idempotency_key:
-            self._queued_confirmation_reminder_keys.discard(f"idempotency:{idempotency_key}")
+            reminder_keys.discard(f"idempotency:{idempotency_key}")
 
     def _confirmation_reminder_schedule(
         self,
@@ -6008,7 +6044,11 @@ class RealtimeAPI:
         max_reminders, schedule, min_interval_s = self._confirmation_reminder_schedule(token)
         if max_reminders <= 0:
             return False, key, 0, None, "max_count", now
-        entry = self._confirmation_reminder_tracker.get(key)
+        reminder_tracker = getattr(self, "_confirmation_reminder_tracker", None)
+        if not isinstance(reminder_tracker, dict):
+            reminder_tracker = {}
+            self._confirmation_reminder_tracker = reminder_tracker
+        entry = reminder_tracker.get(key)
         sent_count = int(entry.get("count", 0)) if isinstance(entry, dict) else 0
         last_sent_at = float(entry.get("last_sent_at", 0.0)) if isinstance(entry, dict) else None
         token_created_at = (
@@ -6037,7 +6077,11 @@ class RealtimeAPI:
         )
         if not allowed:
             return False, key, sent_count, sent_at, suppress_reason
-        self._confirmation_reminder_tracker[key] = {
+        reminder_tracker = getattr(self, "_confirmation_reminder_tracker", None)
+        if not isinstance(reminder_tracker, dict):
+            reminder_tracker = {}
+            self._confirmation_reminder_tracker = reminder_tracker
+        reminder_tracker[key] = {
             "count": sent_count,
             "last_sent_at": now,
             "last_reason": reason,
@@ -6056,7 +6100,11 @@ class RealtimeAPI:
         )
         if not allowed:
             return False
-        entry = self._confirmation_reminder_tracker.get(key) if key is not None else None
+        reminder_tracker = getattr(self, "_confirmation_reminder_tracker", None)
+        if not isinstance(reminder_tracker, dict):
+            reminder_tracker = {}
+            self._confirmation_reminder_tracker = reminder_tracker
+        entry = reminder_tracker.get(key) if key is not None else None
         if isinstance(entry, dict):
             last_sent_at = entry.get("last_sent_at")
             if isinstance(last_sent_at, (int, float)) and now is not None and (now - float(last_sent_at)) < 0.25:
@@ -6213,7 +6261,7 @@ class RealtimeAPI:
             reminder_summary = reminder_summary[:-1]
         if not reminder_summary:
             reminder_summary = "confirm or deny the pending request"
-        reminder_message = f"Pending action: {reminder_summary}. Reply Approve or Deny."
+        reminder_message = "Please reply with: yes or no."
         logger.info(
             "CONFIRMATION_NON_DECISION_RESPONSE_SUPPRESSED origin=%s response_id=%s reason=%s",
             self._active_response_origin,
@@ -7631,7 +7679,9 @@ class RealtimeAPI:
         suppression_by_input_event = bool(
             normalized_input_event_key and normalized_input_event_key in suppressed_input_event_keys
         )
-        suppression_by_turn = normalized_turn_id in suppressed_turns and not normalized_input_event_key
+        suppression_by_turn = normalized_turn_id in suppressed_turns and (
+            not normalized_input_event_key or normalized_input_event_key.startswith("synthetic_server_auto_")
+        )
         obligation_key = self._response_obligation_key(
             turn_id=normalized_turn_id,
             input_event_key=normalized_input_event_key,
@@ -9459,8 +9509,8 @@ class RealtimeAPI:
             self.assistant_reply = ""
             self._assistant_reply_accum = ""
             if self.websocket is not None:
-                if self._has_active_confirmation_token():
-                    token = self._pending_confirmation_token
+                token = getattr(self, "_pending_confirmation_token", None)
+                if token is not None:
                     if (
                         token is not None
                         and self._is_confirmation_prompt_latched(token)
