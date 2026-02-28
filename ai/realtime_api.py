@@ -171,6 +171,7 @@ _MICRO_ACK_CONFIRMATION_ALLOWLIST: frozenset[str] = frozenset(
         "watchdog_approval_pending",
     }
 )
+_MICRO_ACK_CONFIRMATION_DECLINE_GUARD_S = 5.0
 _PREFERENCE_KEYWORD_STOPWORDS = {
     "which",
     "what",
@@ -856,6 +857,7 @@ class RealtimeAPI:
             self._micro_ack_runtime_mode = "normal"
         self._micro_ack_channel_policy = self._load_micro_ack_channel_policy(realtime_cfg)
         self._vad_turn_detection = self._resolve_vad_turn_detection(config)
+        self._micro_ack_suppress_until_ts = 0.0
         self._micro_ack_manager = self._build_micro_ack_manager(realtime_cfg)
 
     @staticmethod
@@ -1001,6 +1003,8 @@ class RealtimeAPI:
         baseline_reason = manager.suppression_baseline_reason()
         if baseline_reason:
             return baseline_reason
+        if time.monotonic() < float(getattr(self, "_micro_ack_suppress_until_ts", 0.0) or 0.0):
+            return "confirmation_decline_guard"
         pending_reason = str(getattr(self, "_pending_micro_ack_reason", "") or "").strip().lower()
         if (
             (self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase())
@@ -1094,6 +1098,14 @@ class RealtimeAPI:
         if manager is None:
             return
         manager.cancel(turn_id=turn_id, reason=reason)
+
+    def _extend_micro_ack_decline_guard(self, *, now: float | None = None) -> None:
+        current_until = float(getattr(self, "_micro_ack_suppress_until_ts", 0.0) or 0.0)
+        start = max(current_until, now if now is not None else time.monotonic())
+        self._micro_ack_suppress_until_ts = start + _MICRO_ACK_CONFIRMATION_DECLINE_GUARD_S
+
+    def _clear_micro_ack_decline_guard(self) -> None:
+        self._micro_ack_suppress_until_ts = 0.0
 
     def _emit_micro_ack(self, context: MicroAckContext, phrase_id: str, phrase: str) -> None:
         websocket = getattr(self, "websocket", None)
@@ -6568,6 +6580,7 @@ class RealtimeAPI:
             )
 
             if decision == "yes":
+                self._clear_micro_ack_decline_guard()
                 if token is not None:
                     self._set_confirmation_state(ConfirmationState.RESOLVING, reason="tool_confirmation_accepted")
                 logger.info("CONFIRMATION_ACCEPTED tool=%s", action.tool_name)
@@ -6588,6 +6601,11 @@ class RealtimeAPI:
                 return True
 
             if decision in {"no", "cancel"}:
+                self._extend_micro_ack_decline_guard(now=now)
+                self._cancel_micro_ack(
+                    turn_id=self._current_turn_id_or_unknown(),
+                    reason="confirmation_declined",
+                )
                 if token is not None:
                     self._set_confirmation_state(ConfirmationState.RESOLVING, reason="tool_confirmation_rejected")
                 logger.info("CONFIRMATION_REJECTED tool=%s", action.tool_name)
