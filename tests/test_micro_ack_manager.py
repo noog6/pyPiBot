@@ -83,6 +83,25 @@ def test_micro_ack_suppresses_for_recent_talk_over() -> None:
     loop.close()
 
 
+def test_channel_disabled_logs_single_suppression_without_scheduling_state_change() -> None:
+    loop = asyncio.new_event_loop()
+    logs: list[tuple[str, str, str, int | None]] = []
+
+    manager = MicroAckManager(
+        config=MicroAckConfig(delay_ms=20, channel_enabled={"voice": False}),
+        on_emit=lambda *_args: None,
+        on_log=lambda event, turn_id, reason, delay_ms: logs.append((event, turn_id, reason, delay_ms)),
+        suppression_reason=lambda: None,
+    )
+
+    manager.maybe_schedule(context=_context(turn_id="turn-channel-disabled", channel="voice"), reason="speech_stopped", loop=loop, expected_delay_ms=900)
+
+    assert logs == [("suppressed", "turn-channel-disabled", "channel_disabled", None)]
+    assert manager._scheduled == {}
+    assert manager._scheduled_reason == {}
+    loop.close()
+
+
 def test_same_turn_different_category_allowed_per_policy() -> None:
     loop = asyncio.new_event_loop()
     emits: list[tuple[MicroAckContext, str, str]] = []

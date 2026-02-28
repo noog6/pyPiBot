@@ -153,9 +153,6 @@ class MicroAckManager:
         if dedupe_key in self._emitted_at_by_dedupe_key:
             self._on_log("suppressed", turn_id, "duplicate_within_ttl", None)
             return
-        if not self._is_channel_enabled(context.channel):
-            self._on_log("suppressed", turn_id, "channel_disabled", None)
-            return
         if dedupe_key in self._scheduled:
             self._on_log("suppressed", turn_id, "already_scheduled", None)
             return
