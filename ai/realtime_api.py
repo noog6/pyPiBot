@@ -65,7 +65,7 @@ from ai.governance import (
 from ai.orchestration import OrchestrationPhase, OrchestrationState
 from ai.event_bus import Event, EventBus
 from ai.event_injector import EventInjector
-from ai.micro_ack_manager import MicroAckConfig, MicroAckManager
+from ai.micro_ack_manager import MicroAckConfig, MicroAckContext, MicroAckManager
 from ai.utils import (
     PREFIX_PADDING_MS,
     RUN_TIME_TABLE_LOG_JSON,
@@ -921,20 +921,56 @@ class RealtimeAPI:
             return "speech_active"
         return None
 
+    def _micro_ack_correlation_metadata(self) -> dict[str, Any]:
+        pending = getattr(self, "_pending_response_create", None)
+        if isinstance(pending, PendingResponseCreate):
+            metadata = self._extract_response_create_metadata(pending.event)
+            if metadata:
+                return metadata
+        last_metadata = getattr(self, "_last_response_metadata", None)
+        if isinstance(last_metadata, dict):
+            response_payload = last_metadata.get("response")
+            if isinstance(response_payload, dict):
+                metadata = response_payload.get("metadata")
+                if isinstance(metadata, dict):
+                    return metadata
+        return {}
+
     def _maybe_schedule_micro_ack(
         self,
         *,
         turn_id: str,
+        category: str,
+        channel: str,
+        intent: str | None = None,
+        action: str | None = None,
+        tool_call_id: str | None = None,
         reason: str,
         expected_delay_ms: int | None = None,
     ) -> None:
         manager = getattr(self, "_micro_ack_manager", None)
         if manager is None or self.loop is None:
             return
+        metadata = self._micro_ack_correlation_metadata()
+        metadata_intent = str(metadata.get("intent") or metadata.get("normalized_intent") or "").strip() or None
+        metadata_action = str(metadata.get("action") or metadata.get("trigger") or "").strip() or None
+        metadata_tool_call_id = str(metadata.get("tool_call_id") or "").strip() or None
+        canonical_key = str(getattr(self, "_active_response_canonical_key", "") or "").strip() or None
+
         self._pending_micro_ack_reason = reason
+        context = MicroAckContext(
+            category=category,
+            channel=channel,
+            run_id=self._current_run_id() or None,
+            session_id=str(getattr(self, "_active_session_id", "") or "").strip() or None,
+            turn_id=turn_id,
+            intent=intent or metadata_intent,
+            action=action or metadata_action or canonical_key,
+            tool_call_id=tool_call_id or metadata_tool_call_id,
+        )
         try:
             manager.maybe_schedule(
-                turn_id=turn_id,
+                context=context,
                 reason=reason,
                 loop=self.loop,
                 expected_delay_ms=expected_delay_ms,
@@ -948,7 +984,7 @@ class RealtimeAPI:
             return
         manager.cancel(turn_id=turn_id, reason=reason)
 
-    def _emit_micro_ack(self, turn_id: str, phrase_id: str, phrase: str) -> None:
+    def _emit_micro_ack(self, context: MicroAckContext, phrase_id: str, phrase: str) -> None:
         websocket = getattr(self, "websocket", None)
         if websocket is None or self.loop is None:
             return
@@ -961,8 +997,13 @@ class RealtimeAPI:
                     "trigger": "micro_ack",
                     "micro_ack": "true",
                     "consumes_canonical_slot": "false",
-                    "micro_ack_turn_id": turn_id,
+                    "micro_ack_turn_id": context.turn_id,
                     "micro_ack_phrase_id": phrase_id,
+                    "micro_ack_category": context.category,
+                    "micro_ack_channel": context.channel,
+                    "micro_ack_intent": context.intent or "",
+                    "micro_ack_action": context.action or "",
+                    "micro_ack_tool_call_id": context.tool_call_id or "",
                 },
             )
 
@@ -1054,6 +1095,9 @@ class RealtimeAPI:
         if policy_decision.should_schedule_micro_ack:
             self._maybe_schedule_micro_ack(
                 turn_id=turn_id,
+                category="watchdog",
+                channel="voice",
+                action=self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key),
                 reason=f"watchdog_{policy_decision.reason_code}",
                 expected_delay_ms=900,
             )
@@ -8020,6 +8064,9 @@ class RealtimeAPI:
             )
             self._maybe_schedule_micro_ack(
                 turn_id=resolved_turn_id,
+                category="transcript",
+                channel="voice",
+                action=self._canonical_utterance_key(turn_id=resolved_turn_id, input_event_key=input_event_key),
                 reason="transcript_finalized",
                 expected_delay_ms=700,
             )
@@ -8182,8 +8229,15 @@ class RealtimeAPI:
                 self._confirmation_asr_pending = True
                 self._mark_confirmation_activity(reason="speech_stopped")
             await self.handle_speech_stopped(websocket)
+            current_turn_id = self._current_turn_id_or_unknown()
             self._maybe_schedule_micro_ack(
-                turn_id=self._current_turn_id_or_unknown(),
+                turn_id=current_turn_id,
+                category="speech",
+                channel="voice",
+                action=self._canonical_utterance_key(
+                    turn_id=current_turn_id,
+                    input_event_key=self._active_input_event_key_for_turn(current_turn_id),
+                ),
                 reason="speech_stopped",
                 expected_delay_ms=700,
             )
