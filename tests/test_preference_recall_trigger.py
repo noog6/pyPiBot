@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from collections import deque
 from types import SimpleNamespace
@@ -1038,6 +1039,68 @@ def test_preference_recall_cancels_only_matching_server_auto_response(monkeypatc
     assert api._active_server_auto_input_event_key == "item-1"
     assert "item-1" in api._preference_recall_suppressed_input_event_keys
     assert "item-2" not in api._preference_recall_suppressed_input_event_keys
+
+
+def test_server_auto_obligation_pre_audio_cancel_ignores_audio_delta(monkeypatch) -> None:
+    api = _make_api_stub()
+    ws = _RecordingWs()
+    info_logs: list[str] = []
+
+    async def _false(*_args, **_kwargs) -> bool:
+        return False
+
+    api.websocket = ws
+    api._maybe_handle_confirmation_decision_timeout = _false
+    api._maybe_handle_approval_response = _false
+    api._handle_stop_word = _false
+    api._maybe_handle_research_permission_response = _false
+    api._maybe_handle_research_budget_response = _false
+    api._maybe_apply_late_confirmation_decision = _false
+    api._maybe_process_research_intent = _false
+    api._maybe_handle_preference_recall_intent = _false
+    api._has_active_confirmation_token = lambda: False
+    api._is_awaiting_confirmation_phase = lambda: False
+    api._is_user_approved_interrupt_response = lambda _response: False
+    api._log_user_transcript = lambda *_args, **_kwargs: None
+    api._record_user_input = lambda *_args, **_kwargs: None
+    api._track_outgoing_event = lambda *_args, **_kwargs: None
+
+    monkeypatch.setattr(
+        logger,
+        "info",
+        lambda msg, *args, **kwargs: info_logs.append(msg % args if args else msg),
+    )
+
+    api._current_response_turn_id = "turn_1"
+    api._pending_response_create_origins.append({"origin": "server_auto", "consumes_canonical_slot": "true"})
+    api._pending_server_auto_input_event_keys.append("item-1")
+    api._current_input_event_key = "item-1"
+    api._set_response_obligation(
+        turn_id="turn_1",
+        input_event_key="item-1",
+        source="input_audio_transcription",
+    )
+
+    asyncio.run(api.handle_event({"type": "response.created", "response": {"id": "resp-obligation"}}, ws))
+
+    canonical_key = api._active_response_canonical_key
+    assert canonical_key is not None
+    lifecycle_state = api._canonical_lifecycle_state(canonical_key)
+    assert lifecycle_state.get("cancel_requested_pre_audio") is True
+    assert ws.sent and json.loads(ws.sent[0])["type"] == "response.cancel"
+    assert any("server_auto_guard_pre_audio_cancel response_id=resp-obligation" in entry for entry in info_logs)
+
+    asyncio.run(
+        api.handle_event(
+            {
+                "type": "response.output_audio.delta",
+                "delta": base64.b64encode(b"ignored-audio").decode("ascii"),
+            },
+            ws,
+        )
+    )
+
+    assert api._audio_accum == bytearray()
 
 
 def test_transcript_watchdog_logs_when_response_not_scheduled(monkeypatch) -> None:
