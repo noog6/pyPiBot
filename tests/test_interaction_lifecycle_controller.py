@@ -34,6 +34,23 @@ def test_audio_and_done_transitions_are_deterministic() -> None:
     assert cancelled.action is LifecycleDecisionAction.CANCEL
 
 
+def test_audio_delta_transitions_once_then_stays_steady_state() -> None:
+    controller = InteractionLifecycleController()
+    key = "run-1:turn-1:item-1"
+    controller.on_response_created(key, origin="assistant_message")
+
+    first = controller.on_audio_delta(key)
+    second = controller.on_audio_delta(key)
+    third = controller.on_audio_delta(key)
+
+    assert first.action is LifecycleDecisionAction.ALLOW
+    assert first.reason == "transitioned=audio_started"
+    assert second.action is LifecycleDecisionAction.ALLOW
+    assert second.reason == "state=audio_started"
+    assert third.action is LifecycleDecisionAction.ALLOW
+    assert third.reason == "state=audio_started"
+
+
 def test_replace_marks_old_key_replaced() -> None:
     controller = InteractionLifecycleController()
     old_key = "run-1:turn-1:synthetic"
@@ -44,4 +61,3 @@ def test_replace_marks_old_key_replaced() -> None:
     assert controller.state_for(old_key) == InteractionLifecycleState.REPLACED
     assert controller.decide_response_create_allow(old_key, origin="assistant_message").action is LifecycleDecisionAction.CANCEL
     assert controller.decide_response_create_allow(new_key, origin="assistant_message").action is LifecycleDecisionAction.ALLOW
-

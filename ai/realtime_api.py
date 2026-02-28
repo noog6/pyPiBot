@@ -13,6 +13,7 @@ from enum import Enum
 import hashlib
 from io import BytesIO
 import json
+import logging
 import os
 import random
 import re
@@ -2829,6 +2830,7 @@ class RealtimeAPI:
         origin: str,
         response_id: str | None,
         decision: str,
+        level: int = logging.INFO,
     ) -> None:
         resolved_turn_id = str(turn_id or "").strip() or "turn-unknown"
         resolved_input_event_key = str(input_event_key or "").strip() or "unknown"
@@ -2839,7 +2841,8 @@ class RealtimeAPI:
         resolved_origin = str(origin or "").strip() or "unknown"
         resolved_response_id = str(response_id or "").strip() or "none"
         resolved_decision = str(decision or "").strip() or "unknown"
-        logger.info(
+        logger.log(
+            level,
             "lifecycle_event run_id=%s turn_id=%s input_event_key=%s canonical_key=%s origin=%s response_id=%s decision=%s",
             self._current_run_id() or "",
             resolved_turn_id,
@@ -8102,6 +8105,12 @@ class RealtimeAPI:
                     return
             if active_canonical_key:
                 audio_decision = self._lifecycle_controller().on_audio_delta(active_canonical_key)
+                audio_log_level = logging.INFO
+                if (
+                    audio_decision.action is LifecycleDecisionAction.ALLOW
+                    and audio_decision.reason == "state=audio_started"
+                ):
+                    audio_log_level = logging.DEBUG
                 self._log_lifecycle_event(
                     turn_id=self._current_turn_id_or_unknown(),
                     input_event_key=getattr(self, "_active_response_input_event_key", None),
@@ -8109,6 +8118,7 @@ class RealtimeAPI:
                     origin=getattr(self, "_active_response_origin", "unknown"),
                     response_id=getattr(self, "_active_response_id", None),
                     decision=f"audio_delta_{audio_decision.action.value}:{audio_decision.reason}",
+                    level=audio_log_level,
                 )
                 if audio_decision.action is LifecycleDecisionAction.CANCEL:
                     self._debug_dump_canonical_key_timeline(
