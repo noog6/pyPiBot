@@ -4012,3 +4012,105 @@ def test_confirmation_reminder_and_generic_micro_ack_do_not_co_emit() -> None:
     assert reminder_events[0].get("approval_flow") == "true"
     assert reminder_events[0].get("confirmation_token") == "tok_window"
     assert all(event.get("micro_ack") != "true" for event in metadata_events)
+
+
+def test_decline_cancels_pending_watchdog_micro_ack_and_prevents_emit() -> None:
+    api = _make_api_stub()
+    api.loop = asyncio.new_event_loop()
+    pending = _build_pending_action(idempotency_key="idem-decline-cancel")
+    api._pending_confirmation_token = _build_confirmation_token(
+        kind="tool_governance",
+        pending_action=pending,
+        token_id="tok_decline_cancel",
+    )
+    api._pending_action = pending
+    api._confirmation_state = ConfirmationState.AWAITING_DECISION
+    api._awaiting_confirmation_completion = False
+
+    class _Manager:
+        def __init__(self) -> None:
+            self.pending: dict[str, tuple[object, str]] = {}
+            self.cancelled: list[tuple[str, str]] = []
+
+        def suppression_baseline_reason(self):
+            return None
+
+        def maybe_schedule(self, *, context, reason: str, loop, expected_delay_ms=None):
+            if api._micro_ack_suppression_reason() is not None:
+                return
+            self.pending[context.turn_id] = (context, reason)
+
+        def cancel(self, *, turn_id: str, reason: str) -> None:
+            self.pending.pop(turn_id, None)
+            self.cancelled.append((turn_id, reason))
+
+        def emit_pending(self) -> None:
+            for turn_id in list(self.pending):
+                context, _reason = self.pending.pop(turn_id)
+                if not api._has_active_confirmation_token() and not api._is_awaiting_confirmation_phase():
+                    self.cancelled.append((turn_id, "confirmation_decline_guard"))
+                    continue
+                if api._micro_ack_suppression_reason() is None:
+                    api._emit_micro_ack(context, "watchdog_confirmation_pending", "One sec while I confirm that.")
+
+    manager = _Manager()
+    api._micro_ack_manager = manager
+
+    emitted: list[str] = []
+
+    def _capture_emit(*_args, **_kwargs):
+        emitted.append("emitted")
+
+    api._emit_micro_ack = _capture_emit
+    api._send_response_create = lambda *_args, **_kwargs: asyncio.sleep(0)
+    api.send_assistant_message = lambda *_args, **_kwargs: asyncio.sleep(0)
+
+    api._maybe_schedule_micro_ack(
+        turn_id="turn-decline",
+        reason="watchdog_confirmation_pending",
+        category=api._micro_ack_category_for_reason("watchdog_confirmation_pending"),
+        channel="text",
+        expected_delay_ms=900,
+    )
+    assert "turn-decline" in manager.pending
+
+    assert asyncio.run(api._maybe_handle_approval_response("no", _Ws())) is True
+
+    manager.emit_pending()
+
+    assert manager.pending == {}
+    assert emitted == []
+    api.loop.close()
+
+
+def test_late_watchdog_after_decline_uses_decline_guard_and_skips_new_micro_ack() -> None:
+    api = _make_api_stub()
+    api.loop = asyncio.new_event_loop()
+
+    class _Manager:
+        def __init__(self) -> None:
+            self.schedule_attempts: list[tuple[str, str, str | None]] = []
+
+        def suppression_baseline_reason(self):
+            return "confirmation_decline_guard"
+
+        def maybe_schedule(self, *, context, reason: str, loop, expected_delay_ms=None):
+            self.schedule_attempts.append((context.turn_id, reason, api._micro_ack_suppression_reason()))
+
+        def cancel(self, *, turn_id: str, reason: str) -> None:
+            return None
+
+    api._micro_ack_manager = _Manager()
+
+    asyncio.run(
+        api._watch_transcript_response_outcome(
+            turn_id="turn-late",
+            input_event_key="evt-late",
+            timeout_s=0.0,
+        )
+    )
+
+    assert api._micro_ack_manager.schedule_attempts == [
+        ("turn-late", "watchdog_timeout", "confirmation_decline_guard")
+    ]
+    api.loop.close()
