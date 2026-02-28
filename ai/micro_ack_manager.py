@@ -31,6 +31,7 @@ class MicroAckConfig:
     dedupe_ttl_ms: int = 8000
     channel_enabled: dict[str, bool] | None = None
     channel_cooldown_ms: dict[str, int] | None = None
+    category_cooldown_ms: dict[str, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -80,6 +81,7 @@ class MicroAckManager:
         self._scheduled_reason: dict[str, str] = {}
         self._last_micro_ack_ts: float | None = None
         self._last_micro_ack_ts_by_channel: dict[str, float] = {}
+        self._last_micro_ack_ts_by_category: dict[str, float] = {}
         self._last_user_speech_started_ts: float | None = None
         self._last_user_speech_ended_ts: float | None = None
         self._last_assistant_audio_end_ts: float | None = None
@@ -180,6 +182,15 @@ class MicroAckManager:
         if dedupe_key in self._emitted_at_by_dedupe_key:
             self._log("suppressed", turn_id, "duplicate_within_ttl", None, context)
             return
+        now = self._now()
+        category_key = self._category_key(context.category)
+        category_last_ts = self._last_micro_ack_ts_by_category.get(category_key)
+        if category_last_ts is not None:
+            elapsed_category_ms = (now - category_last_ts) * 1000.0
+            category_cooldown_ms = self._category_cooldown_ms(context.category)
+            if elapsed_category_ms < category_cooldown_ms:
+                self._log("suppressed", turn_id, "category_cooldown", int(elapsed_category_ms), context)
+                return
         if dedupe_key in self._scheduled:
             self._log("suppressed", turn_id, "already_scheduled", None, context)
             return
@@ -247,6 +258,14 @@ class MicroAckManager:
             if elapsed_channel_ms < channel_cooldown_ms:
                 self._log("suppressed", turn_id, "channel_cooldown", int(elapsed_channel_ms), context)
                 return
+        category_key = self._category_key(context.category)
+        category_last_ts = self._last_micro_ack_ts_by_category.get(category_key)
+        if category_last_ts is not None:
+            elapsed_category_ms = (now - category_last_ts) * 1000.0
+            category_cooldown_ms = self._category_cooldown_ms(context.category)
+            if elapsed_category_ms < category_cooldown_ms:
+                self._log("suppressed", turn_id, "category_cooldown", int(elapsed_category_ms), context)
+                return
 
         phrase_id, phrase = self._select_phrase(context=context, dedupe_key=dedupe_key)
         emitted_at = self._now()
@@ -255,6 +274,7 @@ class MicroAckManager:
         self._emitted_scope_history[scope_key] = scope_history
         self._last_micro_ack_ts = now
         self._last_micro_ack_ts_by_channel[context.channel] = now
+        self._last_micro_ack_ts_by_category[category_key] = now
         self._on_emit(context, phrase_id, phrase)
         self._log("emitted", turn_id, phrase_id, None, context)
 
@@ -322,4 +342,15 @@ class MicroAckManager:
     def _channel_cooldown_ms(self, channel: str) -> int:
         mapping = self._config.channel_cooldown_ms or {}
         configured = int(mapping.get(channel, self._config.global_cooldown_ms))
+        return max(0, configured)
+
+    @staticmethod
+    def _category_key(category: MicroAckCategory | str) -> str:
+        if isinstance(category, MicroAckCategory):
+            return category.value
+        return str(category)
+
+    def _category_cooldown_ms(self, category: MicroAckCategory | str) -> int:
+        mapping = self._config.category_cooldown_ms or {}
+        configured = int(mapping.get(self._category_key(category), 0))
         return max(0, configured)

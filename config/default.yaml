@@ -138,6 +138,11 @@ realtime:
   micro_ack_expected_wait_threshold_ms: 700
   micro_ack_long_wait_second_ack_ms: 4000
   micro_ack_global_cooldown_ms: 10000
+  micro_ack_category_cooldown_ms:
+    latency_mask: 10000
+    start_of_work: 0
+    safety_gate: 0
+    failure_fallback: 0
   micro_ack_per_turn_max: 1
   micro_ack_channel_mode: "text_and_audio"
   micro_ack_runtime_mode: "normal"
