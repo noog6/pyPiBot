@@ -6,6 +6,7 @@ import asyncio
 from collections import deque
 from dataclasses import dataclass
 from enum import Enum
+import hashlib
 import random
 import time
 from typing import Callable
@@ -63,7 +64,19 @@ class MicroAckManager:
         config: MicroAckConfig,
         on_emit: Callable[[MicroAckContext, str, str], None],
         on_log: Callable[
-            [str, str, str, int | None, str | None, str | None, str | None, str | None, str | None],
+            [
+                str,
+                str,
+                str,
+                int | None,
+                str | None,
+                str | None,
+                str | None,
+                str | None,
+                str | None,
+                str | None,
+                str | None,
+            ],
             None,
         ],
         suppression_reason: Callable[[], str | None],
@@ -115,7 +128,9 @@ class MicroAckManager:
         reason: str,
         delay_ms: int | None,
         context: MicroAckContext | None,
+        suppression_source: str | None = None,
     ) -> None:
+        dedupe_fingerprint = self._dedupe_fingerprint(context) if context else None
         self._on_log(
             event,
             turn_id,
@@ -130,6 +145,8 @@ class MicroAckManager:
             context.intent if context else None,
             context.action if context else None,
             context.tool_call_id if context else None,
+            dedupe_fingerprint,
+            suppression_source,
         )
 
     def on_user_speech_started(self) -> None:
@@ -197,7 +214,7 @@ class MicroAckManager:
             return
         suppress = self._suppression_reason()
         if suppress:
-            self._log("suppressed", turn_id, suppress, None, context)
+            self._log("suppressed", turn_id, suppress, None, context, self._suppression_source_for_reason(suppress))
             return
 
         delay_s = max(0.01, self._config.delay_ms / 1000.0)
@@ -235,7 +252,7 @@ class MicroAckManager:
 
         suppress = self._suppression_reason()
         if suppress:
-            self._log("suppressed", turn_id, suppress, None, context)
+            self._log("suppressed", turn_id, suppress, None, context, self._suppression_source_for_reason(suppress))
             return
 
         scope_history = self._emitted_scope_history.get(scope_key, deque())
@@ -252,13 +269,13 @@ class MicroAckManager:
             elapsed_channel_ms = (now - channel_last_ts) * 1000.0
             channel_cooldown_ms = self._channel_cooldown_ms(context.channel)
             if elapsed_channel_ms < channel_cooldown_ms:
-                self._log("suppressed", turn_id, "channel_cooldown", int(elapsed_channel_ms), context)
+                self._log("suppressed", turn_id, "channel_cooldown", int(elapsed_channel_ms), context, "cooldown")
                 return
 
         if self._global_cooldown_scope() == "all" and self._last_micro_ack_ts is not None:
             elapsed_ms = (now - self._last_micro_ack_ts) * 1000.0
             if elapsed_ms < self._config.global_cooldown_ms:
-                self._log("suppressed", turn_id, "cooldown", int(elapsed_ms), context)
+                self._log("suppressed", turn_id, "cooldown", int(elapsed_ms), context, "cooldown")
                 return
         category_key = self._category_key(context.category)
         category_last_ts = self._last_micro_ack_ts_by_category.get(category_key)
@@ -266,7 +283,7 @@ class MicroAckManager:
             elapsed_category_ms = (now - category_last_ts) * 1000.0
             category_cooldown_ms = self._category_cooldown_ms(context.category)
             if elapsed_category_ms < category_cooldown_ms:
-                self._log("suppressed", turn_id, "category_cooldown", int(elapsed_category_ms), context)
+                self._log("suppressed", turn_id, "category_cooldown", int(elapsed_category_ms), context, "cooldown")
                 return
 
         phrase_id, phrase = self._select_phrase(context=context, dedupe_key=dedupe_key)
@@ -311,6 +328,21 @@ class MicroAckManager:
             f"session={context.session_id or ''}|intent={context.intent or ''}|"
             f"action={context.action or ''}|tool_call_id={context.tool_call_id or ''}"
         )
+
+    def _dedupe_fingerprint(self, context: MicroAckContext) -> str:
+        digest = hashlib.blake2s(self._dedupe_key(context).encode("utf-8"), digest_size=4)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _suppression_source_for_reason(reason: str) -> str:
+        normalized = str(reason or "").strip().lower()
+        if normalized in {"cooldown", "channel_cooldown", "category_cooldown"}:
+            return "cooldown"
+        if normalized.startswith("confirmation"):
+            return "confirmation"
+        if normalized in {"anti_chatter", "talk_over_risk", "speech_active", "listening_state"}:
+            return "baseline"
+        return "policy"
 
     def _select_phrase(self, *, context: MicroAckContext, dedupe_key: str) -> tuple[str, str]:
         phrases = self._phrases_by_category.get(

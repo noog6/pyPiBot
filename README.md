@@ -89,6 +89,11 @@ Default keys include:
 - `governance` settings (autonomy level, autonomy windows, budgets, and tool tier specs)
 - `research` settings for web-lookup behavior, user permission gating, provider wiring, budget limits, and cache controls
 
+Micro-ack tracing tip (Realtime): when micro-ack logging is enabled, each `micro_ack_scheduled`,
+`micro_ack_emitted`, and `micro_ack_suppressed` line includes `dedupe_fp=<short_fingerprint>` so operators can
+trace one micro-ack decision across schedule/emit/suppress transitions. Suppressions also include
+`suppression_source` (for example `baseline`, `confirmation`, or `cooldown`) to quickly identify the gating layer.
+
 ### Web Research Capability
 
 The runtime includes a web-research subsystem that:
