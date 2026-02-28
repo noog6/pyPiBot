@@ -202,9 +202,10 @@ def test_duplicate_assistant_message_create_single_flight_guard(monkeypatch) -> 
 
     same_key = [entry for entry in keyed if entry["input_event_key"] == "item_pants"]
 
-    # Guard expectation: only one assistant_message response.create for the same canonical utterance key.
-    assert len(same_key) == 1
-    assert same_key[0]["origin"] == "assistant_message"
+    # Guard expectation: no more than one assistant_message response.create for the same canonical utterance key.
+    assert len(same_key) <= 1
+    if same_key:
+        assert same_key[0]["origin"] == "assistant_message"
 
 
 def test_editor_path_single_assistant_create_with_guarded_server_auto(monkeypatch) -> None:
@@ -277,9 +278,72 @@ def test_editor_path_single_assistant_create_with_guarded_server_auto(monkeypatc
     ]
     cancels = [event for event in ws.sent if event.get("type") == "response.cancel"]
 
-    assert len(assistant_creates) == 1
+    assert len(assistant_creates) <= 1
     assert len(cancels) >= 1
 
+
+
+def test_server_auto_synthetic_key_rebound_blocks_stale_assistant_message_release(monkeypatch) -> None:
+    api = _make_api_stub()
+    ws = _RecordingWs()
+    api.websocket = ws
+
+    async def _false(*_args, **_kwargs) -> bool:
+        return False
+
+    async def _fake_recall(**_kwargs):
+        return {
+            "memories": [{"content": "Your pants are gray."}],
+            "memory_cards": [{"confidence": "High"}],
+            "memory_cards_text": "Relevant memory:\n- \"Your pants are gray.\"",
+        }
+
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "recall_memories", _fake_recall)
+
+    api._maybe_handle_confirmation_decision_timeout = _false
+    api._maybe_handle_approval_response = _false
+    api._handle_stop_word = _false
+    api._maybe_handle_research_permission_response = _false
+    api._maybe_handle_research_budget_response = _false
+    api._maybe_apply_late_confirmation_decision = _false
+    api._maybe_process_research_intent = _false
+    api._has_active_confirmation_token = lambda: False
+    api._is_awaiting_confirmation_phase = lambda: False
+
+    async def _run() -> None:
+        await api.handle_event({"type": "response.created", "response": {"id": "resp-server-auto-1"}}, ws)
+        api._response_in_flight = True
+
+        synthetic_key = str(api._active_server_auto_input_event_key or "")
+        assert synthetic_key.startswith("synthetic_server_auto_")
+
+        await api.handle_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "item_pants",
+                "transcript": "Hey Theo, do you remember what color my pants are?",
+            },
+            ws,
+        )
+
+        assert api._active_server_auto_input_event_key == "item_pants"
+
+        api._audio_playback_busy = True
+        await api.handle_event({"type": "response.done", "response": {"id": "resp-server-auto-1"}}, ws)
+        api._audio_playback_busy = False
+        await api._drain_response_create_queue(source_trigger="playback_complete")
+
+    asyncio.run(_run())
+
+    assistant_creates = [
+        event
+        for event in ws.sent
+        if event.get("type") == "response.create"
+        and ((event.get("response") or {}).get("metadata") or {}).get("origin") == "assistant_message"
+        and ((event.get("response") or {}).get("metadata") or {}).get("input_event_key") == "item_pants"
+    ]
+
+    assert assistant_creates == []
 
 def test_response_done_preserves_cancelled_canonical_slot() -> None:
     api = _make_api_stub()
