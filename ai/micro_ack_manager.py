@@ -5,9 +5,17 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from dataclasses import dataclass
+from enum import Enum
 import random
 import time
 from typing import Callable
+
+
+class MicroAckCategory(str, Enum):
+    START_OF_WORK = "start_of_work"
+    LATENCY_MASK = "latency_mask"
+    SAFETY_GATE = "safety_gate"
+    FAILURE_FALLBACK = "failure_fallback"
 
 
 @dataclass(frozen=True)
@@ -27,7 +35,7 @@ class MicroAckConfig:
 
 @dataclass(frozen=True)
 class MicroAckContext:
-    category: str
+    category: MicroAckCategory
     channel: str
     turn_id: str
     run_id: str | None = None
@@ -62,8 +70,7 @@ class MicroAckManager:
         self._on_log = on_log
         self._suppression_reason = suppression_reason
         self._now = now_fn or time.monotonic
-        self._rng = rng or random.Random()
-
+        _ = rng
         self._emitted_at_by_dedupe_key: dict[str, float] = {}
         self._emitted_scope_history: dict[str, deque[float]] = {}
         self._scheduled: dict[str, _ScheduledMicroAck] = {}
@@ -75,12 +82,25 @@ class MicroAckManager:
         self._last_assistant_audio_end_ts: float | None = None
         self._talk_over_incident_ts: deque[float] = deque()
 
-        self._phrases: tuple[tuple[str, str], ...] = (
-            ("one_sec_checking", "One sec—checking."),
-            ("hmm", "Hmm…"),
-            ("let_me_think", "Let me think."),
-            ("checking_that", "Checking that…"),
-        )
+        self._phrases_by_category: dict[MicroAckCategory, tuple[tuple[str, str], ...]] = {
+            MicroAckCategory.START_OF_WORK: (
+                ("start_of_work_one_sec", "One sec—checking."),
+                ("start_of_work_on_it", "On it."),
+            ),
+            MicroAckCategory.LATENCY_MASK: (
+                ("latency_mask_hmm", "Hmm…"),
+                ("latency_mask_let_me_think", "Let me think."),
+                ("latency_mask_checking_that", "Checking that…"),
+            ),
+            MicroAckCategory.SAFETY_GATE: (
+                ("safety_gate_hold_on", "Hold on—I should verify that first."),
+                ("safety_gate_careful", "I should be careful here—checking."),
+            ),
+            MicroAckCategory.FAILURE_FALLBACK: (
+                ("failure_fallback_retry", "One sec—I can try another way."),
+                ("failure_fallback_recover", "Give me a moment to recover that."),
+            ),
+        }
 
     def on_user_speech_started(self) -> None:
         self._last_user_speech_started_ts = self._now()
@@ -204,7 +224,7 @@ class MicroAckManager:
                 self._on_log("suppressed", turn_id, "channel_cooldown", int(elapsed_channel_ms))
                 return
 
-        phrase_id, phrase = self._rng.choice(self._phrases)
+        phrase_id, phrase = self._select_phrase(context=context, dedupe_key=dedupe_key)
         emitted_at = self._now()
         self._emitted_at_by_dedupe_key[dedupe_key] = emitted_at
         scope_history.append(emitted_at)
@@ -245,6 +265,16 @@ class MicroAckManager:
             f"session={context.session_id or ''}|intent={context.intent or ''}|"
             f"action={context.action or ''}|tool_call_id={context.tool_call_id or ''}"
         )
+
+    def _select_phrase(self, *, context: MicroAckContext, dedupe_key: str) -> tuple[str, str]:
+        phrases = self._phrases_by_category.get(
+            context.category,
+            self._phrases_by_category[MicroAckCategory.LATENCY_MASK],
+        )
+        if len(phrases) == 1:
+            return phrases[0]
+        selector = sum(ord(ch) for ch in dedupe_key) % len(phrases)
+        return phrases[selector]
 
     def suppression_baseline_reason(self) -> str | None:
         now = self._now()

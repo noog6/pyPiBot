@@ -65,7 +65,7 @@ from ai.governance import (
 from ai.orchestration import OrchestrationPhase, OrchestrationState
 from ai.event_bus import Event, EventBus
 from ai.event_injector import EventInjector
-from ai.micro_ack_manager import MicroAckConfig, MicroAckContext, MicroAckManager
+from ai.micro_ack_manager import MicroAckCategory, MicroAckConfig, MicroAckContext, MicroAckManager
 from ai.utils import (
     PREFIX_PADDING_MS,
     RUN_TIME_TABLE_LOG_JSON,
@@ -980,7 +980,7 @@ class RealtimeAPI:
         self,
         *,
         turn_id: str,
-        category: str,
+        category: MicroAckCategory,
         channel: str,
         intent: str | None = None,
         action: str | None = None,
@@ -1017,6 +1017,24 @@ class RealtimeAPI:
             )
         finally:
             self._pending_micro_ack_reason = None
+
+    @staticmethod
+    def _micro_ack_category_for_reason(reason: str) -> MicroAckCategory:
+        normalized_reason = str(reason or "").strip().lower()
+        if normalized_reason == "speech_stopped":
+            return MicroAckCategory.START_OF_WORK
+        if normalized_reason == "transcript_finalized":
+            return MicroAckCategory.LATENCY_MASK
+        if normalized_reason.startswith("watchdog_"):
+            if any(
+                marker in normalized_reason
+                for marker in ("confirm", "approval", "permission", "policy", "safety")
+            ):
+                return MicroAckCategory.SAFETY_GATE
+            if any(marker in normalized_reason for marker in ("error", "failed", "failure", "timeout")):
+                return MicroAckCategory.FAILURE_FALLBACK
+            return MicroAckCategory.LATENCY_MASK
+        return MicroAckCategory.LATENCY_MASK
 
     def _cancel_micro_ack(self, *, turn_id: str, reason: str) -> None:
         manager = getattr(self, "_micro_ack_manager", None)
@@ -1149,7 +1167,7 @@ class RealtimeAPI:
         if policy_decision.should_schedule_micro_ack:
             self._maybe_schedule_micro_ack(
                 turn_id=turn_id,
-                category="watchdog",
+                category=self._micro_ack_category_for_reason(f"watchdog_{policy_decision.reason_code}"),
                 channel="voice",
                 action=self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key),
                 reason=f"watchdog_{policy_decision.reason_code}",
@@ -8118,7 +8136,7 @@ class RealtimeAPI:
             )
             self._maybe_schedule_micro_ack(
                 turn_id=resolved_turn_id,
-                category="transcript",
+                category=self._micro_ack_category_for_reason("transcript_finalized"),
                 channel="voice",
                 action=self._canonical_utterance_key(turn_id=resolved_turn_id, input_event_key=input_event_key),
                 reason="transcript_finalized",
@@ -8286,7 +8304,7 @@ class RealtimeAPI:
             current_turn_id = self._current_turn_id_or_unknown()
             self._maybe_schedule_micro_ack(
                 turn_id=current_turn_id,
-                category="speech",
+                category=self._micro_ack_category_for_reason("speech_stopped"),
                 channel="voice",
                 action=self._canonical_utterance_key(
                     turn_id=current_turn_id,
