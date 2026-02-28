@@ -42,6 +42,10 @@ from interaction import (
     InteractionStateManager,
 )
 from ai.tools import function_map, tools
+from ai.interaction_lifecycle_controller import (
+    InteractionLifecycleController,
+    LifecycleDecisionAction,
+)
 from ai.reflection import ReflectionCoordinator, ReflectionContext
 from ai.stimuli_coordinator import StimuliCoordinator
 from ai.governance import (
@@ -759,6 +763,7 @@ class RealtimeAPI:
         self._response_delivery_ledger: dict[str, str] = {}
         self._response_id_by_canonical_key: dict[str, str] = {}
         self._canonical_response_lifecycle_state: dict[str, dict[str, bool]] = {}
+        self._interaction_lifecycle_controller = InteractionLifecycleController()
         self._response_obligations: dict[str, dict[str, Any]] = {}
         self._already_scheduled_for_input_event_key: set[str] = set()
         self._active_response_input_event_key: str | None = None
@@ -1953,6 +1958,13 @@ class RealtimeAPI:
         run_id = str(self._current_run_id() or "").strip() or "run-unknown"
         return f"{run_id}:{resolved_turn_id}:{resolved_input_event_key}"
 
+    def _lifecycle_controller(self) -> InteractionLifecycleController:
+        controller = getattr(self, "_interaction_lifecycle_controller", None)
+        if not isinstance(controller, InteractionLifecycleController):
+            controller = InteractionLifecycleController()
+            self._interaction_lifecycle_controller = controller
+        return controller
+
     def _is_synthetic_input_event_key(self, input_event_key: str | None) -> bool:
         normalized = str(input_event_key or "").strip().lower()
         return normalized.startswith("synthetic_")
@@ -1998,6 +2010,7 @@ class RealtimeAPI:
             old_state = lifecycle_state.pop(old_canonical_key)
             if new_canonical_key not in lifecycle_state:
                 lifecycle_state[new_canonical_key] = old_state
+        self._lifecycle_controller().on_replaced(old_canonical_key, new_canonical_key)
 
         if str(getattr(self, "_active_response_input_event_key", "") or "").strip() == active_key:
             self._active_response_input_event_key = normalized_replacement
@@ -2066,6 +2079,14 @@ class RealtimeAPI:
         return self._response_delivery_state(turn_id=turn_id, input_event_key=input_event_key) == "delivered"
 
     def _single_flight_block_reason(self, *, turn_id: str, input_event_key: str | None) -> str | None:
+        canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+        decision = self._lifecycle_controller().decide_response_create_allow(canonical_key, origin="assistant_message")
+        if decision.action is LifecycleDecisionAction.CANCEL:
+            if "state=done" in decision.reason:
+                return "already_done"
+            return "already_created"
+        if decision.action is LifecycleDecisionAction.DEFER:
+            return decision.reason
         state = self._response_delivery_state(turn_id=turn_id, input_event_key=input_event_key)
         if state == "created":
             return "already_created"
@@ -2139,7 +2160,7 @@ class RealtimeAPI:
             len(getattr(self, "_pending_server_auto_input_event_keys", deque()) or ()),
             suppression_reason != "none",
             obligation_present,
-            self._response_done_serial,
+            getattr(self, "_response_done_serial", 0),
         )
 
     def _set_response_obligation(self, *, turn_id: str, input_event_key: str, source: str) -> None:
@@ -2304,6 +2325,8 @@ class RealtimeAPI:
         return existing
 
     def _canonical_first_audio_started(self, canonical_key: str) -> bool:
+        if self._lifecycle_controller().audio_started(canonical_key):
+            return True
         state = self._canonical_lifecycle_state(canonical_key)
         return bool(state.get("first_audio_started", False))
 
@@ -4120,7 +4143,7 @@ class RealtimeAPI:
             bool(turn_id in suppression_turns),
             self._resptrace_suppression_reason(turn_id=turn_id, input_event_key=current_input_event_key),
             obligation_present,
-            self._response_done_serial,
+            getattr(self, "_response_done_serial", 0),
         )
         if self._is_response_already_delivered(turn_id=turn_id, input_event_key=current_input_event_key):
             logger.debug(
@@ -4270,7 +4293,7 @@ class RealtimeAPI:
                 bool(turn_id in suppression_turns),
                 self._resptrace_suppression_reason(turn_id=turn_id, input_event_key=current_input_event_key),
                 obligation_present,
-                self._response_done_serial,
+                getattr(self, "_response_done_serial", 0),
             )
             return False
 
@@ -4328,7 +4351,7 @@ class RealtimeAPI:
                 bool(turn_id in suppression_turns),
                 self._resptrace_suppression_reason(turn_id=turn_id, input_event_key=current_input_event_key),
                 obligation_present,
-                self._response_done_serial,
+                getattr(self, "_response_done_serial", 0),
             )
         else:
             logger.info(
@@ -4352,7 +4375,7 @@ class RealtimeAPI:
                 bool(turn_id in suppression_turns),
                 self._resptrace_suppression_reason(turn_id=turn_id, input_event_key=current_input_event_key),
                 obligation_present,
-                self._response_done_serial,
+                getattr(self, "_response_done_serial", 0),
             )
         return False
 
@@ -4447,7 +4470,7 @@ class RealtimeAPI:
             bool(turn_id in suppression_turns),
             self._resptrace_suppression_reason(turn_id=turn_id, input_event_key=current_input_event_key),
             obligation_present,
-            self._response_done_serial,
+            getattr(self, "_response_done_serial", 0),
         )
         if self._is_response_already_delivered(turn_id=turn_id, input_event_key=current_input_event_key):
             logger.debug(
@@ -4567,7 +4590,7 @@ class RealtimeAPI:
             bool(turn_id in suppression_turns),
             self._resptrace_suppression_reason(turn_id=turn_id, input_event_key=current_input_event_key),
             obligation_present,
-            self._response_done_serial,
+            getattr(self, "_response_done_serial", 0),
         )
         return True
 
@@ -4621,7 +4644,7 @@ class RealtimeAPI:
                 skipped_reason,
                 selected_pending_enqueued_done_serial,
                 selected_pending_serial_relation,
-                self._response_done_serial,
+                getattr(self, "_response_done_serial", 0),
                 drain_result,
             )
 
@@ -7105,6 +7128,9 @@ class RealtimeAPI:
                     cancel_event = {"type": "response.cancel"}
                     log_ws_event("Outgoing", cancel_event)
                     self._track_outgoing_event(cancel_event, origin="server_auto_binding_guard")
+                    self._lifecycle_controller().on_cancel_sent(
+                        self._canonical_utterance_key(turn_id=turn_id, input_event_key=expected_input_event_key)
+                    )
                     await websocket.send(json.dumps(cancel_event))
                     return
                 if not input_event_key:
@@ -7196,6 +7222,18 @@ class RealtimeAPI:
                 created_keys_size_after,
                 self._active_input_event_key_for_turn(turn_id) or "unknown",
             )
+            lifecycle_created_decision = self._lifecycle_controller().on_response_created(
+                canonical_key,
+                origin=origin,
+            )
+            if lifecycle_created_decision.action is LifecycleDecisionAction.CANCEL:
+                cancel_event = {"type": "response.cancel"}
+                log_ws_event("Outgoing", cancel_event)
+                self._track_outgoing_event(cancel_event, origin="interaction_lifecycle_controller")
+                self._lifecycle_controller().on_cancel_sent(canonical_key)
+                if websocket is not None:
+                    await websocket.send(json.dumps(cancel_event))
+                return
             self._active_response_input_event_key = str(resolved_input_event_key or "").strip() or None
             self._active_response_canonical_key = canonical_key
             if consumes_canonical_slot:
@@ -7275,6 +7313,7 @@ class RealtimeAPI:
                 cancel_event = {"type": "response.cancel"}
                 log_ws_event("Outgoing", cancel_event)
                 self._track_outgoing_event(cancel_event, origin="preference_recall_guard")
+                self._lifecycle_controller().on_cancel_sent(canonical_key)
                 await websocket.send(json.dumps(cancel_event))
             else:
                 if consumes_canonical_slot:
@@ -7362,6 +7401,10 @@ class RealtimeAPI:
                 False,
             ):
                 return
+            if active_canonical_key:
+                audio_decision = self._lifecycle_controller().on_audio_delta(active_canonical_key)
+                if audio_decision.action is LifecycleDecisionAction.CANCEL:
+                    return
             self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
             if active_canonical_key:
                 self._canonical_lifecycle_state(active_canonical_key)["first_audio_started"] = True
@@ -7422,6 +7465,9 @@ class RealtimeAPI:
                 active_by_turn = {}
                 self._active_input_event_key_by_turn_id = active_by_turn
             active_by_turn[resolved_turn_id] = input_event_key
+            self._lifecycle_controller().on_transcript_final(
+                self._canonical_utterance_key(turn_id=resolved_turn_id, input_event_key=input_event_key)
+            )
             self._rebind_active_response_correlation_key(
                 turn_id=resolved_turn_id,
                 replacement_input_event_key=input_event_key,
@@ -8680,7 +8726,7 @@ class RealtimeAPI:
             bool(trace_turn_id in getattr(self, "_preference_recall_suppressed_turns", set())),
             self._resptrace_suppression_reason(turn_id=trace_turn_id, input_event_key=trace_input_event_key),
             obligation_present,
-            self._response_done_serial,
+            getattr(self, "_response_done_serial", 0),
         )
         await self._send_response_create(
             websocket,
@@ -8787,6 +8833,10 @@ class RealtimeAPI:
     async def handle_response_done(self, event: dict[str, Any] | None = None) -> None:
         turn_id = self._current_turn_id_or_unknown()
         done_input_event_key = str(getattr(self, "_active_response_input_event_key", "") or "").strip()
+        done_canonical_key = self._canonical_utterance_key(
+            turn_id=turn_id,
+            input_event_key=done_input_event_key,
+        )
         active_response_id_before_clear = getattr(self, "_active_response_id", None)
         active_response_origin_before_clear = getattr(self, "_active_response_origin", "unknown")
         active_response_input_event_key_before_clear = getattr(self, "_active_response_input_event_key", None)
@@ -8810,6 +8860,7 @@ class RealtimeAPI:
         self.response_in_progress = False
         self._response_in_flight = False
         if done_input_event_key and bool(getattr(self, "_active_response_consumes_canonical_slot", True)):
+            self._lifecycle_controller().on_response_done(done_canonical_key)
             existing_delivery_state = self._response_delivery_state(
                 turn_id=turn_id,
                 input_event_key=done_input_event_key,
@@ -8837,7 +8888,7 @@ class RealtimeAPI:
             suppressed_turn_present_before,
             obligation_count_before_clear,
             pending_queue_len_before_clear,
-            self._response_done_serial,
+            getattr(self, "_response_done_serial", 0),
             current_state_before_cleanup,
         )
         self._preference_recall_suppressed_turns.discard(suppressed_turn_id)
@@ -8879,7 +8930,7 @@ class RealtimeAPI:
             obligation_count_before_clear,
             obligation_count_after_clear,
             len(getattr(self, "_response_create_queue", deque()) or ()),
-            self._response_done_serial,
+            getattr(self, "_response_done_serial", 0),
             getattr(self.state_manager, "state", InteractionState.IDLE),
             turn_id,
             resolved_input_event_key,
@@ -8967,6 +9018,11 @@ class RealtimeAPI:
         self.response_in_progress = False
         self._response_in_flight = False
         if done_input_event_key and bool(getattr(self, "_active_response_consumes_canonical_slot", True)):
+            done_canonical_key = self._canonical_utterance_key(
+                turn_id=turn_id,
+                input_event_key=done_input_event_key,
+            )
+            self._lifecycle_controller().on_response_done(done_canonical_key)
             existing_delivery_state = self._response_delivery_state(
                 turn_id=turn_id,
                 input_event_key=done_input_event_key,
