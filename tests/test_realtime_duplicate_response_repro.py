@@ -44,6 +44,8 @@ def _make_api_stub() -> RealtimeAPI:
     api._response_obligations = {}
     api._response_created_canonical_keys = set()
     api._response_delivery_ledger = {}
+    api._response_id_by_canonical_key = {}
+    api._canonical_response_lifecycle_state = {}
     api._already_scheduled_for_input_event_key = set()
     api._active_response_id = None
     api._active_response_origin = "unknown"
@@ -371,3 +373,71 @@ def test_response_completed_preserves_cancelled_canonical_slot() -> None:
     asyncio.run(api.handle_response_completed())
 
     assert api._response_delivery_state(turn_id=turn_id, input_event_key=input_event_key) == "cancelled"
+
+
+def test_canonical_audio_started_blocks_duplicate_response_create(monkeypatch) -> None:
+    api = _make_api_stub()
+    ws = _RecordingWs()
+    api.websocket = ws
+    log_messages: list[str] = []
+
+    original_info = __import__("ai.realtime_api", fromlist=["logger"]).logger.info
+
+    def _capture_info(message: str, *args, **kwargs):
+        rendered = message % args if args else message
+        log_messages.append(rendered)
+        return original_info(message, *args, **kwargs)
+
+    monkeypatch.setattr(__import__("ai.realtime_api", fromlist=["logger"]).logger, "info", _capture_info)
+
+    async def _run() -> tuple[bool, bool]:
+        first_event = {
+            "type": "response.create",
+            "response": {
+                "metadata": {
+                    "origin": "assistant_message",
+                    "turn_id": "turn_1",
+                    "input_event_key": "item_dup",
+                }
+            },
+        }
+        first_sent = await api._send_response_create(ws, first_event, origin="assistant_message")
+        assert first_sent
+
+        canonical_key = api._canonical_utterance_key(turn_id="turn_1", input_event_key="item_dup")
+        api._active_response_canonical_key = canonical_key
+        await api.handle_event({"type": "response.output_audio.delta", "delta": "AAA="}, ws)
+        api._canonical_lifecycle_state(canonical_key)["first_audio_started"] = True
+        api._response_in_flight = False
+        api.response_in_progress = False
+        api._response_delivery_ledger.clear()
+        api._response_created_canonical_keys.clear()
+
+        duplicate_event = {
+            "type": "response.create",
+            "response": {
+                "metadata": {
+                    "origin": "assistant_message",
+                    "turn_id": "turn_1",
+                    "input_event_key": "item_dup",
+                }
+            },
+        }
+        second_sent = await api._send_response_create(ws, duplicate_event, origin="assistant_message")
+        return first_sent, second_sent
+
+    first_sent, second_sent = asyncio.run(_run())
+
+    assert first_sent is True
+    assert second_sent is False
+    assistant_creates = [
+        event
+        for event in ws.sent
+        if event.get("type") == "response.create"
+        and ((event.get("response") or {}).get("metadata") or {}).get("input_event_key") == "item_dup"
+    ]
+    assert len(assistant_creates) == 1
+    assert api._canonical_first_audio_started(api._canonical_utterance_key(turn_id="turn_1", input_event_key="item_dup"))
+    assert any("reason=canonical_audio_already_started" in message for message in log_messages)
+
+
