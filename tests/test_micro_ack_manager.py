@@ -425,3 +425,30 @@ def test_non_safety_categories_never_emit_safety_phrase_ids() -> None:
     assert emits
     assert all(not phrase_id.startswith("safety_gate_") for _context_value, phrase_id, _phrase in emits)
     loop.close()
+
+
+def test_safety_sensitive_phrase_catalog_uses_neutral_pre_confirmation_wording() -> None:
+    """Guard START_OF_WORK phrases from implying irreversible execution before confirmation.
+
+    Migration note: we preserve existing START_OF_WORK phrase IDs for deterministic selection
+    compatibility while updating phrase text to safer wording.
+    """
+
+    manager = MicroAckManager(
+        config=MicroAckConfig(),
+        on_emit=lambda *_args: None,
+        on_log=lambda *_args: None,
+        suppression_reason=lambda: None,
+    )
+
+    start_of_work = manager._phrases_by_category[MicroAckCategory.START_OF_WORK]
+    safety_gate = manager._phrases_by_category[MicroAckCategory.SAFETY_GATE]
+
+    assert all(phrase_id.startswith("start_of_work_") for phrase_id, _phrase in start_of_work)
+    assert all(phrase_id.startswith("safety_gate_") for phrase_id, _phrase in safety_gate)
+
+    execution_implying_markers = ("on it", "i'll do", "doing that", "execut", "already")
+    assert all(
+        all(marker not in phrase.lower() for marker in execution_implying_markers)
+        for _phrase_id, phrase in start_of_work
+    )

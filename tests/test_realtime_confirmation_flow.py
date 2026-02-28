@@ -10,6 +10,7 @@ from collections import deque
 from unittest.mock import patch
 
 from ai.governance import ActionPacket, build_normalized_idempotency_key
+from ai.micro_ack_manager import MicroAckCategory
 from ai.orchestration import OrchestrationPhase
 from ai.realtime_api import ConfirmationState, PendingConfirmationToken, RealtimeAPI, UtteranceContext
 from interaction import InteractionState
@@ -4092,4 +4093,22 @@ def test_late_watchdog_after_decline_uses_decline_guard_and_skips_new_micro_ack(
 
     assert api._micro_ack_suppression_reason() == "confirmation_decline_guard"
     assert emitted == []
+    api.loop.close()
+
+
+
+def test_confirmation_flow_start_of_work_phrases_remain_non_executing() -> None:
+    api = _make_api_stub()
+    api.loop = asyncio.new_event_loop()
+    api._micro_ack_manager = api._build_micro_ack_manager({"micro_ack_delay_ms": 10, "micro_ack_global_cooldown_ms": 0})
+
+    assert api._micro_ack_category_for_reason("speech_stopped") is MicroAckCategory.START_OF_WORK
+
+    start_of_work_phrases = api._micro_ack_manager._phrases_by_category[MicroAckCategory.START_OF_WORK]
+    execution_implying_markers = ("on it", "i'll do", "doing that", "execut", "already")
+
+    assert all(
+        all(marker not in phrase.lower() for marker in execution_implying_markers)
+        for _phrase_id, phrase in start_of_work_phrases
+    )
     api.loop.close()

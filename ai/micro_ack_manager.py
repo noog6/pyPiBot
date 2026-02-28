@@ -90,8 +90,8 @@ class MicroAckManager:
 
         self._phrases_by_category: dict[MicroAckCategory, tuple[tuple[str, str], ...]] = {
             MicroAckCategory.START_OF_WORK: (
-                ("start_of_work_one_sec", "One sec—checking."),
-                ("start_of_work_on_it", "On it."),
+                ("start_of_work_one_sec", "One moment while I check."),
+                ("start_of_work_on_it", "Let me check."),
             ),
             MicroAckCategory.LATENCY_MASK: (
                 ("latency_mask_hmm", "Hmm…"),
