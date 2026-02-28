@@ -290,3 +290,48 @@ def test_watchdog_audio_busy_terminal_state_ignores_pending_for_other_canonical_
         and "input_event_key=input_evt_target" in entry
         for entry in info_logs
     )
+
+
+def test_drain_response_create_queue_drops_terminal_canonical_key(monkeypatch) -> None:
+    api = _make_api()
+    info_logs: list[str] = []
+    transcript_outcomes: list[dict[str, object]] = []
+    send_attempts: list[str] = []
+
+    api._mark_transcript_response_outcome = lambda **kwargs: transcript_outcomes.append(kwargs)
+    monkeypatch.setattr(logger, "info", lambda msg, *args, **kwargs: info_logs.append(msg % args if args else msg))
+
+    turn_id = "turn_1"
+    input_event_key = "input_evt_terminal"
+    canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+    api._lifecycle_controller().on_response_done(canonical_key)
+
+    api._response_create_queue.append(
+        {
+            "websocket": None,
+            "event": {"type": "response.create", "response": {"metadata": {"input_event_key": input_event_key}}},
+            "origin": "assistant_message",
+            "turn_id": turn_id,
+            "record_ai_call": False,
+        }
+    )
+
+    async def _fake_send_response_create(*_args, **_kwargs):
+        send_attempts.append("sent")
+        return True
+
+    api._send_response_create = _fake_send_response_create
+    asyncio.run(api._drain_response_create_queue())
+
+    assert send_attempts == []
+    assert list(api._response_create_queue) == []
+    assert any("response_dropped_terminal_state" in entry for entry in info_logs)
+    assert transcript_outcomes == [
+        {
+            "input_event_key": input_event_key,
+            "turn_id": turn_id,
+            "outcome": "response_not_scheduled",
+            "reason": "canonical_delivery_terminal_state",
+            "details": "canonical delivery terminal state origin=assistant_message prior_state=done",
+        }
+    ]
