@@ -7209,15 +7209,37 @@ class RealtimeAPI:
             obligation_input_event_key = active_input_event_key if origin == "server_auto" else current_input_event_key
             suppression_by_input_event = bool(active_input_event_key and active_input_event_key in suppressed_input_event_keys)
             suppression_by_turn = turn_id in suppressed_turns and not active_input_event_key
-            if origin == "server_auto" and (suppression_by_turn or suppression_window_active or suppression_by_input_event):
+            obligation_key = self._response_obligation_key(
+                turn_id=turn_id,
+                input_event_key=obligation_input_event_key,
+            )
+            obligations = getattr(self, "_response_obligations", None)
+            obligation_replacement = isinstance(obligations, dict) and obligation_key in obligations
+            replacement_pre_audio_cancel = bool(
+                origin == "server_auto"
+                and (
+                    suppression_by_turn
+                    or suppression_window_active
+                    or suppression_by_input_event
+                    or obligation_replacement
+                )
+            )
+            if replacement_pre_audio_cancel:
+                replacement_reason = (
+                    "preference_recall_suppressed"
+                    if (suppression_by_turn or suppression_window_active or suppression_by_input_event)
+                    else "response_obligation_replacement"
+                )
                 self._active_response_preference_guarded = True
                 if consumes_canonical_slot:
                     created_keys.discard(canonical_key)
+                    lifecycle_state = self._canonical_lifecycle_state(canonical_key)
+                    lifecycle_state["cancel_requested_pre_audio"] = True
                 self._mark_transcript_response_outcome(
                     input_event_key=active_input_event_key,
                     turn_id=turn_id,
                     outcome="response_not_scheduled",
-                    reason="preference_recall_suppressed",
+                    reason=replacement_reason,
                     details="guarded server_auto response cancelled",
                 )
                 self._set_response_delivery_state(
@@ -7236,7 +7258,12 @@ class RealtimeAPI:
                     input_event_key=active_input_event_key,
                     canonical_key=canonical_key,
                     origin=origin,
-                    trigger="preference_recall_suppressed",
+                    trigger=replacement_reason,
+                )
+                logger.info(
+                    "server_auto_guard_pre_audio_cancel response_id=%s canonical_key=%s",
+                    self._active_response_id or "unknown",
+                    canonical_key,
                 )
                 cancel_event = {"type": "response.cancel"}
                 log_ws_event("Outgoing", cancel_event)
@@ -7322,8 +7349,13 @@ class RealtimeAPI:
         elif event_type == "response.output_audio.delta":
             if self._is_active_response_guarded():
                 return
-            self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
             active_canonical_key = str(getattr(self, "_active_response_canonical_key", "") or "").strip()
+            if active_canonical_key and self._canonical_lifecycle_state(active_canonical_key).get(
+                "cancel_requested_pre_audio",
+                False,
+            ):
+                return
+            self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
             if active_canonical_key:
                 self._canonical_lifecycle_state(active_canonical_key)["first_audio_started"] = True
             self._audio_playback_busy = True
