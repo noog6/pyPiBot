@@ -1,0 +1,151 @@
+{
+  "description": "Fixture-driven lifecycle stream scenarios for server_auto cancel and fallback behavior.",
+  "scenarios": [
+    {
+      "name": "pre_audio_cancel_success",
+      "events": [
+        {
+          "seq": 1,
+          "type": "speech_stopped",
+          "utterance_id": "utt_cancel_before_audio",
+          "canonical_key": "run-700:turn-1:synthetic_server_auto_1"
+        },
+        {
+          "seq": 2,
+          "type": "response.created",
+          "response_id": "resp_server_auto_pre",
+          "origin": "server_auto",
+          "utterance_id": "utt_cancel_before_audio",
+          "canonical_key": "run-700:turn-1:synthetic_server_auto_1"
+        },
+        {
+          "seq": 3,
+          "type": "transcript.final",
+          "item_id": "item-memory-1",
+          "utterance_id": "utt_cancel_before_audio",
+          "canonical_key": "run-700:turn-1:item-memory-1"
+        },
+        {
+          "seq": 4,
+          "type": "response.cancel",
+          "response_id": "resp_server_auto_pre",
+          "utterance_id": "utt_cancel_before_audio",
+          "canonical_key": "run-700:turn-1:item-memory-1"
+        },
+        {
+          "seq": 5,
+          "type": "response.output_audio.delta",
+          "response_id": "resp_server_auto_pre",
+          "utterance_id": "utt_cancel_before_audio",
+          "canonical_key": "run-700:turn-1:item-memory-1"
+        },
+        {
+          "seq": 6,
+          "type": "response.created",
+          "response_id": "resp_assistant_final_pre",
+          "origin": "assistant_message",
+          "utterance_id": "utt_cancel_before_audio",
+          "canonical_key": "run-700:turn-1:item-memory-1"
+        },
+        {
+          "seq": 7,
+          "type": "response.output_audio.delta",
+          "response_id": "resp_assistant_final_pre",
+          "utterance_id": "utt_cancel_before_audio",
+          "canonical_key": "run-700:turn-1:item-memory-1"
+        },
+        {
+          "seq": 8,
+          "type": "response.done",
+          "response_id": "resp_assistant_final_pre",
+          "origin": "assistant_message",
+          "utterance_id": "utt_cancel_before_audio",
+          "canonical_key": "run-700:turn-1:item-memory-1"
+        }
+      ],
+      "expected": {
+        "response_created_by_origin": {
+          "server_auto": 1,
+          "assistant_message": 1
+        },
+        "cancel_before_first_accepted_audio_delta": true,
+        "final_assistant_response_count_by_utterance": {
+          "utt_cancel_before_audio": 1
+        },
+        "canonical_progression": [
+          "run-700:turn-1:synthetic_server_auto_1",
+          "run-700:turn-1:item-memory-1"
+        ]
+      }
+    },
+    {
+      "name": "already_audio_started_fallback_no_second_slot",
+      "events": [
+        {
+          "seq": 1,
+          "type": "speech_stopped",
+          "utterance_id": "utt_audio_started",
+          "canonical_key": "run-700:turn-2:synthetic_server_auto_2"
+        },
+        {
+          "seq": 2,
+          "type": "response.created",
+          "response_id": "resp_server_auto_live",
+          "origin": "server_auto",
+          "utterance_id": "utt_audio_started",
+          "canonical_key": "run-700:turn-2:synthetic_server_auto_2"
+        },
+        {
+          "seq": 3,
+          "type": "transcript.final",
+          "item_id": "item-memory-2",
+          "utterance_id": "utt_audio_started",
+          "canonical_key": "run-700:turn-2:item-memory-2"
+        },
+        {
+          "seq": 4,
+          "type": "response.output_audio.delta",
+          "response_id": "resp_server_auto_live",
+          "utterance_id": "utt_audio_started",
+          "canonical_key": "run-700:turn-2:item-memory-2"
+        },
+        {
+          "seq": 5,
+          "type": "response.cancel",
+          "response_id": "resp_server_auto_live",
+          "utterance_id": "utt_audio_started",
+          "canonical_key": "run-700:turn-2:item-memory-2"
+        },
+        {
+          "seq": 6,
+          "type": "response.output_audio.delta",
+          "response_id": "resp_server_auto_live",
+          "utterance_id": "utt_audio_started",
+          "canonical_key": "run-700:turn-2:item-memory-2"
+        },
+        {
+          "seq": 7,
+          "type": "response.done",
+          "response_id": "resp_server_auto_live",
+          "origin": "server_auto",
+          "utterance_id": "utt_audio_started",
+          "canonical_key": "run-700:turn-2:item-memory-2"
+        }
+      ],
+      "expected": {
+        "response_created_by_origin": {
+          "server_auto": 1,
+          "assistant_message": 0
+        },
+        "cancel_before_first_accepted_audio_delta": false,
+        "final_assistant_response_count_by_utterance": {
+          "utt_audio_started": 0
+        },
+        "canonical_progression": [
+          "run-700:turn-2:synthetic_server_auto_2",
+          "run-700:turn-2:item-memory-2"
+        ]
+      }
+    }
+  ]
+}
