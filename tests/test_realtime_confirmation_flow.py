@@ -3798,3 +3798,38 @@ def test_research_budget_rejection_clears_deferred_tool(monkeypatch, tmp_path) -
         if controller is not None:
             controller.close()
         storage_controller_cls._instance = None
+
+
+def test_confirmation_reminder_emits_while_generic_micro_ack_is_suppressed() -> None:
+    api = _make_api_stub()
+    api._pending_confirmation_token = _build_confirmation_token(kind="tool_governance")
+
+    class _Manager:
+        def __init__(self):
+            self.scheduled = []
+
+        def suppression_baseline_reason(self):
+            return None
+
+        def maybe_schedule(self, *, turn_id: str, reason: str, loop, expected_delay_ms=None):
+            if api._micro_ack_suppression_reason() is None:
+                self.scheduled.append((turn_id, reason, expected_delay_ms))
+
+    api._micro_ack_manager = _Manager()
+    api.loop = asyncio.new_event_loop()
+
+    sent_messages: list[dict[str, dict[str, str]]] = []
+
+    async def _send_assistant_message(message: str, _websocket, *, response_metadata=None):
+        sent_messages.append({"message": message, "metadata": response_metadata or {}})
+
+    api.send_assistant_message = _send_assistant_message
+
+    api._maybe_schedule_micro_ack(turn_id="turn-1", reason="speech_stopped", expected_delay_ms=900)
+    assert api._micro_ack_manager.scheduled == []
+
+    asyncio.run(api._maybe_emit_confirmation_reminder(api.websocket, reason="test_reminder"))
+
+    assert len(sent_messages) == 1
+    assert sent_messages[0]["metadata"].get("trigger") == "confirmation_reminder"
+    api.loop.close()

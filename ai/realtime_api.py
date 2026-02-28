@@ -163,6 +163,7 @@ _PREFERENCE_QUERY_CANONICAL_BY_DOMAIN = {
 }
 _PREFERENCE_QUERY_FALLBACK_CANONICAL = ("user preference", "favorite preference", "preferred setting")
 _PREFERENCE_TAG_FALLBACK_QUERIES = ("preference", "favorite", "preferred")
+_MICRO_ACK_CONFIRMATION_ALLOWLIST: frozenset[str] = frozenset()
 _PREFERENCE_KEYWORD_STOPWORDS = {
     "which",
     "what",
@@ -907,6 +908,12 @@ class RealtimeAPI:
         baseline_reason = manager.suppression_baseline_reason()
         if baseline_reason:
             return baseline_reason
+        pending_reason = str(getattr(self, "_pending_micro_ack_reason", "") or "").strip().lower()
+        if (
+            (self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase())
+            and pending_reason not in _MICRO_ACK_CONFIRMATION_ALLOWLIST
+        ):
+            return "confirmation_pending"
         current_state = getattr(getattr(self, "state_manager", None), "state", None)
         if current_state == InteractionState.LISTENING:
             return "listening_state"
@@ -924,12 +931,16 @@ class RealtimeAPI:
         manager = getattr(self, "_micro_ack_manager", None)
         if manager is None or self.loop is None:
             return
-        manager.maybe_schedule(
-            turn_id=turn_id,
-            reason=reason,
-            loop=self.loop,
-            expected_delay_ms=expected_delay_ms,
-        )
+        self._pending_micro_ack_reason = reason
+        try:
+            manager.maybe_schedule(
+                turn_id=turn_id,
+                reason=reason,
+                loop=self.loop,
+                expected_delay_ms=expected_delay_ms,
+            )
+        finally:
+            self._pending_micro_ack_reason = None
 
     def _cancel_micro_ack(self, *, turn_id: str, reason: str) -> None:
         manager = getattr(self, "_micro_ack_manager", None)
