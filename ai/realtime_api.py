@@ -233,6 +233,12 @@ class ConfirmationState(str, Enum):
     COMPLETED = "completed"
 
 
+class ServerAutoArbitrationOutcome(str, Enum):
+    ALLOW = "allow"
+    CANCEL_PRE_AUDIO = "cancel_pre_audio"
+    DEFER = "defer"
+
+
 @dataclass(frozen=True)
 class StartupDependencyOutcome:
     component: str
@@ -7222,6 +7228,49 @@ class RealtimeAPI:
                     event_type,
                 )
 
+    def _arbitrate_server_auto_response_created(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str,
+        canonical_key: str,
+        origin: str,
+    ) -> ServerAutoArbitrationOutcome:
+        normalized_origin = str(origin or "").strip().lower()
+        if normalized_origin != "server_auto":
+            return ServerAutoArbitrationOutcome.ALLOW
+
+        normalized_turn_id = str(turn_id or "").strip()
+        normalized_canonical_key = str(canonical_key or "").strip()
+        if not normalized_turn_id or not normalized_canonical_key:
+            return ServerAutoArbitrationOutcome.DEFER
+
+        normalized_input_event_key = str(input_event_key or "").strip()
+        suppression_until = float(getattr(self, "_preference_recall_response_suppression_until", 0.0) or 0.0)
+        suppression_window_active = suppression_until > time.monotonic()
+        suppressed_turns = getattr(self, "_preference_recall_suppressed_turns", None)
+        if not isinstance(suppressed_turns, set):
+            suppressed_turns = set()
+            self._preference_recall_suppressed_turns = suppressed_turns
+        suppressed_input_event_keys = getattr(self, "_preference_recall_suppressed_input_event_keys", None)
+        if not isinstance(suppressed_input_event_keys, set):
+            suppressed_input_event_keys = set()
+            self._preference_recall_suppressed_input_event_keys = suppressed_input_event_keys
+
+        suppression_by_input_event = bool(
+            normalized_input_event_key and normalized_input_event_key in suppressed_input_event_keys
+        )
+        suppression_by_turn = normalized_turn_id in suppressed_turns and not normalized_input_event_key
+        obligation_key = self._response_obligation_key(
+            turn_id=normalized_turn_id,
+            input_event_key=normalized_input_event_key,
+        )
+        obligations = getattr(self, "_response_obligations", None)
+        obligation_replacement = isinstance(obligations, dict) and obligation_key in obligations
+        if suppression_by_turn or suppression_window_active or suppression_by_input_event or obligation_replacement:
+            return ServerAutoArbitrationOutcome.CANCEL_PRE_AUDIO
+        return ServerAutoArbitrationOutcome.ALLOW
+
     async def handle_event(self, event: dict[str, Any], websocket: Any) -> None:
         event_type = event.get("type")
         await self._maybe_handle_confirmation_decision_timeout(
@@ -7241,8 +7290,6 @@ class RealtimeAPI:
             self._active_response_preference_guarded = False
             turn_id = self._current_turn_id_or_unknown()
             self._cancel_micro_ack(turn_id=turn_id, reason="response_created")
-            suppressed_turns = getattr(self, "_preference_recall_suppressed_turns", set())
-            suppressed_input_event_keys = getattr(self, "_preference_recall_suppressed_input_event_keys", set())
             if origin == "server_auto":
                 expected_input_event_key = self._active_input_event_key_for_turn(turn_id)
                 input_event_key = None
@@ -7359,6 +7406,18 @@ class RealtimeAPI:
                 canonical_key = utterance_context.canonical_key
             if origin != "server_auto":
                 current_input_event_key = resolved_input_event_key
+            arbitration_outcome = self._arbitrate_server_auto_response_created(
+                turn_id=turn_id,
+                input_event_key=resolved_input_event_key,
+                canonical_key=canonical_key,
+                origin=origin,
+            )
+            if origin == "server_auto":
+                logger.info(
+                    "server_auto_arbitration outcome=%s canonical_key=%s",
+                    arbitration_outcome.value,
+                    canonical_key,
+                )
             created_keys = getattr(self, "_response_created_canonical_keys", None)
             if not isinstance(created_keys, set):
                 created_keys = set()
@@ -7386,6 +7445,8 @@ class RealtimeAPI:
             lifecycle_canonical_key = canonical_key
             if not consumes_canonical_slot:
                 lifecycle_canonical_key = f"{canonical_key}:non_consuming:{self._active_response_id or 'unknown'}"
+            lifecycle_state = self._canonical_lifecycle_state(lifecycle_canonical_key)
+            lifecycle_state["server_auto_arbitration"] = arbitration_outcome.value
             lifecycle_created_decision = self._lifecycle_controller().on_response_created(
                 lifecycle_canonical_key,
                 origin=origin,
@@ -7432,37 +7493,20 @@ class RealtimeAPI:
                     response_id_by_key = {}
                     self._response_id_by_canonical_key = response_id_by_key
                 response_id_by_key[canonical_key] = str(self._active_response_id or "")
-            suppression_until = float(getattr(self, "_preference_recall_response_suppression_until", 0.0) or 0.0)
-            suppression_window_active = suppression_until > time.monotonic()
             active_input_event_key = str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip()
             obligation_input_event_key = active_input_event_key if origin == "server_auto" else current_input_event_key
-            suppression_by_input_event = bool(active_input_event_key and active_input_event_key in suppressed_input_event_keys)
-            suppression_by_turn = turn_id in suppressed_turns and not active_input_event_key
-            obligation_key = self._response_obligation_key(
-                turn_id=turn_id,
-                input_event_key=obligation_input_event_key,
-            )
-            obligations = getattr(self, "_response_obligations", None)
-            obligation_replacement = isinstance(obligations, dict) and obligation_key in obligations
-            replacement_pre_audio_cancel = bool(
-                origin == "server_auto"
-                and (
-                    suppression_by_turn
-                    or suppression_window_active
-                    or suppression_by_input_event
-                    or obligation_replacement
+            if arbitration_outcome is ServerAutoArbitrationOutcome.CANCEL_PRE_AUDIO:
+                replacement_reason = "preference_recall_suppressed"
+                obligations = getattr(self, "_response_obligations", None)
+                obligation_key = self._response_obligation_key(
+                    turn_id=turn_id,
+                    input_event_key=obligation_input_event_key,
                 )
-            )
-            if replacement_pre_audio_cancel:
-                replacement_reason = (
-                    "preference_recall_suppressed"
-                    if (suppression_by_turn or suppression_window_active or suppression_by_input_event)
-                    else "response_obligation_replacement"
-                )
+                if isinstance(obligations, dict) and obligation_key in obligations:
+                    replacement_reason = "response_obligation_replacement"
                 self._active_response_preference_guarded = True
                 if consumes_canonical_slot:
                     created_keys.discard(canonical_key)
-                    lifecycle_state = self._canonical_lifecycle_state(canonical_key)
                     lifecycle_state["cancel_requested_pre_audio"] = True
                 self._mark_transcript_response_outcome(
                     input_event_key=active_input_event_key,
@@ -7507,6 +7551,19 @@ class RealtimeAPI:
                     decision=f"guard_cancel_sent:{replacement_reason}",
                 )
                 await websocket.send(json.dumps(cancel_event))
+            elif arbitration_outcome is ServerAutoArbitrationOutcome.DEFER:
+                self._active_response_preference_guarded = True
+                logger.info(
+                    "server_auto_guard_pre_audio_defer response_id=%s canonical_key=%s",
+                    self._active_response_id or "unknown",
+                    canonical_key,
+                )
+                cancel_event = {"type": "response.cancel"}
+                log_ws_event("Outgoing", cancel_event)
+                self._track_outgoing_event(cancel_event, origin="server_auto_arbitration_defer")
+                self._lifecycle_controller().on_cancel_sent(canonical_key)
+                await websocket.send(json.dumps(cancel_event))
+                return
             else:
                 if consumes_canonical_slot:
                     logger.debug(
@@ -7588,11 +7645,19 @@ class RealtimeAPI:
             if self._is_active_response_guarded():
                 return
             active_canonical_key = str(getattr(self, "_active_response_canonical_key", "") or "").strip()
-            if active_canonical_key and self._canonical_lifecycle_state(active_canonical_key).get(
-                "cancel_requested_pre_audio",
-                False,
-            ):
-                return
+            if active_canonical_key:
+                lifecycle_state = self._canonical_lifecycle_state(active_canonical_key)
+                if lifecycle_state.get("cancel_requested_pre_audio", False):
+                    return
+                arbitration_state = str(
+                    lifecycle_state.get(
+                        "server_auto_arbitration",
+                        ServerAutoArbitrationOutcome.ALLOW.value,
+                    )
+                    or ""
+                ).strip().lower()
+                if arbitration_state and arbitration_state != ServerAutoArbitrationOutcome.ALLOW.value:
+                    return
             if active_canonical_key:
                 audio_decision = self._lifecycle_controller().on_audio_delta(active_canonical_key)
                 self._log_lifecycle_event(
