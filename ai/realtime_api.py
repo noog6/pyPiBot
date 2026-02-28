@@ -20,7 +20,7 @@ import signal
 import threading
 import time
 import uuid
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 from urllib import request
 from urllib.parse import urlparse
 
@@ -223,6 +223,20 @@ class UtteranceContext:
     input_event_key: str
     canonical_key: str
     utterance_seq: int
+
+
+@dataclass
+class CanonicalResponseState:
+    created: bool = False
+    audio_started: bool = False
+    done: bool = False
+    cancel_sent: bool = False
+    origin: str = "unknown"
+    response_id: str = ""
+    obligation_present: bool = False
+    input_event_key: str = ""
+    turn_id: str = ""
+    obligation: dict[str, Any] | None = None
 
 
 class ConfirmationState(str, Enum):
@@ -778,10 +792,12 @@ class RealtimeAPI:
         self._response_created_canonical_keys: set[str] = set()
         self._response_delivery_ledger: dict[str, str] = {}
         self._response_id_by_canonical_key: dict[str, str] = {}
+        self._canonical_response_state_by_key: dict[str, CanonicalResponseState] = {}
         self._canonical_response_lifecycle_state: dict[str, dict[str, bool]] = {}
         self._lifecycle_canonical_timeline: dict[str, deque[str]] = {}
         self._interaction_lifecycle_controller = InteractionLifecycleController()
         self._response_obligations: dict[str, dict[str, Any]] = {}
+        self._canonical_invariant_logged: set[str] = set()
         self._already_scheduled_for_input_event_key: set[str] = set()
         self._active_response_input_event_key: str | None = None
         self._active_response_canonical_key: str | None = None
@@ -2069,26 +2085,22 @@ class RealtimeAPI:
         if old_canonical_key == new_canonical_key:
             return
 
-        created_keys = getattr(self, "_response_created_canonical_keys", None)
-        if isinstance(created_keys, set) and old_canonical_key in created_keys:
-            created_keys.discard(old_canonical_key)
-            created_keys.add(new_canonical_key)
-
-        ledger = getattr(self, "_response_delivery_ledger", None)
-        if isinstance(ledger, dict) and old_canonical_key in ledger and new_canonical_key not in ledger:
-            ledger[new_canonical_key] = ledger.pop(old_canonical_key)
-
-        response_id_by_key = getattr(self, "_response_id_by_canonical_key", None)
-        if isinstance(response_id_by_key, dict) and old_canonical_key in response_id_by_key:
-            response_id = response_id_by_key.pop(old_canonical_key)
-            if new_canonical_key not in response_id_by_key:
-                response_id_by_key[new_canonical_key] = response_id
+        state_store = self._canonical_response_state_store()
+        old_state = state_store.get(old_canonical_key)
+        if isinstance(old_state, CanonicalResponseState):
+            if new_canonical_key not in state_store:
+                rebound_state = replace(old_state)
+                rebound_state.turn_id = str(turn_id or "").strip() or rebound_state.turn_id
+                rebound_state.input_event_key = normalized_replacement
+                state_store[new_canonical_key] = rebound_state
+            del state_store[old_canonical_key]
+            self._sync_legacy_response_state_mirrors()
 
         lifecycle_state = getattr(self, "_canonical_response_lifecycle_state", None)
         if isinstance(lifecycle_state, dict) and old_canonical_key in lifecycle_state:
-            old_state = lifecycle_state.pop(old_canonical_key)
+            old_lifecycle = lifecycle_state.pop(old_canonical_key)
             if new_canonical_key not in lifecycle_state:
-                lifecycle_state[new_canonical_key] = old_state
+                lifecycle_state[new_canonical_key] = old_lifecycle
         self._lifecycle_controller().on_replaced(old_canonical_key, new_canonical_key)
         self._log_lifecycle_event(
             turn_id=turn_id,
@@ -2137,11 +2149,149 @@ class RealtimeAPI:
     def _response_obligation_key(self, *, turn_id: str, input_event_key: str | None) -> str:
         return self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
 
+    def _canonical_response_state_store(self) -> dict[str, CanonicalResponseState]:
+        state_store = getattr(self, "_canonical_response_state_by_key", None)
+        if not isinstance(state_store, dict):
+            state_store = {}
+            self._canonical_response_state_by_key = state_store
+        return state_store
+
+    def _canonical_response_state(self, canonical_key: str) -> CanonicalResponseState | None:
+        normalized = str(canonical_key or "").strip()
+        if not normalized:
+            return None
+        state = self._canonical_response_state_store().get(normalized)
+        return state if isinstance(state, CanonicalResponseState) else None
+
+    def _canonical_response_state_mutate(
+        self,
+        *,
+        canonical_key: str,
+        turn_id: str,
+        input_event_key: str | None,
+        mutator: Callable[[CanonicalResponseState], None],
+    ) -> CanonicalResponseState:
+        normalized_canonical_key = str(canonical_key or "").strip()
+        if not normalized_canonical_key:
+            normalized_canonical_key = self._canonical_utterance_key(
+                turn_id=turn_id,
+                input_event_key=input_event_key,
+            )
+        state_store = self._canonical_response_state_store()
+        prior_state = state_store.get(normalized_canonical_key)
+        if not isinstance(prior_state, CanonicalResponseState):
+            prior_state = CanonicalResponseState()
+        next_state = replace(prior_state)
+        resolved_turn_id = str(turn_id or "").strip()
+        resolved_input_event_key = str(input_event_key or "").strip()
+        if resolved_turn_id:
+            next_state.turn_id = resolved_turn_id
+        if resolved_input_event_key:
+            next_state.input_event_key = resolved_input_event_key
+        mutator(next_state)
+        state_store[normalized_canonical_key] = next_state
+        self._sync_legacy_response_state_mirrors()
+        self._debug_assert_canonical_state_invariants(
+            canonical_key=normalized_canonical_key,
+            state=next_state,
+        )
+        return next_state
+
+    def _sync_legacy_response_state_mirrors(self) -> None:
+        # TODO: Remove these legacy mirrors after callers/tests fully migrate to canonical state accessors.
+        state_store = self._canonical_response_state_store()
+        created_keys: set[str] = set()
+        delivery_ledger: dict[str, str] = {}
+        response_id_by_key: dict[str, str] = {}
+        obligations: dict[str, dict[str, Any]] = {}
+        for canonical_key, state in state_store.items():
+            if not isinstance(state, CanonicalResponseState):
+                continue
+            if state.created:
+                created_keys.add(canonical_key)
+            if state.done:
+                delivery_ledger[canonical_key] = "done"
+            elif state.cancel_sent:
+                delivery_ledger[canonical_key] = "cancelled"
+            elif state.audio_started:
+                delivery_ledger[canonical_key] = "delivered"
+            elif state.created:
+                delivery_ledger[canonical_key] = "created"
+            if state.response_id:
+                response_id_by_key[canonical_key] = state.response_id
+            if state.obligation_present:
+                obligations[canonical_key] = dict(state.obligation or {
+                    "turn_id": state.turn_id,
+                    "input_event_key": state.input_event_key,
+                    "source": state.origin,
+                    "created_at": time.monotonic(),
+                })
+        self._response_created_canonical_keys = created_keys
+        self._response_delivery_ledger = delivery_ledger
+        self._response_id_by_canonical_key = response_id_by_key
+        self._response_obligations = obligations
+
+    def _debug_assert_canonical_state_invariants(
+        self,
+        *,
+        canonical_key: str,
+        state: CanonicalResponseState,
+    ) -> None:
+        if not logger.isEnabledFor(10):
+            return
+        invalid: list[str] = []
+        if state.done and not state.created:
+            invalid.append("done_without_created")
+        if state.audio_started and not state.created:
+            invalid.append("audio_without_created")
+        if state.cancel_sent and not state.created:
+            invalid.append("cancel_without_created")
+        if not invalid:
+            return
+        run_id = str(self._current_run_id() or "").strip() or "run-unknown"
+        logged = getattr(self, "_canonical_invariant_logged", None)
+        if not isinstance(logged, set):
+            logged = set()
+            self._canonical_invariant_logged = logged
+        for item in invalid:
+            invariant_key = f"{run_id}:{canonical_key}:{item}"
+            if invariant_key in logged:
+                continue
+            logged.add(invariant_key)
+            logger.debug(
+                "canonical_state_invariant_failed run_id=%s canonical_key=%s reason=%s state=%s",
+                run_id,
+                canonical_key,
+                item,
+                {
+                    "created": state.created,
+                    "audio_started": state.audio_started,
+                    "done": state.done,
+                    "cancel_sent": state.cancel_sent,
+                    "origin": state.origin,
+                    "response_id": state.response_id,
+                    "obligation_present": state.obligation_present,
+                    "input_event_key": state.input_event_key,
+                    "turn_id": state.turn_id,
+                },
+            )
+
     def _response_delivery_state(self, *, turn_id: str, input_event_key: str | None) -> str | None:
+        key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+        state = self._canonical_response_state(key)
+        if isinstance(state, CanonicalResponseState):
+            if state.done:
+                return "done"
+            if state.cancel_sent:
+                return "cancelled"
+            if state.audio_started:
+                return "delivered"
+            if state.created:
+                return "created"
+            return None
         ledger = getattr(self, "_response_delivery_ledger", None)
         if not isinstance(ledger, dict):
             return None
-        key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
         value = ledger.get(key)
         return str(value).strip().lower() if isinstance(value, str) else None
 
@@ -2155,22 +2305,46 @@ class RealtimeAPI:
         normalized_state = str(state or "").strip().lower()
         if not normalized_state:
             return
-        ledger = getattr(self, "_response_delivery_ledger", None)
-        if not isinstance(ledger, dict):
-            ledger = {}
-            self._response_delivery_ledger = ledger
         key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
-        ledger[key] = normalized_state
+
+        def _mutate(record: CanonicalResponseState) -> None:
+            if normalized_state == "created":
+                record.created = True
+                record.done = False
+                record.cancel_sent = False
+            elif normalized_state == "delivered":
+                record.created = True
+                record.audio_started = True
+                record.done = False
+            elif normalized_state == "done":
+                record.created = True
+                record.done = True
+            elif normalized_state == "cancelled":
+                record.cancel_sent = True
+
+        self._canonical_response_state_mutate(
+            canonical_key=key,
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            mutator=_mutate,
+        )
 
     def _is_response_already_delivered(self, *, turn_id: str, input_event_key: str | None) -> bool:
         return self._response_delivery_state(turn_id=turn_id, input_event_key=input_event_key) == "delivered"
 
     def _single_flight_block_reason(self, *, turn_id: str, input_event_key: str | None) -> str | None:
         canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+        obligation_state = self._canonical_response_state(canonical_key)
+        obligation_present = bool(
+            isinstance(obligation_state, CanonicalResponseState)
+            and obligation_state.obligation_present
+        )
         decision = self._lifecycle_controller().decide_response_create_allow(canonical_key, origin="assistant_message")
         if decision.action is LifecycleDecisionAction.CANCEL:
             if "state=done" in decision.reason:
                 return "already_done"
+            if obligation_present:
+                return None
             return "already_created"
         if decision.action is LifecycleDecisionAction.DEFER:
             return decision.reason
@@ -2190,9 +2364,8 @@ class RealtimeAPI:
         canonical_key: str,
         block_reason: str,
     ) -> None:
-        existing_response_id = str(
-            getattr(self, "_response_id_by_canonical_key", {}).get(canonical_key) or ""
-        ).strip()
+        existing_state = self._canonical_response_state(canonical_key)
+        existing_response_id = str(existing_state.response_id if isinstance(existing_state, CanonicalResponseState) else "").strip()
         self._log_lifecycle_event(
             turn_id=turn_id,
             input_event_key=input_event_key,
@@ -2221,14 +2394,14 @@ class RealtimeAPI:
             turn_id=turn_id,
             input_event_key=normalized_input_event_key,
         )
-        obligations = getattr(self, "_response_obligations", None)
-        obligation_present = (
-            isinstance(obligations, dict)
-            and self._response_obligation_key(
-                turn_id=turn_id,
-                input_event_key=normalized_input_event_key,
-            )
-            in obligations
+        obligation_key = self._response_obligation_key(
+            turn_id=turn_id,
+            input_event_key=normalized_input_event_key,
+        )
+        obligation_state = self._canonical_response_state(obligation_key)
+        obligation_present = bool(
+            isinstance(obligation_state, CanonicalResponseState)
+            and obligation_state.obligation_present
         )
         suppression_reason = self._resptrace_suppression_reason(
             turn_id=turn_id,
@@ -2253,23 +2426,38 @@ class RealtimeAPI:
 
     def _set_response_obligation(self, *, turn_id: str, input_event_key: str, source: str) -> None:
         obligation_key = self._response_obligation_key(turn_id=turn_id, input_event_key=input_event_key)
-        obligations = getattr(self, "_response_obligations", None)
-        if not isinstance(obligations, dict):
-            obligations = {}
-            self._response_obligations = obligations
-        obligation_present_before = obligation_key in obligations
+        prior_state = self._canonical_response_state(obligation_key)
+        obligation_present_before = bool(
+            isinstance(prior_state, CanonicalResponseState) and prior_state.obligation_present
+        )
         active_response_input_event_key = str(
             getattr(self, "_active_response_input_event_key", "") or ""
         ).strip() or "none"
         active_server_auto_input_event_key = str(
             getattr(self, "_active_server_auto_input_event_key", "") or ""
         ).strip() or "none"
-        obligations[obligation_key] = {
-            "turn_id": turn_id,
-            "input_event_key": input_event_key,
-            "source": source,
-            "created_at": time.monotonic(),
-        }
+
+        def _mutate(record: CanonicalResponseState) -> None:
+            record.obligation_present = True
+            record.origin = str(source or "").strip() or record.origin
+            record.obligation = {
+                "turn_id": turn_id,
+                "input_event_key": input_event_key,
+                "source": source,
+                "created_at": time.monotonic(),
+            }
+
+        updated_state = self._canonical_response_state_mutate(
+            canonical_key=obligation_key,
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            mutator=_mutate,
+        )
+        total_obligations = sum(
+            1
+            for state in self._canonical_response_state_store().values()
+            if isinstance(state, CanonicalResponseState) and state.obligation_present
+        )
         logger.info(
             "response_obligation_set run_id=%s turn_id=%s input_event_key=%s source=%s",
             self._current_run_id() or "",
@@ -2287,8 +2475,8 @@ class RealtimeAPI:
             self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key),
             source,
             obligation_present_before,
-            obligation_key in obligations,
-            len(obligations),
+            updated_state.obligation_present,
+            total_obligations,
             obligation_key,
             active_response_input_event_key,
             active_server_auto_input_event_key,
@@ -2303,20 +2491,33 @@ class RealtimeAPI:
         origin: str,
     ) -> None:
         obligation_key = self._response_obligation_key(turn_id=turn_id, input_event_key=input_event_key)
-        obligations = getattr(self, "_response_obligations", None)
-        if not isinstance(obligations, dict):
+        prior_state = self._canonical_response_state(obligation_key)
+        if not isinstance(prior_state, CanonicalResponseState) or not prior_state.obligation_present:
             return
-        obligation_present_before = obligation_key in obligations
+        obligation_present_before = prior_state.obligation_present
         active_response_input_event_key = str(
             getattr(self, "_active_response_input_event_key", "") or ""
         ).strip() or "none"
         active_server_auto_input_event_key = str(
             getattr(self, "_active_server_auto_input_event_key", "") or ""
         ).strip() or "none"
-        obligation = obligations.pop(obligation_key, None)
-        if obligation is None:
-            return
+
+        def _mutate(record: CanonicalResponseState) -> None:
+            record.obligation_present = False
+            record.obligation = None
+
+        updated_state = self._canonical_response_state_mutate(
+            canonical_key=obligation_key,
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            mutator=_mutate,
+        )
         normalized_input_event_key = str(input_event_key or "").strip() or "unknown"
+        total_obligations = sum(
+            1
+            for state in self._canonical_response_state_store().values()
+            if isinstance(state, CanonicalResponseState) and state.obligation_present
+        )
         logger.info(
             "response_obligation_cleared run_id=%s turn_id=%s input_event_key=%s origin=%s reason=%s",
             self._current_run_id() or "",
@@ -2335,8 +2536,8 @@ class RealtimeAPI:
             self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key),
             origin,
             obligation_present_before,
-            obligation_key in obligations,
-            len(obligations),
+            updated_state.obligation_present,
+            total_obligations,
             obligation_key,
             active_response_input_event_key,
             active_server_auto_input_event_key,
@@ -2482,6 +2683,9 @@ class RealtimeAPI:
 
     def _canonical_first_audio_started(self, canonical_key: str) -> bool:
         if self._lifecycle_controller().audio_started(canonical_key):
+            return True
+        unified_state = self._canonical_response_state(canonical_key)
+        if isinstance(unified_state, CanonicalResponseState) and unified_state.audio_started:
             return True
         state = self._canonical_lifecycle_state(canonical_key)
         return bool(state.get("first_audio_started", False))
@@ -7268,8 +7472,11 @@ class RealtimeAPI:
             turn_id=normalized_turn_id,
             input_event_key=normalized_input_event_key,
         )
-        obligations = getattr(self, "_response_obligations", None)
-        obligation_replacement = isinstance(obligations, dict) and obligation_key in obligations
+        obligation_state = self._canonical_response_state(obligation_key)
+        obligation_replacement = bool(
+            isinstance(obligation_state, CanonicalResponseState)
+            and obligation_state.obligation_present
+        )
         if suppression_by_turn or suppression_window_active or suppression_by_input_event or obligation_replacement:
             return ServerAutoArbitrationOutcome.CANCEL_PRE_AUDIO
         return ServerAutoArbitrationOutcome.ALLOW
@@ -7421,15 +7628,19 @@ class RealtimeAPI:
                     arbitration_outcome.value,
                     canonical_key,
                 )
-            created_keys = getattr(self, "_response_created_canonical_keys", None)
-            if not isinstance(created_keys, set):
-                created_keys = set()
-                self._response_created_canonical_keys = created_keys
-            created_keys_size_before = len(created_keys)
+            created_keys_size_before = len(getattr(self, "_response_created_canonical_keys", set()) or ())
             consumes_canonical_slot = bool(getattr(self, "_active_response_consumes_canonical_slot", True))
             if consumes_canonical_slot:
-                created_keys.add(canonical_key)
-            created_keys_size_after = len(created_keys)
+                self._canonical_response_state_mutate(
+                    canonical_key=canonical_key,
+                    turn_id=turn_id,
+                    input_event_key=resolved_input_event_key,
+                    mutator=lambda record: (
+                        setattr(record, "created", True),
+                        setattr(record, "origin", origin),
+                    ),
+                )
+            created_keys_size_after = len(getattr(self, "_response_created_canonical_keys", set()) or ())
             logger.debug(
                 "[RESPTRACE] response_created run_id=%s turn_id=%s origin=%s response_id=%s resolved_input_event_key=%s "
                 "canonical_key=%s consumes_canonical_slot=%s created_keys_size_before=%s created_keys_size_after=%s "
@@ -7491,25 +7702,34 @@ class RealtimeAPI:
                     input_event_key=resolved_input_event_key,
                     state="created",
                 )
-                response_id_by_key = getattr(self, "_response_id_by_canonical_key", None)
-                if not isinstance(response_id_by_key, dict):
-                    response_id_by_key = {}
-                    self._response_id_by_canonical_key = response_id_by_key
-                response_id_by_key[canonical_key] = str(self._active_response_id or "")
+                self._canonical_response_state_mutate(
+                    canonical_key=canonical_key,
+                    turn_id=turn_id,
+                    input_event_key=resolved_input_event_key,
+                    mutator=lambda record: (
+                        setattr(record, "response_id", str(self._active_response_id or "")),
+                        setattr(record, "origin", origin),
+                    ),
+                )
             active_input_event_key = str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip()
             obligation_input_event_key = active_input_event_key if origin == "server_auto" else current_input_event_key
             if arbitration_outcome is ServerAutoArbitrationOutcome.CANCEL_PRE_AUDIO:
                 replacement_reason = "preference_recall_suppressed"
-                obligations = getattr(self, "_response_obligations", None)
                 obligation_key = self._response_obligation_key(
                     turn_id=turn_id,
                     input_event_key=obligation_input_event_key,
                 )
-                if isinstance(obligations, dict) and obligation_key in obligations:
+                obligation_state = self._canonical_response_state(obligation_key)
+                if isinstance(obligation_state, CanonicalResponseState) and obligation_state.obligation_present:
                     replacement_reason = "response_obligation_replacement"
                 self._active_response_preference_guarded = True
                 if consumes_canonical_slot:
-                    created_keys.discard(canonical_key)
+                    self._canonical_response_state_mutate(
+                        canonical_key=canonical_key,
+                        turn_id=turn_id,
+                        input_event_key=resolved_input_event_key,
+                        mutator=lambda record: setattr(record, "created", False),
+                    )
                     lifecycle_state["cancel_requested_pre_audio"] = True
                 self._mark_transcript_response_outcome(
                     input_event_key=active_input_event_key,
@@ -7680,6 +7900,17 @@ class RealtimeAPI:
             self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
             if active_canonical_key:
                 self._canonical_lifecycle_state(active_canonical_key)["first_audio_started"] = True
+                self._canonical_response_state_mutate(
+                    canonical_key=active_canonical_key,
+                    turn_id=self._current_turn_id_or_unknown(),
+                    input_event_key=getattr(self, "_active_response_input_event_key", None),
+                    mutator=lambda record: (
+                        setattr(record, "created", True),
+                        setattr(record, "audio_started", True),
+                        setattr(record, "origin", str(getattr(self, "_active_response_origin", "unknown") or "unknown")),
+                        setattr(record, "response_id", str(getattr(self, "_active_response_id", "") or "")),
+                    ),
+                )
             self._audio_playback_busy = True
             audio_data = base64.b64decode(event["delta"])
             self._audio_accum.extend(audio_data)
