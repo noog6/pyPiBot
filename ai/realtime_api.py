@@ -6,6 +6,7 @@ import asyncio
 import audioop
 import base64
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import Enum
@@ -19,7 +20,7 @@ import signal
 import threading
 import time
 import uuid
-from typing import Any
+from typing import Any, Iterator
 from urllib import request
 from urllib.parse import urlparse
 
@@ -214,6 +215,14 @@ class NormalizedConfirmationDecision:
     thresholds: dict[str, Any] | None = None
     max_reminders: int | None = None
     reminder_schedule_seconds: tuple[float, ...] = ()
+
+
+@dataclass(frozen=True)
+class UtteranceContext:
+    turn_id: str
+    input_event_key: str
+    canonical_key: str
+    utterance_seq: int
 
 
 class ConfirmationState(str, Enum):
@@ -475,6 +484,7 @@ class RealtimeAPI:
         self._pending_response_create: PendingResponseCreate | None = None
         self._response_create_turn_counter = 0
         self._current_response_turn_id: str | None = None
+        self._utterance_context: UtteranceContext | None = None
         self._queued_confirmation_reminder_keys: set[str] = set()
         self._pending_confirmation_prompt_latches: set[str] = set()
         self._pending_response_create_origins: deque[dict[str, str]] = deque(maxlen=64)
@@ -1904,6 +1914,68 @@ class RealtimeAPI:
     def _current_turn_id_or_unknown(self) -> str:
         turn_id = str(getattr(self, "_current_response_turn_id", "") or "").strip()
         return turn_id or "turn-unknown"
+
+    def _current_utterance_seq(self) -> int:
+        active = getattr(self, "_active_utterance", None)
+        if isinstance(active, dict):
+            utterance_id = active.get("utterance_id")
+            if isinstance(utterance_id, int):
+                return utterance_id
+        return int(getattr(self, "_utterance_counter", 0) or 0)
+
+    def _build_utterance_context(
+        self,
+        *,
+        turn_id: str | None = None,
+        input_event_key: str | None = None,
+        utterance_seq: int | None = None,
+    ) -> UtteranceContext:
+        resolved_turn_id = str(turn_id or self._current_turn_id_or_unknown()).strip() or "turn-unknown"
+        resolved_input_event_key = str(
+            input_event_key
+            if input_event_key is not None
+            else getattr(self, "_current_input_event_key", "")
+            or ""
+        ).strip()
+        resolved_utterance_seq = int(utterance_seq or self._current_utterance_seq() or 0)
+        canonical_key = self._canonical_utterance_key(
+            turn_id=resolved_turn_id,
+            input_event_key=resolved_input_event_key,
+        )
+        return UtteranceContext(
+            turn_id=resolved_turn_id,
+            input_event_key=resolved_input_event_key,
+            canonical_key=canonical_key,
+            utterance_seq=resolved_utterance_seq,
+        )
+
+    @contextmanager
+    def _utterance_context_scope(
+        self,
+        *,
+        turn_id: str | None = None,
+        input_event_key: str | None = None,
+        utterance_seq: int | None = None,
+        restore_on_exit: bool = False,
+    ) -> Iterator[UtteranceContext]:
+        prior_context = getattr(self, "_utterance_context", None)
+        prior_turn_id = getattr(self, "_current_response_turn_id", None)
+        prior_input_event_key = getattr(self, "_current_input_event_key", None)
+        context = self._build_utterance_context(
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            utterance_seq=utterance_seq,
+        )
+        self._utterance_context = context
+        self._current_response_turn_id = context.turn_id
+        self._current_input_event_key = context.input_event_key or None
+        try:
+            yield context
+        finally:
+            if restore_on_exit:
+                self._utterance_context = prior_context
+                self._current_response_turn_id = prior_turn_id
+                self._current_input_event_key = prior_input_event_key
 
     def _active_input_event_key_for_turn(self, turn_id: str) -> str:
         active_by_turn = getattr(self, "_active_input_event_key_by_turn_id", None)
@@ -4026,34 +4098,34 @@ class RealtimeAPI:
         metadata_turn_id = metadata.get("turn_id")
         if isinstance(metadata_turn_id, str) and metadata_turn_id.strip():
             turn_id = metadata_turn_id.strip()
-            self._current_response_turn_id = turn_id
-            return turn_id
+            with self._utterance_context_scope(turn_id=turn_id):
+                return turn_id
 
         normalized_origin = str(origin or "unknown").strip().lower()
         if normalized_origin == "assistant_message":
             micro_ack_turn_id = metadata.get("micro_ack_turn_id")
             if isinstance(micro_ack_turn_id, str) and micro_ack_turn_id.strip():
                 turn_id = micro_ack_turn_id.strip()
-                self._current_response_turn_id = turn_id
-                return turn_id
+                with self._utterance_context_scope(turn_id=turn_id):
+                    return turn_id
             if self._current_response_turn_id:
                 return self._current_response_turn_id
             turn_id = self._next_response_turn_id()
-            self._current_response_turn_id = turn_id
-            return turn_id
+            with self._utterance_context_scope(turn_id=turn_id):
+                return turn_id
         if normalized_origin == "tool_output":
             if self._current_response_turn_id:
                 return self._current_response_turn_id
             if self._pending_response_create is not None:
                 return self._pending_response_create.turn_id
             turn_id = self._next_response_turn_id()
-            self._current_response_turn_id = turn_id
-            return turn_id
+            with self._utterance_context_scope(turn_id=turn_id):
+                return turn_id
         if self._current_response_turn_id:
             return self._current_response_turn_id
         turn_id = self._next_response_turn_id()
-        self._current_response_turn_id = turn_id
-        return turn_id
+        with self._utterance_context_scope(turn_id=turn_id):
+            return turn_id
 
     def _response_create_priority(self, origin: str) -> int:
         normalized_origin = str(origin or "").strip().lower()
@@ -4103,11 +4175,17 @@ class RealtimeAPI:
             origin=origin,
             turn_id=turn_id,
         )
+        with self._utterance_context_scope(
+            turn_id=turn_id,
+            input_event_key=current_input_event_key,
+        ) as resolved_context:
+            turn_id = resolved_context.turn_id
+            current_input_event_key = resolved_context.input_event_key
+            canonical_key = resolved_context.canonical_key
         response_metadata = self._extract_response_create_metadata(response_create_event)
         normalized_origin = str(origin or "").strip().lower()
         consumes_canonical_slot = self._response_consumes_canonical_slot(response_metadata)
         suppression_turns = getattr(self, "_preference_recall_suppressed_turns", set())
-        canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=current_input_event_key)
         created_keys = getattr(self, "_response_created_canonical_keys", set())
         if consumes_canonical_slot:
             single_flight_block_reason = self._single_flight_block_reason(
@@ -4385,6 +4463,7 @@ class RealtimeAPI:
         response_create_event: dict[str, Any],
         *,
         origin: str,
+        utterance_context: UtteranceContext | None = None,
         record_ai_call: bool = False,
         debug_context: dict[str, Any] | None = None,
         memory_brief_note: str | None = None,
@@ -4424,17 +4503,29 @@ class RealtimeAPI:
                 await self._send_memory_brief_note(websocket, memory_brief_note)
             except Exception as exc:  # pragma: no cover - defensive fail-open
                 logger.warning("Memory brief injection skipped due to error: %s", exc)
+        context_hint = utterance_context or getattr(self, "_utterance_context", None)
+        if context_hint is not None:
+            metadata = self._extract_response_create_metadata(response_create_event)
+            metadata.setdefault("turn_id", context_hint.turn_id)
+            if context_hint.input_event_key:
+                metadata.setdefault("input_event_key", context_hint.input_event_key)
         turn_id = self._resolve_response_create_turn_id(origin=origin, response_create_event=response_create_event)
         current_input_event_key = self._ensure_response_create_correlation(
             response_create_event=response_create_event,
             origin=origin,
             turn_id=turn_id,
         )
+        with self._utterance_context_scope(
+            turn_id=turn_id,
+            input_event_key=current_input_event_key,
+        ) as resolved_context:
+            turn_id = resolved_context.turn_id
+            current_input_event_key = resolved_context.input_event_key
+            canonical_key = resolved_context.canonical_key
         response_metadata = self._extract_response_create_metadata(response_create_event)
         normalized_origin = str(origin or "").strip().lower()
         consumes_canonical_slot = self._response_consumes_canonical_slot(response_metadata)
         suppression_turns = getattr(self, "_preference_recall_suppressed_turns", set())
-        canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=current_input_event_key)
         created_keys = getattr(self, "_response_created_canonical_keys", set())
         if consumes_canonical_slot:
             single_flight_block_reason = self._single_flight_block_reason(
@@ -7198,6 +7289,15 @@ class RealtimeAPI:
                     current_input_event_key or "unknown",
                     canonical_key,
                 )
+            with self._utterance_context_scope(
+                turn_id=turn_id,
+                input_event_key=resolved_input_event_key,
+            ) as utterance_context:
+                turn_id = utterance_context.turn_id
+                resolved_input_event_key = utterance_context.input_event_key
+                canonical_key = utterance_context.canonical_key
+            if origin != "server_auto":
+                current_input_event_key = resolved_input_event_key
             created_keys = getattr(self, "_response_created_canonical_keys", None)
             if not isinstance(created_keys, set):
                 created_keys = set()
@@ -7222,20 +7322,23 @@ class RealtimeAPI:
                 created_keys_size_after,
                 self._active_input_event_key_for_turn(turn_id) or "unknown",
             )
+            lifecycle_canonical_key = canonical_key
+            if not consumes_canonical_slot:
+                lifecycle_canonical_key = f"{canonical_key}:non_consuming:{self._active_response_id or 'unknown'}"
             lifecycle_created_decision = self._lifecycle_controller().on_response_created(
-                canonical_key,
+                lifecycle_canonical_key,
                 origin=origin,
             )
             if lifecycle_created_decision.action is LifecycleDecisionAction.CANCEL:
                 cancel_event = {"type": "response.cancel"}
                 log_ws_event("Outgoing", cancel_event)
                 self._track_outgoing_event(cancel_event, origin="interaction_lifecycle_controller")
-                self._lifecycle_controller().on_cancel_sent(canonical_key)
+                self._lifecycle_controller().on_cancel_sent(lifecycle_canonical_key)
                 if websocket is not None:
                     await websocket.send(json.dumps(cancel_event))
                 return
             self._active_response_input_event_key = str(resolved_input_event_key or "").strip() or None
-            self._active_response_canonical_key = canonical_key
+            self._active_response_canonical_key = lifecycle_canonical_key
             if consumes_canonical_slot:
                 self._canonical_lifecycle_state(canonical_key).setdefault("first_audio_started", False)
                 self._set_response_delivery_state(
@@ -7453,13 +7556,23 @@ class RealtimeAPI:
             partial_text = event.get("delta")
             if not isinstance(partial_text, str) or not partial_text.strip():
                 partial_text = self._extract_transcript(event) or ""
-            self._log_user_transcript(partial_text, final=False, event_type=event_type)
+            transcript_input_event_key = self._resolve_input_event_key(event)
+            with self._utterance_context_scope(
+                turn_id=self._current_turn_id_or_unknown(),
+                input_event_key=transcript_input_event_key,
+            ):
+                self._log_user_transcript(partial_text, final=False, event_type=event_type)
         elif event_type == "conversation.item.input_audio_transcription.completed":
             transcript = self._extract_transcript(event)
             self._log_user_transcript(transcript or "", final=True, event_type=event_type)
             input_event_key = self._resolve_input_event_key(event)
-            self._current_input_event_key = input_event_key
             resolved_turn_id = self._current_turn_id_or_unknown()
+            with self._utterance_context_scope(
+                turn_id=resolved_turn_id,
+                input_event_key=input_event_key,
+            ) as utterance_context:
+                resolved_turn_id = utterance_context.turn_id
+                input_event_key = utterance_context.input_event_key
             active_by_turn = getattr(self, "_active_input_event_key_by_turn_id", None)
             if not isinstance(active_by_turn, dict):
                 active_by_turn = {}
@@ -7618,6 +7731,13 @@ class RealtimeAPI:
                     except Exception as exc:
                         logger.debug("talk_over_abort_cancel_failed turn_id=%s error=%s", turn_id, exc)
             self._utterance_counter += 1
+            next_turn_id = self._next_response_turn_id()
+            with self._utterance_context_scope(
+                turn_id=next_turn_id,
+                input_event_key="",
+                utterance_seq=self._utterance_counter,
+            ):
+                pass
             self._active_utterance = {
                 "utterance_id": self._utterance_counter,
                 "t_start": time.monotonic(),
@@ -8661,6 +8781,7 @@ class RealtimeAPI:
         *,
         speak: bool = True,
         response_metadata: dict[str, Any] | None = None,
+        utterance_context: UtteranceContext | None = None,
     ) -> None:
         assistant_item = {
             "type": "conversation.item.create",
@@ -8678,11 +8799,20 @@ class RealtimeAPI:
         metadata = {"origin": "assistant_message"}
         if response_metadata:
             metadata.update(response_metadata)
-        metadata.setdefault("turn_id", self._current_turn_id_or_unknown())
-        current_input_event_key = str(getattr(self, "_current_input_event_key", "") or "").strip()
-        if current_input_event_key:
-            metadata.setdefault("input_event_key", current_input_event_key)
+        context_hint = utterance_context or getattr(self, "_utterance_context", None) or self._build_utterance_context()
+        metadata.setdefault("turn_id", context_hint.turn_id)
+        if context_hint.input_event_key:
+            metadata.setdefault("input_event_key", context_hint.input_event_key)
+        trigger_reason = str(metadata.get("trigger") or "").strip().lower()
         explicit_parent_key = str(metadata.get("input_event_key") or "").strip()
+        if (
+            trigger_reason == "preference_recall"
+            and bool(getattr(self, "_response_in_flight", False))
+            and explicit_parent_key
+            and explicit_parent_key in getattr(self, "_preference_recall_suppressed_input_event_keys", set())
+        ):
+            explicit_parent_key = self._next_synthetic_input_event_key("preference_recall")
+            metadata["input_event_key"] = explicit_parent_key
         background_behavior_allowed = str(metadata.get("background_behavior_allowed", "")).strip().lower() in {
             "1",
             "true",
@@ -8702,10 +8832,12 @@ class RealtimeAPI:
                 metadata.setdefault("confirmation_token", token.id)
         trace_turn_id = str(metadata.get("turn_id") or self._current_turn_id_or_unknown())
         trace_input_event_key = str(metadata.get("input_event_key") or "").strip()
-        trace_canonical_key = self._canonical_utterance_key(
+        trace_context = self._build_utterance_context(
             turn_id=trace_turn_id,
             input_event_key=trace_input_event_key,
+            utterance_seq=context_hint.utterance_seq,
         )
+        trace_canonical_key = trace_context.canonical_key
         trigger_reason = str(metadata.get("trigger") or "assistant_message")
         obligation_present = self._response_obligation_key(
             turn_id=trace_turn_id,
@@ -8732,6 +8864,7 @@ class RealtimeAPI:
             websocket,
             {"type": "response.create", "response": {"metadata": metadata}},
             origin="assistant_message",
+            utterance_context=trace_context,
         )
 
     async def send_error_message_to_assistant(self, error_message: str, websocket: Any) -> None:
