@@ -11,7 +11,7 @@ from interaction import InteractionState
 
 class _Manager:
     def __init__(self) -> None:
-        self.scheduled: list[tuple[str, str, int | None]] = []
+        self.scheduled: list[tuple[str, str, str, int | None]] = []
         self.cancelled: list[tuple[str, str]] = []
         self.speech_started = 0
         self.speech_ended = 0
@@ -20,7 +20,7 @@ class _Manager:
     def maybe_schedule(self, *, context, reason: str, loop, expected_delay_ms=None) -> None:
         if callable(self.suppression_reason) and self.suppression_reason():
             return
-        self.scheduled.append((context.turn_id, reason, expected_delay_ms))
+        self.scheduled.append((context.turn_id, context.category, reason, expected_delay_ms))
 
     def cancel(self, *, turn_id: str, reason: str) -> None:
         self.cancelled.append((turn_id, reason))
@@ -131,7 +131,7 @@ def _api_stub() -> RealtimeAPI:
 def test_speech_stopped_schedules_micro_ack() -> None:
     api = _api_stub()
     asyncio.run(api.handle_event({"type": "input_audio_buffer.speech_stopped"}, api.websocket))
-    assert ("turn-1", "speech_stopped", 700) in api._micro_ack_manager.scheduled
+    assert ("turn-1", "start_of_work", "speech_stopped", 700) in api._micro_ack_manager.scheduled
     api.loop.close()
 
 
@@ -231,4 +231,15 @@ def test_emit_micro_ack_respects_text_only_channel_mode() -> None:
     api.loop.run_until_complete(asyncio.sleep(0))
 
     assert calls == [False]
+    api.loop.close()
+
+
+def test_micro_ack_reason_maps_to_expected_category() -> None:
+    api = _api_stub()
+
+    assert api._micro_ack_category_for_reason("speech_stopped") == "start_of_work"
+    assert api._micro_ack_category_for_reason("transcript_finalized") == "latency_mask"
+    assert api._micro_ack_category_for_reason("watchdog_confirmation_pending") == "safety_gate"
+    assert api._micro_ack_category_for_reason("watchdog_timeout") == "failure_fallback"
+
     api.loop.close()

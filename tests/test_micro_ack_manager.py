@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import random
 
-from ai.micro_ack_manager import MicroAckConfig, MicroAckContext, MicroAckManager
+from ai.micro_ack_manager import MicroAckCategory, MicroAckConfig, MicroAckContext, MicroAckManager
 
 
 def _context(*, turn_id: str, category: str = "speech", channel: str = "voice", intent: str | None = None) -> MicroAckContext:
@@ -191,4 +191,82 @@ def test_per_channel_cooldown_blocks_same_channel_only() -> None:
 
     assert [context.channel for context, *_ in emits] == ["voice", "text"]
     assert any(event == "suppressed" and reason == "channel_cooldown" for event, _turn, reason, _ in logs)
+    loop.close()
+
+
+def test_category_drives_phrase_family() -> None:
+    loop = asyncio.new_event_loop()
+    emits: list[tuple[MicroAckContext, str, str]] = []
+
+    manager = MicroAckManager(
+        config=MicroAckConfig(delay_ms=10, global_cooldown_ms=0, per_turn_max=1, long_wait_second_ack_ms=0),
+        on_emit=lambda context, phrase_id, phrase: emits.append((context, phrase_id, phrase)),
+        on_log=lambda *_args: None,
+        suppression_reason=lambda: None,
+    )
+
+    manager.maybe_schedule(
+        context=_context(turn_id="turn-1", category=MicroAckCategory.START_OF_WORK),
+        reason="speech_stopped",
+        loop=loop,
+        expected_delay_ms=900,
+    )
+    loop.run_until_complete(asyncio.sleep(0.02))
+
+    assert emits
+    assert emits[0][1].startswith("start_of_work_")
+    loop.close()
+
+
+def test_phrase_selection_is_deterministic_for_same_dedupe_key() -> None:
+    loop = asyncio.new_event_loop()
+    emits_a: list[tuple[MicroAckContext, str, str]] = []
+    emits_b: list[tuple[MicroAckContext, str, str]] = []
+
+    manager_a = MicroAckManager(
+        config=MicroAckConfig(delay_ms=10, global_cooldown_ms=0, per_turn_max=1, long_wait_second_ack_ms=0),
+        on_emit=lambda context, phrase_id, phrase: emits_a.append((context, phrase_id, phrase)),
+        on_log=lambda *_args: None,
+        suppression_reason=lambda: None,
+    )
+    manager_b = MicroAckManager(
+        config=MicroAckConfig(delay_ms=10, global_cooldown_ms=0, per_turn_max=1, long_wait_second_ack_ms=0),
+        on_emit=lambda context, phrase_id, phrase: emits_b.append((context, phrase_id, phrase)),
+        on_log=lambda *_args: None,
+        suppression_reason=lambda: None,
+    )
+
+    context = _context(turn_id="turn-1", category=MicroAckCategory.LATENCY_MASK, intent="weather")
+    manager_a.maybe_schedule(context=context, reason="transcript_finalized", loop=loop, expected_delay_ms=900)
+    manager_b.maybe_schedule(context=context, reason="transcript_finalized", loop=loop, expected_delay_ms=900)
+    loop.run_until_complete(asyncio.sleep(0.02))
+
+    assert emits_a and emits_b
+    assert emits_a[0][1] == emits_b[0][1]
+    assert emits_a[0][2] == emits_b[0][2]
+    loop.close()
+
+
+def test_non_safety_categories_never_emit_safety_phrase_ids() -> None:
+    loop = asyncio.new_event_loop()
+    emits: list[tuple[MicroAckContext, str, str]] = []
+
+    manager = MicroAckManager(
+        config=MicroAckConfig(delay_ms=10, global_cooldown_ms=0, per_turn_max=3, dedupe_ttl_ms=0, long_wait_second_ack_ms=0),
+        on_emit=lambda context, phrase_id, phrase: emits.append((context, phrase_id, phrase)),
+        on_log=lambda *_args: None,
+        suppression_reason=lambda: None,
+    )
+
+    for idx, category in enumerate((MicroAckCategory.START_OF_WORK, MicroAckCategory.LATENCY_MASK, MicroAckCategory.FAILURE_FALLBACK), start=1):
+        manager.maybe_schedule(
+            context=_context(turn_id=f"turn-{idx}", category=category, intent=f"intent-{idx}"),
+            reason="speech_stopped",
+            loop=loop,
+            expected_delay_ms=900,
+        )
+    loop.run_until_complete(asyncio.sleep(0.03))
+
+    assert emits
+    assert all(not phrase_id.startswith("safety_gate_") for _context_value, phrase_id, _phrase in emits)
     loop.close()
