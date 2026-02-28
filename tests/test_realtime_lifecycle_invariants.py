@@ -5,6 +5,37 @@ from collections import defaultdict
 from pathlib import Path
 
 
+class _FakeEventDispatcher:
+    def __init__(self) -> None:
+        self.ordered_events: list[tuple[str, str, str]] = []
+        self.audible_delta_count = 0
+        self._cancelled_response_ids: set[str] = set()
+        self._first_audible_response_id: str | None = None
+
+    def emit(self, event_type: str, *, response_id: str) -> None:
+        self.ordered_events.append(("sent", event_type, response_id))
+
+    def handle(self, event_type: str, *, response_id: str) -> None:
+        self.ordered_events.append(("handled", event_type, response_id))
+
+        if event_type == "response.cancel":
+            self._cancelled_response_ids.add(response_id)
+            return
+
+        if event_type != "response.output_audio.delta":
+            return
+
+        if response_id in self._cancelled_response_ids:
+            return
+
+        self.audible_delta_count += 1
+        if self._first_audible_response_id is None:
+            self._first_audible_response_id = response_id
+
+    def first_audible_delta_response_id(self) -> str | None:
+        return self._first_audible_response_id
+
+
 def _load_stream_fixture() -> dict[str, object]:
     fixture_path = Path(__file__).parent / "fixtures" / "realtime_stream_single_turn.json"
     return json.loads(fixture_path.read_text(encoding="utf-8"))
@@ -55,3 +86,26 @@ def test_realtime_lifecycle_invariants_single_turn_fixture() -> None:
                 "expected a single final assistant response for non-multipart utterance "
                 f"utterance_id={utterance_id} done_count={done_count}"
             )
+
+
+def test_guarded_server_auto_cancel_precedes_first_accepted_audio_delta() -> None:
+    dispatcher = _FakeEventDispatcher()
+
+    guarded_response_id = "resp_server_auto_guarded"
+
+    dispatcher.emit("response.cancel", response_id=guarded_response_id)
+    dispatcher.handle("response.cancel", response_id=guarded_response_id)
+
+    dispatcher.handle("response.output_audio.delta", response_id=guarded_response_id)
+
+    accepted_response_id = "resp_assistant_final"
+    dispatcher.handle("response.output_audio.delta", response_id=accepted_response_id)
+
+    cancel_event_index = dispatcher.ordered_events.index(("handled", "response.cancel", guarded_response_id))
+    first_accepted_delta_index = dispatcher.ordered_events.index(
+        ("handled", "response.output_audio.delta", accepted_response_id)
+    )
+
+    assert cancel_event_index < first_accepted_delta_index
+    assert dispatcher.first_audible_delta_response_id() == accepted_response_id
+    assert dispatcher.audible_delta_count == 1
