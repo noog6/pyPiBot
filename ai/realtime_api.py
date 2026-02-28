@@ -2079,6 +2079,12 @@ class RealtimeAPI:
             obligations = {}
             self._response_obligations = obligations
         obligation_present_before = obligation_key in obligations
+        active_response_input_event_key = str(
+            getattr(self, "_active_response_input_event_key", "") or ""
+        ).strip() or "none"
+        active_server_auto_input_event_key = str(
+            getattr(self, "_active_server_auto_input_event_key", "") or ""
+        ).strip() or "none"
         obligations[obligation_key] = {
             "turn_id": turn_id,
             "input_event_key": input_event_key,
@@ -2094,7 +2100,8 @@ class RealtimeAPI:
         )
         logger.debug(
             "[RESPTRACE] obligation_set run_id=%s turn_id=%s input_event_key=%s canonical_key=%s source=%s "
-            "obligation_present_before=%s obligation_present_after=%s total_obligations=%s obligation_key=%s",
+            "obligation_present_before=%s obligation_present_after=%s total_obligations=%s obligation_key=%s "
+            "active_response_input_event_key=%s active_server_auto_input_event_key=%s",
             self._current_run_id() or "",
             turn_id,
             input_event_key or "unknown",
@@ -2104,6 +2111,8 @@ class RealtimeAPI:
             obligation_key in obligations,
             len(obligations),
             obligation_key,
+            active_response_input_event_key,
+            active_server_auto_input_event_key,
         )
 
     def _clear_response_obligation(
@@ -2119,6 +2128,12 @@ class RealtimeAPI:
         if not isinstance(obligations, dict):
             return
         obligation_present_before = obligation_key in obligations
+        active_response_input_event_key = str(
+            getattr(self, "_active_response_input_event_key", "") or ""
+        ).strip() or "none"
+        active_server_auto_input_event_key = str(
+            getattr(self, "_active_server_auto_input_event_key", "") or ""
+        ).strip() or "none"
         obligation = obligations.pop(obligation_key, None)
         if obligation is None:
             return
@@ -2134,7 +2149,7 @@ class RealtimeAPI:
         logger.debug(
             "[RESPTRACE] obligation_cleared run_id=%s turn_id=%s input_event_key=%s canonical_key=%s origin=%s "
             "obligation_present_before=%s obligation_present_after=%s total_obligations=%s obligation_key=%s "
-            "reason=%s",
+            "active_response_input_event_key=%s active_server_auto_input_event_key=%s reason=%s",
             self._current_run_id() or "",
             turn_id,
             normalized_input_event_key,
@@ -2144,6 +2159,8 @@ class RealtimeAPI:
             obligation_key in obligations,
             len(obligations),
             obligation_key,
+            active_response_input_event_key,
+            active_server_auto_input_event_key,
             reason,
         )
 
@@ -8625,6 +8642,8 @@ class RealtimeAPI:
             self._preference_recall_suppressed_input_event_keys = suppressed_input_event_keys
         obligations = getattr(self, "_response_obligations", {})
         obligation_count_before_clear = len(obligations) if isinstance(obligations, dict) else 0
+        obligation_key = self._response_obligation_key(turn_id=turn_id, input_event_key=done_input_event_key)
+        obligation_present_before = isinstance(obligations, dict) and obligation_key in obligations
         pending_queue_len_before_clear = len(getattr(self, "_response_create_queue", deque()) or ())
         current_state_before_cleanup = getattr(self.state_manager, "state", InteractionState.IDLE)
         self._cancel_micro_ack(turn_id=turn_id, reason="response_done")
@@ -8677,10 +8696,21 @@ class RealtimeAPI:
         self._active_server_auto_input_event_key = None
         obligations_after_cleanup = getattr(self, "_response_obligations", {})
         obligation_count_after_clear = len(obligations_after_cleanup) if isinstance(obligations_after_cleanup, dict) else 0
+        obligation_present_after = (
+            isinstance(obligations_after_cleanup, dict) and obligation_key in obligations_after_cleanup
+        )
+        resolved_input_event_key = done_input_event_key or "unknown"
+        resolved_canonical_key = self._canonical_utterance_key(
+            turn_id=turn_id,
+            input_event_key=done_input_event_key,
+        )
         logger.debug(
             "[RESPTRACE] response_done_cleanup_after run_id=%s removed_suppressed_turn=%s "
             "removed_suppressed_input_event_key=%s suppressed_turns_count=%s suppressed_keys_count=%s "
-            "obligation_count_before=%s obligation_count_after=%s pending_queue_len=%s response_done_serial=%s state=%s",
+            "obligation_count_before=%s obligation_count_after=%s pending_queue_len=%s response_done_serial=%s state=%s "
+            "turn_id=%s input_event_key=%s canonical_key=%s obligation_key=%s "
+            "obligation_present_before=%s obligation_present_after=%s total_obligations=%s "
+            "active_response_input_event_key=%s active_server_auto_input_event_key=%s",
             self._current_run_id() or "",
             suppressed_turn_present_before and suppressed_turn_id not in self._preference_recall_suppressed_turns,
             active_input_event_key_present_before
@@ -8692,6 +8722,15 @@ class RealtimeAPI:
             len(getattr(self, "_response_create_queue", deque()) or ()),
             self._response_done_serial,
             getattr(self.state_manager, "state", InteractionState.IDLE),
+            turn_id,
+            resolved_input_event_key,
+            resolved_canonical_key,
+            obligation_key,
+            obligation_present_before,
+            obligation_present_after,
+            obligation_count_after_clear,
+            str(getattr(self, "_active_response_input_event_key", "") or "").strip() or "none",
+            str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip() or "none",
         )
         current_state = getattr(self.state_manager, "state", InteractionState.IDLE)
         if current_state != InteractionState.LISTENING:
