@@ -287,3 +287,36 @@ def test_micro_ack_reason_maps_to_expected_category() -> None:
     assert api._micro_ack_category_for_reason("watchdog_timeout") == "failure_fallback"
 
     api.loop.close()
+
+
+def test_response_audio_delta_logs_transition_once_then_steady_state_debug(monkeypatch) -> None:
+    api = _api_stub()
+    api._active_response_canonical_key = "run-1:turn-1:item-1"
+    api._active_response_origin = "assistant_message"
+    api._active_response_id = "resp-1"
+    api._active_response_input_event_key = "item-1"
+    event = {"type": "response.output_audio.delta", "delta": base64.b64encode(b"abc").decode("ascii")}
+
+    lifecycle_logs: list[tuple[int, str]] = []
+
+    def _capture_log(level, message, *args, **kwargs):
+        _ = kwargs
+        if "lifecycle_event" not in message:
+            return None
+        lifecycle_logs.append((level, str(args[-1])))
+        return None
+
+    monkeypatch.setattr("ai.realtime_api.logger.log", _capture_log)
+
+    asyncio.run(api.handle_event(event, api.websocket))
+    asyncio.run(api.handle_event(event, api.websocket))
+    asyncio.run(api.handle_event(event, api.websocket))
+
+    transition_logs = [entry for entry in lifecycle_logs if "transitioned=audio_started" in entry[1]]
+    steady_state_logs = [entry for entry in lifecycle_logs if "state=audio_started" in entry[1]]
+
+    assert len(transition_logs) == 1
+    assert transition_logs[0][0] == 20
+    assert len(steady_state_logs) == 2
+    assert all(entry[0] == 10 for entry in steady_state_logs)
+    api.loop.close()

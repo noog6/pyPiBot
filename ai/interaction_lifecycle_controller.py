@@ -87,6 +87,14 @@ class InteractionLifecycleController:
             return LifecycleDecision(LifecycleDecisionAction.CANCEL, f"state={record.state.value}")
         if record.state == InteractionLifecycleState.DONE:
             return LifecycleDecision(LifecycleDecisionAction.CANCEL, "state=done")
+        if record.state in {
+            InteractionLifecycleState.NEW,
+            InteractionLifecycleState.SERVER_AUTO_CREATED,
+        }:
+            record.state = InteractionLifecycleState.AUDIO_STARTED
+            return LifecycleDecision(LifecycleDecisionAction.ALLOW, "transitioned=audio_started")
+        if record.state == InteractionLifecycleState.AUDIO_STARTED:
+            return LifecycleDecision(LifecycleDecisionAction.ALLOW, "state=audio_started")
         record.state = InteractionLifecycleState.AUDIO_STARTED
         return LifecycleDecision(LifecycleDecisionAction.ALLOW, "transitioned=audio_started")
 
