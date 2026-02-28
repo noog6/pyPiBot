@@ -47,6 +47,11 @@ from ai.interaction_lifecycle_controller import (
     InteractionLifecycleController,
     LifecycleDecisionAction,
 )
+from ai.interaction_lifecycle_policy import (
+    InteractionLifecyclePolicy,
+    ResponseCreateDecisionAction,
+    ServerAutoCreatedDecisionAction,
+)
 from ai.reflection import ReflectionCoordinator, ReflectionContext
 from ai.stimuli_coordinator import StimuliCoordinator
 from ai.governance import (
@@ -796,6 +801,7 @@ class RealtimeAPI:
         self._canonical_response_lifecycle_state: dict[str, dict[str, bool]] = {}
         self._lifecycle_canonical_timeline: dict[str, deque[str]] = {}
         self._interaction_lifecycle_controller = InteractionLifecycleController()
+        self._interaction_lifecycle_policy = InteractionLifecyclePolicy()
         self._response_obligations: dict[str, dict[str, Any]] = {}
         self._canonical_invariant_logged: set[str] = set()
         self._already_scheduled_for_input_event_key: set[str] = set()
@@ -1011,51 +1017,33 @@ class RealtimeAPI:
             await asyncio.sleep(timeout_s)
         except asyncio.CancelledError:
             return
-        reason = "timeout"
-        details = "response.created missing before timeout"
         suppression_until = float(getattr(self, "_preference_recall_response_suppression_until", 0.0) or 0.0)
-        if turn_id in getattr(self, "_preference_recall_suppressed_turns", set()):
-            reason = "preference_recall_suppressed"
-            details = "turn suppression active"
-        elif input_event_key in getattr(self, "_preference_recall_suppressed_input_event_keys", set()):
-            reason = "preference_recall_suppressed"
-            details = "input_event suppression active"
-        elif suppression_until > time.monotonic():
-            reason = "preference_recall_suppressed"
-            details = "suppression window active"
-        elif bool(getattr(self, "_response_in_flight", False)):
-            reason = "active_response_in_flight"
-            details = (
-                f"active_origin={getattr(self, '_active_response_origin', 'unknown')} "
-                f"response_id={getattr(self, '_active_response_id', None) or 'unknown'}"
-            )
-        elif self._response_delivery_state(turn_id=turn_id, input_event_key=input_event_key) in {"delivered", "done"}:
-            reason = "already_handled"
-            details = "canonical delivery terminal state"
-        elif bool(getattr(self, "_audio_playback_busy", False)):
-            reason = "audio_playback_busy"
-            details = "audio playback active"
-        elif getattr(self, "_pending_response_create", None) is not None:
-            pending = self._pending_response_create
-            reason = "response_create_queued"
-            details = (
-                f"pending_origin={getattr(pending, 'origin', 'unknown')} "
-                f"pending_reason={getattr(pending, 'reason', 'unknown')}"
-            )
-        elif getattr(getattr(self, "state_manager", None), "state", None) == InteractionState.LISTENING:
-            reason = "listening_state_gate"
-            details = "state_manager is LISTENING"
+        pending = getattr(self, "_pending_response_create", None)
+        policy_decision = self._lifecycle_policy().decide_watchdog_timeout(
+            suppressed_by_turn=turn_id in getattr(self, "_preference_recall_suppressed_turns", set()),
+            suppressed_by_input_event=input_event_key in getattr(self, "_preference_recall_suppressed_input_event_keys", set()),
+            suppression_window_active=suppression_until > time.monotonic(),
+            response_in_flight=bool(getattr(self, "_response_in_flight", False)),
+            active_response_origin=str(getattr(self, "_active_response_origin", "unknown") or "unknown"),
+            active_response_id=str(getattr(self, "_active_response_id", None) or "unknown"),
+            delivery_state_terminal=self._response_delivery_state(turn_id=turn_id, input_event_key=input_event_key) in {"delivered", "done"},
+            audio_playback_busy=bool(getattr(self, "_audio_playback_busy", False)),
+            has_pending_response_create=pending is not None,
+            pending_origin=str(getattr(pending, "origin", "unknown") if pending is not None else "unknown"),
+            pending_reason=str(getattr(pending, "reason", "unknown") if pending is not None else "unknown"),
+            listening_state_gate=getattr(getattr(self, "state_manager", None), "state", None) == InteractionState.LISTENING,
+        )
         self._mark_transcript_response_outcome(
             input_event_key=input_event_key,
             turn_id=turn_id,
             outcome="response_not_scheduled",
-            reason=reason,
-            details=details,
+            reason=policy_decision.reason_code,
+            details=policy_decision.details,
         )
-        if reason in {"audio_playback_busy", "response_create_queued", "timeout"}:
+        if policy_decision.should_schedule_micro_ack:
             self._maybe_schedule_micro_ack(
                 turn_id=turn_id,
-                reason=f"watchdog_{reason}",
+                reason=f"watchdog_{policy_decision.reason_code}",
                 expected_delay_ms=900,
             )
 
@@ -2059,6 +2047,13 @@ class RealtimeAPI:
             controller = InteractionLifecycleController()
             self._interaction_lifecycle_controller = controller
         return controller
+
+    def _lifecycle_policy(self) -> InteractionLifecyclePolicy:
+        policy = getattr(self, "_interaction_lifecycle_policy", None)
+        if not isinstance(policy, InteractionLifecyclePolicy):
+            policy = InteractionLifecyclePolicy()
+            self._interaction_lifecycle_policy = policy
+        return policy
 
     def _is_synthetic_input_event_key(self, input_event_key: str | None) -> bool:
         normalized = str(input_event_key or "").strip().lower()
@@ -4782,20 +4777,7 @@ class RealtimeAPI:
                 f"{delta_ms:.1f}" if delta_ms is not None else "n/a",
             )
 
-        # Coordinator rule: at most one pending response.create is retained per turn.
-        # When both assistant_message and tool_output compete, tool_output wins because
-        # it contains fresher tool results for the same turn.
-        if self._response_in_flight or self._audio_playback_busy:
-            queue_reason = "active_response" if self._response_in_flight else "audio_playback_busy"
-            return self._schedule_pending_response_create(
-                websocket=websocket,
-                response_create_event=response_create_event,
-                origin=origin,
-                reason=queue_reason,
-                record_ai_call=record_ai_call,
-                debug_context=debug_context,
-                memory_brief_note=memory_brief_note,
-            )
+        # Migration (phase 1): delegated policy decisions keep signature stable.
         if memory_brief_note:
             try:
                 await self._send_memory_brief_note(websocket, memory_brief_note)
@@ -4813,42 +4795,93 @@ class RealtimeAPI:
             origin=origin,
             turn_id=turn_id,
         )
-        with self._utterance_context_scope(
-            turn_id=turn_id,
-            input_event_key=current_input_event_key,
-        ) as resolved_context:
+        with self._utterance_context_scope(turn_id=turn_id, input_event_key=current_input_event_key) as resolved_context:
             turn_id = resolved_context.turn_id
             current_input_event_key = resolved_context.input_event_key
             canonical_key = resolved_context.canonical_key
+
         response_metadata = self._extract_response_create_metadata(response_create_event)
         normalized_origin = str(origin or "").strip().lower()
         consumes_canonical_slot = self._response_consumes_canonical_slot(response_metadata)
         explicit_multipart = self._response_is_explicit_multipart(response_metadata)
-        if consumes_canonical_slot and self._canonical_first_audio_started(canonical_key) and not explicit_multipart:
-            logger.info(
-                "response_schedule_blocked run_id=%s turn_id=%s origin=%s mode=direct reason=canonical_audio_already_started canonical_key=%s",
-                self._current_run_id() or "",
-                turn_id,
-                normalized_origin,
-                canonical_key,
-            )
-            return False
         suppression_turns = getattr(self, "_preference_recall_suppressed_turns", set())
         created_keys = getattr(self, "_response_created_canonical_keys", set())
-        if consumes_canonical_slot:
-            single_flight_block_reason = self._single_flight_block_reason(
-                turn_id=turn_id,
-                input_event_key=current_input_event_key,
+        single_flight_block_reason = self._single_flight_block_reason(
+            turn_id=turn_id,
+            input_event_key=current_input_event_key,
+        ) if consumes_canonical_slot else ""
+        suppression_active = turn_id in suppression_turns and not current_input_event_key
+        preference_recall_lock_blocked = self._is_preference_recall_lock_blocked(
+            turn_id=turn_id,
+            input_event_key=current_input_event_key,
+            normalized_origin=normalized_origin,
+            response_metadata=response_metadata,
+        )
+        decision = self._lifecycle_policy().decide_response_create(
+            response_in_flight=bool(self._response_in_flight),
+            audio_playback_busy=bool(self._audio_playback_busy),
+            consumes_canonical_slot=consumes_canonical_slot,
+            canonical_audio_started=self._canonical_first_audio_started(canonical_key),
+            explicit_multipart=explicit_multipart,
+            single_flight_block_reason=single_flight_block_reason,
+            already_delivered=self._is_response_already_delivered(turn_id=turn_id, input_event_key=current_input_event_key),
+            preference_recall_lock_blocked=preference_recall_lock_blocked,
+            canonical_key_already_created=canonical_key in created_keys,
+            has_safety_override=self._response_has_safety_override(response_create_event),
+            suppression_active=suppression_active,
+            normalized_origin=normalized_origin,
+        )
+
+        if decision.action is ResponseCreateDecisionAction.SCHEDULE:
+            return self._schedule_pending_response_create(
+                websocket=websocket,
+                response_create_event=response_create_event,
+                origin=origin,
+                reason=str(decision.queue_reason or decision.reason_code),
+                record_ai_call=record_ai_call,
+                debug_context=debug_context,
+                memory_brief_note=memory_brief_note,
             )
-            if single_flight_block_reason:
+        if decision.action is ResponseCreateDecisionAction.BLOCK:
+            if decision.reason_code == "already_delivered":
+                logger.debug(
+                    "duplicate_response_prevented run_id=%s turn_id=%s input_event_key=%s reason=already_delivered origin=%s",
+                    self._current_run_id() or "",
+                    turn_id,
+                    current_input_event_key or "unknown",
+                    normalized_origin,
+                )
+                return False
+            if decision.reason_code == "preference_recall_lock_blocked":
+                return False
+            if single_flight_block_reason and decision.reason_code == single_flight_block_reason:
                 self._log_response_create_blocked(
                     turn_id=turn_id,
                     origin=normalized_origin,
                     input_event_key=current_input_event_key,
                     canonical_key=canonical_key,
-                    block_reason=single_flight_block_reason,
+                    block_reason=decision.reason_code,
                 )
                 return False
+            if decision.reason_code == "preference_recall_suppressed":
+                self._drop_suppressed_scheduled_response_creates(turn_id=turn_id, origin=normalized_origin)
+                self._mark_transcript_response_outcome(
+                    input_event_key=current_input_event_key,
+                    turn_id=turn_id,
+                    outcome="response_not_scheduled",
+                    reason=decision.reason_code,
+                    details="direct response.create blocked",
+                )
+            logger.info(
+                "response_schedule_blocked run_id=%s turn_id=%s origin=%s mode=direct reason=%s canonical_key=%s",
+                self._current_run_id() or "",
+                turn_id,
+                normalized_origin,
+                decision.reason_code,
+                canonical_key,
+            )
+            return False
+
         obligation_present = self._response_obligation_key(
             turn_id=turn_id,
             input_event_key=current_input_event_key,
@@ -4861,7 +4894,7 @@ class RealtimeAPI:
             self._current_run_id() or "",
             turn_id,
             normalized_origin,
-            "direct_send",
+            decision.reason_code,
             current_input_event_key or "unknown",
             canonical_key,
             len(getattr(self, "_response_create_queue", deque()) or ()),
@@ -4871,48 +4904,6 @@ class RealtimeAPI:
             obligation_present,
             getattr(self, "_response_done_serial", 0),
         )
-        if self._is_response_already_delivered(turn_id=turn_id, input_event_key=current_input_event_key):
-            logger.debug(
-                "duplicate_response_prevented run_id=%s turn_id=%s input_event_key=%s reason=already_delivered origin=%s",
-                self._current_run_id() or "",
-                turn_id,
-                current_input_event_key or "unknown",
-                normalized_origin,
-            )
-            return False
-        if self._is_preference_recall_lock_blocked(
-            turn_id=turn_id,
-            input_event_key=current_input_event_key,
-            normalized_origin=normalized_origin,
-            response_metadata=response_metadata,
-        ):
-            return False
-        if consumes_canonical_slot and canonical_key in created_keys and not self._response_has_safety_override(response_create_event):
-            logger.info(
-                "response_schedule_blocked run_id=%s turn_id=%s origin=%s mode=direct reason=canonical_response_already_created canonical_key=%s",
-                self._current_run_id() or "",
-                turn_id,
-                normalized_origin,
-                canonical_key,
-            )
-            return False
-        suppression_active = turn_id in suppression_turns and not current_input_event_key
-        if suppression_active and normalized_origin == "server_auto":
-            self._drop_suppressed_scheduled_response_creates(turn_id=turn_id, origin=normalized_origin)
-            self._mark_transcript_response_outcome(
-                input_event_key=current_input_event_key,
-                turn_id=turn_id,
-                outcome="response_not_scheduled",
-                reason="preference_recall_suppressed",
-                details="direct response.create blocked",
-            )
-            logger.info(
-                "response_schedule_blocked run_id=%s turn_id=%s origin=%s mode=direct reason=preference_recall_suppressed",
-                self._current_run_id() or "",
-                turn_id,
-                normalized_origin,
-            )
-            return False
         schedule_logged_turn_ids = getattr(self, "_response_schedule_logged_turn_ids", None)
         if not isinstance(schedule_logged_turn_ids, set):
             schedule_logged_turn_ids = set()
@@ -4964,7 +4955,7 @@ class RealtimeAPI:
             self._current_run_id() or "",
             turn_id,
             normalized_origin,
-            "direct_send",
+            decision.reason_code,
             current_input_event_key or "unknown",
             canonical_key,
             len(getattr(self, "_response_create_queue", deque()) or ()),
@@ -7442,19 +7433,13 @@ class RealtimeAPI:
         input_event_key: str,
         canonical_key: str,
         origin: str,
-    ) -> ServerAutoArbitrationOutcome:
+    ) -> tuple[ServerAutoArbitrationOutcome, str]:
+        # Migration (phase 1): branch logic moved into InteractionLifecyclePolicy.
         normalized_origin = str(origin or "").strip().lower()
-        if normalized_origin != "server_auto":
-            return ServerAutoArbitrationOutcome.ALLOW
-
         normalized_turn_id = str(turn_id or "").strip()
         normalized_canonical_key = str(canonical_key or "").strip()
-        if not normalized_turn_id or not normalized_canonical_key:
-            return ServerAutoArbitrationOutcome.DEFER
-
         normalized_input_event_key = str(input_event_key or "").strip()
         suppression_until = float(getattr(self, "_preference_recall_response_suppression_until", 0.0) or 0.0)
-        suppression_window_active = suppression_until > time.monotonic()
         suppressed_turns = getattr(self, "_preference_recall_suppressed_turns", None)
         if not isinstance(suppressed_turns, set):
             suppressed_turns = set()
@@ -7477,9 +7462,20 @@ class RealtimeAPI:
             isinstance(obligation_state, CanonicalResponseState)
             and obligation_state.obligation_present
         )
-        if suppression_by_turn or suppression_window_active or suppression_by_input_event or obligation_replacement:
-            return ServerAutoArbitrationOutcome.CANCEL_PRE_AUDIO
-        return ServerAutoArbitrationOutcome.ALLOW
+        policy_decision = self._lifecycle_policy().decide_server_auto_created(
+            normalized_origin=normalized_origin,
+            has_turn_id=bool(normalized_turn_id),
+            has_canonical_key=bool(normalized_canonical_key),
+            suppression_by_turn=suppression_by_turn,
+            suppression_window_active=suppression_until > time.monotonic(),
+            suppression_by_input_event=suppression_by_input_event,
+            obligation_replacement=obligation_replacement,
+        )
+        if policy_decision.action is ServerAutoCreatedDecisionAction.CANCEL_PRE_AUDIO:
+            return ServerAutoArbitrationOutcome.CANCEL_PRE_AUDIO, policy_decision.reason_code
+        if policy_decision.action is ServerAutoCreatedDecisionAction.DEFER:
+            return ServerAutoArbitrationOutcome.DEFER, policy_decision.reason_code
+        return ServerAutoArbitrationOutcome.ALLOW, policy_decision.reason_code
 
     async def handle_event(self, event: dict[str, Any], websocket: Any) -> None:
         event_type = event.get("type")
@@ -7616,7 +7612,7 @@ class RealtimeAPI:
                 canonical_key = utterance_context.canonical_key
             if origin != "server_auto":
                 current_input_event_key = resolved_input_event_key
-            arbitration_outcome = self._arbitrate_server_auto_response_created(
+            arbitration_outcome, arbitration_reason_code = self._arbitrate_server_auto_response_created(
                 turn_id=turn_id,
                 input_event_key=resolved_input_event_key,
                 canonical_key=canonical_key,
@@ -7624,8 +7620,9 @@ class RealtimeAPI:
             )
             if origin == "server_auto":
                 logger.info(
-                    "server_auto_arbitration outcome=%s canonical_key=%s",
+                    "server_auto_arbitration outcome=%s reason=%s canonical_key=%s",
                     arbitration_outcome.value,
+                    arbitration_reason_code,
                     canonical_key,
                 )
             created_keys_size_before = len(getattr(self, "_response_created_canonical_keys", set()) or ())
@@ -7714,14 +7711,7 @@ class RealtimeAPI:
             active_input_event_key = str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip()
             obligation_input_event_key = active_input_event_key if origin == "server_auto" else current_input_event_key
             if arbitration_outcome is ServerAutoArbitrationOutcome.CANCEL_PRE_AUDIO:
-                replacement_reason = "preference_recall_suppressed"
-                obligation_key = self._response_obligation_key(
-                    turn_id=turn_id,
-                    input_event_key=obligation_input_event_key,
-                )
-                obligation_state = self._canonical_response_state(obligation_key)
-                if isinstance(obligation_state, CanonicalResponseState) and obligation_state.obligation_present:
-                    replacement_reason = "response_obligation_replacement"
+                replacement_reason = arbitration_reason_code
                 self._active_response_preference_guarded = True
                 if consumes_canonical_slot:
                     self._canonical_response_state_mutate(
