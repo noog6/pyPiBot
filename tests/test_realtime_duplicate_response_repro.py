@@ -474,3 +474,87 @@ def test_canonical_audio_started_blocks_duplicate_response_create(monkeypatch) -
     assert any("reason=canonical_audio_already_started" in message for message in log_messages)
 
 
+def test_canonical_audio_started_blocks_all_canonical_origins() -> None:
+    api = _make_api_stub()
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._canonical_first_audio_started = lambda _canonical_key: True
+
+    async def _run() -> list[tuple[str, bool]]:
+        results: list[tuple[str, bool]] = []
+        for origin in ("assistant_message", "tool_output", "server_auto"):
+            turn_id = f"turn_{origin}"
+            input_event_key = f"item_{origin}"
+            api._response_in_flight = False
+            api.response_in_progress = False
+            sent = await api._send_response_create(
+                ws,
+                {
+                    "type": "response.create",
+                    "response": {
+                        "metadata": {
+                            "origin": origin,
+                            "turn_id": turn_id,
+                            "input_event_key": input_event_key,
+                        }
+                    },
+                },
+                origin=origin,
+            )
+            results.append((origin, sent))
+        return results
+
+    results = asyncio.run(_run())
+    assert results == [
+        ("assistant_message", False),
+        ("tool_output", False),
+        ("server_auto", False),
+    ]
+
+
+def test_canonical_audio_started_allows_explicit_multipart_and_micro_ack() -> None:
+    api = _make_api_stub()
+    ws = _RecordingWs()
+    api.websocket = ws
+
+    async def _run() -> tuple[bool, bool]:
+        canonical_key = api._canonical_utterance_key(turn_id="turn_multi", input_event_key="item_multi")
+        api._canonical_lifecycle_state(canonical_key)["first_audio_started"] = True
+        multipart_sent = await api._send_response_create(
+            ws,
+            {
+                "type": "response.create",
+                "response": {
+                    "metadata": {
+                        "origin": "assistant_message",
+                        "turn_id": "turn_multi",
+                        "input_event_key": "item_multi",
+                        "explicit_multipart": "true",
+                    }
+                },
+            },
+            origin="assistant_message",
+        )
+        api._response_in_flight = False
+        api.response_in_progress = False
+        micro_ack_sent = await api._send_response_create(
+            ws,
+            {
+                "type": "response.create",
+                "response": {
+                    "metadata": {
+                        "origin": "assistant_message",
+                        "turn_id": "turn_micro",
+                        "input_event_key": "item_micro",
+                        "consumes_canonical_slot": "false",
+                    }
+                },
+            },
+            origin="assistant_message",
+        )
+        return multipart_sent, micro_ack_sent
+
+    multipart_sent, micro_ack_sent = asyncio.run(_run())
+    assert multipart_sent is True
+    assert micro_ack_sent is True
+

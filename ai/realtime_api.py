@@ -4269,6 +4269,16 @@ class RealtimeAPI:
         response_metadata = self._extract_response_create_metadata(response_create_event)
         normalized_origin = str(origin or "").strip().lower()
         consumes_canonical_slot = self._response_consumes_canonical_slot(response_metadata)
+        explicit_multipart = self._response_is_explicit_multipart(response_metadata)
+        if consumes_canonical_slot and self._canonical_first_audio_started(canonical_key) and not explicit_multipart:
+            logger.info(
+                "response_schedule_blocked run_id=%s turn_id=%s origin=%s mode=direct reason=canonical_audio_already_started canonical_key=%s",
+                self._current_run_id() or "",
+                turn_id,
+                normalized_origin,
+                canonical_key,
+            )
+            return False
         suppression_turns = getattr(self, "_preference_recall_suppressed_turns", set())
         created_keys = getattr(self, "_response_created_canonical_keys", set())
         if consumes_canonical_slot:
@@ -4609,6 +4619,16 @@ class RealtimeAPI:
         response_metadata = self._extract_response_create_metadata(response_create_event)
         normalized_origin = str(origin or "").strip().lower()
         consumes_canonical_slot = self._response_consumes_canonical_slot(response_metadata)
+        explicit_multipart = self._response_is_explicit_multipart(response_metadata)
+        if consumes_canonical_slot and self._canonical_first_audio_started(canonical_key) and not explicit_multipart:
+            logger.info(
+                "response_schedule_blocked run_id=%s turn_id=%s origin=%s mode=direct reason=canonical_audio_already_started canonical_key=%s",
+                self._current_run_id() or "",
+                turn_id,
+                normalized_origin,
+                canonical_key,
+            )
+            return False
         suppression_turns = getattr(self, "_preference_recall_suppressed_turns", set())
         created_keys = getattr(self, "_response_created_canonical_keys", set())
         if consumes_canonical_slot:
@@ -4663,24 +4683,7 @@ class RealtimeAPI:
             response_metadata=response_metadata,
         ):
             return False
-        if (
-            consumes_canonical_slot
-            and self._canonical_first_audio_started(canonical_key)
-            and not self._response_is_explicit_multipart(response_metadata)
-        ):
-            logger.info(
-                "response_schedule_blocked run_id=%s turn_id=%s origin=%s mode=direct reason=canonical_audio_already_started canonical_key=%s",
-                self._current_run_id() or "",
-                turn_id,
-                normalized_origin,
-                canonical_key,
-            )
-            return False
-        if (
-            consumes_canonical_slot
-            and canonical_key in created_keys
-            and not self._response_has_safety_override(response_create_event)
-        ):
+        if consumes_canonical_slot and canonical_key in created_keys and not self._response_has_safety_override(response_create_event):
             logger.info(
                 "response_schedule_blocked run_id=%s turn_id=%s origin=%s mode=direct reason=canonical_response_already_created canonical_key=%s",
                 self._current_run_id() or "",
