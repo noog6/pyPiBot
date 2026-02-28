@@ -913,38 +913,74 @@ class RealtimeAPI:
             suppression_reason=self._micro_ack_suppression_reason,
         )
 
-    def _log_micro_ack_event(self, event: str, turn_id: str, reason: str, delay_ms: int | None) -> None:
+    def _log_micro_ack_event(
+        self,
+        event: str,
+        turn_id: str,
+        reason: str,
+        delay_ms: int | None,
+        category: str | None,
+        channel: str | None,
+        intent: str | None,
+        action: str | None,
+        tool_call_id: str | None,
+    ) -> None:
         run_id = self._current_run_id() or ""
+        category_value = category or ""
+        channel_value = channel or ""
+        intent_value = intent or ""
+        action_value = action or ""
+        tool_call_id_value = tool_call_id or ""
         if event == "scheduled":
             logger.info(
-                "micro_ack_scheduled run_id=%s turn_id=%s reason=%s delay_ms=%s",
+                "micro_ack_scheduled run_id=%s turn_id=%s reason=%s delay_ms=%s category=%s channel=%s intent=%s action=%s tool_call_id=%s",
                 run_id,
                 turn_id,
                 reason,
                 delay_ms if delay_ms is not None else "",
+                category_value,
+                channel_value,
+                intent_value,
+                action_value,
+                tool_call_id_value,
             )
             return
         if event == "emitted":
             logger.info(
-                "micro_ack_emitted run_id=%s turn_id=%s phrase_id=%s",
+                "micro_ack_emitted run_id=%s turn_id=%s phrase_id=%s category=%s channel=%s intent=%s action=%s tool_call_id=%s",
                 run_id,
                 turn_id,
                 reason,
+                category_value,
+                channel_value,
+                intent_value,
+                action_value,
+                tool_call_id_value,
             )
             return
         if event == "cancelled":
             logger.info(
-                "micro_ack_cancelled run_id=%s turn_id=%s reason=%s",
+                "micro_ack_cancelled run_id=%s turn_id=%s reason=%s category=%s channel=%s intent=%s action=%s tool_call_id=%s",
                 run_id,
                 turn_id,
                 reason,
+                category_value,
+                channel_value,
+                intent_value,
+                action_value,
+                tool_call_id_value,
             )
             return
         logger.debug(
-            "micro_ack_suppressed run_id=%s turn_id=%s reason=%s",
+            "micro_ack_suppressed run_id=%s turn_id=%s reason=%s category=%s channel=%s intent=%s action=%s tool_call_id=%s",
             run_id,
             turn_id,
             reason,
+            category_value,
+            channel_value,
+            intent_value,
+            action_value,
+            tool_call_id_value,
         )
 
     def _micro_ack_suppression_reason(self) -> str | None:
