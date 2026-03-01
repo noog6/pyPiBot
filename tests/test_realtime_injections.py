@@ -38,7 +38,7 @@ def test_should_defer_while_first_turn_unsettled(monkeypatch) -> None:
     assert messages == ["startup_injection_deferred source=camera reason=first_turn_unsettled"]
 
 
-def test_timeout_release_flushes_fifo_in_order(monkeypatch) -> None:
+def test_schedule_timeout_reuses_existing_task_and_flushes_once(monkeypatch) -> None:
     flushed: list[tuple[str, str]] = []
     coordinator = _build_coordinator(
         gate_timeout_s=0.01,
@@ -60,6 +60,10 @@ def test_timeout_release_flushes_fifo_in_order(monkeypatch) -> None:
         coordinator.schedule_timeout(loop)
         future = coordinator.timeout_task
         assert future is not None
+
+        coordinator.schedule_timeout(loop)
+        assert coordinator.timeout_task is future
+
         loop.run_until_complete(asyncio.wrap_future(future, loop=loop))
     finally:
         loop.close()
