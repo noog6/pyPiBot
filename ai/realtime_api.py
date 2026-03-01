@@ -47,7 +47,7 @@ from interaction import (
 from ai.tools import function_map, tools
 from ai.realtime.event_router import EventRouter
 from ai.realtime.injections import StartupInjectionCoordinator
-from ai.realtime.response_lifecycle import ResponseLifecycleCoordinator
+from ai.realtime.response_lifecycle import ResponseLifecycleTracker
 from ai.realtime.shutdown import ShutdownCoordinator, WebsocketCloser
 from ai.realtime.transport import RealtimeTransport
 from ai.realtime.types import CanonicalResponseState, PendingResponseCreate, UtteranceContext
@@ -924,7 +924,7 @@ class RealtimeAPI:
         self._conversation_efficiency_by_turn: dict[str, ConversationEfficiencyState] = {}
         self._conversation_efficiency_logged_turns: set[str] = set()
         self._silent_turn_incident_count = 0
-        self._response_lifecycle = ResponseLifecycleCoordinator(self)
+        self._response_lifecycle = ResponseLifecycleTracker(self)
         self._transport: RealtimeTransport | None = None
         self._event_router = EventRouter(
             fallback=self._handle_unknown_event,
@@ -3407,14 +3407,14 @@ class RealtimeAPI:
         return str(metadata.get("safety_override", "")).strip().lower() in {"true", "1", "yes"}
 
     def _empty_response_retry_idempotency_key(self, *, canonical_key: str) -> str:
-        return self._response_lifecycle.empty_response_retry_idempotency_key(canonical_key=canonical_key)
+        return self._response_lifecycle_tracker().empty_response_retry_idempotency_key(canonical_key=canonical_key)
 
     @staticmethod
     def _strip_empty_retry_suffix_lineage(input_event_key: str | None) -> str:
-        return ResponseLifecycleCoordinator.strip_empty_retry_suffix_lineage(input_event_key)
+        return ResponseLifecycleTracker.strip_empty_retry_suffix_lineage(input_event_key)
 
     def _canonical_key_for_empty_retry_origin(self, *, turn_id: str, input_event_key: str | None) -> str:
-        return self._response_lifecycle.canonical_key_for_empty_retry_origin(
+        return self._response_lifecycle_tracker().canonical_key_for_empty_retry_origin(
             turn_id=turn_id,
             input_event_key=input_event_key,
         )
@@ -3462,7 +3462,7 @@ class RealtimeAPI:
         )
 
     def _is_empty_response_done(self, *, canonical_key: str) -> bool:
-        return self._response_lifecycle.is_empty_response_done(canonical_key=canonical_key)
+        return self._response_lifecycle_tracker().is_empty_response_done(canonical_key=canonical_key)
 
     async def _maybe_schedule_empty_response_retry(
         self,
@@ -3474,7 +3474,7 @@ class RealtimeAPI:
         origin: str,
         delivery_state_before_done: str | None,
     ) -> None:
-        await self._response_lifecycle.maybe_schedule_empty_response_retry(
+        await self._response_lifecycle_tracker().maybe_schedule_empty_response_retry(
             websocket=websocket,
             turn_id=turn_id,
             canonical_key=canonical_key,
@@ -3482,6 +3482,13 @@ class RealtimeAPI:
             origin=origin,
             delivery_state_before_done=delivery_state_before_done,
         )
+
+    def _response_lifecycle_tracker(self) -> ResponseLifecycleTracker:
+        tracker = getattr(self, "_response_lifecycle", None)
+        if not isinstance(tracker, ResponseLifecycleTracker):
+            tracker = ResponseLifecycleTracker(self)
+            self._response_lifecycle = tracker
+        return tracker
 
     def _response_is_explicit_multipart(self, metadata: dict[str, Any] | None) -> bool:
         if not isinstance(metadata, dict):
