@@ -122,6 +122,57 @@ def test_realtime_api_handle_event_legacy_processes_assistant_conversation_item_
         state="delivered",
     )
 
+
+
+def test_realtime_api_handle_event_legacy_processes_assistant_response_output_item_added() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api.assistant_reply = ""
+    api._assistant_reply_accum = ""
+    api._active_response_input_event_key = "input-active"
+    api._current_input_event_key = "input-fallback"
+    api._is_active_response_guarded = lambda: False
+    api._cancel_micro_ack = Mock()
+    api._current_turn_id_or_unknown = lambda: "turn-1"
+    api._mark_first_assistant_utterance_observed_if_needed = Mock()
+    api._set_response_delivery_state = Mock()
+    api.state_manager = type("StateManager", (), {"update_state": Mock()})()
+
+    event = {
+        "type": "response.output_item.added",
+        "item": {
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "output_text", "text": "Ready"},
+                {"type": "audio", "transcript": " now"},
+            ],
+        },
+    }
+
+    asyncio.run(api._handle_event_legacy(event, websocket=None))
+
+    assert api.assistant_reply == "Ready now"
+    assert api._assistant_reply_accum == "Ready now"
+    api._mark_first_assistant_utterance_observed_if_needed.assert_called_once_with("Ready now")
+    api._set_response_delivery_state.assert_called_once_with(
+        turn_id="turn-1",
+        input_event_key="input-active",
+        state="delivered",
+    )
+
+
+def test_realtime_api_prompt_origin_binding_sets_active_key_before_output_processing() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._active_input_event_key_by_turn_id = {}
+
+    api._bind_active_input_event_key_for_turn(
+        turn_id="turn-1",
+        input_event_key="synthetic_prompt_1",
+    )
+
+    assert api._active_input_event_key_for_turn("turn-1") == "synthetic_prompt_1"
+
+
 def test_realtime_api_handle_event_dispatches_via_event_router_once() -> None:
     api = RealtimeAPI.__new__(RealtimeAPI)
     event = {"type": "response.created", "id": "evt-123"}

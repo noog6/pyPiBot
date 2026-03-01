@@ -991,7 +991,40 @@ class RealtimeAPI:
         logger.debug("Unhandled realtime event type=%s", str(event.get("type") or "unknown"))
 
     async def _handle_response_lifecycle_event(self, event: dict[str, Any], websocket: Any) -> None:
+        event_type = str(event.get("type") or "unknown")
+        logger.debug(
+            "realtime_lifecycle_event_received event_type=%s has_item=%s has_delta=%s",
+            event_type,
+            isinstance(event.get("item"), dict),
+            "delta" in event,
+        )
         await self._handle_event_legacy(event, websocket)
+
+    def _extract_assistant_text_from_content(self, content: Any) -> tuple[str, list[str]]:
+        if not isinstance(content, list):
+            return "", []
+        part_types: list[str] = []
+        extracted_parts: list[str] = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            part_type = str(part.get("type") or "")
+            part_types.append(part_type)
+
+            candidate_texts: list[str] = []
+            if part_type in {"output_text", "text"}:
+                text_value = part.get("text")
+                if isinstance(text_value, str) and text_value:
+                    candidate_texts.append(text_value)
+            transcript_value = part.get("transcript")
+            if isinstance(transcript_value, str) and transcript_value:
+                candidate_texts.append(transcript_value)
+
+            for candidate in candidate_texts:
+                if candidate:
+                    extracted_parts.append(candidate)
+
+        return "".join(extracted_parts), part_types
 
     async def _handle_input_audio_transcription_partial_event(
         self, event: dict[str, Any], websocket: Any
@@ -2944,6 +2977,17 @@ class RealtimeAPI:
             active_by_turn = {}
             self._active_input_event_key_by_turn_id = active_by_turn
         return str(active_by_turn.get(turn_id) or "").strip()
+
+    def _bind_active_input_event_key_for_turn(self, *, turn_id: str, input_event_key: str | None) -> None:
+        normalized_turn_id = str(turn_id or "").strip()
+        normalized_key = str(input_event_key or "").strip()
+        if not normalized_turn_id or not normalized_key:
+            return
+        active_by_turn = getattr(self, "_active_input_event_key_by_turn_id", None)
+        if not isinstance(active_by_turn, dict):
+            active_by_turn = {}
+            self._active_input_event_key_by_turn_id = active_by_turn
+        active_by_turn[normalized_turn_id] = normalized_key
 
     def _log_response_binding_event(self, *, response_key: str, turn_id: str, origin: str) -> None:
         logger.info(
@@ -8965,6 +9009,10 @@ class RealtimeAPI:
                 await transport.send_json(websocket, cancel_event)
             return
         self._active_response_input_event_key = str(resolved_input_event_key or "").strip() or None
+        self._bind_active_input_event_key_for_turn(
+            turn_id=turn_id,
+            input_event_key=self._active_response_input_event_key,
+        )
         self._active_response_canonical_key = lifecycle_canonical_key
         if consumes_canonical_slot:
             self._canonical_lifecycle_state(canonical_key).setdefault("first_audio_started", False)
@@ -9392,31 +9440,7 @@ class RealtimeAPI:
                 return
             if item.get("type") != "message" or item.get("role") != "assistant":
                 return
-            content = item.get("content", [])
-            if not isinstance(content, list):
-                return
-            part_types: list[str] = []
-            extracted_parts: list[str] = []
-            for part in content:
-                if not isinstance(part, dict):
-                    continue
-                part_type = str(part.get("type") or "")
-                part_types.append(part_type)
-
-                candidate_texts: list[str] = []
-                if part_type in {"output_text", "text"}:
-                    text_value = part.get("text")
-                    if isinstance(text_value, str) and text_value:
-                        candidate_texts.append(text_value)
-                transcript_value = part.get("transcript")
-                if isinstance(transcript_value, str) and transcript_value:
-                    candidate_texts.append(transcript_value)
-
-                for candidate in candidate_texts:
-                    if candidate:
-                        extracted_parts.append(candidate)
-
-            extracted_text = "".join(extracted_parts)
+            extracted_text, part_types = self._extract_assistant_text_from_content(item.get("content", []))
             logger.debug(
                 "assistant_content_event_received event_type=conversation.item.added part_types=%s extracted_chars=%s",
                 ",".join(part_types),
@@ -9519,6 +9543,35 @@ class RealtimeAPI:
         if item.get("type") == "function_call":
             self.function_call = item
             self.function_call_args = ""
+            return
+        if self._is_active_response_guarded():
+            return
+        if not isinstance(item, dict):
+            return
+        if item.get("type") != "message" or item.get("role") != "assistant":
+            return
+        extracted_text, part_types = self._extract_assistant_text_from_content(item.get("content", []))
+        logger.debug(
+            "assistant_content_event_received event_type=response.output_item.added part_types=%s extracted_chars=%s",
+            ",".join(part_types),
+            len(extracted_text),
+        )
+        if not extracted_text:
+            return
+        self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
+        self._mark_first_assistant_utterance_observed_if_needed(extracted_text)
+        self.assistant_reply += extracted_text
+        self._assistant_reply_accum += extracted_text
+        self.state_manager.update_state(InteractionState.SPEAKING, "text output")
+        current_turn_id = self._current_turn_id_or_unknown()
+        current_input_event_key = str(getattr(self, "_active_response_input_event_key", "") or "").strip()
+        if not current_input_event_key:
+            current_input_event_key = str(getattr(self, "_current_input_event_key", "") or "").strip()
+        self._set_response_delivery_state(
+            turn_id=current_turn_id,
+            input_event_key=current_input_event_key,
+            state="delivered",
+        )
 
     async def handle_function_call(self, event: dict[str, Any], websocket: Any) -> None:
         if self.function_call:
