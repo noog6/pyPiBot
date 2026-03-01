@@ -4118,3 +4118,67 @@ def test_confirmation_flow_start_of_work_phrases_remain_non_executing() -> None:
         for _phrase_id, phrase in start_of_work_phrases
     )
     api.loop.close()
+
+
+def test_function_call_arguments_done_event_parse_failure_falls_back_to_empty_args() -> None:
+    api = _make_api_stub()
+    api.function_call = {"name": "perform_research", "call_id": "call_parse_fallback"}
+    api._pending_research_request = object()
+    api._function_call_accumulator = type(
+        "A",
+        (),
+        {
+            "arguments_buffer": '{"query"',
+            "handle_function_call_arguments_done": lambda self, event, websocket: api.handle_function_call(event, websocket),
+            "reset_arguments_buffer": lambda self: None,
+        },
+    )()
+
+    sent_payloads: list[dict[str, object]] = []
+
+    class _SendWs:
+        async def send(self, payload: str) -> None:
+            sent_payloads.append(json.loads(payload))
+
+    asyncio.run(api._handle_function_call_arguments_done_event({}, _SendWs()))
+
+    assert len(sent_payloads) == 1
+    output_payload = json.loads(sent_payloads[0]["item"]["output"])
+    assert output_payload["status"] == "waiting_for_permission"
+    assert api.function_call is None
+    assert api.function_call_args == ""
+
+
+def test_function_call_arguments_done_event_replays_denied_research_suppression() -> None:
+    api = _make_api_stub()
+    api.function_call = {"name": "perform_research", "call_id": "call_replay"}
+    api._pending_research_request = None
+    args_payload = '{"query":"status"}'
+    fingerprint = api._build_research_args_fingerprint({"query": "status"})
+    assert fingerprint is not None
+    api._record_research_permission_outcome(fingerprint, approved=False)
+    api._function_call_accumulator = type(
+        "A",
+        (),
+        {
+            "arguments_buffer": args_payload,
+            "handle_function_call_arguments_done": lambda self, event, websocket: api.handle_function_call(event, websocket),
+            "reset_arguments_buffer": lambda self: None,
+        },
+    )()
+
+    sent_payloads: list[dict[str, object]] = []
+
+    class _SendWs:
+        async def send(self, payload: str) -> None:
+            sent_payloads.append(json.loads(payload))
+
+    asyncio.run(api._handle_function_call_arguments_done_event({}, _SendWs()))
+    api.function_call = {"name": "perform_research", "call_id": "call_replay_2"}
+    asyncio.run(api._handle_function_call_arguments_done_event({}, _SendWs()))
+
+    assert len(sent_payloads) == 2
+    first_output = json.loads(sent_payloads[0]["item"]["output"])
+    second_output = json.loads(sent_payloads[1]["item"]["output"])
+    assert first_output["status"] == "blocked_by_research_permission"
+    assert second_output["status"] == "blocked_by_research_permission"
