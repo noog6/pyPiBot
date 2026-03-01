@@ -22,6 +22,23 @@ from ai.realtime_api import RealtimeAPI
 
 class _StubCanonicalState:
     audio_started = False
+    deliverable_observed = False
+
+
+class _StubFunctionCallAccumulator:
+    arguments_buffer = ""
+
+    async def handle_output_item_added(self, event: dict) -> None:
+        _ = event
+
+    def handle_function_call_arguments_delta(self, event: dict) -> None:
+        self.arguments_buffer += str(event.get("delta", ""))
+
+    async def handle_function_call_arguments_done(self, event: dict, websocket: object) -> None:
+        _ = (event, websocket)
+
+    def reset_arguments_buffer(self) -> None:
+        self.arguments_buffer = ""
 
 
 def _make_api() -> RealtimeAPI:
@@ -39,6 +56,7 @@ def _make_api() -> RealtimeAPI:
     api._canonical_first_audio_started = lambda canonical_key: False
     api._canonical_response_state = lambda canonical_key: _StubCanonicalState()
     api._log_lifecycle_event = lambda **kwargs: None
+    api._function_call_accumulator = _StubFunctionCallAccumulator()
     api._debug_dump_canonical_key_timeline = lambda **kwargs: None
     api._lifecycle_controller = lambda: type("_Lifecycle", (), {"on_response_done": lambda self, *_: None})()
     return api
@@ -183,3 +201,165 @@ def test_maybe_schedule_empty_response_retry_delegates_to_tracker() -> None:
         origin="prompt",
         delivery_state_before_done="done",
     )
+
+
+def test_created_done_with_deliverable_marker_does_not_retry() -> None:
+    api = _make_api()
+    sent_events: list[dict] = []
+
+    async def _capture_send_response_create(_websocket, event, **_kwargs):
+        sent_events.append(event)
+        return True
+
+    api._send_response_create = _capture_send_response_create
+    canonical_key = api._canonical_utterance_key(turn_id="turn_1", input_event_key="input_evt_tool")
+    api._canonical_response_state = lambda _canonical_key: type(
+        "_State",
+        (),
+        {"audio_started": False, "deliverable_observed": True},
+    )()
+
+    asyncio.run(
+        api._maybe_schedule_empty_response_retry(
+            websocket=object(),
+            turn_id="turn_1",
+            canonical_key=canonical_key,
+            input_event_key="input_evt_tool",
+            origin="prompt",
+            delivery_state_before_done="done",
+        )
+    )
+
+    assert sent_events == []
+
+
+def test_tool_only_output_item_path_marks_response_non_empty() -> None:
+    api = _make_api()
+    sent_events: list[dict] = []
+
+    async def _capture_send_response_create(_websocket, event, **_kwargs):
+        sent_events.append(event)
+        return True
+
+    api._send_response_create = _capture_send_response_create
+    states: dict[str, object] = {}
+
+    def _mutate(*, canonical_key: str, turn_id: str, input_event_key: str | None, mutator):
+        state = states.get(canonical_key)
+        if state is None:
+            state = type(
+                "_State",
+                (),
+                {
+                    "created": False,
+                    "audio_started": False,
+                    "deliverable_observed": False,
+                    "done": False,
+                    "cancel_sent": False,
+                    "origin": "unknown",
+                    "response_id": "",
+                    "obligation_present": False,
+                    "input_event_key": "",
+                    "turn_id": "",
+                    "obligation": None,
+                },
+            )()
+        mutator(state)
+        states[canonical_key] = state
+        return state
+
+    api._canonical_response_state_mutate = _mutate
+    api._canonical_response_state = lambda canonical_key: states.get(canonical_key, _StubCanonicalState())
+    api._active_response_canonical_key = api._canonical_utterance_key(turn_id="turn_1", input_event_key="input_evt_tool_only")
+    api._active_response_input_event_key = "input_evt_tool_only"
+    api._active_response_origin = "prompt"
+    api._active_response_id = "resp_1"
+
+    asyncio.run(
+        api._handle_output_item_added_event(
+            {"type": "response.output_item.added", "item": {"type": "function_call"}},
+            websocket=object(),
+        )
+    )
+
+    canonical_key = api._active_response_canonical_key
+    assert bool(getattr(states[canonical_key], "deliverable_observed", False))
+
+    asyncio.run(
+        api._maybe_schedule_empty_response_retry(
+            websocket=object(),
+            turn_id="turn_1",
+            canonical_key=canonical_key,
+            input_event_key="input_evt_tool_only",
+            origin="prompt",
+            delivery_state_before_done="done",
+        )
+    )
+
+    assert sent_events == []
+
+
+def test_tool_only_arguments_delta_path_marks_response_non_empty() -> None:
+    api = _make_api()
+    sent_events: list[dict] = []
+
+    async def _capture_send_response_create(_websocket, event, **_kwargs):
+        sent_events.append(event)
+        return True
+
+    api._send_response_create = _capture_send_response_create
+    states: dict[str, object] = {}
+
+    def _mutate(*, canonical_key: str, turn_id: str, input_event_key: str | None, mutator):
+        state = states.get(canonical_key)
+        if state is None:
+            state = type(
+                "_State",
+                (),
+                {
+                    "created": False,
+                    "audio_started": False,
+                    "deliverable_observed": False,
+                    "done": False,
+                    "cancel_sent": False,
+                    "origin": "unknown",
+                    "response_id": "",
+                    "obligation_present": False,
+                    "input_event_key": "",
+                    "turn_id": "",
+                    "obligation": None,
+                },
+            )()
+        mutator(state)
+        states[canonical_key] = state
+        return state
+
+    api._canonical_response_state_mutate = _mutate
+    api._canonical_response_state = lambda canonical_key: states.get(canonical_key, _StubCanonicalState())
+    api._active_response_canonical_key = api._canonical_utterance_key(turn_id="turn_1", input_event_key="input_evt_args")
+    api._active_response_input_event_key = "input_evt_args"
+    api._active_response_origin = "prompt"
+    api._active_response_id = "resp_args"
+
+    asyncio.run(
+        api._handle_function_call_arguments_delta_event(
+            {"type": "response.function_call_arguments.delta", "delta": '{"query":"status"}'},
+            websocket=object(),
+        )
+    )
+
+    canonical_key = api._active_response_canonical_key
+    assert bool(getattr(states[canonical_key], "deliverable_observed", False))
+
+    asyncio.run(
+        api._maybe_schedule_empty_response_retry(
+            websocket=object(),
+            turn_id="turn_1",
+            canonical_key=canonical_key,
+            input_event_key="input_evt_args",
+            origin="prompt",
+            delivery_state_before_done="done",
+        )
+    )
+
+    assert sent_events == []
