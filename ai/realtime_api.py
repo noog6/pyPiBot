@@ -9350,6 +9350,19 @@ class RealtimeAPI:
             self.assistant_reply += delta
             self._assistant_reply_accum += delta
             self.state_manager.update_state(InteractionState.SPEAKING, "text output")
+        elif event_type == "response.output_text.delta":
+            if self._is_active_response_guarded():
+                return
+            self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
+            delta = event.get("delta", "")
+            logger.debug(
+                "assistant_content_event_received event_type=response.output_text.delta delta_len=%s",
+                len(delta),
+            )
+            self._mark_first_assistant_utterance_observed_if_needed(delta)
+            self.assistant_reply += delta
+            self._assistant_reply_accum += delta
+            self.state_manager.update_state(InteractionState.SPEAKING, "text output")
         elif event_type == "response.output_audio.done":
             await self.handle_audio_response_done()
             self.state_manager.update_state(InteractionState.IDLE, "audio output done")
