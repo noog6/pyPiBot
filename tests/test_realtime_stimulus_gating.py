@@ -63,3 +63,57 @@ def test_inject_event_suppresses_camera_during_awaiting_confirmation() -> None:
     api.inject_event(Event(source="camera", kind="image", priority="normal"))
 
     assert not sent
+
+
+def test_startup_gate_defers_noncritical_injection_until_first_assistant_output() -> None:
+    api = _make_api_stub()
+    api._startup_injection_gate_released = False
+    api._startup_first_assistant_utterance_observed = False
+    api._startup_injection_gate_timeout_s = 5.0
+    api._startup_injection_queue = []
+    api._ensure_startup_injection_timeout_task = lambda: None
+    api._pending_confirmation_token = None
+    api.orchestration_state = type("S", (), {"phase": OrchestrationPhase.IDLE})()
+
+    sent: list[str] = []
+    api._format_event_for_injection = lambda event: ("camera frame", False)
+    api._should_request_battery_response = lambda event, fallback: fallback
+    api._is_battery_query_context_active = lambda: False
+    api._send_text_message = lambda message, **kwargs: sent.append(message)
+
+    api.inject_event(Event(source="camera", kind="image", priority="normal"))
+
+    assert not sent
+    assert len(api._startup_injection_queue) == 1
+
+    api._release_startup_injection_gate(reason="first_turn_complete")
+
+    assert sent == ["camera frame"]
+
+
+def test_startup_gate_allows_critical_battery_injection() -> None:
+    api = _make_api_stub()
+    api._startup_injection_gate_released = False
+    api._startup_first_assistant_utterance_observed = False
+    api._startup_injection_gate_timeout_s = 5.0
+    api._startup_injection_queue = []
+    api._pending_confirmation_token = None
+    api.orchestration_state = type("S", (), {"phase": OrchestrationPhase.IDLE})()
+
+    sent: list[str] = []
+    api._format_event_for_injection = lambda event: ("battery critical", False)
+    api._should_request_battery_response = lambda event, fallback: fallback
+    api._is_battery_query_context_active = lambda: False
+    api._send_text_message = lambda message, **kwargs: sent.append(message)
+
+    api.inject_event(
+        Event(
+            source="battery",
+            kind="status",
+            priority="critical",
+            metadata={"severity": "critical"},
+        )
+    )
+
+    assert sent == ["battery critical"]
+    assert not api._startup_injection_queue

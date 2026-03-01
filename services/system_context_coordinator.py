@@ -58,10 +58,12 @@ class SystemContextCoordinator:
                 if not self._startup_snapshot_ready():
                     self._stop_event.wait(self._poll_interval_s)
                     continue
-                if not self._realtime_api.is_ready_for_injections():
+                ready = self._realtime_api.is_ready_for_injections()
+                if not ready:
                     self._stop_event.wait(self._poll_interval_s)
                     continue
                 payload = self._build_startup_payload()
+                # RealtimeAPI may defer non-critical startup injections until first-turn output settles.
                 self._realtime_api.inject_system_context(payload)
                 self._startup_injected = True
                 self._startup_health_status = str(payload["startup_health"]["status"])

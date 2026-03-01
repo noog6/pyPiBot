@@ -910,6 +910,14 @@ class RealtimeAPI:
         self._awaiting_confirmation_allowed_sources = (
             self._load_awaiting_confirmation_source_policy(realtime_cfg)
         )
+        self._startup_injection_gate_timeout_s = max(
+            0.0,
+            float(realtime_cfg.get("startup_injection_gate_timeout_s", 5.0)),
+        )
+        self._startup_injection_gate_released = False
+        self._startup_first_assistant_utterance_observed = False
+        self._startup_injection_queue: deque[dict[str, Any]] = deque()
+        self._startup_injection_timeout_task: Any = None
         self._utterance_counter = 0
         self._active_utterance: dict[str, Any] | None = None
         self._recent_input_levels: deque[dict[str, float]] = deque(maxlen=256)
@@ -1807,6 +1815,86 @@ class RealtimeAPI:
             reason,
         )
 
+    def _startup_injection_gate_active(self) -> bool:
+        if self._startup_injection_gate_released:
+            return False
+        if self._startup_first_assistant_utterance_observed:
+            return False
+        if self._startup_injection_gate_timeout_s <= 0.0:
+            return False
+        return True
+
+    def _startup_gate_is_critical_allowed(self, source: str, kind: str, priority: str) -> bool:
+        normalized_source = str(source).strip().lower()
+        normalized_kind = str(kind).strip().lower()
+        normalized_priority = str(priority).strip().lower()
+        return self._is_allowed_awaiting_confirmation_stimulus(
+            normalized_source,
+            normalized_kind,
+            normalized_priority,
+        )
+
+    def _maybe_defer_startup_injection(
+        self,
+        *,
+        source: str,
+        kind: str,
+        priority: str,
+        payload: dict[str, Any],
+    ) -> bool:
+        if not self._startup_injection_gate_active():
+            return False
+        if self._startup_gate_is_critical_allowed(source, kind, priority):
+            return False
+        logger.info(
+            "startup_injection_deferred source=%s reason=first_turn_unsettled",
+            source,
+        )
+        self._startup_injection_queue.append(payload)
+        return True
+
+    def _release_startup_injection_gate(self, *, reason: str) -> None:
+        if self._startup_injection_gate_released:
+            return
+        self._startup_injection_gate_released = True
+        queued_items = list(self._startup_injection_queue)
+        self._startup_injection_queue.clear()
+        logger.info(
+            "startup_injection_flush count=%s reason=%s",
+            len(queued_items),
+            reason,
+        )
+        for item in queued_items:
+            item_type = str(item.get("type") or "")
+            if item_type == "event":
+                self._emit_injected_event(item)
+                continue
+            if item_type == "system_context":
+                self._emit_system_context_payload(item)
+
+    async def _startup_injection_timeout_release(self) -> None:
+        timeout_s = self._startup_injection_gate_timeout_s
+        if timeout_s <= 0.0:
+            return
+        try:
+            await asyncio.sleep(timeout_s)
+        except asyncio.CancelledError:
+            return
+        self._release_startup_injection_gate(reason="timeout")
+
+    def _ensure_startup_injection_timeout_task(self) -> None:
+        if self._startup_injection_gate_released or self._startup_first_assistant_utterance_observed:
+            return
+        if not self.loop:
+            return
+        task = self._startup_injection_timeout_task
+        if task is not None and not task.done():
+            return
+        self._startup_injection_timeout_task = asyncio.run_coroutine_threadsafe(
+            self._startup_injection_timeout_release(),
+            self.loop,
+        )
+
     def get_session_health(self) -> dict[str, Any]:
         retrieval_metrics = self._memory_manager.get_retrieval_health_metrics(
             scope=self._memory_retrieval_scope,
@@ -1951,18 +2039,42 @@ class RealtimeAPI:
             request_response = event.request_response
         if event.source in {"battery", "imu", "camera", "ops", "health"} and event.request_response is None:
             request_response = bool(request_response) and safety_override
-        self._log_injection_event(event, request_response)
-        self._send_text_message(
-            message,
-            request_response=request_response,
-            bypass_response_suppression=bypass_response_suppression,
-            safety_override=safety_override,
-            injection_metadata={
+        queued_payload = {
+            "type": "event",
+            "event": event,
+            "message": message,
+            "request_response": request_response,
+            "bypass_response_suppression": bypass_response_suppression,
+            "safety_override": safety_override,
+            "injection_metadata": {
                 "source": event.source,
                 "kind": event.kind,
                 "priority": event.priority,
                 "severity": str((event.metadata or {}).get("severity") or "").strip().lower(),
             },
+        }
+        severity = str((event.metadata or {}).get("severity") or event.kind or "").strip().lower()
+        priority = str(event.priority or "").strip().lower()
+        if self._maybe_defer_startup_injection(
+            source=event.source,
+            kind=severity,
+            priority=priority,
+            payload=queued_payload,
+        ):
+            self._ensure_startup_injection_timeout_task()
+            return
+        self._emit_injected_event(queued_payload)
+
+    def _emit_injected_event(self, payload: dict[str, Any]) -> None:
+        event = payload.get("event")
+        if isinstance(event, Event):
+            self._log_injection_event(event, bool(payload.get("request_response", True)))
+        self._send_text_message(
+            str(payload.get("message") or ""),
+            request_response=bool(payload.get("request_response", True)),
+            bypass_response_suppression=bool(payload.get("bypass_response_suppression", False)),
+            safety_override=bool(payload.get("safety_override", False)),
+            injection_metadata=payload.get("injection_metadata") if isinstance(payload.get("injection_metadata"), dict) else None,
         )
 
     def _log_injection_event(self, event: Event, request_response: bool) -> None:
@@ -2015,6 +2127,26 @@ class RealtimeAPI:
 
     def inject_system_context(self, payload: dict[str, Any]) -> None:
         """Inject non-chat startup context into conversation state."""
+
+        source = str(payload.get("source") or "system_context").strip().lower()
+        queued_payload = {
+            "type": "system_context",
+            "payload": payload,
+        }
+        if self._maybe_defer_startup_injection(
+            source=source,
+            kind="context",
+            priority="normal",
+            payload=queued_payload,
+        ):
+            self._ensure_startup_injection_timeout_task()
+            return
+        self._emit_system_context_payload(queued_payload)
+
+    def _emit_system_context_payload(self, queued_payload: dict[str, Any]) -> None:
+        payload = queued_payload.get("payload")
+        if not isinstance(payload, dict):
+            return
 
         if not self.loop:
             logger.debug("Unable to send system context; event loop unavailable.")
@@ -8721,6 +8853,9 @@ class RealtimeAPI:
                 return
             self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
             delta = event.get("delta", "")
+            if delta and not self._startup_first_assistant_utterance_observed:
+                self._startup_first_assistant_utterance_observed = True
+                self._release_startup_injection_gate(reason="first_turn_complete")
             self.assistant_reply += delta
             self._assistant_reply_accum += delta
             self.state_manager.update_state(InteractionState.SPEAKING, "text output")
@@ -8797,6 +8932,9 @@ class RealtimeAPI:
             if self._is_active_response_guarded():
                 return
             delta = event.get("delta", "")
+            if delta and not self._startup_first_assistant_utterance_observed:
+                self._startup_first_assistant_utterance_observed = True
+                self._release_startup_injection_gate(reason="first_turn_complete")
             self.assistant_reply += delta
             self._assistant_reply_accum += delta
         elif event_type == "response.output_audio_transcript.done":
@@ -9134,6 +9272,7 @@ class RealtimeAPI:
             if not self.ready_event.is_set():
                 logger.info("Realtime API ready to accept injections.")
                 self.ready_event.set()
+            self._ensure_startup_injection_timeout_task()
 
     async def handle_output_item_added(self, event: dict[str, Any]) -> None:
         item = event.get("item", {})
