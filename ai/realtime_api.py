@@ -49,6 +49,7 @@ from ai.realtime.event_router import EventRouter
 from ai.realtime.injections import InjectionCoordinator
 from ai.realtime.input_audio_events import InputAudioEventHandlers
 from ai.realtime.response_lifecycle import ResponseLifecycleTracker
+from ai.realtime.response_terminal_handlers import ResponseTerminalHandlers
 from ai.realtime.shutdown import ShutdownCoordinator
 from ai.realtime.transport import RealtimeTransport
 from ai.realtime.types import CanonicalResponseState, PendingResponseCreate, UtteranceContext
@@ -927,6 +928,7 @@ class RealtimeAPI:
         self._conversation_efficiency_logged_turns: set[str] = set()
         self._silent_turn_incident_count = 0
         self._response_lifecycle = ResponseLifecycleTracker(self)
+        self._response_terminal_handlers = ResponseTerminalHandlers(self)
         self._input_audio_events = InputAudioEventHandlers(self)
         self._transport: RealtimeTransport | None = None
         self._event_router = EventRouter(
@@ -3545,6 +3547,14 @@ class RealtimeAPI:
             tracker = ResponseLifecycleTracker(self)
             self._response_lifecycle = tracker
         return tracker
+
+
+    def _response_terminal_handlers_module(self) -> ResponseTerminalHandlers:
+        handlers = getattr(self, "_response_terminal_handlers", None)
+        if not isinstance(handlers, ResponseTerminalHandlers):
+            handlers = ResponseTerminalHandlers(self)
+            self._response_terminal_handlers = handlers
+        return handlers
 
     def _response_is_explicit_multipart(self, metadata: dict[str, Any] | None) -> bool:
         if not isinstance(metadata, dict):
@@ -10462,393 +10472,16 @@ class RealtimeAPI:
         await transport.send_json(websocket, error_item)
 
     async def handle_transcribe_response_done(self) -> None:
-        if (
-            self._active_response_confirmation_guarded
-            and (self._has_active_confirmation_token() or self._pending_action is not None)
-            and self._is_awaiting_confirmation_phase()
-        ):
-            self.assistant_reply = ""
-            self._assistant_reply_accum = ""
-            if self.websocket is not None:
-                token = getattr(self, "_pending_confirmation_token", None)
-                if token is not None:
-                    if (
-                        token is not None
-                        and self._is_confirmation_prompt_latched(token)
-                        and self._is_guarded_server_auto_reminder_allowed(reason="transcribe_response_done")
-                    ):
-                        await self._maybe_emit_confirmation_reminder(
-                            self.websocket,
-                            reason="transcribe_response_done",
-                        )
-                else:
-                    if self._is_guarded_server_auto_reminder_allowed(
-                        reason="transcribe_response_done_legacy"
-                    ):
-                        await self._maybe_emit_confirmation_reminder(
-                            self.websocket,
-                            reason="transcribe_response_done_legacy",
-                        )
-            self._active_response_confirmation_guarded = False
-            self.response_in_progress = False
-            self._recover_confirmation_guard_microphone("transcribe_response_done")
-            self._maybe_enqueue_reflection("response transcript done")
-            if self._pending_image_stimulus and not self._pending_image_flush_after_playback:
-                await self._flush_pending_image_stimulus("response transcript done")
-            logger.info("Finished handle_transcribe_response_done()")
-            return
-
-        if self.assistant_reply:
-            self.assistant_reply = self._normalize_memory_recall_answer(self.assistant_reply)
-            log_info(f"Assistant Response: {self.assistant_reply}", style="bold blue")
-            self.assistant_reply = ""
-
-        self.response_in_progress = False
-        self._maybe_enqueue_reflection("response transcript done")
-        if self._pending_image_stimulus and not self._pending_image_flush_after_playback:
-            await self._flush_pending_image_stimulus("response transcript done")
-        logger.info("Finished handle_transcribe_response_done()")
+        await self._response_terminal_handlers_module().handle_transcribe_response_done()
 
     async def handle_audio_response_done(self) -> None:
-        if self.response_start_time is not None:
-            response_end_time = time.perf_counter()
-            response_duration = response_end_time - self.response_start_time
-            log_runtime("realtime_api_response", response_duration)
-            self.response_start_time = None
-
-        log_info("Assistant audio response complete.", style="bold blue")
-        self.response_in_progress = False
-        if self._audio_accum:
-            if self.audio_player:
-                self.audio_player.play_audio(bytes(self._audio_accum))
-            self._audio_accum.clear()
-        if self.audio_player:
-            self.audio_player.close_response()
-        manager = getattr(self, "_micro_ack_manager", None)
-        if manager is not None:
-            manager.mark_assistant_audio_ended()
-        delivered_turn_id = self._current_turn_id_or_unknown()
-        delivered_input_event_key = str(getattr(self, "_active_response_input_event_key", "") or "").strip()
-        if delivered_input_event_key:
-            self._set_response_delivery_state(
-                turn_id=delivered_turn_id,
-                input_event_key=delivered_input_event_key,
-                state="delivered",
-            )
-            logger.debug(
-                "response_delivery_marked run_id=%s input_event_key=%s",
-                self._current_run_id() or "",
-                delivered_input_event_key,
-            )
-        if self._pending_image_stimulus:
-            if self.audio_player:
-                self._pending_image_flush_after_playback = True
-            else:
-                await self._flush_pending_image_stimulus("audio response done")
+        await self._response_terminal_handlers_module().handle_audio_response_done()
 
     async def handle_response_done(self, event: dict[str, Any] | None = None) -> None:
-        turn_id = self._current_turn_id_or_unknown()
-        done_input_event_key = str(getattr(self, "_active_response_input_event_key", "") or "").strip()
-        done_canonical_key = self._canonical_utterance_key(
-            turn_id=turn_id,
-            input_event_key=done_input_event_key,
-        )
-        delivery_state_before_done = self._response_delivery_state(
-            turn_id=turn_id,
-            input_event_key=done_input_event_key,
-        )
-        active_response_id_before_clear = getattr(self, "_active_response_id", None)
-        active_response_origin_before_clear = getattr(self, "_active_response_origin", "unknown")
-        active_response_input_event_key_before_clear = getattr(self, "_active_response_input_event_key", None)
-        active_response_canonical_key_before_clear = getattr(self, "_active_response_canonical_key", None)
-        suppressed_turns = getattr(self, "_preference_recall_suppressed_turns", None)
-        if not isinstance(suppressed_turns, set):
-            suppressed_turns = set()
-            self._preference_recall_suppressed_turns = suppressed_turns
-        suppressed_input_event_keys = getattr(self, "_preference_recall_suppressed_input_event_keys", None)
-        if not isinstance(suppressed_input_event_keys, set):
-            suppressed_input_event_keys = set()
-            self._preference_recall_suppressed_input_event_keys = suppressed_input_event_keys
-        obligations = getattr(self, "_response_obligations", {})
-        obligation_count_before_clear = len(obligations) if isinstance(obligations, dict) else 0
-        obligation_key = self._response_obligation_key(turn_id=turn_id, input_event_key=done_input_event_key)
-        obligation_present_before = isinstance(obligations, dict) and obligation_key in obligations
-        pending_queue_len_before_clear = len(getattr(self, "_response_create_queue", deque()) or ())
-        current_state_before_cleanup = getattr(self.state_manager, "state", InteractionState.IDLE)
-        self._cancel_micro_ack(turn_id=turn_id, reason="response_done")
-        self._response_done_serial += 1
-        self.response_in_progress = False
-        self._response_in_flight = False
-        if done_input_event_key and bool(getattr(self, "_active_response_consumes_canonical_slot", True)):
-            self._lifecycle_controller().on_response_done(done_canonical_key)
-            self._log_lifecycle_event(
-                turn_id=turn_id,
-                input_event_key=done_input_event_key,
-                canonical_key=done_canonical_key,
-                origin=active_response_origin_before_clear,
-                response_id=active_response_id_before_clear,
-                decision="transition_done:response_done",
-            )
-            self._debug_dump_canonical_key_timeline(
-                canonical_key=done_canonical_key,
-                trigger="response_done",
-            )
-            if delivery_state_before_done != "cancelled":
-                self._set_response_delivery_state(
-                    turn_id=turn_id,
-                    input_event_key=done_input_event_key,
-                    state="done",
-                )
-        suppressed_turn_id = self._current_turn_id_or_unknown()
-        suppressed_turn_present_before = suppressed_turn_id in suppressed_turns
-        logger.debug(
-            "[RESPTRACE] response_done_cleanup_before run_id=%s active_response_id=%s "
-            "active_response_origin=%s active_response_input_event_key=%s active_response_canonical_key=%s "
-            "suppressed_turns_count=%s suppressed_keys_count=%s suppressed_turn_present_before=%s "
-            "obligation_count_before=%s pending_queue_len=%s response_done_serial=%s state=%s",
-            self._current_run_id() or "",
-            active_response_id_before_clear,
-            active_response_origin_before_clear,
-            active_response_input_event_key_before_clear,
-            active_response_canonical_key_before_clear,
-            len(suppressed_turns),
-            len(suppressed_input_event_keys),
-            suppressed_turn_present_before,
-            obligation_count_before_clear,
-            pending_queue_len_before_clear,
-            getattr(self, "_response_done_serial", 0),
-            current_state_before_cleanup,
-        )
-        self._preference_recall_suppressed_turns.discard(suppressed_turn_id)
-        active_input_event_key = str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip()
-        active_input_event_key_present_before = bool(active_input_event_key and active_input_event_key in suppressed_input_event_keys)
-        if active_input_event_key:
-            self._preference_recall_suppressed_input_event_keys.discard(active_input_event_key)
-        was_confirmation_guarded = self._active_response_confirmation_guarded
-        self._active_response_id = None
-        self._active_response_confirmation_guarded = False
-        self._active_response_preference_guarded = False
-        self._active_response_origin = "unknown"
-        self._active_response_input_event_key = None
-        self._active_response_canonical_key = None
-        self._active_server_auto_input_event_key = None
-        obligations_after_cleanup = getattr(self, "_response_obligations", {})
-        obligation_count_after_clear = len(obligations_after_cleanup) if isinstance(obligations_after_cleanup, dict) else 0
-        obligation_present_after = (
-            isinstance(obligations_after_cleanup, dict) and obligation_key in obligations_after_cleanup
-        )
-        resolved_input_event_key = done_input_event_key or "unknown"
-        resolved_canonical_key = self._canonical_utterance_key(
-            turn_id=turn_id,
-            input_event_key=done_input_event_key,
-        )
-        logger.debug(
-            "[RESPTRACE] response_done_cleanup_after run_id=%s removed_suppressed_turn=%s "
-            "removed_suppressed_input_event_key=%s suppressed_turns_count=%s suppressed_keys_count=%s "
-            "obligation_count_before=%s obligation_count_after=%s pending_queue_len=%s response_done_serial=%s state=%s "
-            "turn_id=%s input_event_key=%s canonical_key=%s obligation_key=%s "
-            "obligation_present_before=%s obligation_present_after=%s total_obligations=%s "
-            "active_response_input_event_key=%s active_server_auto_input_event_key=%s",
-            self._current_run_id() or "",
-            suppressed_turn_present_before and suppressed_turn_id not in self._preference_recall_suppressed_turns,
-            active_input_event_key_present_before
-            and active_input_event_key not in self._preference_recall_suppressed_input_event_keys,
-            len(suppressed_turns),
-            len(suppressed_input_event_keys),
-            obligation_count_before_clear,
-            obligation_count_after_clear,
-            len(getattr(self, "_response_create_queue", deque()) or ()),
-            getattr(self, "_response_done_serial", 0),
-            getattr(self.state_manager, "state", InteractionState.IDLE),
-            turn_id,
-            resolved_input_event_key,
-            resolved_canonical_key,
-            obligation_key,
-            obligation_present_before,
-            obligation_present_after,
-            obligation_count_after_clear,
-            str(getattr(self, "_active_response_input_event_key", "") or "").strip() or "none",
-            str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip() or "none",
-        )
-        current_state = getattr(self.state_manager, "state", InteractionState.IDLE)
-        if current_state != InteractionState.LISTENING:
-            self.state_manager.update_state(InteractionState.IDLE, "response done")
-        else:
-            logger.debug(
-                "Skipping IDLE transition for response.done while still listening; deferring until speech stop."
-            )
-        logger.info("Received response.done event.")
-        if self._is_empty_response_done(canonical_key=done_canonical_key):
-            self._record_silent_turn_incident(
-                turn_id=turn_id,
-                canonical_key=done_canonical_key,
-                origin=active_response_origin_before_clear,
-                response_id=active_response_id_before_clear,
-            )
-        await self._maybe_schedule_empty_response_retry(
-            websocket=self.websocket,
-            turn_id=turn_id,
-            canonical_key=done_canonical_key,
-            input_event_key=done_input_event_key,
-            origin=active_response_origin_before_clear,
-            delivery_state_before_done=delivery_state_before_done,
-        )
-        if event:
-            self._last_response_metadata = {
-                "event_type": event.get("type"),
-                "response": event.get("response"),
-                "rate_limits": self.rate_limits,
-            }
-        self._emit_preference_recall_skip_trace_if_needed(turn_id=self._current_response_turn_id)
-        self._log_turn_conversation_efficiency(
-            turn_id=turn_id,
-            canonical_key=resolved_canonical_key,
-            close_reason="response_done",
-        )
-        transition = self._build_confirmation_transition_decision(
-            reason="response_done",
-            include_reminder_gate=True,
-            was_confirmation_guarded=was_confirmation_guarded,
-        )
-        token_active, awaiting_phase, _, phase_is_awaiting_confirmation = self._confirmation_hold_components()
-        if not transition.allow_response_transition:
-            logger.info(
-                "Confirmation state is holding phase progression; skipping REFLECT transition "
-                "(phase=%s token_active=%s awaiting_phase=%s).",
-                self.orchestration_state.phase,
-                token_active,
-                awaiting_phase,
-            )
-            if phase_is_awaiting_confirmation and token_active:
-                logger.info("Staying in AWAITING_CONFIRMATION until user accepts/rejects.")
-            elif transition.close_reason == "confirmation_follow_up_completed":
-                self._awaiting_confirmation_completion = False
-                self.orchestration_state.transition(
-                    OrchestrationPhase.IDLE,
-                    reason="confirmation follow-up completed",
-                )
-        else:
-            self.orchestration_state.transition(
-                OrchestrationPhase.REFLECT,
-                reason="response done",
-            )
-            self._enqueue_response_done_reflection("response done")
-            self.orchestration_state.transition(
-                OrchestrationPhase.IDLE,
-                reason="response done reflection",
-            )
-        if was_confirmation_guarded:
-            if token_active:
-                self._mark_confirmation_activity(reason="guarded_response_done")
-            if (
-                transition.emit_reminder
-                and self.websocket is not None
-                and self._should_send_response_done_fallback_reminder()
-                and self._is_guarded_server_auto_reminder_allowed(reason="response_done_fallback")
-            ):
-                await self._maybe_emit_confirmation_reminder(self.websocket, reason="response_done_fallback")
-            if transition.recover_mic:
-                self._recover_confirmation_guard_microphone("response_done")
-        self._response_create_queue_drain_source = "response_done"
-        await self._drain_response_create_queue()
-        if self._pending_image_stimulus and not self._pending_image_flush_after_playback:
-            await self._flush_pending_image_stimulus("response done")
+        await self._response_terminal_handlers_module().handle_response_done(event)
 
     async def handle_response_completed(self, event: dict[str, Any] | None = None) -> None:
-        turn_id = self._current_turn_id_or_unknown()
-        done_input_event_key = str(getattr(self, "_active_response_input_event_key", "") or "").strip()
-        self._cancel_micro_ack(turn_id=turn_id, reason="response_completed")
-        self.response_in_progress = False
-        self._response_in_flight = False
-        if done_input_event_key and bool(getattr(self, "_active_response_consumes_canonical_slot", True)):
-            done_canonical_key = self._canonical_utterance_key(
-                turn_id=turn_id,
-                input_event_key=done_input_event_key,
-            )
-            self._lifecycle_controller().on_response_done(done_canonical_key)
-            self._log_lifecycle_event(
-                turn_id=turn_id,
-                input_event_key=done_input_event_key,
-                canonical_key=done_canonical_key,
-                origin=getattr(self, "_active_response_origin", "unknown"),
-                response_id=getattr(self, "_active_response_id", None),
-                decision="transition_done:response_completed",
-            )
-            self._debug_dump_canonical_key_timeline(
-                canonical_key=done_canonical_key,
-                trigger="response_completed",
-            )
-            existing_delivery_state = self._response_delivery_state(
-                turn_id=turn_id,
-                input_event_key=done_input_event_key,
-            )
-            if existing_delivery_state != "cancelled":
-                self._set_response_delivery_state(
-                    turn_id=turn_id,
-                    input_event_key=done_input_event_key,
-                    state="done",
-                )
-        self._preference_recall_suppressed_turns.discard(self._current_turn_id_or_unknown())
-        active_input_event_key = str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip()
-        if active_input_event_key:
-            self._preference_recall_suppressed_input_event_keys.discard(active_input_event_key)
-        self._active_response_id = None
-        self._active_response_confirmation_guarded = False
-        self._active_response_preference_guarded = False
-        self._active_response_origin = "unknown"
-        self._active_server_auto_input_event_key = None
-        current_state = getattr(self.state_manager, "state", InteractionState.IDLE)
-        if current_state != InteractionState.LISTENING:
-            self.state_manager.update_state(InteractionState.IDLE, "response completed")
-        else:
-            logger.debug(
-                "Skipping IDLE transition for response.completed while still listening; deferring until speech stop."
-            )
-        logger.info("Received response.completed event.")
-        if event:
-            self._last_response_metadata = {
-                "event_type": event.get("type"),
-                "response": event.get("response"),
-                "rate_limits": self.rate_limits,
-            }
-        self._emit_preference_recall_skip_trace_if_needed(turn_id=self._current_response_turn_id)
-        self._log_turn_conversation_efficiency(
-            turn_id=turn_id,
-            canonical_key=self._canonical_utterance_key(turn_id=turn_id, input_event_key=done_input_event_key),
-            close_reason="response_completed",
-        )
-        transition = self._build_confirmation_transition_decision(reason="response_completed")
-        token_active, awaiting_phase, _, phase_is_awaiting_confirmation = self._confirmation_hold_components()
-        if not transition.allow_response_transition:
-            logger.info(
-                "Confirmation state is holding phase progression; skipping REFLECT transition "
-                "(phase=%s token_active=%s awaiting_phase=%s).",
-                self.orchestration_state.phase,
-                token_active,
-                awaiting_phase,
-            )
-            if phase_is_awaiting_confirmation and token_active:
-                logger.info("Staying in AWAITING_CONFIRMATION until user accepts/rejects.")
-            elif transition.close_reason == "confirmation_follow_up_completed":
-                self._awaiting_confirmation_completion = False
-                self.orchestration_state.transition(
-                    OrchestrationPhase.IDLE,
-                    reason="confirmation follow-up completed",
-                )
-        else:
-            self.orchestration_state.transition(
-                OrchestrationPhase.REFLECT,
-                reason="response completed",
-            )
-            self._maybe_enqueue_reflection("response completed")
-            self.orchestration_state.transition(
-                OrchestrationPhase.IDLE,
-                reason="reflection enqueued",
-            )
-        self._response_create_queue_drain_source = "explicit_caller"
-        await self._drain_response_create_queue()
-        if self._pending_image_stimulus and not self._pending_image_flush_after_playback:
-            await self._flush_pending_image_stimulus("response completed")
+        await self._response_terminal_handlers_module().handle_response_completed(event)
 
     async def handle_error(self, event: dict[str, Any], websocket: Any) -> None:
         error_message = event.get("error", {}).get("message", "")
