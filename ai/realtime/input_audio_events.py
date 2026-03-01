@@ -35,6 +35,8 @@ class InputAudioEventHandlers:
         self, event: dict[str, Any], websocket: Any
     ) -> None:
         _ = event
+        self._api._reset_utterance_info_summary()
+        self._api._mark_utterance_info_summary(speech_started_seen=True)
         logger.info("Speech detected, listening...")
         manager = getattr(self._api, "_micro_ack_manager", None)
         talk_over_active = self._api.state_manager.state == InteractionState.SPEAKING or self._api._audio_playback_busy
@@ -102,6 +104,7 @@ class InputAudioEventHandlers:
         self, event: dict[str, Any], websocket: Any
     ) -> None:
         _ = event
+        self._api._mark_utterance_info_summary(speech_stopped_seen=True)
         manager = getattr(self._api, "_micro_ack_manager", None)
         if manager is not None:
             manager.on_user_speech_ended()
@@ -136,5 +139,6 @@ class InputAudioEventHandlers:
     ) -> None:
         _ = event
         _ = websocket
+        self._api._mark_utterance_info_summary(commit_seen=True)
         self._api._refresh_utterance_audio_levels()
         self._api._log_utterance_envelope("input_audio_buffer.committed")

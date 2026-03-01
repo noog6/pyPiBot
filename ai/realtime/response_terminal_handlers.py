@@ -125,6 +125,7 @@ class ResponseTerminalHandlers:
 
     async def handle_response_done(self, event: dict[str, Any] | None = None) -> None:
         api = self._api
+        api._mark_utterance_info_summary(response_done_seen=True)
         turn_id = api._current_turn_id_or_unknown()
         done_input_event_key = str(getattr(api, "_active_response_input_event_key", "") or "").strip()
         done_canonical_key = api._canonical_utterance_key(
@@ -281,6 +282,7 @@ class ResponseTerminalHandlers:
                 "Skipping IDLE transition for response.done while still listening; deferring until speech stop."
             )
         logger.info("Received response.done event.")
+        api._emit_utterance_info_summary(anchor="response.done")
         if api._is_empty_response_done(canonical_key=done_canonical_key):
             api._record_silent_turn_incident(
                 turn_id=turn_id,
