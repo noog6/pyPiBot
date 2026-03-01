@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import base64
 from collections import deque
+import time
 
 from ai.orchestration import OrchestrationPhase
-from ai.realtime_api import RealtimeAPI
+from ai.realtime_api import PendingResponseCreate, RealtimeAPI
 from interaction import InteractionState
 
 
@@ -25,6 +26,17 @@ class _Manager:
     def cancel(self, *, turn_id: str, reason: str) -> None:
         self.cancelled.append((turn_id, reason))
         self.scheduled = [item for item in self.scheduled if item[0] != turn_id]
+
+    def cancel_matching(self, *, turn_id: str, reason: str, matcher) -> None:
+        self.cancelled.append((turn_id, reason))
+        kept = []
+        for item in self.scheduled:
+            category = item[1]
+            context = type("Ctx", (), {"category": category, "turn_id": item[0], "channel": "voice"})()
+            if item[0] == turn_id and matcher(context):
+                continue
+            kept.append(item)
+        self.scheduled = kept
 
     def cancel_all(self, *, reason: str) -> None:
         self.cancelled.append(("*", reason))
@@ -417,4 +429,86 @@ def test_same_turn_speech_stopped_then_transcript_finalized_schedules_once() -> 
     assert api._micro_ack_manager.scheduled == [
         ("turn-1", "latency_mask", "transcript_finalized", 700)
     ]
+    api.loop.close()
+
+
+def test_near_ready_suppresses_latency_mask_and_keeps_safety_gate(monkeypatch) -> None:
+    api = _api_stub()
+    api._micro_ack_near_ready_suppress_ms = 0
+    api._micro_ack_manager.suppression_reason = api._micro_ack_suppression_reason
+
+    api._maybe_schedule_micro_ack(
+        turn_id="turn-1",
+        category="safety_gate",
+        channel="voice",
+        reason="watchdog_confirmation_pending",
+        expected_delay_ms=700,
+    )
+    api._maybe_schedule_micro_ack(
+        turn_id="turn-1",
+        category="latency_mask",
+        channel="voice",
+        reason="transcript_finalized",
+        expected_delay_ms=700,
+    )
+
+    info_messages: list[str] = []
+
+    def _capture_info(message, *args, **kwargs):
+        _ = kwargs
+        info_messages.append(message % args)
+        return None
+
+    monkeypatch.setattr("ai.realtime_api.logger.info", _capture_info)
+
+    api._micro_ack_near_ready_suppress_ms = 200
+    api._pending_response_create = PendingResponseCreate(
+        websocket=api.websocket,
+        event={"type": "response.create"},
+        origin="assistant_message",
+        turn_id="turn-1",
+        created_at=time.monotonic() - 0.25,
+        reason="test",
+    )
+
+    api._maybe_schedule_micro_ack(
+        turn_id="turn-1",
+        category="latency_mask",
+        channel="voice",
+        reason="transcript_finalized",
+        expected_delay_ms=700,
+    )
+
+    assert api._micro_ack_manager.scheduled == [
+        ("turn-1", "safety_gate", "watchdog_confirmation_pending", 700)
+    ]
+    assert ("turn-1", "near_ready") in api._micro_ack_manager.cancelled
+    assert any("micro_ack_suppressed_near_ready" in msg and "turn_id=turn-1" in msg for msg in info_messages)
+    api.loop.close()
+
+
+def test_near_ready_does_not_suppress_safety_gate() -> None:
+    api = _api_stub()
+    api._micro_ack_near_ready_suppress_ms = 200
+    api._pending_response_create = PendingResponseCreate(
+        websocket=api.websocket,
+        event={"type": "response.create"},
+        origin="assistant_message",
+        turn_id="turn-1",
+        created_at=time.monotonic() - 0.5,
+        reason="test",
+    )
+
+    api._maybe_schedule_micro_ack(
+        turn_id="turn-1",
+        category="safety_gate",
+        channel="voice",
+        reason="watchdog_confirmation_pending",
+        expected_delay_ms=700,
+    )
+
+    assert api._micro_ack_manager.scheduled == [
+        ("turn-1", "safety_gate", "watchdog_confirmation_pending", 700)
+    ]
+    assert api._micro_ack_manager.cancelled == []
     api.loop.close()
