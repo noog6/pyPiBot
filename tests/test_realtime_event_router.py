@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from ai.realtime.event_router import EventRouter
 from ai.realtime_api import RealtimeAPI
@@ -73,6 +73,54 @@ def test_handler_exception_triggers_exception_callback_once() -> None:
 
     assert exception_calls == [("response.done", "boom")]
 
+
+def test_realtime_api_configure_event_router_registers_conversation_item_added() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+
+    async def _fallback(_event: dict[str, Any], _websocket: Any) -> None:
+        return None
+
+    api._event_router = EventRouter(fallback=_fallback)
+
+    api._configure_event_router()
+
+    assert api._event_router._handlers["conversation.item.added"] == api._handle_response_lifecycle_event
+
+
+def test_realtime_api_handle_event_legacy_processes_assistant_conversation_item_added() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api.assistant_reply = ""
+    api._assistant_reply_accum = ""
+    api._current_input_event_key = "input-1"
+    api._is_active_response_guarded = lambda: False
+    api._cancel_micro_ack = Mock()
+    api._current_turn_id_or_unknown = lambda: "turn-1"
+    api._mark_first_assistant_utterance_observed_if_needed = Mock()
+    api._set_response_delivery_state = Mock()
+    api.state_manager = type("StateManager", (), {"update_state": Mock()})()
+
+    event = {
+        "type": "conversation.item.added",
+        "item": {
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "output_text", "text": "Hello"},
+                {"type": "audio", "transcript": " world"},
+            ],
+        },
+    }
+
+    asyncio.run(api._handle_event_legacy(event, websocket=None))
+
+    assert api.assistant_reply == "Hello world"
+    assert api._assistant_reply_accum == "Hello world"
+    api._mark_first_assistant_utterance_observed_if_needed.assert_called_once_with("Hello world")
+    api._set_response_delivery_state.assert_called_once_with(
+        turn_id="turn-1",
+        input_event_key="input-1",
+        state="delivered",
+    )
 
 def test_realtime_api_handle_event_dispatches_via_event_router_once() -> None:
     api = RealtimeAPI.__new__(RealtimeAPI)
