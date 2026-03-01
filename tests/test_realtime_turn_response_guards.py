@@ -3,6 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import sys
+import types
+
+if "audioop" not in sys.modules:
+    sys.modules["audioop"] = types.ModuleType("audioop")
+
 from collections import deque
 
 from ai.realtime_api import PendingResponseCreate, RealtimeAPI
@@ -459,6 +465,54 @@ def test_drain_response_create_queue_drops_terminal_canonical_key(monkeypatch) -
             "turn_id": turn_id,
             "outcome": "response_not_scheduled",
             "reason": "canonical_delivery_terminal_state",
-            "details": "canonical delivery terminal state origin=assistant_message prior_state=done",
+            "details": "canonical delivery terminal state origin=assistant_message prior_state=done canonical_key=run-395:turn_1:input_evt_terminal origin_canonical_key=run-395:turn_1:input_evt_terminal",
         }
     ]
+
+
+def test_empty_response_done_retry_terminal_guard_uses_retry_canonical_key() -> None:
+    api = _make_api()
+    turn_id = "turn_1"
+    origin_input_event_key = "input_evt_1"
+    retry_input_event_key = f"{origin_input_event_key}__empty_retry"
+    metadata = {"input_event_key": retry_input_event_key, "retry_reason": "empty_response_done"}
+
+    origin_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=origin_input_event_key)
+    retry_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=retry_input_event_key)
+    api._lifecycle_controller().on_response_done(origin_canonical_key)
+
+    dropped = api._drop_response_create_for_terminal_state(
+        turn_id=turn_id,
+        input_event_key=retry_input_event_key,
+        origin="prompt",
+        response_metadata=metadata,
+    )
+
+    assert dropped is False
+    assert api._lifecycle_controller().state_for(origin_canonical_key).value == "done"
+    assert api._lifecycle_controller().state_for(retry_canonical_key).value == "new"
+
+
+def test_empty_response_done_retry_terminal_guard_drops_when_retry_canonical_terminal() -> None:
+    api = _make_api()
+    turn_id = "turn_1"
+    origin_input_event_key = "input_evt_1"
+    retry_input_event_key = f"{origin_input_event_key}__empty_retry"
+    metadata = {"input_event_key": retry_input_event_key, "retry_reason": "empty_response_done"}
+    outcomes: list[dict[str, str]] = []
+    api._mark_transcript_response_outcome = lambda **kwargs: outcomes.append(kwargs)
+
+    retry_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=retry_input_event_key)
+    api._lifecycle_controller().on_response_done(retry_canonical_key)
+
+    dropped = api._drop_response_create_for_terminal_state(
+        turn_id=turn_id,
+        input_event_key=retry_input_event_key,
+        origin="prompt",
+        response_metadata=metadata,
+    )
+
+    assert dropped is True
+    assert outcomes
+    assert outcomes[0]["reason"] == "canonical_delivery_terminal_state"
+    assert "origin_canonical_key=run-395:turn_1:input_evt_1" in outcomes[0]["details"]
