@@ -45,6 +45,12 @@ from interaction import (
     InteractionStateManager,
 )
 from ai.tools import function_map, tools
+from ai.realtime.event_router import RealtimeEventRouter
+from ai.realtime.injections import StartupInjectionCoordinator
+from ai.realtime.response_lifecycle import ResponseLifecycleCoordinator
+from ai.realtime.shutdown import ShutdownCoordinator, WebsocketCloser
+from ai.realtime.transport import RealtimeTransport
+from ai.realtime.types import CanonicalResponseState, PendingResponseCreate, UtteranceContext
 from ai.interaction_lifecycle_controller import (
     InteractionLifecycleController,
     InteractionLifecycleState,
@@ -262,28 +268,6 @@ class NormalizedConfirmationDecision:
 
 
 @dataclass(frozen=True)
-class UtteranceContext:
-    turn_id: str
-    input_event_key: str
-    canonical_key: str
-    utterance_seq: int
-
-
-@dataclass
-class CanonicalResponseState:
-    created: bool = False
-    audio_started: bool = False
-    done: bool = False
-    cancel_sent: bool = False
-    origin: str = "unknown"
-    response_id: str = ""
-    obligation_present: bool = False
-    input_event_key: str = ""
-    turn_id: str = ""
-    obligation: dict[str, Any] | None = None
-
-
-@dataclass(frozen=True)
 class PendingMicroAckMarker:
     category: MicroAckCategory | str
     priority: int
@@ -388,21 +372,6 @@ class IntentLedgerEntry:
     timeout_at: float | None = None
     failure_at: float | None = None
     executed_at: float | None = None
-
-
-@dataclass
-class PendingResponseCreate:
-    websocket: Any
-    event: dict[str, Any]
-    origin: str
-    turn_id: str
-    created_at: float
-    reason: str
-    record_ai_call: bool = False
-    debug_context: dict[str, Any] | None = None
-    memory_brief_note: str | None = None
-    queued_reminder_key: str | None = None
-    enqueued_done_serial: int = 0
 
 
 @dataclass
@@ -563,8 +532,7 @@ class RealtimeAPI:
         self.audio_player: AudioPlayer | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
         self.ready_event = threading.Event()
-        self._shutdown_lock = threading.Lock()
-        self._shutdown_requested = False
+        self._shutdown = ShutdownCoordinator()
 
         self.assistant_reply = ""
         self._assistant_reply_accum = ""
@@ -591,9 +559,7 @@ class RealtimeAPI:
         self._last_rate_limit_present_buckets: set[str] = set()
         self.response_start_time: float | None = None
         self.websocket = None
-        self._ws_close_lock = asyncio.Lock()
-        self._ws_close_started = False
-        self._ws_close_done = False
+        self._ws_closer = WebsocketCloser(close_timeout_s=float(config.get("websocket_close_timeout_s", 5.0)))
         self.profile_manager = ProfileManager.get_instance()
         self._memory_manager = MemoryManager.get_instance()
         self.state_manager = InteractionStateManager()
@@ -920,10 +886,12 @@ class RealtimeAPI:
             0.0,
             float(realtime_cfg.get("startup_injection_gate_timeout_s", 5.0)),
         )
-        self._startup_injection_gate_released = False
-        self._startup_first_assistant_utterance_observed = False
-        self._startup_injection_queue: deque[dict[str, Any]] = deque()
-        self._startup_injection_timeout_task: Any = None
+        self._startup_injections = StartupInjectionCoordinator(
+            gate_timeout_s=self._startup_injection_gate_timeout_s,
+            loop_getter=lambda: self.loop,
+            emit_injected_event=self._emit_injected_event,
+            emit_system_context_payload=self._emit_system_context_payload,
+        )
         self._utterance_counter = 0
         self._active_utterance: dict[str, Any] | None = None
         self._recent_input_levels: deque[dict[str, float]] = deque(maxlen=256)
@@ -956,6 +924,79 @@ class RealtimeAPI:
         self._conversation_efficiency_by_turn: dict[str, ConversationEfficiencyState] = {}
         self._conversation_efficiency_logged_turns: set[str] = set()
         self._silent_turn_incident_count = 0
+        self._response_lifecycle = ResponseLifecycleCoordinator(self)
+        self._transport: RealtimeTransport | None = None
+        self._event_router = RealtimeEventRouter(fallback=self._handle_event_via_legacy_router)
+        self._configure_event_router()
+
+    def _configure_event_router(self) -> None:
+        self._event_router.register("response.output_item.added", self._route_output_item_added)
+        self._event_router.register("response.function_call_arguments.delta", self._route_function_call_delta)
+        self._event_router.register("response.function_call_arguments.done", self._route_function_call_done)
+
+    async def _route_output_item_added(self, event: dict[str, Any], websocket: Any) -> bool:
+        _ = websocket
+        await self.handle_output_item_added(event)
+        return True
+
+    async def _route_function_call_delta(self, event: dict[str, Any], websocket: Any) -> bool:
+        _ = websocket
+        self.function_call_args += event.get("delta", "")
+        return True
+
+    async def _route_function_call_done(self, event: dict[str, Any], websocket: Any) -> bool:
+        await self.handle_function_call(event, websocket)
+        return True
+
+    async def _handle_event_via_legacy_router(self, event: dict[str, Any], websocket: Any) -> None:
+        await self._handle_event_legacy(event, websocket)
+
+    def _shutdown_coordinator(self) -> ShutdownCoordinator:
+        coordinator = getattr(self, "_shutdown", None)
+        if not isinstance(coordinator, ShutdownCoordinator):
+            coordinator = ShutdownCoordinator()
+            self._shutdown = coordinator
+        return coordinator
+
+    def _websocket_closer(self) -> WebsocketCloser:
+        closer = getattr(self, "_ws_closer", None)
+        if not isinstance(closer, WebsocketCloser):
+            closer = WebsocketCloser(
+                close_timeout_s=float(getattr(self, "_websocket_close_timeout_s", 5.0) or 5.0)
+            )
+            self._ws_closer = closer
+        return closer
+
+    def _startup_injection_coordinator(self) -> StartupInjectionCoordinator:
+        coordinator = getattr(self, "_startup_injections", None)
+        if isinstance(coordinator, StartupInjectionCoordinator):
+            return coordinator
+        gate_timeout_s = float(getattr(self, "_startup_injection_gate_timeout_s", 5.0) or 0.0)
+        coordinator = StartupInjectionCoordinator(
+            gate_timeout_s=gate_timeout_s,
+            loop_getter=lambda: getattr(self, "loop", None),
+            emit_injected_event=self._emit_injected_event,
+            emit_system_context_payload=self._emit_system_context_payload,
+        )
+        coordinator.gate_released = bool(getattr(self, "_startup_injection_gate_released", False))
+        coordinator.first_assistant_utterance_observed = bool(
+            getattr(self, "_startup_first_assistant_utterance_observed", False)
+        )
+        queue = getattr(self, "_startup_injection_queue", None)
+        if isinstance(queue, list):
+            coordinator.queue.extend(queue)
+        elif isinstance(queue, deque):
+            coordinator.queue = queue
+        coordinator.timeout_task = getattr(self, "_startup_injection_timeout_task", None)
+        self._startup_injections = coordinator
+        return coordinator
+
+    def _sync_startup_injection_legacy_state(self) -> None:
+        coordinator = self._startup_injection_coordinator()
+        self._startup_injection_gate_released = coordinator.gate_released
+        self._startup_first_assistant_utterance_observed = coordinator.first_assistant_utterance_observed
+        self._startup_injection_queue = list(coordinator.queue)
+        self._startup_injection_timeout_task = coordinator.timeout_task
 
     @staticmethod
     def _load_micro_ack_channel_policy(realtime_cfg: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -1387,13 +1428,17 @@ class RealtimeAPI:
 
     def _conversation_efficiency_state(self, *, turn_id: str) -> ConversationEfficiencyState:
         normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
-        state = self._conversation_efficiency_by_turn.get(normalized_turn_id)
+        efficiency = getattr(self, "_conversation_efficiency_by_turn", None)
+        if not isinstance(efficiency, dict):
+            efficiency = {}
+            self._conversation_efficiency_by_turn = efficiency
+        state = efficiency.get(normalized_turn_id)
         if state is None:
             state = ConversationEfficiencyState(
                 substantive_count_by_canonical={},
                 duplicate_alerted_canonical_keys=set(),
             )
-            self._conversation_efficiency_by_turn[normalized_turn_id] = state
+            efficiency[normalized_turn_id] = state
         if state.substantive_count_by_canonical is None:
             state.substantive_count_by_canonical = {}
         if state.duplicate_alerted_canonical_keys is None:
@@ -1513,7 +1558,11 @@ class RealtimeAPI:
         normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
         if normalized_turn_id in self._conversation_efficiency_logged_turns:
             return
-        state = self._conversation_efficiency_by_turn.get(normalized_turn_id)
+        efficiency = getattr(self, "_conversation_efficiency_by_turn", None)
+        if not isinstance(efficiency, dict):
+            efficiency = {}
+            self._conversation_efficiency_by_turn = efficiency
+        state = efficiency.get(normalized_turn_id)
         if state is None:
             return
         self._conversation_efficiency_logged_turns.add(normalized_turn_id)
@@ -1745,7 +1794,11 @@ class RealtimeAPI:
         self._ai_call_budget.record()
 
     def _emit_alert(self, alert: Alert) -> None:
-        self._alert_policy.emit(self.event_bus, alert)
+        alert_policy = getattr(self, "_alert_policy", None)
+        event_bus = getattr(self, "event_bus", None)
+        if alert_policy is None or event_bus is None:
+            return
+        alert_policy.emit(event_bus, alert)
 
     def is_ready_for_injections(self, with_reason: bool = False) -> bool | tuple[bool, str]:
         injector_ready, injector_reason = self._can_accept_external_stimulus(
@@ -1874,13 +1927,7 @@ class RealtimeAPI:
         )
 
     def _startup_injection_gate_active(self) -> bool:
-        if self._startup_injection_gate_released:
-            return False
-        if self._startup_first_assistant_utterance_observed:
-            return False
-        if self._startup_injection_gate_timeout_s <= 0.0:
-            return False
-        return True
+        return self._startup_injection_coordinator().gate_active()
 
     def _startup_gate_is_critical_allowed(self, source: str, kind: str, priority: str) -> bool:
         normalized_source = str(source).strip().lower()
@@ -1904,54 +1951,26 @@ class RealtimeAPI:
             return False
         if self._startup_gate_is_critical_allowed(source, kind, priority):
             return False
-        logger.info(
-            "startup_injection_deferred source=%s reason=first_turn_unsettled",
-            source,
+        deferred = self._startup_injection_coordinator().maybe_defer(
+            source=source,
+            allow_critical=False,
+            payload=payload,
         )
-        self._startup_injection_queue.append(payload)
-        return True
+        if deferred:
+            self._sync_startup_injection_legacy_state()
+        return deferred
 
     def _release_startup_injection_gate(self, *, reason: str) -> None:
-        if self._startup_injection_gate_released:
-            return
-        self._startup_injection_gate_released = True
-        queued_items = list(self._startup_injection_queue)
-        self._startup_injection_queue.clear()
-        logger.info(
-            "startup_injection_flush count=%s reason=%s",
-            len(queued_items),
-            reason,
-        )
-        for item in queued_items:
-            item_type = str(item.get("type") or "")
-            if item_type == "event":
-                self._emit_injected_event(item)
-                continue
-            if item_type == "system_context":
-                self._emit_system_context_payload(item)
+        self._startup_injection_coordinator().release_gate(reason=reason)
+        self._sync_startup_injection_legacy_state()
 
     async def _startup_injection_timeout_release(self) -> None:
-        timeout_s = self._startup_injection_gate_timeout_s
-        if timeout_s <= 0.0:
-            return
-        try:
-            await asyncio.sleep(timeout_s)
-        except asyncio.CancelledError:
-            return
-        self._release_startup_injection_gate(reason="timeout")
+        await self._startup_injection_coordinator().timeout_release()
+        self._sync_startup_injection_legacy_state()
 
     def _ensure_startup_injection_timeout_task(self) -> None:
-        if self._startup_injection_gate_released or self._startup_first_assistant_utterance_observed:
-            return
-        if not self.loop:
-            return
-        task = self._startup_injection_timeout_task
-        if task is not None and not task.done():
-            return
-        self._startup_injection_timeout_task = asyncio.run_coroutine_threadsafe(
-            self._startup_injection_timeout_release(),
-            self.loop,
-        )
+        self._startup_injection_coordinator().ensure_timeout_task()
+        self._sync_startup_injection_legacy_state()
 
     def get_session_health(self) -> dict[str, Any]:
         retrieval_metrics = self._memory_manager.get_retrieval_health_metrics(
@@ -3354,23 +3373,17 @@ class RealtimeAPI:
         return str(metadata.get("safety_override", "")).strip().lower() in {"true", "1", "yes"}
 
     def _empty_response_retry_idempotency_key(self, *, canonical_key: str) -> str:
-        normalized_canonical_key = str(canonical_key or "").strip() or "unknown"
-        digest = hashlib.sha1(normalized_canonical_key.encode("utf-8")).hexdigest()[:16]
-        return f"empty_response_done:{digest}"
+        return self._response_lifecycle.empty_response_retry_idempotency_key(canonical_key=canonical_key)
 
     @staticmethod
     def _strip_empty_retry_suffix_lineage(input_event_key: str | None) -> str:
-        normalized_key = str(input_event_key or "").strip()
-        if not normalized_key:
-            return ""
-        suffix = "__empty_retry"
-        while normalized_key.endswith(suffix):
-            normalized_key = normalized_key[: -len(suffix)]
-        return normalized_key
+        return ResponseLifecycleCoordinator.strip_empty_retry_suffix_lineage(input_event_key)
 
     def _canonical_key_for_empty_retry_origin(self, *, turn_id: str, input_event_key: str | None) -> str:
-        origin_input_event_key = self._strip_empty_retry_suffix_lineage(input_event_key)
-        return self._canonical_utterance_key(turn_id=turn_id, input_event_key=origin_input_event_key)
+        return self._response_lifecycle.canonical_key_for_empty_retry_origin(
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+        )
 
     async def _emit_empty_response_retry_exhausted_fallback(
         self,
@@ -3415,13 +3428,7 @@ class RealtimeAPI:
         )
 
     def _is_empty_response_done(self, *, canonical_key: str) -> bool:
-        response_state = self._canonical_response_state(canonical_key)
-        audio_delta_seen = bool(
-            isinstance(response_state, CanonicalResponseState) and response_state.audio_started
-        ) or self._canonical_first_audio_started(canonical_key)
-        assistant_reply_present = bool(str(getattr(self, "assistant_reply", "") or "").strip())
-        assistant_buffer_present = bool(str(getattr(self, "_assistant_reply_accum", "") or "").strip())
-        return not assistant_reply_present and not assistant_buffer_present and not audio_delta_seen
+        return self._response_lifecycle.is_empty_response_done(canonical_key=canonical_key)
 
     async def _maybe_schedule_empty_response_retry(
         self,
@@ -3433,108 +3440,14 @@ class RealtimeAPI:
         origin: str,
         delivery_state_before_done: str | None,
     ) -> None:
-        normalized_origin = str(origin or "unknown").strip().lower()
-        run_id = self._current_run_id() or ""
-        origin_input_event_key = self._strip_empty_retry_suffix_lineage(input_event_key)
-        origin_canonical_key = self._canonical_key_for_empty_retry_origin(
+        await self._response_lifecycle.maybe_schedule_empty_response_retry(
+            websocket=websocket,
             turn_id=turn_id,
+            canonical_key=canonical_key,
             input_event_key=input_event_key,
+            origin=origin,
+            delivery_state_before_done=delivery_state_before_done,
         )
-        if not self._is_empty_response_done(canonical_key=canonical_key):
-            return
-        logger.info(
-            "empty_response_detected run_id=%s turn_id=%s origin=%s canonical_key=%s origin_canonical_key=%s",
-            run_id,
-            turn_id,
-            normalized_origin or "unknown",
-            canonical_key,
-            origin_canonical_key,
-        )
-        retry_registry = getattr(self, "_empty_response_retry_canonical_keys", None)
-        if not isinstance(retry_registry, set):
-            retry_registry = set()
-            self._empty_response_retry_canonical_keys = retry_registry
-        retry_counts = getattr(self, "_empty_response_retry_counts", None)
-        if not isinstance(retry_counts, dict):
-            retry_counts = {}
-            self._empty_response_retry_counts = retry_counts
-        max_attempts = max(1, int(getattr(self, "_empty_response_retry_max_attempts", 2) or 1))
-        prior_attempts = int(retry_counts.get(origin_canonical_key, 0) or 0)
-        if prior_attempts >= max_attempts:
-            logger.info(
-                "empty_response_retry_skipped reason=max_retries_exhausted run_id=%s turn_id=%s canonical_key=%s attempts=%s max_attempts=%s",
-                run_id,
-                turn_id,
-                origin_canonical_key,
-                prior_attempts,
-                max_attempts,
-            )
-            await self._emit_empty_response_retry_exhausted_fallback(
-                websocket=websocket,
-                turn_id=turn_id,
-                input_event_key=origin_input_event_key,
-                canonical_key=origin_canonical_key,
-                origin=normalized_origin,
-            )
-            return
-        if canonical_key in retry_registry:
-            logger.info(
-                "empty_response_retry_skipped reason=already_retried run_id=%s turn_id=%s",
-                run_id,
-                turn_id,
-            )
-            return
-
-        state_not_retryable = (
-            websocket is None
-            or normalized_origin not in {"prompt", "server_auto", "user_transcript"}
-            or delivery_state_before_done == "cancelled"
-        )
-        if state_not_retryable:
-            logger.info(
-                "empty_response_retry_skipped reason=state_not_retryable run_id=%s turn_id=%s",
-                run_id,
-                turn_id,
-            )
-            return
-
-        retry_registry.add(canonical_key)
-        retry_counts[origin_canonical_key] = prior_attempts + 1
-        retry_input_event_key = f"{origin_input_event_key or 'unknown'}__empty_retry"
-        response_create_event = {
-            "type": "response.create",
-            "response": {
-                "metadata": {
-                    "turn_id": turn_id,
-                    "input_event_key": retry_input_event_key,
-                    "retry_reason": "empty_response_done",
-                    "idempotency_key": self._empty_response_retry_idempotency_key(
-                        canonical_key=f"{origin_canonical_key}:attempt:{prior_attempts + 1}"
-                    ),
-                }
-            },
-        }
-        sent = await self._send_response_create(
-            websocket,
-            response_create_event,
-            origin=normalized_origin,
-            record_ai_call=True,
-        )
-        if sent:
-            logger.info(
-                "empty_response_retry_scheduled run_id=%s turn_id=%s canonical_key=%s attempt=%s max_attempts=%s",
-                run_id,
-                turn_id,
-                origin_canonical_key,
-                prior_attempts + 1,
-                max_attempts,
-            )
-        else:
-            logger.info(
-                "empty_response_retry_skipped reason=state_not_retryable run_id=%s turn_id=%s",
-                run_id,
-                turn_id,
-            )
 
     def _response_is_explicit_multipart(self, metadata: dict[str, Any] | None) -> bool:
         if not isinstance(metadata, dict):
@@ -8358,6 +8271,10 @@ class RealtimeAPI:
     async def run(self) -> None:
         websockets = _require_websockets()
         _, ConnectionClosedError = _resolve_websocket_exceptions(websockets)
+        self._transport = RealtimeTransport(
+            connect_fn=websockets.connect,
+            validate_outbound_endpoint=_validate_outbound_endpoint,
+        )
 
         self.loop = asyncio.get_running_loop()
         self.ready_event.clear()
@@ -8379,12 +8296,11 @@ class RealtimeAPI:
                 try:
                     self._note_connection_attempt()
                     url = "wss://api.openai.com/v1/realtime?model=gpt-realtime"
-                    _validate_outbound_endpoint(url)
                     headers = {"Authorization": f"Bearer {self.api_key}"}
 
-                    async with websockets.connect(
-                        url,
-                        additional_headers=headers,
+                    async with self._transport.connect(
+                        url=url,
+                        headers=headers,
                         close_timeout=120,
                         ping_interval=30,
                         ping_timeout=10,
@@ -8401,9 +8317,6 @@ class RealtimeAPI:
                         )
 
                         self.websocket = websocket
-                        self._ws_close_started = False
-                        self._ws_close_done = False
-
                         try:
                             self.loop.add_signal_handler(signal.SIGTERM, self.shutdown_handler)
                             self.loop.add_signal_handler(signal.SIGINT, self.shutdown_handler)
@@ -8515,8 +8428,11 @@ class RealtimeAPI:
         ConnectionClosed, _ = _resolve_websocket_exceptions(websockets)
         while True:
             try:
-                message = await websocket.recv()
-                event = json.loads(message)
+                transport = self._transport or RealtimeTransport(
+                    connect_fn=websockets.connect,
+                    validate_outbound_endpoint=_validate_outbound_endpoint,
+                )
+                event = await transport.recv_json(websocket)
                 log_ws_event("Incoming", event)
                 try:
                     await self.handle_event(event, websocket)
@@ -8627,6 +8543,17 @@ class RealtimeAPI:
         return ServerAutoArbitrationOutcome.ALLOW, policy_decision.reason_code
 
     async def handle_event(self, event: dict[str, Any], websocket: Any) -> None:
+        event_type = str(event.get("type") or "")
+        if event_type in {
+            "response.output_item.added",
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done",
+        }:
+            await self._event_router.dispatch(event, websocket)
+            return
+        await self._handle_event_legacy(event, websocket)
+
+    async def _handle_event_legacy(self, event: dict[str, Any], websocket: Any) -> None:
         event_type = event.get("type")
         await self._maybe_handle_confirmation_decision_timeout(
             websocket,
@@ -9005,8 +8932,8 @@ class RealtimeAPI:
                 return
             self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
             delta = event.get("delta", "")
-            if delta and not self._startup_first_assistant_utterance_observed:
-                self._startup_first_assistant_utterance_observed = True
+            if delta and not self._startup_injection_coordinator().first_assistant_utterance_observed:
+                self._startup_injection_coordinator().first_assistant_utterance_observed = True
                 self._release_startup_injection_gate(reason="first_turn_complete")
             self.assistant_reply += delta
             self._assistant_reply_accum += delta
@@ -9084,8 +9011,8 @@ class RealtimeAPI:
             if self._is_active_response_guarded():
                 return
             delta = event.get("delta", "")
-            if delta and not self._startup_first_assistant_utterance_observed:
-                self._startup_first_assistant_utterance_observed = True
+            if delta and not self._startup_injection_coordinator().first_assistant_utterance_observed:
+                self._startup_injection_coordinator().first_assistant_utterance_observed = True
                 self._release_startup_injection_gate(reason="first_turn_complete")
             self.assistant_reply += delta
             self._assistant_reply_accum += delta
@@ -11268,11 +11195,8 @@ class RealtimeAPI:
             await self._close_websocket("audio loop exiting", websocket=websocket)
 
     def shutdown_handler(self) -> None:
-        with self._shutdown_lock:
-            if self._shutdown_requested:
-                logger.debug("Shutdown already in progress; ignoring duplicate shutdown signal.")
-                return
-            self._shutdown_requested = True
+        if not self._shutdown_coordinator().begin_shutdown():
+            return
 
         logger.info("Received shutdown signal. Initiating graceful shutdown...")
         if self.loop and self.loop.is_running():
@@ -11292,26 +11216,8 @@ class RealtimeAPI:
         websocket: Any | None = None,
         timeout_s: float | None = None,
     ) -> None:
-        ws = websocket or self.websocket
-        if not ws:
-            return
-        close_timeout_s = (
-            getattr(self, "_websocket_close_timeout_s", 5.0)
-            if timeout_s is None
-            else timeout_s
+        await self._websocket_closer().close(
+            websocket or self.websocket,
+            reason=reason,
+            timeout_s=timeout_s,
         )
-        async with self._ws_close_lock:
-            if self._ws_close_started or self._ws_close_done:
-                return
-            self._ws_close_started = True
-        try:
-            await asyncio.wait_for(ws.close(), timeout=close_timeout_s)
-            logger.info("WebSocket closed (%s).", reason)
-        except asyncio.TimeoutError:
-            logger.warning("Timed out closing WebSocket (%s).", reason)
-        except Exception as exc:
-            logger.warning("Failed to close WebSocket (%s): %s", reason, exc)
-        finally:
-            async with self._ws_close_lock:
-                self._ws_close_started = False
-                self._ws_close_done = True
