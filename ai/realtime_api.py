@@ -2295,6 +2295,8 @@ class RealtimeAPI:
         normalized_origin = str(origin).strip() if origin else "unknown"
         response = event.get("response") if isinstance(event, dict) else None
         metadata = response.get("metadata") if isinstance(response, dict) else None
+        metadata_turn_id = str(metadata.get("turn_id") or "").strip() if isinstance(metadata, dict) else ""
+        metadata_input_event_key = str(metadata.get("input_event_key") or "").strip() if isinstance(metadata, dict) else ""
         consumes_canonical_slot = self._response_consumes_canonical_slot(metadata)
         pending_origin = {
             "origin": normalized_origin,
@@ -2302,7 +2304,14 @@ class RealtimeAPI:
             if isinstance(metadata, dict) and str(metadata.get("micro_ack", "")).strip().lower() == "true"
             else "false",
             "consumes_canonical_slot": "true" if consumes_canonical_slot else "false",
+            "turn_id": metadata_turn_id,
+            "input_event_key": metadata_input_event_key,
         }
+        if metadata_turn_id and metadata_input_event_key:
+            self._bind_active_input_event_key_for_turn(
+                turn_id=metadata_turn_id,
+                input_event_key=metadata_input_event_key,
+            )
         self._pending_response_create_origins.append(pending_origin)
 
     def _response_consumes_canonical_slot(self, metadata: dict[str, Any] | None) -> bool:
@@ -2316,6 +2325,7 @@ class RealtimeAPI:
 
     def _consume_response_origin(self, event: dict[str, Any] | None = None) -> str:
         self._active_response_consumes_canonical_slot = True
+        self._last_consumed_response_origin_context = {}
         if self._pending_response_create_origins:
             response = event.get("response") if isinstance(event, dict) else None
             metadata = response.get("metadata") if isinstance(response, dict) else None
@@ -2349,6 +2359,10 @@ class RealtimeAPI:
             if not isinstance(pending, dict):
                 self._active_response_consumes_canonical_slot = True
                 return str(pending or "unknown")
+            self._last_consumed_response_origin_context = {
+                "turn_id": str(pending.get("turn_id") or "").strip(),
+                "input_event_key": str(pending.get("input_event_key") or "").strip(),
+            }
             self._active_response_consumes_canonical_slot = (
                 str(pending.get("consumes_canonical_slot", "")).strip().lower() == "true"
             )
@@ -3684,7 +3698,8 @@ class RealtimeAPI:
         if not input_event_key:
             input_event_key = self._next_synthetic_input_event_key(origin)
             metadata["input_event_key"] = input_event_key
-        metadata.setdefault("turn_id", turn_id)
+        metadata["turn_id"] = str(metadata.get("turn_id") or "").strip() or str(turn_id or "").strip() or "turn-unknown"
+        metadata["input_event_key"] = str(metadata.get("input_event_key") or "").strip() or input_event_key
         return input_event_key
 
     def _response_has_safety_override(self, response_create_event: dict[str, Any]) -> bool:
@@ -6027,6 +6042,10 @@ class RealtimeAPI:
             response_create_event=response_create_event,
             origin=origin,
             turn_id=turn_id,
+        )
+        self._bind_active_input_event_key_for_turn(
+            turn_id=turn_id,
+            input_event_key=current_input_event_key,
         )
         with self._utterance_context_scope(turn_id=turn_id, input_event_key=current_input_event_key) as resolved_context:
             turn_id = resolved_context.turn_id
@@ -8977,6 +8996,14 @@ class RealtimeAPI:
         self._mark_utterance_info_summary(response_created_seen=True)
         log_info(f"response.created: origin={origin}")
         response = event.get("response") or {}
+        response_metadata = response.get("metadata") if isinstance(response, dict) else None
+        metadata_turn_id = str(response_metadata.get("turn_id") or "").strip() if isinstance(response_metadata, dict) else ""
+        metadata_input_event_key = str(response_metadata.get("input_event_key") or "").strip() if isinstance(response_metadata, dict) else ""
+        pending_origin_context = getattr(self, "_last_consumed_response_origin_context", {})
+        if not isinstance(pending_origin_context, dict):
+            pending_origin_context = {}
+        pending_turn_id = str(pending_origin_context.get("turn_id") or "").strip()
+        pending_input_event_key = str(pending_origin_context.get("input_event_key") or "").strip()
         response_id = response.get("id")
         self._active_response_id = str(response_id) if response_id else None
         self._active_response_origin = str(origin)
@@ -8984,16 +9011,16 @@ class RealtimeAPI:
         self._active_response_canonical_key = None
         pending_confirmation_active = self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase()
         self._active_response_preference_guarded = False
-        turn_id = self._current_turn_id_or_unknown()
+        turn_id = metadata_turn_id or pending_turn_id or self._current_turn_id_or_unknown()
         self._cancel_micro_ack(turn_id=turn_id, reason="response_created")
         if origin == "server_auto":
             expected_input_event_key = self._active_input_event_key_for_turn(turn_id)
-            input_event_key = None
+            input_event_key = metadata_input_event_key or pending_input_event_key or None
             pending_server_auto_keys = getattr(self, "_pending_server_auto_input_event_keys", None)
             if not isinstance(pending_server_auto_keys, deque):
                 pending_server_auto_keys = deque(maxlen=64)
                 self._pending_server_auto_input_event_keys = pending_server_auto_keys
-            while pending_server_auto_keys:
+            while not input_event_key and pending_server_auto_keys:
                 queued_key = str(pending_server_auto_keys.popleft() or "").strip()
                 if not queued_key:
                     continue
@@ -9048,6 +9075,12 @@ class RealtimeAPI:
                 return
             if not input_event_key:
                 input_event_key = self._next_synthetic_input_event_key("server_auto")
+                logger.info(
+                    "response_created_key_synthesized run_id=%s turn_id=%s origin=%s reason=no_metadata_or_pending",
+                    self._current_run_id() or "",
+                    turn_id,
+                    origin,
+                )
             self._active_server_auto_input_event_key = input_event_key
             self._log_response_binding_event(
                 response_key=input_event_key,
@@ -9077,9 +9110,15 @@ class RealtimeAPI:
                     turn_id,
                 )
         else:
-            current_input_event_key = str(getattr(self, "_current_input_event_key", "") or "").strip()
+            current_input_event_key = metadata_input_event_key or pending_input_event_key or str(getattr(self, "_current_input_event_key", "") or "").strip()
             if not current_input_event_key:
                 current_input_event_key = self._next_synthetic_input_event_key(origin)
+                logger.info(
+                    "response_created_key_synthesized run_id=%s turn_id=%s origin=%s reason=no_metadata_or_pending",
+                    self._current_run_id() or "",
+                    turn_id,
+                    origin,
+                )
             self._log_response_binding_event(
                 response_key=current_input_event_key,
                 turn_id=turn_id,

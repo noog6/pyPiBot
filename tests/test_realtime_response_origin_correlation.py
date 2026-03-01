@@ -129,7 +129,80 @@ def test_response_created_origin_correlation_prefers_non_micro_ack_for_server_au
 
     origin_logs = [entry for entry in logs if entry.startswith("response.created:")]
     assert origin_logs == ["response.created: origin=server_auto"]
-    assert list(api._pending_response_create_origins) == [{"origin": "assistant_message", "micro_ack": "true", "consumes_canonical_slot": "false"}]
+    assert list(api._pending_response_create_origins) == [
+        {
+            "origin": "assistant_message",
+            "micro_ack": "true",
+            "consumes_canonical_slot": "false",
+            "turn_id": "",
+            "input_event_key": "",
+        }
+    ]
+
+
+def test_response_created_binding_prompt_happy_path_never_logs_unknown_active_key(monkeypatch) -> None:
+    api = _build_api()
+    binding_logs: list[str] = []
+
+    monkeypatch.setattr(
+        "ai.realtime_api.logger.info",
+        lambda message, *args: binding_logs.append(message % args),
+    )
+
+    api._track_outgoing_event(
+        {
+            "type": "response.create",
+            "response": {"metadata": {"turn_id": "turn-7", "input_event_key": "evt-7"}},
+        },
+        origin="prompt",
+    )
+
+    asyncio.run(
+        api.handle_event(
+            {
+                "type": "response.created",
+                "response": {
+                    "id": "resp-prompt",
+                    "metadata": {"turn_id": "turn-7", "input_event_key": "evt-7"},
+                },
+            },
+            websocket=None,
+        )
+    )
+
+    assert any("response_binding" in line for line in binding_logs)
+    assert not any("response_binding" in line and "active_key=unknown" in line for line in binding_logs)
+
+
+def test_response_created_binding_server_auto_happy_path_never_logs_unknown_active_key(monkeypatch) -> None:
+    api = _build_api()
+    binding_logs: list[str] = []
+
+    monkeypatch.setattr(
+        "ai.realtime_api.logger.info",
+        lambda message, *args: binding_logs.append(message % args),
+    )
+
+    api._current_response_turn_id = "turn-9"
+    api._current_input_event_key = "evt-9"
+    api._active_input_event_key_by_turn_id = {"turn-9": "evt-9"}
+    api._pending_server_auto_input_event_keys = deque(["evt-9"])
+
+    asyncio.run(
+        api.handle_event(
+            {
+                "type": "response.created",
+                "response": {
+                    "id": "resp-auto",
+                    "metadata": {"turn_id": "turn-9", "input_event_key": "evt-9"},
+                },
+            },
+            websocket=None,
+        )
+    )
+
+    assert any("response_binding" in line for line in binding_logs)
+    assert not any("response_binding" in line and "active_key=unknown" in line for line in binding_logs)
 
 
 def test_response_created_from_pending_action_with_server_auto_keeps_awaiting_phase(
