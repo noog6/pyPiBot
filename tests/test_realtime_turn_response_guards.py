@@ -22,6 +22,9 @@ def _make_api() -> RealtimeAPI:
     api._response_created_canonical_keys = set()
     api._empty_response_retry_canonical_keys = set()
     api._response_delivery_ledger = {}
+    api._empty_response_retry_counts = {}
+    api._empty_response_retry_fallback_emitted = set()
+    api._empty_response_retry_max_attempts = 2
     api._response_in_flight = False
     api._audio_playback_busy = False
     api._pending_response_create = None
@@ -29,6 +32,8 @@ def _make_api() -> RealtimeAPI:
     api._queued_confirmation_reminder_keys = set()
     api._response_done_serial = 0
     api._response_schedule_logged_turn_ids = set()
+    api._conversation_efficiency_by_turn = {}
+    api._silent_turn_incident_count = 0
     api._turn_diagnostic_timestamps = {}
     api._preference_recall_suppressed_turns = set()
     api._preference_recall_locked_input_event_keys = set()
@@ -80,6 +85,62 @@ def test_empty_response_done_schedules_single_retry_for_prompt_origin() -> None:
     assert metadata["retry_reason"] == "empty_response_done"
     assert metadata["idempotency_key"].startswith("empty_response_done:")
 
+
+
+def test_empty_response_retry_uses_origin_canonical_key_and_exhausts_with_terminal_fallback() -> None:
+    api = _make_api()
+    api._empty_response_retry_max_attempts = 1
+    sent_events: list[dict[str, object]] = []
+    fallback_messages: list[tuple[str, bool]] = []
+    terminal_markers: list[str] = []
+
+    origin_canonical_key = api._canonical_utterance_key(turn_id="turn_1", input_event_key="input_evt_1")
+    retry_canonical_key = api._canonical_utterance_key(
+        turn_id="turn_1",
+        input_event_key="input_evt_1__empty_retry",
+    )
+
+    async def _capture_send_response_create(_websocket, event, **kwargs):
+        sent_events.append({"event": event, **kwargs})
+        return True
+
+    async def _capture_assistant_message(message, _websocket, *, speak=True, **kwargs):
+        fallback_messages.append((message, speak))
+
+    def _capture_log_lifecycle_event(**kwargs):
+        terminal_markers.append(str(kwargs.get("decision") or ""))
+
+    api._send_response_create = _capture_send_response_create
+    api.send_assistant_message = _capture_assistant_message
+    api._log_lifecycle_event = _capture_log_lifecycle_event
+    api._debug_dump_canonical_key_timeline = lambda **kwargs: None
+
+    asyncio.run(
+        api._maybe_schedule_empty_response_retry(
+            websocket=object(),
+            turn_id="turn_1",
+            canonical_key=origin_canonical_key,
+            input_event_key="input_evt_1",
+            origin="prompt",
+            delivery_state_before_done="done",
+        )
+    )
+    asyncio.run(
+        api._maybe_schedule_empty_response_retry(
+            websocket=object(),
+            turn_id="turn_1",
+            canonical_key=retry_canonical_key,
+            input_event_key="input_evt_1__empty_retry",
+            origin="prompt",
+            delivery_state_before_done="done",
+        )
+    )
+
+    assert len(sent_events) == 1
+    assert api._empty_response_retry_counts[origin_canonical_key] == 1
+    assert fallback_messages == [("Sorry—I’m having trouble generating a response right now.", False)]
+    assert "transition_terminal:empty_response_retry_exhausted" in terminal_markers
+    assert api._response_delivery_state(turn_id="turn_1", input_event_key="input_evt_1") == "done"
 
 def test_empty_response_done_retry_skipped_for_cancelled_terminal_state() -> None:
     api = _make_api()

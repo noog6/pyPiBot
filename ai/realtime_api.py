@@ -880,6 +880,9 @@ class RealtimeAPI:
         self._synthetic_input_event_counter = 0
         self._response_created_canonical_keys: set[str] = set()
         self._empty_response_retry_canonical_keys: set[str] = set()
+        self._empty_response_retry_counts: dict[str, int] = {}
+        self._empty_response_retry_fallback_emitted: set[str] = set()
+        self._empty_response_retry_max_attempts = 2
         self._response_delivery_ledger: dict[str, str] = {}
         self._response_id_by_canonical_key: dict[str, str] = {}
         self._canonical_response_state_by_key: dict[str, CanonicalResponseState] = {}
@@ -3353,6 +3356,62 @@ class RealtimeAPI:
         digest = hashlib.sha1(normalized_canonical_key.encode("utf-8")).hexdigest()[:16]
         return f"empty_response_done:{digest}"
 
+    @staticmethod
+    def _strip_empty_retry_suffix_lineage(input_event_key: str | None) -> str:
+        normalized_key = str(input_event_key or "").strip()
+        if not normalized_key:
+            return ""
+        suffix = "__empty_retry"
+        while normalized_key.endswith(suffix):
+            normalized_key = normalized_key[: -len(suffix)]
+        return normalized_key
+
+    def _canonical_key_for_empty_retry_origin(self, *, turn_id: str, input_event_key: str | None) -> str:
+        origin_input_event_key = self._strip_empty_retry_suffix_lineage(input_event_key)
+        return self._canonical_utterance_key(turn_id=turn_id, input_event_key=origin_input_event_key)
+
+    async def _emit_empty_response_retry_exhausted_fallback(
+        self,
+        *,
+        websocket: Any,
+        turn_id: str,
+        input_event_key: str,
+        canonical_key: str,
+        origin: str,
+    ) -> None:
+        if websocket is None:
+            return
+        exhausted_registry = getattr(self, "_empty_response_retry_fallback_emitted", None)
+        if not isinstance(exhausted_registry, set):
+            exhausted_registry = set()
+            self._empty_response_retry_fallback_emitted = exhausted_registry
+        if canonical_key in exhausted_registry:
+            return
+        exhausted_registry.add(canonical_key)
+        await self.send_assistant_message(
+            "Sorry—I’m having trouble generating a response right now.",
+            websocket,
+            speak=False,
+        )
+        self._lifecycle_controller().on_response_done(canonical_key)
+        self._set_response_delivery_state(
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            state="done",
+        )
+        self._log_lifecycle_event(
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            canonical_key=canonical_key,
+            origin=origin,
+            response_id=None,
+            decision="transition_terminal:empty_response_retry_exhausted",
+        )
+        self._debug_dump_canonical_key_timeline(
+            canonical_key=canonical_key,
+            trigger="empty_response_retry_exhausted",
+        )
+
     def _is_empty_response_done(self, *, canonical_key: str) -> bool:
         response_state = self._canonical_response_state(canonical_key)
         audio_delta_seen = bool(
@@ -3374,18 +3433,48 @@ class RealtimeAPI:
     ) -> None:
         normalized_origin = str(origin or "unknown").strip().lower()
         run_id = self._current_run_id() or ""
+        origin_input_event_key = self._strip_empty_retry_suffix_lineage(input_event_key)
+        origin_canonical_key = self._canonical_key_for_empty_retry_origin(
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+        )
         if not self._is_empty_response_done(canonical_key=canonical_key):
             return
         logger.info(
-            "empty_response_detected run_id=%s turn_id=%s origin=%s",
+            "empty_response_detected run_id=%s turn_id=%s origin=%s canonical_key=%s origin_canonical_key=%s",
             run_id,
             turn_id,
             normalized_origin or "unknown",
+            canonical_key,
+            origin_canonical_key,
         )
         retry_registry = getattr(self, "_empty_response_retry_canonical_keys", None)
         if not isinstance(retry_registry, set):
             retry_registry = set()
             self._empty_response_retry_canonical_keys = retry_registry
+        retry_counts = getattr(self, "_empty_response_retry_counts", None)
+        if not isinstance(retry_counts, dict):
+            retry_counts = {}
+            self._empty_response_retry_counts = retry_counts
+        max_attempts = max(1, int(getattr(self, "_empty_response_retry_max_attempts", 2) or 1))
+        prior_attempts = int(retry_counts.get(origin_canonical_key, 0) or 0)
+        if prior_attempts >= max_attempts:
+            logger.info(
+                "empty_response_retry_skipped reason=max_retries_exhausted run_id=%s turn_id=%s canonical_key=%s attempts=%s max_attempts=%s",
+                run_id,
+                turn_id,
+                origin_canonical_key,
+                prior_attempts,
+                max_attempts,
+            )
+            await self._emit_empty_response_retry_exhausted_fallback(
+                websocket=websocket,
+                turn_id=turn_id,
+                input_event_key=origin_input_event_key,
+                canonical_key=origin_canonical_key,
+                origin=normalized_origin,
+            )
+            return
         if canonical_key in retry_registry:
             logger.info(
                 "empty_response_retry_skipped reason=already_retried run_id=%s turn_id=%s",
@@ -3408,7 +3497,8 @@ class RealtimeAPI:
             return
 
         retry_registry.add(canonical_key)
-        retry_input_event_key = f"{input_event_key or 'unknown'}__empty_retry"
+        retry_counts[origin_canonical_key] = prior_attempts + 1
+        retry_input_event_key = f"{origin_input_event_key or 'unknown'}__empty_retry"
         response_create_event = {
             "type": "response.create",
             "response": {
@@ -3416,7 +3506,9 @@ class RealtimeAPI:
                     "turn_id": turn_id,
                     "input_event_key": retry_input_event_key,
                     "retry_reason": "empty_response_done",
-                    "idempotency_key": self._empty_response_retry_idempotency_key(canonical_key=canonical_key),
+                    "idempotency_key": self._empty_response_retry_idempotency_key(
+                        canonical_key=f"{origin_canonical_key}:attempt:{prior_attempts + 1}"
+                    ),
                 }
             },
         }
@@ -3428,9 +3520,12 @@ class RealtimeAPI:
         )
         if sent:
             logger.info(
-                "empty_response_retry_scheduled run_id=%s turn_id=%s",
+                "empty_response_retry_scheduled run_id=%s turn_id=%s canonical_key=%s attempt=%s max_attempts=%s",
                 run_id,
                 turn_id,
+                origin_canonical_key,
+                prior_attempts + 1,
+                max_attempts,
             )
         else:
             logger.info(
