@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ai.event_bus import Event
 from ai.orchestration import OrchestrationPhase
+from ai.realtime.injections import InjectionCoordinator
 from ai.realtime_api import RealtimeAPI
 from interaction import InteractionState
 
@@ -20,6 +21,13 @@ def _make_api_stub() -> RealtimeAPI:
     api.state_manager = _StateManagerStub(InteractionState.IDLE)
     api.orchestration_state = type("S", (), {"phase": OrchestrationPhase.AWAITING_CONFIRMATION})()
     api._awaiting_confirmation_allowed_sources = {("battery", "critical"), ("imu", "critical")}
+    api._startup_injection_gate_timeout_s = 5.0
+    api._startup_injections = InjectionCoordinator(
+        gate_timeout_s=api._startup_injection_gate_timeout_s,
+        loop_getter=lambda: None,
+        emit_injected_event=api._emit_injected_event,
+        emit_system_context_payload=api._emit_system_context_payload,
+    )
     return api
 
 
@@ -67,10 +75,9 @@ def test_inject_event_suppresses_camera_during_awaiting_confirmation() -> None:
 
 def test_startup_gate_defers_noncritical_injection_until_first_assistant_output() -> None:
     api = _make_api_stub()
-    api._startup_injection_gate_released = False
-    api._startup_first_assistant_utterance_observed = False
-    api._startup_injection_gate_timeout_s = 5.0
-    api._startup_injection_queue = []
+    api._startup_injection_coordinator().released = False
+    api._startup_injection_coordinator().first_assistant_utterance_observed = False
+    api._startup_injection_coordinator().queue.clear()
     api._ensure_startup_injection_timeout_task = lambda: None
     api._pending_confirmation_token = None
     api.orchestration_state = type("S", (), {"phase": OrchestrationPhase.IDLE})()
@@ -84,7 +91,7 @@ def test_startup_gate_defers_noncritical_injection_until_first_assistant_output(
     api.inject_event(Event(source="camera", kind="image", priority="normal"))
 
     assert not sent
-    assert len(api._startup_injection_queue) == 1
+    assert len(api._startup_injection_coordinator().queue) == 1
 
     api._release_startup_injection_gate(reason="first_turn_complete")
 
@@ -93,10 +100,9 @@ def test_startup_gate_defers_noncritical_injection_until_first_assistant_output(
 
 def test_startup_gate_allows_critical_battery_injection() -> None:
     api = _make_api_stub()
-    api._startup_injection_gate_released = False
-    api._startup_first_assistant_utterance_observed = False
-    api._startup_injection_gate_timeout_s = 5.0
-    api._startup_injection_queue = []
+    api._startup_injection_coordinator().released = False
+    api._startup_injection_coordinator().first_assistant_utterance_observed = False
+    api._startup_injection_coordinator().queue.clear()
     api._pending_confirmation_token = None
     api.orchestration_state = type("S", (), {"phase": OrchestrationPhase.IDLE})()
 
@@ -116,4 +122,19 @@ def test_startup_gate_allows_critical_battery_injection() -> None:
     )
 
     assert sent == ["battery critical"]
-    assert not api._startup_injection_queue
+    assert not api._startup_injection_coordinator().queue
+
+
+def test_startup_injection_legacy_aliases_track_coordinator_without_mutation_sync() -> None:
+    api = _make_api_stub()
+    coordinator = api._startup_injection_coordinator()
+    coordinator.released = True
+    coordinator.queue.append({"type": "event", "message": "camera frame"})
+    coordinator.timeout_task = object()
+
+    assert api._startup_injection_gate_released is True
+    assert api._startup_injection_queue == [{"type": "event", "message": "camera frame"}]
+    assert api._startup_injection_timeout_task is coordinator.timeout_task
+    assert "_startup_injection_gate_released" not in api.__dict__
+    assert "_startup_injection_queue" not in api.__dict__
+    assert "_startup_injection_timeout_task" not in api.__dict__

@@ -1022,12 +1022,20 @@ class RealtimeAPI:
         self._startup_injections = coordinator
         return coordinator
 
-    def _sync_startup_injection_legacy_state(self) -> None:
-        coordinator = self._startup_injection_coordinator()
-        self._startup_injection_gate_released = coordinator.released
-        self._startup_first_assistant_utterance_observed = coordinator.first_assistant_utterance_observed
-        self._startup_injection_queue = list(coordinator.queue)
-        self._startup_injection_timeout_task = coordinator.timeout_task
+    @property
+    def _startup_injection_gate_released(self) -> bool:
+        """Legacy read-only alias for coordinator gate state."""
+        return self._startup_injection_coordinator().released
+
+    @property
+    def _startup_injection_queue(self) -> list[dict[str, Any]]:
+        """Legacy read-only alias for coordinator queue snapshot."""
+        return list(self._startup_injection_coordinator().queue)
+
+    @property
+    def _startup_injection_timeout_task(self) -> Any:
+        """Legacy read-only alias for coordinator timeout task."""
+        return self._startup_injection_coordinator().timeout_task
 
     @staticmethod
     def _load_micro_ack_channel_policy(realtime_cfg: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -1986,20 +1994,16 @@ class RealtimeAPI:
         deferred = coordinator.should_defer(payload, source)
         if deferred:
             coordinator.enqueue(payload)
-            self._sync_startup_injection_legacy_state()
         return deferred
 
     def _release_startup_injection_gate(self, *, reason: str) -> None:
         self._startup_injection_coordinator().release(reason)
-        self._sync_startup_injection_legacy_state()
 
     async def _startup_injection_timeout_release(self) -> None:
         await self._startup_injection_coordinator()._timeout_release()
-        self._sync_startup_injection_legacy_state()
 
     def _ensure_startup_injection_timeout_task(self) -> None:
         self._startup_injection_coordinator().schedule_timeout(getattr(self, "loop", None))
-        self._sync_startup_injection_legacy_state()
 
     def get_session_health(self) -> dict[str, Any]:
         retrieval_metrics = self._memory_manager.get_retrieval_health_metrics(
