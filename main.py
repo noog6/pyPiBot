@@ -13,7 +13,7 @@ import sys
 from ai import RealtimeAPI
 from ai.realtime_api import RealtimeAPIStartupError
 from config import ConfigController
-from core.logging import enable_file_logging, logger
+from core.logging import configure_websocket_library_logging, enable_file_logging, logger
 from hardware import CameraController
 from interaction.stderr_suppression import suppress_noisy_stderr
 from motion import MotionController
@@ -33,6 +33,9 @@ def configure_logging(level_name: str) -> None:
     level = logging._nameToLevel.get(level_name.upper(), logging.INFO)
     root_logger = logging.getLogger()
     root_logger.setLevel(level)
+
+    # Keep third-party websocket traces safe by redacting Bearer secrets.
+    configure_websocket_library_logging()
 
     for handler in list(root_logger.handlers):
         root_logger.removeHandler(handler)
