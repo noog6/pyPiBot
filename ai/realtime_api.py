@@ -8506,9 +8506,13 @@ class RealtimeAPI:
 
                         if self.prompts:
                             await self.send_initial_prompts(websocket)
-                        else:
+
+                        if not self.mic.is_recording:
                             self.mic.start_recording()
-                            logger.info("Recording started. Listening for speech...")
+                            if self.prompts:
+                                logger.info("Recording started after startup prompts.")
+                            else:
+                                logger.info("Recording started. Listening for speech...")
 
                         await self.send_audio_loop(websocket)
 
@@ -11354,6 +11358,12 @@ class RealtimeAPI:
                         }
                         transport = self._get_or_create_transport()
                         await transport.send_json(websocket, audio_event)
+                        logger.debug(
+                            "input_audio_append_sent bytes=%s rms=%s peak=%s",
+                            len(audio_data),
+                            rms,
+                            peak,
+                        )
                     else:
                         logger.debug("Failed to encode audio data for sending")
 
