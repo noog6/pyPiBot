@@ -74,3 +74,55 @@ def test_user_transcript_redaction_masks_email_and_phone(monkeypatch) -> None:
     assert "<redacted_phone>" in captured[0]
     assert "test.user@example.com" not in captured[0]
     assert "555" not in captured[0]
+
+
+def test_utterance_info_summary_classifies_transcript_null(monkeypatch) -> None:
+    api = _make_api_stub(enabled=True)
+    captured: list[str] = []
+
+    def _capture(message, *args):
+        captured.append(message % args)
+
+    monkeypatch.setattr("ai.realtime_api.logger.info", _capture)
+
+    api._reset_utterance_info_summary()
+    api._mark_utterance_info_summary(
+        speech_started_seen=True,
+        speech_stopped_seen=True,
+        commit_seen=True,
+        transcript_present=False,
+    )
+
+    api._emit_utterance_info_summary(anchor="transcript_completed_empty")
+
+    assert len(captured) == 1
+    assert "UTTERANCE_INFO_SUMMARY" in captured[0]
+    assert "anchor=transcript_completed_empty" in captured[0]
+    assert "transcript_present=False" in captured[0]
+    assert "asr_error_present=False" in captured[0]
+
+
+def test_utterance_info_summary_classifies_asr_error(monkeypatch) -> None:
+    api = _make_api_stub(enabled=True)
+    captured: list[str] = []
+
+    def _capture(message, *args):
+        captured.append(message % args)
+
+    monkeypatch.setattr("ai.realtime_api.logger.info", _capture)
+
+    api._reset_utterance_info_summary()
+    api._mark_utterance_info_summary(
+        speech_started_seen=True,
+        speech_stopped_seen=True,
+        asr_error_present=True,
+        transcript_present=False,
+    )
+
+    api._emit_utterance_info_summary(anchor="transcript_failed")
+
+    assert len(captured) == 1
+    assert "UTTERANCE_INFO_SUMMARY" in captured[0]
+    assert "anchor=transcript_failed" in captured[0]
+    assert "transcript_present=False" in captured[0]
+    assert "asr_error_present=True" in captured[0]

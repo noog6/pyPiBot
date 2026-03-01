@@ -898,6 +898,8 @@ class RealtimeAPI:
         )
         self._utterance_counter = 0
         self._active_utterance: dict[str, Any] | None = None
+        self._utterance_info_summary: dict[str, bool] = {}
+        self._utterance_info_summary_emitted = False
         self._recent_input_levels: deque[dict[str, float]] = deque(maxlen=256)
         self._transcript_response_watchdog_timeout_s = max(
             0.5,
@@ -950,6 +952,10 @@ class RealtimeAPI:
         self._event_router.register(
             "conversation.item.input_audio_transcription.completed",
             self._handle_input_audio_transcription_completed_event,
+        )
+        self._event_router.register(
+            "conversation.item.input_audio_transcription.failed",
+            self._handle_input_audio_transcription_failed_event,
         )
         for event_type in {
             "conversation.item.added",
@@ -7593,7 +7599,7 @@ class RealtimeAPI:
         if not self._debug_vad or not self._active_utterance:
             return
         env = self._active_utterance
-        logger.info(
+        logger.debug(
             "VAD_UTTERANCE event=%s id=%s t_start=%.3f t_stop=%s duration_ms=%s rms=%s peak=%s transcript=%s len=%s confirmation_candidate=%s decision=%s suppressed=%s",
             event_name,
             env.get("utterance_id"),
@@ -7607,6 +7613,50 @@ class RealtimeAPI:
             env.get("confirmation_candidate", False),
             env.get("decision", "unclear"),
             env.get("suppressed", False),
+        )
+
+    def _reset_utterance_info_summary(self) -> None:
+        self._utterance_info_summary = {
+            "speech_started_seen": False,
+            "speech_stopped_seen": False,
+            "commit_seen": False,
+            "transcript_present": False,
+            "asr_error_present": False,
+            "response_created_seen": False,
+            "response_done_seen": False,
+            "deliverable_seen": False,
+        }
+        self._utterance_info_summary_emitted = False
+
+    def _mark_utterance_info_summary(self, **updates: bool) -> None:
+        if not isinstance(getattr(self, "_utterance_info_summary", None), dict):
+            self._reset_utterance_info_summary()
+        for key, value in updates.items():
+            if key in self._utterance_info_summary:
+                self._utterance_info_summary[key] = bool(value)
+
+    def _emit_utterance_info_summary(self, *, anchor: str) -> None:
+        if getattr(self, "_utterance_info_summary_emitted", False):
+            return
+        summary = dict(getattr(self, "_utterance_info_summary", {}) or {})
+        if not summary:
+            self._reset_utterance_info_summary()
+            summary = dict(self._utterance_info_summary)
+        self._utterance_info_summary_emitted = True
+        logger.info(
+            "UTTERANCE_INFO_SUMMARY run_id=%s anchor=%s speech_started_seen=%s speech_stopped_seen=%s "
+            "commit_seen=%s transcript_present=%s asr_error_present=%s response_created_seen=%s "
+            "response_done_seen=%s deliverable_seen=%s",
+            self._current_run_id() or "",
+            anchor,
+            summary.get("speech_started_seen", False),
+            summary.get("speech_stopped_seen", False),
+            summary.get("commit_seen", False),
+            summary.get("transcript_present", False),
+            summary.get("asr_error_present", False),
+            summary.get("response_created_seen", False),
+            summary.get("response_done_seen", False),
+            summary.get("deliverable_seen", False),
         )
 
     def _is_noise_like_transcript(self, transcript: str) -> bool:
@@ -8906,6 +8956,7 @@ class RealtimeAPI:
 
     async def _handle_response_created_event(self, event: dict[str, Any], websocket: Any) -> None:
         origin = self._consume_response_origin(event)
+        self._mark_utterance_info_summary(response_created_seen=True)
         log_info(f"response.created: origin={origin}")
         response = event.get("response") or {}
         response_id = response.get("id")
@@ -9300,6 +9351,7 @@ class RealtimeAPI:
         _ = websocket
         if self._is_active_response_guarded():
             return
+        self._mark_utterance_info_summary(deliverable_seen=True)
         active_canonical_key = str(getattr(self, "_active_response_canonical_key", "") or "").strip()
         if active_canonical_key:
             lifecycle_state = self._canonical_lifecycle_state(active_canonical_key)
@@ -9373,7 +9425,10 @@ class RealtimeAPI:
     ) -> None:
         event_type = str(event.get("type") or "unknown")
         transcript = self._extract_transcript(event)
+        self._mark_utterance_info_summary(transcript_present=bool(transcript))
         self._log_user_transcript(transcript or "", final=True, event_type=event_type)
+        if not transcript:
+            self._emit_utterance_info_summary(anchor="transcript_completed_empty")
         input_event_key = self._resolve_input_event_key(event)
         resolved_turn_id = self._current_turn_id_or_unknown()
         with self._utterance_context_scope(
@@ -9517,6 +9572,21 @@ class RealtimeAPI:
                     },
                 )
 
+    async def _handle_input_audio_transcription_failed_event(
+        self,
+        event: dict[str, Any],
+        websocket: Any,
+    ) -> None:
+        _ = websocket
+        error_payload = event.get("error")
+        self._mark_utterance_info_summary(asr_error_present=True, transcript_present=False)
+        logger.info(
+            "input_audio_transcription_failed run_id=%s error=%s",
+            self._current_run_id() or "",
+            json.dumps(error_payload, sort_keys=True) if isinstance(error_payload, dict) else str(error_payload or "unknown"),
+        )
+        self._emit_utterance_info_summary(anchor="transcript_failed")
+
     async def _handle_event_legacy(self, event: dict[str, Any], websocket: Any) -> None:
         event_type = event.get("type")
         if event_type == "response.output_item.added":
@@ -9528,6 +9598,7 @@ class RealtimeAPI:
         elif event_type == "response.text.delta":
             if self._is_active_response_guarded():
                 return
+            self._mark_utterance_info_summary(deliverable_seen=True)
             self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
             delta = event.get("delta", "")
             self._mark_first_assistant_utterance_observed_if_needed(delta)
@@ -9537,6 +9608,7 @@ class RealtimeAPI:
         elif event_type == "response.output_text.delta":
             if self._is_active_response_guarded():
                 return
+            self._mark_utterance_info_summary(deliverable_seen=True)
             self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
             delta = event.get("delta", "")
             logger.debug(
@@ -9553,6 +9625,7 @@ class RealtimeAPI:
         elif event_type == "response.output_audio_transcript.delta":
             if self._is_active_response_guarded():
                 return
+            self._mark_utterance_info_summary(deliverable_seen=True)
             delta = event.get("delta", "")
             self._mark_first_assistant_utterance_observed_if_needed(delta)
             self.assistant_reply += delta
