@@ -3,8 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import sys
+import types
+
+if "audioop" not in sys.modules:
+    sys.modules["audioop"] = types.ModuleType("audioop")
+
+import pytest
 
 from ai.realtime.injections import InjectionCoordinator
+from ai.realtime_api import RealtimeAPI
 
 
 def _build_coordinator(
@@ -81,3 +89,43 @@ def test_release_is_idempotent() -> None:
     coordinator.release("first_turn_complete")
 
     assert flushed == ["e1"]
+
+
+@pytest.mark.parametrize("should_defer_return", [True, False])
+def test_maybe_defer_startup_injection_delegates_to_coordinator(
+    monkeypatch,
+    should_defer_return: bool,
+) -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    coordinator = _build_coordinator()
+    payload = {"type": "event", "message": "camera frame"}
+    calls: list[tuple[str, object, object]] = []
+
+    api._startup_injection_gate_active = lambda: True
+    api._startup_gate_is_critical_allowed = lambda source, kind, priority: False
+    api._startup_injection_coordinator = lambda: coordinator
+
+    def _fake_should_defer(self, injected_payload, source):
+        calls.append(("should_defer", source, injected_payload))
+        return should_defer_return
+
+    def _fake_enqueue(self, injected_payload):
+        calls.append(("enqueue", None, injected_payload))
+
+    monkeypatch.setattr(InjectionCoordinator, "should_defer", _fake_should_defer)
+    monkeypatch.setattr(InjectionCoordinator, "enqueue", _fake_enqueue)
+
+    deferred = api._maybe_defer_startup_injection(
+        source="camera",
+        kind="frame",
+        priority="normal",
+        payload=payload,
+    )
+
+    assert deferred is should_defer_return
+    assert calls[0] == ("should_defer", "camera", payload)
+    enqueue_calls = [call for call in calls if call[0] == "enqueue"]
+    if should_defer_return:
+        assert enqueue_calls == [("enqueue", None, payload)]
+    else:
+        assert enqueue_calls == []
