@@ -191,6 +191,8 @@ audio:
 # Injected response throttling
 injection_response_cooldown_s: 2.0
 max_injection_responses_per_minute: 12
+# Coalesce low-priority sensor response requests by source/severity before response.create.
+sensor_event_aggregation_window_s: 3.0
 
 # Battery monitoring and response behavior
 battery:

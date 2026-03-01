@@ -213,6 +213,19 @@ class PendingAction:
     max_retries: int = 2
 
 
+@dataclass
+class SensorAggregationWindow:
+    source: str
+    severity: str
+    trigger: str
+    first_seen_monotonic: float
+    last_seen_monotonic: float
+    total_events: int = 0
+    dropped_events: int = 0
+    payload_count: int = 0
+    latest_metadata: dict[str, Any] | None = None
+
+
 @dataclass(frozen=True)
 class NormalizedConfirmationDecision:
     status: str
@@ -582,6 +595,25 @@ class RealtimeAPI:
         self._injection_response_timestamps: deque[float] = deque()
         self._injection_response_triggers = config.get("injection_response_triggers") or {}
         self._injection_response_trigger_timestamps: dict[str, deque[float]] = {}
+        self._sensor_event_aggregation_window_s = min(
+            5.0,
+            max(0.0, float(config.get("sensor_event_aggregation_window_s", 3.0))),
+        )
+        self._sensor_event_aggregate_sources: set[str] = {
+            "battery",
+            "imu",
+            "camera",
+            "ops",
+            "health",
+        }
+        self._sensor_event_aggregation_windows: dict[str, SensorAggregationWindow] = {}
+        self._sensor_event_aggregation_tasks: dict[str, asyncio.Task[None]] = {}
+        self._sensor_event_aggregation_lock = asyncio.Lock()
+        self._sensor_event_aggregation_metrics: dict[str, int] = {
+            "dropped": 0,
+            "coalesced": 0,
+            "immediate": 0,
+        }
         battery_cfg = config.get("battery") or {}
         battery_response_cfg = battery_cfg.get("response") or {}
         self._battery_response_enabled = bool(battery_response_cfg.get("enabled", True))
@@ -1662,6 +1694,7 @@ class RealtimeAPI:
             "last_disconnect_reason": self._last_disconnect_reason or "",
             "last_failure_reason": self._last_failure_reason or "",
             "memory_retrieval": retrieval_metrics,
+            "sensor_event_aggregation": dict(self._sensor_event_aggregation_metrics),
         }
 
     def _note_connection_attempt(self) -> None:
@@ -1795,6 +1828,12 @@ class RealtimeAPI:
             request_response=request_response,
             bypass_response_suppression=bypass_response_suppression,
             safety_override=safety_override,
+            injection_metadata={
+                "source": event.source,
+                "kind": event.kind,
+                "priority": event.priority,
+                "severity": str((event.metadata or {}).get("severity") or "").strip().lower(),
+            },
         )
 
     def _log_injection_event(self, event: Event, request_response: bool) -> None:
@@ -1821,6 +1860,7 @@ class RealtimeAPI:
         *,
         bypass_response_suppression: bool = False,
         safety_override: bool = False,
+        injection_metadata: dict[str, Any] | None = None,
     ) -> None:
         if not self.loop:
             logger.debug("Unable to send message; event loop unavailable.")
@@ -1831,6 +1871,7 @@ class RealtimeAPI:
                 request_response=request_response,
                 bypass_response_suppression=bypass_response_suppression,
                 safety_override=safety_override,
+                injection_metadata=injection_metadata,
             ),
             self.loop,
         )
@@ -10256,6 +10297,7 @@ class RealtimeAPI:
         *,
         bypass_response_suppression: bool = False,
         safety_override: bool = False,
+        injection_metadata: dict[str, Any] | None = None,
     ) -> None:
         self._record_user_input(text_message, source="text_message")
         if await self._handle_stop_word(text_message, self.websocket, source="text_message"):
@@ -10296,17 +10338,107 @@ class RealtimeAPI:
         self._track_outgoing_event(text_event)
         await self.websocket.send(json.dumps(text_event))
         if request_response:
+            enqueue_metadata = {
+                "text_length": len(text_message),
+                "bypass_limits": bypass_response_suppression,
+                "safety_override": safety_override,
+            }
+            if injection_metadata:
+                enqueue_metadata["source"] = str(injection_metadata.get("source") or "").strip().lower()
+                enqueue_metadata["kind"] = str(injection_metadata.get("kind") or "").strip().lower()
+                enqueue_metadata["priority"] = str(injection_metadata.get("priority") or "").strip().lower()
+                enqueue_metadata["severity"] = str(injection_metadata.get("severity") or "").strip().lower()
             await self._stimuli_coordinator.enqueue(
                 trigger="text_message",
-                metadata={
-                    "text_length": len(text_message),
-                    "bypass_limits": bypass_response_suppression,
-                    "safety_override": safety_override,
-                },
+                metadata=enqueue_metadata,
                 priority=self._get_injection_priority("text_message"),
             )
 
+    def _is_critical_sensor_trigger(self, source: str, severity: str) -> bool:
+        normalized_source = str(source).strip().lower()
+        normalized_severity = str(severity).strip().lower()
+        return normalized_severity == "critical" and normalized_source in {"battery", "imu"}
+
+    def _sensor_aggregation_key(self, source: str, severity: str) -> str:
+        normalized_source = str(source).strip().lower() or "unknown"
+        normalized_severity = str(severity).strip().lower() or "unknown"
+        return f"{normalized_source}:{normalized_severity}"
+
+    async def _should_defer_sensor_response(self, trigger: str, metadata: dict[str, Any]) -> bool:
+        if trigger != "text_message":
+            self._sensor_event_aggregation_metrics["immediate"] += 1
+            return False
+
+        source = str(metadata.get("source") or "").strip().lower()
+        severity = str(metadata.get("severity") or "").strip().lower()
+        if source not in self._sensor_event_aggregate_sources:
+            self._sensor_event_aggregation_metrics["immediate"] += 1
+            return False
+        if self._is_critical_sensor_trigger(source, severity):
+            self._sensor_event_aggregation_metrics["immediate"] += 1
+            return False
+
+        if self._sensor_event_aggregation_window_s <= 0.0:
+            self._sensor_event_aggregation_metrics["immediate"] += 1
+            return False
+
+        aggregate_key = self._sensor_aggregation_key(source, severity)
+        now = time.monotonic()
+        async with self._sensor_event_aggregation_lock:
+            if metadata.get("sensor_aggregate_summary"):
+                return False
+            payload_count = int(metadata.get("event_count") or 1)
+            window = self._sensor_event_aggregation_windows.get(aggregate_key)
+            if window is None:
+                self._sensor_event_aggregation_windows[aggregate_key] = SensorAggregationWindow(
+                    source=source,
+                    severity=severity or "unknown",
+                    trigger=trigger,
+                    first_seen_monotonic=now,
+                    last_seen_monotonic=now,
+                    total_events=payload_count,
+                    dropped_events=0,
+                    payload_count=1,
+                    latest_metadata=dict(metadata),
+                )
+                task = self._sensor_event_aggregation_tasks.get(aggregate_key)
+                if task is None or task.done():
+                    self._sensor_event_aggregation_tasks[aggregate_key] = asyncio.create_task(
+                        self._flush_sensor_aggregation_window(aggregate_key)
+                    )
+            else:
+                window.last_seen_monotonic = now
+                window.total_events += payload_count
+                window.payload_count += 1
+                window.latest_metadata = dict(metadata)
+                window.dropped_events += payload_count
+                self._sensor_event_aggregation_metrics["dropped"] += payload_count
+            return True
+
+    async def _flush_sensor_aggregation_window(self, aggregate_key: str) -> None:
+        await asyncio.sleep(self._sensor_event_aggregation_window_s)
+        async with self._sensor_event_aggregation_lock:
+            window = self._sensor_event_aggregation_windows.pop(aggregate_key, None)
+            self._sensor_event_aggregation_tasks.pop(aggregate_key, None)
+        if window is None:
+            return
+        summary_metadata = {
+            "source": window.source,
+            "severity": window.severity,
+            "sensor_aggregate_summary": True,
+            "event_count": max(1, int(window.total_events)),
+            "dropped_events": max(0, int(window.dropped_events)),
+            "window_s": self._sensor_event_aggregation_window_s,
+            "bypass_limits": bool((window.latest_metadata or {}).get("bypass_limits", False)),
+            "safety_override": bool((window.latest_metadata or {}).get("safety_override", False)),
+        }
+        self._sensor_event_aggregation_metrics["coalesced"] += 1
+        await self.maybe_request_response(window.trigger, summary_metadata)
+
     async def maybe_request_response(self, trigger: str, metadata: dict[str, Any]) -> None:
+        if await self._should_defer_sensor_response(trigger, metadata):
+            return
+
         if not self.websocket:
             log_warning("Skipping injected response (%s): websocket unavailable.", trigger)
             return
@@ -10427,6 +10559,10 @@ class RealtimeAPI:
             "priority": str(trigger_priority),
             "stimulus": json.dumps(metadata, sort_keys=True),
             "origin": "injection",
+            "sensor_aggregation_metrics": json.dumps(
+                self._sensor_event_aggregation_metrics,
+                sort_keys=True,
+            ),
         }
         if bool(metadata.get("safety_override", False)):
             response_metadata["safety_override"] = "true"
