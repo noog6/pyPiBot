@@ -181,6 +181,41 @@ def test_preference_recall_response_sanitizes_memory_id_phrasing(monkeypatch) ->
     assert "id:" not in sent_messages[0].lower()
 
 
+def test_memory_recall_normalizer_compresses_repeated_reassurance_suffix() -> None:
+    api = _make_api_stub()
+
+    normalized = api._normalize_memory_recall_answer(
+        "\n".join(
+            [
+                'Relevant memory: "Your favorite editor is Vim."',
+                "If you want, I can remember that for next time.",
+                "Want me to save that memory?",
+            ]
+        )
+    )
+
+    assert normalized == "\n".join(
+        [
+            'Relevant memory: "Your favorite editor is Vim."',
+            "Want me to save or update that memory?",
+        ]
+    )
+
+
+def test_memory_recall_normalizer_leaves_single_followup_untouched() -> None:
+    api = _make_api_stub()
+
+    original = "\n".join(
+        [
+            "Relevant memory:",
+            '- "You prefer jasmine tea."',
+            "Want me to pin or rename this memory so it’s easier to recall later?",
+        ]
+    )
+
+    assert api._normalize_memory_recall_answer(original) == original
+
+
 def test_preference_recall_truthfulness_guard_for_checking_phrase(monkeypatch) -> None:
     api = _make_api_stub()
     sent_messages: list[str] = []

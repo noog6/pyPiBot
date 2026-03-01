@@ -165,6 +165,20 @@ _PREFERENCE_QUERY_CANONICAL_BY_DOMAIN = {
 }
 _PREFERENCE_QUERY_FALLBACK_CANONICAL = ("user preference", "favorite preference", "preferred setting")
 _PREFERENCE_TAG_FALLBACK_QUERIES = ("preference", "favorite", "preferred")
+_MEMORY_RECALL_ANSWER_MARKERS = (
+    "relevant memory",
+    "i found a saved preference",
+    "i don't have that saved yet",
+    "i don’t have that saved yet",
+    "what i remember",
+)
+_MEMORY_REASSURANCE_SUFFIX_PATTERNS = (
+    re.compile(r"^(?:if you want,?\s+)?i can remember .* next time\.?$", re.IGNORECASE),
+    re.compile(r"^(?:if you want,?\s+)?i can save .* memory\.?$", re.IGNORECASE),
+    re.compile(r"^want me to (?:save|remember|pin|rename|update) .*\?$", re.IGNORECASE),
+    re.compile(r"^would you like me to (?:save|remember|pin|rename|update) .*\?$", re.IGNORECASE),
+)
+_MEMORY_RECALL_CONCISE_FOLLOWUP = "Want me to save or update that memory?"
 _MICRO_ACK_CONFIRMATION_ALLOWLIST: frozenset[str] = frozenset(
     {
         "watchdog_confirmation_pending",
@@ -2293,6 +2307,39 @@ class RealtimeAPI:
                 cleaned_lines.append(line)
         return "\n".join(cleaned_lines)
 
+    def _is_memory_recall_answer_text(self, text: str) -> bool:
+        normalized = " ".join(str(text or "").strip().lower().split())
+        if not normalized:
+            return False
+        return any(marker in normalized for marker in _MEMORY_RECALL_ANSWER_MARKERS)
+
+    def _matches_memory_reassurance_suffix(self, line: str) -> bool:
+        normalized = " ".join(str(line or "").strip().split())
+        if not normalized:
+            return False
+        return any(pattern.match(normalized) for pattern in _MEMORY_REASSURANCE_SUFFIX_PATTERNS)
+
+    def _normalize_memory_recall_answer(self, text: str) -> str:
+        if not self._is_memory_recall_answer_text(text):
+            return text
+        raw_lines = [str(line).strip() for line in str(text or "").splitlines()]
+        lines = [line for line in raw_lines if line]
+        if len(lines) < 2:
+            return text
+        suffix_start = len(lines)
+        for index in range(len(lines) - 1, -1, -1):
+            if self._matches_memory_reassurance_suffix(lines[index]):
+                suffix_start = index
+                continue
+            break
+        if suffix_start >= len(lines):
+            return text
+        suffix_count = len(lines) - suffix_start
+        if suffix_count < 2:
+            return text
+        normalized_lines = lines[:suffix_start] + [_MEMORY_RECALL_CONCISE_FOLLOWUP]
+        return "\n".join(normalized_lines)
+
     def _memory_pin_followup_needed(
         self,
         *,
@@ -3566,8 +3613,9 @@ class RealtimeAPI:
             if self._memory_pin_followup_needed(cards=cards_list, memories=memories, query=query):
                 response_lines.append("Want me to pin or rename this memory so it’s easier to recall later?")
 
+            response_text = self._normalize_memory_recall_answer("\n".join(response_lines))
             await self.send_assistant_message(
-                "\n".join(response_lines),
+                response_text,
                 websocket,
                 response_metadata={
                     "turn_id": resolved_turn_id,
@@ -9899,6 +9947,7 @@ class RealtimeAPI:
             return
 
         if self.assistant_reply:
+            self.assistant_reply = self._normalize_memory_recall_answer(self.assistant_reply)
             log_info(f"Assistant Response: {self.assistant_reply}", style="bold blue")
             self.assistant_reply = ""
 
