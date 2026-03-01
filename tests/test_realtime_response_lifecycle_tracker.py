@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from unittest.mock import ANY, AsyncMock
 
 from ai.realtime.response_lifecycle import (
     EmptyResponseDecisionAction,
@@ -105,3 +107,46 @@ def test_terminal_cancelled_state_skips_retry_with_reason() -> None:
 
     assert decision.action == EmptyResponseDecisionAction.NOOP
     assert decision.reason_code == "delivery_state_terminal"
+
+
+def test_empty_response_retry_exhausted_emits_fallback_without_scheduling_retry(caplog) -> None:
+    api = _make_api()
+    caplog.set_level(logging.INFO)
+
+    origin_input_event_key = "input_evt_3"
+    retry_input_event_key = f"{origin_input_event_key}__empty_retry"
+    origin_canonical_key = api._canonical_utterance_key(
+        turn_id="turn_1",
+        input_event_key=origin_input_event_key,
+    )
+    retry_canonical_key = api._canonical_utterance_key(
+        turn_id="turn_1",
+        input_event_key=retry_input_event_key,
+    )
+
+    max_attempts = api._empty_response_retry_max_attempts
+    api._empty_response_retry_counts[origin_canonical_key] = max_attempts
+
+    api._emit_empty_response_retry_exhausted_fallback = AsyncMock()
+    api._send_response_create = AsyncMock()
+
+    asyncio.run(
+        api._maybe_schedule_empty_response_retry(
+            websocket=object(),
+            turn_id="turn_1",
+            canonical_key=retry_canonical_key,
+            input_event_key=retry_input_event_key,
+            origin="prompt",
+            delivery_state_before_done="done",
+        )
+    )
+
+    api._emit_empty_response_retry_exhausted_fallback.assert_awaited_once_with(
+        websocket=ANY,
+        turn_id="turn_1",
+        input_event_key=origin_input_event_key,
+        canonical_key=origin_canonical_key,
+        origin="prompt",
+    )
+    api._send_response_create.assert_not_awaited()
+    assert "empty_response_retry_skipped reason=max_retries_exhausted" in caplog.text
