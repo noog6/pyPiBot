@@ -943,6 +943,7 @@ class RealtimeAPI:
         )
         for event_type in {
             "response.output_item.added",
+            "conversation.item.added",
             "response.function_call_arguments.delta",
             "response.function_call_arguments.done",
             "response.text.delta",
@@ -9378,6 +9379,58 @@ class RealtimeAPI:
             self.state_manager.update_state(
                 InteractionState.IDLE,
                 "audio transcript done",
+            )
+        elif event_type == "conversation.item.added":
+            if self._is_active_response_guarded():
+                return
+            item = event.get("item", {})
+            if not isinstance(item, dict):
+                return
+            if item.get("type") != "message" or item.get("role") != "assistant":
+                return
+            content = item.get("content", [])
+            if not isinstance(content, list):
+                return
+            part_types: list[str] = []
+            extracted_parts: list[str] = []
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                part_type = str(part.get("type") or "")
+                part_types.append(part_type)
+
+                candidate_texts: list[str] = []
+                if part_type in {"output_text", "text"}:
+                    text_value = part.get("text")
+                    if isinstance(text_value, str) and text_value:
+                        candidate_texts.append(text_value)
+                transcript_value = part.get("transcript")
+                if isinstance(transcript_value, str) and transcript_value:
+                    candidate_texts.append(transcript_value)
+
+                for candidate in candidate_texts:
+                    if candidate:
+                        extracted_parts.append(candidate)
+
+            extracted_text = "".join(extracted_parts)
+            logger.debug(
+                "assistant_content_event_received event_type=conversation.item.added part_types=%s extracted_chars=%s",
+                ",".join(part_types),
+                len(extracted_text),
+            )
+            if not extracted_text:
+                return
+            self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
+            self._mark_first_assistant_utterance_observed_if_needed(extracted_text)
+            self.assistant_reply += extracted_text
+            self._assistant_reply_accum += extracted_text
+            self.state_manager.update_state(InteractionState.SPEAKING, "text output")
+            current_turn_id = self._current_turn_id_or_unknown()
+            current_input_event_key = str(getattr(self, "_current_input_event_key", "") or "").strip()
+            self._set_response_delivery_state(
+                turn_id=current_turn_id,
+                input_event_key=current_input_event_key,
+                state="delivered",
             )
         elif event_type == "response.completed":
             await self.handle_response_completed(event)
