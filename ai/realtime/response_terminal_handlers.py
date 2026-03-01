@@ -131,6 +131,10 @@ class ResponseTerminalHandlers:
             turn_id=turn_id,
             input_event_key=done_input_event_key,
         )
+        active_response_id = str(getattr(api, "_active_response_id", "") or "").strip()
+        active_response_origin = str(getattr(api, "_active_response_origin", "unknown") or "unknown").strip()
+        active_input_event_key = done_input_event_key
+        active_canonical_key = str(getattr(api, "_active_response_canonical_key", "") or "").strip()
         delivery_state_before_done = api._response_delivery_state(
             turn_id=turn_id,
             input_event_key=done_input_event_key,
@@ -221,6 +225,25 @@ class ResponseTerminalHandlers:
         resolved_canonical_key = api._canonical_utterance_key(
             turn_id=turn_id,
             input_event_key=done_input_event_key,
+        )
+        if active_response_id:
+            api._record_response_trace_context(
+                active_response_id,
+                turn_id=turn_id,
+                input_event_key=resolved_input_event_key,
+                canonical_key=resolved_canonical_key,
+                origin=active_response_origin,
+            )
+        api._emit_response_lifecycle_trace(
+            event_type="response.done",
+            response_id=active_response_id,
+            turn_id=turn_id,
+            input_event_key=resolved_input_event_key,
+            canonical_key=resolved_canonical_key,
+            origin=active_response_origin,
+            active_input_event_key=active_input_event_key,
+            active_canonical_key=active_canonical_key,
+            payload_summary=f"delivery_state_before_done={delivery_state_before_done}",
         )
         logger.debug(
             "[RESPTRACE] response_done_cleanup_after run_id=%s removed_suppressed_turn=%s "
