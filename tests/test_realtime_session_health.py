@@ -56,6 +56,8 @@ def _make_api_stub() -> RealtimeAPI:
     api._last_connect_time = 123.0
     api._last_disconnect_reason = None
     api._last_failure_reason = None
+    api._silent_turn_incident_count = 2
+    api._sensor_event_aggregation_metrics = {}
     return api
 
 
@@ -69,3 +71,11 @@ def test_get_session_health_passes_scope_and_active_session_to_memory_metrics() 
     assert health["memory_retrieval"]["retrieval_count"] == 3
     assert health["memory_retrieval"]["pending_count"] == 4
     assert health["memory_retrieval"]["oldest_pending_age_ms"] == 1250
+
+
+def test_get_session_health_includes_silent_turn_incident_counter() -> None:
+    api = _make_api_stub()
+
+    health = api.get_session_health()
+
+    assert health["silent_turn_incidents"] == 2

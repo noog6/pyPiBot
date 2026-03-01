@@ -411,6 +411,7 @@ class ConversationEfficiencyState:
     dropped_queued_creates: int = 0
     estimated_token_overhead: int = 0
     estimated_audio_overhead_ms: int = 0
+    silent_turn_incidents: int = 0
     substantive_count_by_canonical: dict[str, int] | None = None
     duplicate_alerted_canonical_keys: set[str] | None = None
 
@@ -949,6 +950,7 @@ class RealtimeAPI:
         self._micro_ack_manager = self._build_micro_ack_manager(realtime_cfg)
         self._conversation_efficiency_by_turn: dict[str, ConversationEfficiencyState] = {}
         self._conversation_efficiency_logged_turns: set[str] = set()
+        self._silent_turn_incident_count = 0
 
     @staticmethod
     def _load_micro_ack_channel_policy(realtime_cfg: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -1448,6 +1450,54 @@ class RealtimeAPI:
                     )
                 )
 
+    def _recent_silent_turn_lifecycle_markers(self, *, canonical_key: str) -> str:
+        normalized_canonical_key = str(canonical_key or "").strip()
+        if not normalized_canonical_key:
+            return ""
+        timeline_store = getattr(self, "_lifecycle_canonical_timeline", None)
+        timeline = timeline_store.get(normalized_canonical_key) if isinstance(timeline_store, dict) else None
+        if not isinstance(timeline, deque) or not timeline:
+            return ""
+        marker_entries: list[str] = []
+        decision_markers = (
+            ("response.created", "response_created_"),
+            ("audio_started", "audio_delta_"),
+            ("response.done", "transition_done:response_done"),
+        )
+        for marker_name, decision_prefix in decision_markers:
+            matched_entry = ""
+            for timeline_entry in reversed(timeline):
+                if f"decision={decision_prefix}" in timeline_entry:
+                    matched_entry = timeline_entry
+                    break
+            if matched_entry:
+                marker_entries.append(f"{marker_name}={matched_entry}")
+        return " ".join(marker_entries)
+
+    def _record_silent_turn_incident(
+        self,
+        *,
+        turn_id: str,
+        canonical_key: str,
+        origin: str,
+        response_id: str | None,
+    ) -> None:
+        state = self._conversation_efficiency_state(turn_id=turn_id)
+        state.silent_turn_incidents += 1
+        self._silent_turn_incident_count = int(getattr(self, "_silent_turn_incident_count", 0)) + 1
+        lifecycle_markers = self._recent_silent_turn_lifecycle_markers(canonical_key=canonical_key)
+        marker_suffix = f" lifecycle_markers={lifecycle_markers}" if lifecycle_markers else ""
+        logger.info(
+            "silent_turn_incident run_id=%s turn_id=%s canonical_key=%s origin=%s response_id=%s total_incidents=%s%s",
+            self._current_run_id() or "",
+            str(turn_id or "").strip() or "turn-unknown",
+            str(canonical_key or "").strip() or "canonical-unknown",
+            str(origin or "").strip() or "unknown",
+            str(response_id or "").strip() or "none",
+            self._silent_turn_incident_count,
+            marker_suffix,
+        )
+
     def _log_turn_conversation_efficiency(
         self,
         *,
@@ -1464,7 +1514,8 @@ class RealtimeAPI:
         self._conversation_efficiency_logged_turns.add(normalized_turn_id)
         logger.info(
             "conversation_efficiency run_id=%s turn_id=%s canonical_key=%s ack_count=%s substantive_count=%s "
-            "duplicate_prevented=%s estimated_token_overhead=%s estimated_audio_overhead_ms=%s dropped_queued_creates=%s close_reason=%s",
+            "duplicate_prevented=%s estimated_token_overhead=%s estimated_audio_overhead_ms=%s dropped_queued_creates=%s "
+            "silent_turn_incidents=%s silent_turn_incidents_total=%s close_reason=%s",
             self._current_run_id() or "",
             normalized_turn_id,
             str(canonical_key or "").strip() or "canonical-unknown",
@@ -1474,6 +1525,8 @@ class RealtimeAPI:
             state.estimated_token_overhead,
             state.estimated_audio_overhead_ms,
             state.dropped_queued_creates,
+            state.silent_turn_incidents,
+            int(getattr(self, "_silent_turn_incident_count", 0)),
             close_reason,
         )
 
@@ -1912,6 +1965,7 @@ class RealtimeAPI:
             "last_failure_reason": self._last_failure_reason or "",
             "memory_retrieval": retrieval_metrics,
             "sensor_event_aggregation": dict(self._sensor_event_aggregation_metrics),
+            "silent_turn_incidents": int(getattr(self, "_silent_turn_incident_count", 0)),
         }
 
     def _note_connection_attempt(self) -> None:
@@ -10499,6 +10553,13 @@ class RealtimeAPI:
                 "Skipping IDLE transition for response.done while still listening; deferring until speech stop."
             )
         logger.info("Received response.done event.")
+        if self._is_empty_response_done(canonical_key=done_canonical_key):
+            self._record_silent_turn_incident(
+                turn_id=turn_id,
+                canonical_key=done_canonical_key,
+                origin=active_response_origin_before_clear,
+                response_id=active_response_id_before_clear,
+            )
         await self._maybe_schedule_empty_response_retry(
             websocket=self.websocket,
             turn_id=turn_id,
