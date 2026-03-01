@@ -48,7 +48,7 @@ from ai.tools import function_map, tools
 from ai.realtime.event_router import EventRouter
 from ai.realtime.injections import InjectionCoordinator
 from ai.realtime.response_lifecycle import ResponseLifecycleTracker
-from ai.realtime.shutdown import ShutdownCoordinator, WebsocketCloser
+from ai.realtime.shutdown import ShutdownCoordinator
 from ai.realtime.transport import RealtimeTransport
 from ai.realtime.types import CanonicalResponseState, PendingResponseCreate, UtteranceContext
 from ai.interaction_lifecycle_controller import (
@@ -532,7 +532,9 @@ class RealtimeAPI:
         self.audio_player: AudioPlayer | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
         self.ready_event = threading.Event()
-        self._shutdown = ShutdownCoordinator()
+        self._shutdown = ShutdownCoordinator(
+            close_timeout_s=float(config.get("websocket_close_timeout_s", 5.0))
+        )
 
         self.assistant_reply = ""
         self._assistant_reply_accum = ""
@@ -559,7 +561,6 @@ class RealtimeAPI:
         self._last_rate_limit_present_buckets: set[str] = set()
         self.response_start_time: float | None = None
         self.websocket = None
-        self._ws_closer = WebsocketCloser(close_timeout_s=float(config.get("websocket_close_timeout_s", 5.0)))
         self.profile_manager = ProfileManager.get_instance()
         self._memory_manager = MemoryManager.get_instance()
         self.state_manager = InteractionStateManager()
@@ -988,18 +989,11 @@ class RealtimeAPI:
     def _shutdown_coordinator(self) -> ShutdownCoordinator:
         coordinator = getattr(self, "_shutdown", None)
         if not isinstance(coordinator, ShutdownCoordinator):
-            coordinator = ShutdownCoordinator()
-            self._shutdown = coordinator
-        return coordinator
-
-    def _websocket_closer(self) -> WebsocketCloser:
-        closer = getattr(self, "_ws_closer", None)
-        if not isinstance(closer, WebsocketCloser):
-            closer = WebsocketCloser(
+            coordinator = ShutdownCoordinator(
                 close_timeout_s=float(getattr(self, "_websocket_close_timeout_s", 5.0) or 5.0)
             )
-            self._ws_closer = closer
-        return closer
+            self._shutdown = coordinator
+        return coordinator
 
     def _startup_injection_coordinator(self) -> InjectionCoordinator:
         coordinator = getattr(self, "_startup_injections", None)
@@ -11226,19 +11220,24 @@ class RealtimeAPI:
             await self._close_websocket("audio loop exiting", websocket=websocket)
 
     def shutdown_handler(self) -> None:
-        if not self._shutdown_coordinator().begin_shutdown():
+        if not self._shutdown_coordinator().request_shutdown():
             return
 
         logger.info("Received shutdown signal. Initiating graceful shutdown...")
         if self.loop and self.loop.is_running():
             self.loop.call_soon_threadsafe(self._request_shutdown)
-            for task in asyncio.all_tasks(self.loop):
-                task.cancel()
 
     def _request_shutdown(self) -> None:
         self.exit_event.set()
+        coordinator = self._shutdown_coordinator()
+        close_task = None
         if self.websocket:
-            self.loop.create_task(self._close_websocket("signal"))
+            close_task = self.loop.create_task(self._close_websocket("signal"))
+        coordinator.cancel_tasks(
+            asyncio.all_tasks(self.loop),
+            exclude_current=True,
+            exclude_tasks=[close_task] if close_task else None,
+        )
 
     async def _close_websocket(
         self,
@@ -11247,7 +11246,7 @@ class RealtimeAPI:
         websocket: Any | None = None,
         timeout_s: float | None = None,
     ) -> None:
-        await self._websocket_closer().close(
+        await self._shutdown_coordinator().close_websocket(
             websocket or self.websocket,
             reason=reason,
             timeout_s=timeout_s,
