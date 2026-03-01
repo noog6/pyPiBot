@@ -53,6 +53,12 @@ def _make_api_stub() -> RealtimeAPI:
     api._max_injection_responses_per_minute = 0
     api._injection_response_trigger_timestamps = {}
     api._injection_response_timestamps = deque()
+    api._sensor_event_aggregation_window_s = 0.0
+    api._sensor_event_aggregate_sources = {"battery", "imu", "camera", "ops", "health"}
+    api._sensor_event_aggregation_windows = {}
+    api._sensor_event_aggregation_tasks = {}
+    api._sensor_event_aggregation_lock = asyncio.Lock()
+    api._sensor_event_aggregation_metrics = {"dropped": 0, "coalesced": 0, "immediate": 0}
     api.rate_limits = None
     api.response_in_progress = False
     api.state_manager = type("State", (), {"state": InteractionState.IDLE, "update_state": lambda *args, **kwargs: None})()
