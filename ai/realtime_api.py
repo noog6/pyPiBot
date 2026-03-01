@@ -934,24 +934,27 @@ class RealtimeAPI:
         self._configure_event_router()
 
     def _configure_event_router(self) -> None:
+        self._event_router.register("response.created", self._handle_response_created_event)
+        self._event_router.register("response.output_audio.delta", self._handle_response_output_audio_delta_event)
+        self._event_router.register("response.done", self._handle_response_done_event)
+        self._event_router.register(
+            "conversation.item.input_audio_transcription.completed",
+            self._handle_input_audio_transcription_completed_event,
+        )
         for event_type in {
-            "response.created",
             "response.output_item.added",
             "response.function_call_arguments.delta",
             "response.function_call_arguments.done",
             "response.text.delta",
-            "response.output_audio.delta",
             "response.output_audio.done",
             "response.output_audio_transcript.delta",
             "response.output_audio_transcript.done",
-            "response.done",
             "response.completed",
         }:
             self._event_router.register(event_type, self._handle_response_lifecycle_event)
         for event_type in {
             "conversation.item.input_audio_transcription.delta",
             "conversation.item.input_audio_transcription.partial",
-            "conversation.item.input_audio_transcription.completed",
             "input_audio_buffer.speech_started",
             "input_audio_buffer.speech_stopped",
             "input_audio_buffer.committed",
@@ -8581,6 +8584,12 @@ class RealtimeAPI:
 
     async def handle_event(self, event: dict[str, Any], websocket: Any) -> None:
         event_type = str(event.get("type") or "")
+        if not isinstance(getattr(self, "_event_router", None), EventRouter):
+            self._event_router = EventRouter(
+                fallback=self._handle_unknown_event,
+                on_exception=self._on_event_handler_exception,
+            )
+            self._configure_event_router()
         await self._maybe_handle_confirmation_decision_timeout(
             websocket,
             source_event=event_type or "unknown",
@@ -8600,375 +8609,597 @@ class RealtimeAPI:
             logger.error("EVENT_HANDLER_ERROR event=%s", event_type)
             await self._recover_from_event_handler_error(event_type, websocket)
 
-    async def _handle_event_legacy(self, event: dict[str, Any], websocket: Any) -> None:
-        event_type = event.get("type")
-        if event_type == "response.created":
-            origin = self._consume_response_origin(event)
-            log_info(f"response.created: origin={origin}")
-            response = event.get("response") or {}
-            response_id = response.get("id")
-            self._active_response_id = str(response_id) if response_id else None
-            self._active_response_origin = str(origin)
-            self._active_response_input_event_key = None
-            self._active_response_canonical_key = None
-            pending_confirmation_active = self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase()
-            self._active_response_preference_guarded = False
-            turn_id = self._current_turn_id_or_unknown()
-            self._cancel_micro_ack(turn_id=turn_id, reason="response_created")
-            if origin == "server_auto":
-                expected_input_event_key = self._active_input_event_key_for_turn(turn_id)
-                input_event_key = None
-                pending_server_auto_keys = getattr(self, "_pending_server_auto_input_event_keys", None)
-                if not isinstance(pending_server_auto_keys, deque):
-                    pending_server_auto_keys = deque(maxlen=64)
-                    self._pending_server_auto_input_event_keys = pending_server_auto_keys
-                while pending_server_auto_keys:
-                    queued_key = str(pending_server_auto_keys.popleft() or "").strip()
-                    if not queued_key:
-                        continue
-                    if expected_input_event_key and queued_key != expected_input_event_key:
-                        logger.info(
-                            "server_auto_response_mismatch_discard run_id=%s turn_id=%s active_key=%s response_key=%s",
-                            self._current_run_id() or "",
-                            turn_id,
-                            expected_input_event_key,
-                            queued_key,
-                        )
-                        continue
-                    input_event_key = queued_key
-                    break
-                if not input_event_key:
-                    current_input_event_key = str(getattr(self, "_current_input_event_key", "") or "").strip()
-                    if expected_input_event_key and current_input_event_key and current_input_event_key != expected_input_event_key:
-                        logger.info(
-                            "server_auto_response_mismatch_discard run_id=%s turn_id=%s active_key=%s response_key=%s",
-                            self._current_run_id() or "",
-                            turn_id,
-                            expected_input_event_key,
-                            current_input_event_key,
-                        )
-                    elif current_input_event_key:
-                        input_event_key = current_input_event_key
-                if expected_input_event_key and input_event_key and input_event_key != expected_input_event_key:
+    async def _handle_response_created_event(self, event: dict[str, Any], websocket: Any) -> None:
+        origin = self._consume_response_origin(event)
+        log_info(f"response.created: origin={origin}")
+        response = event.get("response") or {}
+        response_id = response.get("id")
+        self._active_response_id = str(response_id) if response_id else None
+        self._active_response_origin = str(origin)
+        self._active_response_input_event_key = None
+        self._active_response_canonical_key = None
+        pending_confirmation_active = self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase()
+        self._active_response_preference_guarded = False
+        turn_id = self._current_turn_id_or_unknown()
+        self._cancel_micro_ack(turn_id=turn_id, reason="response_created")
+        if origin == "server_auto":
+            expected_input_event_key = self._active_input_event_key_for_turn(turn_id)
+            input_event_key = None
+            pending_server_auto_keys = getattr(self, "_pending_server_auto_input_event_keys", None)
+            if not isinstance(pending_server_auto_keys, deque):
+                pending_server_auto_keys = deque(maxlen=64)
+                self._pending_server_auto_input_event_keys = pending_server_auto_keys
+            while pending_server_auto_keys:
+                queued_key = str(pending_server_auto_keys.popleft() or "").strip()
+                if not queued_key:
+                    continue
+                if expected_input_event_key and queued_key != expected_input_event_key:
                     logger.info(
                         "server_auto_response_mismatch_discard run_id=%s turn_id=%s active_key=%s response_key=%s",
                         self._current_run_id() or "",
                         turn_id,
                         expected_input_event_key,
-                        input_event_key,
+                        queued_key,
                     )
-                    input_event_key = ""
-                if not input_event_key and expected_input_event_key:
+                    continue
+                input_event_key = queued_key
+                break
+            if not input_event_key:
+                current_input_event_key = str(getattr(self, "_current_input_event_key", "") or "").strip()
+                if expected_input_event_key and current_input_event_key and current_input_event_key != expected_input_event_key:
                     logger.info(
-                        "server_auto_response_stale_ignored run_id=%s turn_id=%s active_key=%s response_id=%s",
+                        "server_auto_response_mismatch_discard run_id=%s turn_id=%s active_key=%s response_key=%s",
                         self._current_run_id() or "",
                         turn_id,
                         expected_input_event_key,
-                        self._active_response_id or "unknown",
+                        current_input_event_key,
                     )
-                    cancel_event = {"type": "response.cancel"}
-                    log_ws_event("Outgoing", cancel_event)
-                    self._track_outgoing_event(cancel_event, origin="server_auto_binding_guard")
-                    self._lifecycle_controller().on_cancel_sent(
-                        self._canonical_utterance_key(turn_id=turn_id, input_event_key=expected_input_event_key)
-                    )
-                    transport = self._get_or_create_transport()
-                    await transport.send_json(websocket, cancel_event)
-                    return
-                if not input_event_key:
-                    input_event_key = self._next_synthetic_input_event_key("server_auto")
-                self._active_server_auto_input_event_key = input_event_key
-                self._log_response_binding_event(
-                    response_key=input_event_key,
-                    turn_id=turn_id,
-                    origin=origin,
+                elif current_input_event_key:
+                    input_event_key = current_input_event_key
+            if expected_input_event_key and input_event_key and input_event_key != expected_input_event_key:
+                logger.info(
+                    "server_auto_response_mismatch_discard run_id=%s turn_id=%s active_key=%s response_key=%s",
+                    self._current_run_id() or "",
+                    turn_id,
+                    expected_input_event_key,
+                    input_event_key,
                 )
-                if input_event_key:
-                    self._mark_transcript_response_outcome(
-                        input_event_key=input_event_key,
-                        turn_id=turn_id,
-                        outcome="response_created",
-                    )
-                canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
-                resolved_input_event_key = input_event_key
-                self._log_response_site_debug(
-                    site="server_auto_response_linked",
-                    turn_id=turn_id,
+                input_event_key = ""
+            if not input_event_key and expected_input_event_key:
+                logger.info(
+                    "server_auto_response_stale_ignored run_id=%s turn_id=%s active_key=%s response_id=%s",
+                    self._current_run_id() or "",
+                    turn_id,
+                    expected_input_event_key,
+                    self._active_response_id or "unknown",
+                )
+                cancel_event = {"type": "response.cancel"}
+                log_ws_event("Outgoing", cancel_event)
+                self._track_outgoing_event(cancel_event, origin="server_auto_binding_guard")
+                self._lifecycle_controller().on_cancel_sent(
+                    self._canonical_utterance_key(turn_id=turn_id, input_event_key=expected_input_event_key)
+                )
+                transport = self._get_or_create_transport()
+                await transport.send_json(websocket, cancel_event)
+                return
+            if not input_event_key:
+                input_event_key = self._next_synthetic_input_event_key("server_auto")
+            self._active_server_auto_input_event_key = input_event_key
+            self._log_response_binding_event(
+                response_key=input_event_key,
+                turn_id=turn_id,
+                origin=origin,
+            )
+            if input_event_key:
+                self._mark_transcript_response_outcome(
                     input_event_key=input_event_key,
-                    canonical_key=canonical_key,
-                    origin=origin,
-                    trigger="response_created",
-                )
-                if not input_event_key:
-                    logger.info(
-                        "memory_intent_decision_path run_id=%s turn_id=%s decision_path=speculative_server_auto",
-                        self._current_run_id() or "",
-                        turn_id,
-                    )
-            else:
-                current_input_event_key = str(getattr(self, "_current_input_event_key", "") or "").strip()
-                if not current_input_event_key:
-                    current_input_event_key = self._next_synthetic_input_event_key(origin)
-                self._log_response_binding_event(
-                    response_key=current_input_event_key,
                     turn_id=turn_id,
-                    origin=origin,
+                    outcome="response_created",
                 )
-                if current_input_event_key:
-                    self._mark_transcript_response_outcome(
-                        input_event_key=current_input_event_key,
-                        turn_id=turn_id,
-                        outcome="response_created",
-                    )
-                self._active_server_auto_input_event_key = None
-                canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=current_input_event_key)
-                resolved_input_event_key = current_input_event_key
-            with self._utterance_context_scope(
+            canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+            resolved_input_event_key = input_event_key
+            self._log_response_site_debug(
+                site="server_auto_response_linked",
                 turn_id=turn_id,
-                input_event_key=resolved_input_event_key,
-            ) as utterance_context:
-                turn_id = utterance_context.turn_id
-                resolved_input_event_key = utterance_context.input_event_key
-                canonical_key = utterance_context.canonical_key
-            if origin != "server_auto":
-                current_input_event_key = resolved_input_event_key
-            arbitration_outcome, arbitration_reason_code = self._arbitrate_server_auto_response_created(
-                turn_id=turn_id,
-                input_event_key=resolved_input_event_key,
+                input_event_key=input_event_key,
                 canonical_key=canonical_key,
                 origin=origin,
+                trigger="response_created",
             )
-            if origin == "server_auto":
+            if not input_event_key:
                 logger.info(
-                    "server_auto_arbitration outcome=%s reason=%s canonical_key=%s",
-                    arbitration_outcome.value,
-                    arbitration_reason_code,
-                    canonical_key,
+                    "memory_intent_decision_path run_id=%s turn_id=%s decision_path=speculative_server_auto",
+                    self._current_run_id() or "",
+                    turn_id,
                 )
-            created_keys_size_before = len(getattr(self, "_response_created_canonical_keys", set()) or ())
-            consumes_canonical_slot = bool(getattr(self, "_active_response_consumes_canonical_slot", True))
-            if consumes_canonical_slot:
-                self._canonical_response_state_mutate(
-                    canonical_key=canonical_key,
-                    turn_id=turn_id,
-                    input_event_key=resolved_input_event_key,
-                    mutator=lambda record: (
-                        setattr(record, "created", True),
-                        setattr(record, "origin", origin),
-                    ),
-                )
-            created_keys_size_after = len(getattr(self, "_response_created_canonical_keys", set()) or ())
-            if consumes_canonical_slot:
-                self._record_substantive_response(
-                    turn_id=turn_id,
-                    canonical_key=canonical_key,
-                )
-            logger.debug(
-                "[RESPTRACE] response_created run_id=%s turn_id=%s origin=%s response_id=%s resolved_input_event_key=%s "
-                "canonical_key=%s consumes_canonical_slot=%s created_keys_size_before=%s created_keys_size_after=%s "
-                "active_key_for_turn=%s",
-                self._current_run_id() or "",
-                turn_id,
-                origin,
-                self._active_response_id or "unknown",
-                str(resolved_input_event_key or "").strip() or "unknown",
-                canonical_key,
-                consumes_canonical_slot,
-                created_keys_size_before,
-                created_keys_size_after,
-                self._active_input_event_key_for_turn(turn_id) or "unknown",
-            )
-            lifecycle_canonical_key = canonical_key
-            if not consumes_canonical_slot:
-                lifecycle_canonical_key = f"{canonical_key}:non_consuming:{self._active_response_id or 'unknown'}"
-            lifecycle_state = self._canonical_lifecycle_state(lifecycle_canonical_key)
-            lifecycle_state["server_auto_arbitration"] = arbitration_outcome.value
-            lifecycle_created_decision = self._lifecycle_controller().on_response_created(
-                lifecycle_canonical_key,
+        else:
+            current_input_event_key = str(getattr(self, "_current_input_event_key", "") or "").strip()
+            if not current_input_event_key:
+                current_input_event_key = self._next_synthetic_input_event_key(origin)
+            self._log_response_binding_event(
+                response_key=current_input_event_key,
+                turn_id=turn_id,
                 origin=origin,
             )
+            if current_input_event_key:
+                self._mark_transcript_response_outcome(
+                    input_event_key=current_input_event_key,
+                    turn_id=turn_id,
+                    outcome="response_created",
+                )
+            self._active_server_auto_input_event_key = None
+            canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=current_input_event_key)
+            resolved_input_event_key = current_input_event_key
+        with self._utterance_context_scope(
+            turn_id=turn_id,
+            input_event_key=resolved_input_event_key,
+        ) as utterance_context:
+            turn_id = utterance_context.turn_id
+            resolved_input_event_key = utterance_context.input_event_key
+            canonical_key = utterance_context.canonical_key
+        if origin != "server_auto":
+            current_input_event_key = resolved_input_event_key
+        arbitration_outcome, arbitration_reason_code = self._arbitrate_server_auto_response_created(
+            turn_id=turn_id,
+            input_event_key=resolved_input_event_key,
+            canonical_key=canonical_key,
+            origin=origin,
+        )
+        if origin == "server_auto":
+            logger.info(
+                "server_auto_arbitration outcome=%s reason=%s canonical_key=%s",
+                arbitration_outcome.value,
+                arbitration_reason_code,
+                canonical_key,
+            )
+        created_keys_size_before = len(getattr(self, "_response_created_canonical_keys", set()) or ())
+        consumes_canonical_slot = bool(getattr(self, "_active_response_consumes_canonical_slot", True))
+        if consumes_canonical_slot:
+            self._canonical_response_state_mutate(
+                canonical_key=canonical_key,
+                turn_id=turn_id,
+                input_event_key=resolved_input_event_key,
+                mutator=lambda record: (
+                    setattr(record, "created", True),
+                    setattr(record, "origin", origin),
+                ),
+            )
+        created_keys_size_after = len(getattr(self, "_response_created_canonical_keys", set()) or ())
+        if consumes_canonical_slot:
+            self._record_substantive_response(
+                turn_id=turn_id,
+                canonical_key=canonical_key,
+            )
+        logger.debug(
+            "[RESPTRACE] response_created run_id=%s turn_id=%s origin=%s response_id=%s resolved_input_event_key=%s "
+            "canonical_key=%s consumes_canonical_slot=%s created_keys_size_before=%s created_keys_size_after=%s "
+            "active_key_for_turn=%s",
+            self._current_run_id() or "",
+            turn_id,
+            origin,
+            self._active_response_id or "unknown",
+            str(resolved_input_event_key or "").strip() or "unknown",
+            canonical_key,
+            consumes_canonical_slot,
+            created_keys_size_before,
+            created_keys_size_after,
+            self._active_input_event_key_for_turn(turn_id) or "unknown",
+        )
+        lifecycle_canonical_key = canonical_key
+        if not consumes_canonical_slot:
+            lifecycle_canonical_key = f"{canonical_key}:non_consuming:{self._active_response_id or 'unknown'}"
+        lifecycle_state = self._canonical_lifecycle_state(lifecycle_canonical_key)
+        lifecycle_state["server_auto_arbitration"] = arbitration_outcome.value
+        lifecycle_created_decision = self._lifecycle_controller().on_response_created(
+            lifecycle_canonical_key,
+            origin=origin,
+        )
+        self._log_lifecycle_event(
+            turn_id=turn_id,
+            input_event_key=resolved_input_event_key,
+            canonical_key=lifecycle_canonical_key,
+            origin=origin,
+            response_id=self._active_response_id,
+            decision=f"response_created_{lifecycle_created_decision.action.value}:{lifecycle_created_decision.reason}",
+        )
+        if lifecycle_created_decision.action is LifecycleDecisionAction.CANCEL:
+            self._debug_dump_canonical_key_timeline(
+                canonical_key=lifecycle_canonical_key,
+                trigger="response_created_cancelled",
+            )
+            cancel_event = {"type": "response.cancel"}
+            log_ws_event("Outgoing", cancel_event)
+            self._track_outgoing_event(cancel_event, origin="interaction_lifecycle_controller")
+            self._lifecycle_controller().on_cancel_sent(lifecycle_canonical_key)
             self._log_lifecycle_event(
                 turn_id=turn_id,
                 input_event_key=resolved_input_event_key,
                 canonical_key=lifecycle_canonical_key,
                 origin=origin,
                 response_id=self._active_response_id,
-                decision=f"response_created_{lifecycle_created_decision.action.value}:{lifecycle_created_decision.reason}",
+                decision="transition_cancel_sent:interaction_lifecycle_controller",
             )
-            if lifecycle_created_decision.action is LifecycleDecisionAction.CANCEL:
-                self._debug_dump_canonical_key_timeline(
-                    canonical_key=lifecycle_canonical_key,
-                    trigger="response_created_cancelled",
-                )
-                cancel_event = {"type": "response.cancel"}
-                log_ws_event("Outgoing", cancel_event)
-                self._track_outgoing_event(cancel_event, origin="interaction_lifecycle_controller")
-                self._lifecycle_controller().on_cancel_sent(lifecycle_canonical_key)
-                self._log_lifecycle_event(
-                    turn_id=turn_id,
-                    input_event_key=resolved_input_event_key,
-                    canonical_key=lifecycle_canonical_key,
-                    origin=origin,
-                    response_id=self._active_response_id,
-                    decision="transition_cancel_sent:interaction_lifecycle_controller",
-                )
-                if websocket is not None:
-                    transport = self._get_or_create_transport()
-                    await transport.send_json(websocket, cancel_event)
-                return
-            self._active_response_input_event_key = str(resolved_input_event_key or "").strip() or None
-            self._active_response_canonical_key = lifecycle_canonical_key
+            if websocket is not None:
+                transport = self._get_or_create_transport()
+                await transport.send_json(websocket, cancel_event)
+            return
+        self._active_response_input_event_key = str(resolved_input_event_key or "").strip() or None
+        self._active_response_canonical_key = lifecycle_canonical_key
+        if consumes_canonical_slot:
+            self._canonical_lifecycle_state(canonical_key).setdefault("first_audio_started", False)
+            self._set_response_delivery_state(
+                turn_id=turn_id,
+                input_event_key=resolved_input_event_key,
+                state="created",
+            )
+            self._canonical_response_state_mutate(
+                canonical_key=canonical_key,
+                turn_id=turn_id,
+                input_event_key=resolved_input_event_key,
+                mutator=lambda record: (
+                    setattr(record, "response_id", str(self._active_response_id or "")),
+                    setattr(record, "origin", origin),
+                ),
+            )
+        active_input_event_key = str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip()
+        obligation_input_event_key = active_input_event_key if origin == "server_auto" else current_input_event_key
+        if arbitration_outcome is ServerAutoArbitrationOutcome.CANCEL_PRE_AUDIO:
+            replacement_reason = arbitration_reason_code
+            self._active_response_preference_guarded = True
             if consumes_canonical_slot:
-                self._canonical_lifecycle_state(canonical_key).setdefault("first_audio_started", False)
-                self._set_response_delivery_state(
-                    turn_id=turn_id,
-                    input_event_key=resolved_input_event_key,
-                    state="created",
-                )
                 self._canonical_response_state_mutate(
                     canonical_key=canonical_key,
                     turn_id=turn_id,
                     input_event_key=resolved_input_event_key,
-                    mutator=lambda record: (
-                        setattr(record, "response_id", str(self._active_response_id or "")),
-                        setattr(record, "origin", origin),
-                    ),
+                    mutator=lambda record: setattr(record, "created", False),
                 )
-            active_input_event_key = str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip()
-            obligation_input_event_key = active_input_event_key if origin == "server_auto" else current_input_event_key
-            if arbitration_outcome is ServerAutoArbitrationOutcome.CANCEL_PRE_AUDIO:
-                replacement_reason = arbitration_reason_code
-                self._active_response_preference_guarded = True
-                if consumes_canonical_slot:
-                    self._canonical_response_state_mutate(
-                        canonical_key=canonical_key,
-                        turn_id=turn_id,
-                        input_event_key=resolved_input_event_key,
-                        mutator=lambda record: setattr(record, "created", False),
-                    )
-                    lifecycle_state["cancel_requested_pre_audio"] = True
-                self._mark_transcript_response_outcome(
-                    input_event_key=active_input_event_key,
-                    turn_id=turn_id,
-                    outcome="response_not_scheduled",
-                    reason=replacement_reason,
-                    details="guarded server_auto response cancelled",
-                )
-                self._set_response_delivery_state(
-                    turn_id=turn_id,
-                    input_event_key=active_input_event_key,
-                    state="cancelled",
-                )
-                logger.info(
-                    "PREFERENCE_RECALL_RESPONSE_GUARDED origin=%s response_id=%s",
+                lifecycle_state["cancel_requested_pre_audio"] = True
+            self._mark_transcript_response_outcome(
+                input_event_key=active_input_event_key,
+                turn_id=turn_id,
+                outcome="response_not_scheduled",
+                reason=replacement_reason,
+                details="guarded server_auto response cancelled",
+            )
+            self._set_response_delivery_state(
+                turn_id=turn_id,
+                input_event_key=active_input_event_key,
+                state="cancelled",
+            )
+            logger.info(
+                "PREFERENCE_RECALL_RESPONSE_GUARDED origin=%s response_id=%s",
+                origin,
+                self._active_response_id or "unknown",
+            )
+            self._log_response_site_debug(
+                site="PREFERENCE_RECALL_RESPONSE_GUARDED",
+                turn_id=turn_id,
+                input_event_key=active_input_event_key,
+                canonical_key=canonical_key,
+                origin=origin,
+                trigger=replacement_reason,
+            )
+            logger.info(
+                "server_auto_guard_pre_audio_cancel response_id=%s canonical_key=%s",
+                self._active_response_id or "unknown",
+                canonical_key,
+            )
+            cancel_event = {"type": "response.cancel"}
+            log_ws_event("Outgoing", cancel_event)
+            self._track_outgoing_event(cancel_event, origin="preference_recall_guard")
+            self._lifecycle_controller().on_cancel_sent(canonical_key)
+            self._log_lifecycle_event(
+                turn_id=turn_id,
+                input_event_key=active_input_event_key,
+                canonical_key=canonical_key,
+                origin=origin,
+                response_id=self._active_response_id,
+                decision=f"guard_cancel_sent:{replacement_reason}",
+            )
+            transport = self._get_or_create_transport()
+            await transport.send_json(websocket, cancel_event)
+        elif arbitration_outcome is ServerAutoArbitrationOutcome.DEFER:
+            self._active_response_preference_guarded = True
+            logger.info(
+                "server_auto_guard_pre_audio_defer response_id=%s canonical_key=%s",
+                self._active_response_id or "unknown",
+                canonical_key,
+            )
+            cancel_event = {"type": "response.cancel"}
+            log_ws_event("Outgoing", cancel_event)
+            self._track_outgoing_event(cancel_event, origin="server_auto_arbitration_defer")
+            self._lifecycle_controller().on_cancel_sent(canonical_key)
+            transport = self._get_or_create_transport()
+            await transport.send_json(websocket, cancel_event)
+            return
+        else:
+            if consumes_canonical_slot:
+                logger.debug(
+                    "[RESPTRACE] response_created_clear_obligation run_id=%s turn_id=%s origin=%s "
+                    "obligation_input_event_key=%s canonical_key=%s",
+                    self._current_run_id() or "",
+                    turn_id,
                     origin,
-                    self._active_response_id or "unknown",
-                )
-                self._log_response_site_debug(
-                    site="PREFERENCE_RECALL_RESPONSE_GUARDED",
-                    turn_id=turn_id,
-                    input_event_key=active_input_event_key,
-                    canonical_key=canonical_key,
-                    origin=origin,
-                    trigger=replacement_reason,
-                )
-                logger.info(
-                    "server_auto_guard_pre_audio_cancel response_id=%s canonical_key=%s",
-                    self._active_response_id or "unknown",
+                    str(obligation_input_event_key or "").strip() or "unknown",
                     canonical_key,
                 )
-                cancel_event = {"type": "response.cancel"}
-                log_ws_event("Outgoing", cancel_event)
-                self._track_outgoing_event(cancel_event, origin="preference_recall_guard")
-                self._lifecycle_controller().on_cancel_sent(canonical_key)
-                self._log_lifecycle_event(
+                self._clear_response_obligation(
                     turn_id=turn_id,
-                    input_event_key=active_input_event_key,
-                    canonical_key=canonical_key,
+                    input_event_key=obligation_input_event_key,
+                    reason="response_created",
                     origin=origin,
-                    response_id=self._active_response_id,
-                    decision=f"guard_cancel_sent:{replacement_reason}",
                 )
-                transport = self._get_or_create_transport()
-                await transport.send_json(websocket, cancel_event)
-            elif arbitration_outcome is ServerAutoArbitrationOutcome.DEFER:
-                self._active_response_preference_guarded = True
+            if origin == "server_auto":
+                self._clear_stale_pending_server_auto_for_turn(
+                    turn_id=turn_id,
+                    active_input_event_key=active_input_event_key,
+                    reason="response_created_for_active_input",
+                )
+        if pending_confirmation_active:
+            log_info(f"response.created consumed by confirmation flow; origin={origin}")
+            self._active_response_confirmation_guarded = self._should_guard_confirmation_response(
+                origin,
+                response,
+            )
+            if self._active_response_confirmation_guarded:
+                self._mark_confirmation_activity(reason="guarded_response_created")
                 logger.info(
-                    "server_auto_guard_pre_audio_defer response_id=%s canonical_key=%s",
+                    "CONFIRMATION_NON_DECISION_RESPONSE_GUARDED origin=%s response_id=%s",
+                    self._active_response_origin,
                     self._active_response_id or "unknown",
-                    canonical_key,
                 )
-                cancel_event = {"type": "response.cancel"}
-                log_ws_event("Outgoing", cancel_event)
-                self._track_outgoing_event(cancel_event, origin="server_auto_arbitration_defer")
-                self._lifecycle_controller().on_cancel_sent(canonical_key)
-                transport = self._get_or_create_transport()
-                await transport.send_json(websocket, cancel_event)
+        else:
+            self._active_response_confirmation_guarded = False
+            self.orchestration_state.transition(
+                OrchestrationPhase.PLAN,
+                reason="response created",
+            )
+        if self.audio_player:
+            self.audio_player.start_response()
+        self._audio_accum.clear()
+        self._mic_receive_on_first_audio = True
+        self.response_in_progress = True
+        self._response_in_flight = True
+        self._speaking_started = False
+        self._assistant_reply_accum = ""
+        self._tool_call_records = []
+        self._last_tool_call_results = []
+        self._last_response_metadata = {}
+        self._reflection_enqueued = False
+        if (
+            self.state_manager.state != InteractionState.LISTENING
+            or self._is_user_approved_interrupt_response(response)
+        ):
+            self.state_manager.update_state(InteractionState.THINKING, "response created")
+        else:
+            logger.info(
+                "Skipping THINKING transition for response.created while still listening."
+            )
+
+    async def _handle_response_output_audio_delta_event(self, event: dict[str, Any], websocket: Any) -> None:
+        _ = websocket
+        if self._is_active_response_guarded():
+            return
+        active_canonical_key = str(getattr(self, "_active_response_canonical_key", "") or "").strip()
+        if active_canonical_key:
+            lifecycle_state = self._canonical_lifecycle_state(active_canonical_key)
+            if lifecycle_state.get("cancel_requested_pre_audio", False):
                 return
-            else:
-                if consumes_canonical_slot:
-                    logger.debug(
-                        "[RESPTRACE] response_created_clear_obligation run_id=%s turn_id=%s origin=%s "
-                        "obligation_input_event_key=%s canonical_key=%s",
-                        self._current_run_id() or "",
-                        turn_id,
-                        origin,
-                        str(obligation_input_event_key or "").strip() or "unknown",
-                        canonical_key,
-                    )
-                    self._clear_response_obligation(
-                        turn_id=turn_id,
-                        input_event_key=obligation_input_event_key,
-                        reason="response_created",
-                        origin=origin,
-                    )
-                if origin == "server_auto":
-                    self._clear_stale_pending_server_auto_for_turn(
-                        turn_id=turn_id,
-                        active_input_event_key=active_input_event_key,
-                        reason="response_created_for_active_input",
-                    )
-            if pending_confirmation_active:
-                log_info(f"response.created consumed by confirmation flow; origin={origin}")
-                self._active_response_confirmation_guarded = self._should_guard_confirmation_response(
-                    origin,
-                    response,
+            arbitration_state = str(
+                lifecycle_state.get(
+                    "server_auto_arbitration",
+                    ServerAutoArbitrationOutcome.ALLOW.value,
                 )
-                if self._active_response_confirmation_guarded:
-                    self._mark_confirmation_activity(reason="guarded_response_created")
-                    logger.info(
-                        "CONFIRMATION_NON_DECISION_RESPONSE_GUARDED origin=%s response_id=%s",
-                        self._active_response_origin,
-                        self._active_response_id or "unknown",
-                    )
-            else:
-                self._active_response_confirmation_guarded = False
-                self.orchestration_state.transition(
-                    OrchestrationPhase.PLAN,
-                    reason="response created",
+                or ""
+            ).strip().lower()
+            if arbitration_state and arbitration_state != ServerAutoArbitrationOutcome.ALLOW.value:
+                return
+        if active_canonical_key:
+            audio_decision = self._lifecycle_controller().on_audio_delta(active_canonical_key)
+            self._log_lifecycle_event(
+                turn_id=self._current_turn_id_or_unknown(),
+                input_event_key=getattr(self, "_active_response_input_event_key", None),
+                canonical_key=active_canonical_key,
+                origin=getattr(self, "_active_response_origin", "unknown"),
+                response_id=getattr(self, "_active_response_id", None),
+                decision=f"audio_delta_{audio_decision.action.value}:{audio_decision.reason}",
+            )
+            if audio_decision.action is LifecycleDecisionAction.CANCEL:
+                self._debug_dump_canonical_key_timeline(
+                    canonical_key=active_canonical_key,
+                    trigger="audio_delta_cancelled",
                 )
+                return
+        self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
+        if active_canonical_key:
+            self._canonical_lifecycle_state(active_canonical_key)["first_audio_started"] = True
+            self._canonical_response_state_mutate(
+                canonical_key=active_canonical_key,
+                turn_id=self._current_turn_id_or_unknown(),
+                input_event_key=getattr(self, "_active_response_input_event_key", None),
+                mutator=lambda record: (
+                    setattr(record, "created", True),
+                    setattr(record, "audio_started", True),
+                    setattr(record, "origin", str(getattr(self, "_active_response_origin", "unknown") or "unknown")),
+                    setattr(record, "response_id", str(getattr(self, "_active_response_id", "") or "")),
+                ),
+            )
+        self._audio_playback_busy = True
+        audio_data = base64.b64decode(event["delta"])
+        self._audio_accum.extend(audio_data)
+
+        if self._mic_receive_on_first_audio and not self.mic.is_receiving:
+            self._mic_receive_on_first_audio = False
+            log_info("Starting mic receiving on first audio delta.")
+            self.mic.start_receiving()
+
+        if not self._speaking_started:
+            self._speaking_started = True
+            self.state_manager.update_state(InteractionState.SPEAKING, "audio output")
+
+        if len(self._audio_accum) >= self._audio_accum_bytes_target:
             if self.audio_player:
-                self.audio_player.start_response()
+                self.audio_player.play_audio(bytes(self._audio_accum))
             self._audio_accum.clear()
-            self._mic_receive_on_first_audio = True
-            self.response_in_progress = True
-            self._response_in_flight = True
-            self._speaking_started = False
-            self._assistant_reply_accum = ""
-            self._tool_call_records = []
-            self._last_tool_call_results = []
-            self._last_response_metadata = {}
-            self._reflection_enqueued = False
-            if (
-                self.state_manager.state != InteractionState.LISTENING
-                or self._is_user_approved_interrupt_response(response)
-            ):
-                self.state_manager.update_state(InteractionState.THINKING, "response created")
-            else:
+
+    async def _handle_response_done_event(self, event: dict[str, Any], websocket: Any) -> None:
+        _ = websocket
+        await self.handle_response_done(event)
+
+    async def _handle_input_audio_transcription_completed_event(
+        self,
+        event: dict[str, Any],
+        websocket: Any,
+    ) -> None:
+        event_type = str(event.get("type") or "unknown")
+        transcript = self._extract_transcript(event)
+        self._log_user_transcript(transcript or "", final=True, event_type=event_type)
+        input_event_key = self._resolve_input_event_key(event)
+        resolved_turn_id = self._current_turn_id_or_unknown()
+        with self._utterance_context_scope(
+            turn_id=resolved_turn_id,
+            input_event_key=input_event_key,
+        ) as utterance_context:
+            resolved_turn_id = utterance_context.turn_id
+            input_event_key = utterance_context.input_event_key
+        active_by_turn = getattr(self, "_active_input_event_key_by_turn_id", None)
+        if not isinstance(active_by_turn, dict):
+            active_by_turn = {}
+            self._active_input_event_key_by_turn_id = active_by_turn
+        active_by_turn[resolved_turn_id] = input_event_key
+        self._lifecycle_controller().on_transcript_final(
+            self._canonical_utterance_key(turn_id=resolved_turn_id, input_event_key=input_event_key)
+        )
+        self._rebind_active_response_correlation_key(
+            turn_id=resolved_turn_id,
+            replacement_input_event_key=input_event_key,
+        )
+        self._clear_stale_pending_server_auto_for_turn(
+            turn_id=resolved_turn_id,
+            active_input_event_key=input_event_key,
+            reason="new_transcript_final",
+        )
+        memory_intent = self._is_memory_intent(transcript or "")
+        logger.info(
+            "memory_intent_classification run_id=%s source=input_audio_transcription input_event_key=%s memory_intent=%s",
+            self._current_run_id() or "",
+            input_event_key,
+            str(memory_intent).lower(),
+        )
+        if memory_intent:
+            self._set_response_obligation(
+                turn_id=self._current_turn_id_or_unknown(),
+                input_event_key=input_event_key,
+                source="input_audio_transcription",
+            )
+        pending_server_auto_keys = getattr(self, "_pending_server_auto_input_event_keys", None)
+        if not isinstance(pending_server_auto_keys, deque):
+            pending_server_auto_keys = deque(maxlen=64)
+            self._pending_server_auto_input_event_keys = pending_server_auto_keys
+        active_input_event_key = str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip()
+        has_active_server_auto = str(getattr(self, "_active_response_origin", "")).strip().lower() == "server_auto"
+        if not (has_active_server_auto and active_input_event_key and active_input_event_key == input_event_key):
+            pending_server_auto_keys.append(input_event_key)
+        logger.info(
+            "input_audio_transcription_linked run_id=%s input_event_key=%s pending_server_auto=%s",
+            self._current_run_id() or "",
+            input_event_key,
+            len(pending_server_auto_keys),
+        )
+        self._maybe_schedule_micro_ack(
+            turn_id=resolved_turn_id,
+            category=self._micro_ack_category_for_reason("transcript_finalized"),
+            channel="voice",
+            action=self._canonical_utterance_key(turn_id=resolved_turn_id, input_event_key=input_event_key),
+            reason="transcript_finalized",
+            expected_delay_ms=700,
+        )
+        self._start_transcript_response_watchdog(
+            turn_id=resolved_turn_id,
+            input_event_key=input_event_key,
+        )
+        turn_timestamps_store = getattr(self, "_turn_diagnostic_timestamps", None)
+        if not isinstance(turn_timestamps_store, dict):
+            turn_timestamps_store = {}
+            self._turn_diagnostic_timestamps = turn_timestamps_store
+        turn_timestamps = turn_timestamps_store.setdefault(resolved_turn_id, {})
+        turn_timestamps["transcript_final"] = time.monotonic()
+        confirmation_active = self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase()
+        if confirmation_active:
+            self._confirmation_asr_pending = False
+            self._mark_confirmation_activity(reason="transcription_completed")
+        if self._active_utterance is not None:
+            self._active_utterance["transcript"] = transcript or ""
+            self._active_utterance["transcript_len"] = len((transcript or "").strip())
+            decision = self._parse_confirmation_decision(transcript or "")
+            self._active_utterance["confirmation_candidate"] = decision in {"yes", "no"}
+            self._active_utterance["decision"] = decision
+            duration_ms = self._active_utterance.get("duration_ms")
+            suppressed = self._should_suppress_short_utterance(transcript, duration_ms)
+            self._active_utterance["suppressed"] = suppressed
+            if suppressed:
+                await self._suppress_guardrail_response(websocket, transcript)
+            self._log_utterance_envelope(event_type)
+            if suppressed:
+                return
+        if transcript:
+            if memory_intent:
+                decision_path = "upgraded_response" if str(getattr(self, "_active_response_origin", "")).strip().lower() == "server_auto" else "canonical_transcript"
                 logger.info(
-                    "Skipping THINKING transition for response.created while still listening."
+                    "memory_intent_decision_path run_id=%s turn_id=%s input_event_key=%s decision_path=%s",
+                    self._current_run_id() or "",
+                    resolved_turn_id,
+                    input_event_key,
+                    decision_path,
                 )
-        elif event_type == "response.output_item.added":
+            self._record_user_input(transcript, source="input_audio_transcription")
+            if await self._maybe_handle_approval_response(transcript, websocket):
+                return
+            if await self._handle_stop_word(
+                transcript,
+                websocket,
+                source="input_audio_transcription",
+            ):
+                return
+            if await self._maybe_handle_research_permission_response(transcript, websocket):
+                return
+            if await self._maybe_handle_research_budget_response(transcript, websocket):
+                return
+            if await self._maybe_apply_late_confirmation_decision(transcript, websocket):
+                return
+            if await self._maybe_handle_preference_recall_intent(
+                transcript,
+                websocket,
+                source="input_audio_transcription",
+            ):
+                return
+            if await self._maybe_process_research_intent(
+                transcript,
+                websocket,
+                source="input_audio_transcription",
+            ):
+                return
+        elif confirmation_active and self._has_active_confirmation_token():
+            token = self._pending_confirmation_token
+            metadata = token.metadata if token is not None and isinstance(token.metadata, dict) else {}
+            empty_reprompted = bool(metadata.get("empty_transcript_reprompted", False))
+            if not empty_reprompted:
+                metadata["empty_transcript_reprompted"] = True
+                if token is not None:
+                    token.metadata = metadata
+                await self.send_assistant_message(
+                    "Sorry—was that a yes or no?",
+                    websocket,
+                    response_metadata={
+                        "trigger": "confirmation_reminder",
+                        "approval_flow": "true",
+                        "confirmation_token": token.id if token is not None else "",
+                    },
+                )
+
+    async def _handle_event_legacy(self, event: dict[str, Any], websocket: Any) -> None:
+        event_type = event.get("type")
+        if event_type == "response.output_item.added":
             await self.handle_output_item_added(event)
         elif event_type == "response.function_call_arguments.delta":
             self.function_call_args += event.get("delta", "")
@@ -8985,72 +9216,6 @@ class RealtimeAPI:
             self.assistant_reply += delta
             self._assistant_reply_accum += delta
             self.state_manager.update_state(InteractionState.SPEAKING, "text output")
-        elif event_type == "response.output_audio.delta":
-            if self._is_active_response_guarded():
-                return
-            # Audio deltas are chunk-level and can be high-volume, so allow-path lifecycle
-            # telemetry is emitted at DEBUG while keeping operator-actionable outcomes at INFO.
-            active_canonical_key = str(getattr(self, "_active_response_canonical_key", "") or "").strip()
-            if active_canonical_key:
-                lifecycle_state = self._canonical_lifecycle_state(active_canonical_key)
-                if lifecycle_state.get("cancel_requested_pre_audio", False):
-                    return
-                arbitration_state = str(
-                    lifecycle_state.get(
-                        "server_auto_arbitration",
-                        ServerAutoArbitrationOutcome.ALLOW.value,
-                    )
-                    or ""
-                ).strip().lower()
-                if arbitration_state and arbitration_state != ServerAutoArbitrationOutcome.ALLOW.value:
-                    return
-            if active_canonical_key:
-                audio_decision = self._lifecycle_controller().on_audio_delta(active_canonical_key)
-                self._log_lifecycle_event(
-                    turn_id=self._current_turn_id_or_unknown(),
-                    input_event_key=getattr(self, "_active_response_input_event_key", None),
-                    canonical_key=active_canonical_key,
-                    origin=getattr(self, "_active_response_origin", "unknown"),
-                    response_id=getattr(self, "_active_response_id", None),
-                    decision=f"audio_delta_{audio_decision.action.value}:{audio_decision.reason}",
-                )
-                if audio_decision.action is LifecycleDecisionAction.CANCEL:
-                    self._debug_dump_canonical_key_timeline(
-                        canonical_key=active_canonical_key,
-                        trigger="audio_delta_cancelled",
-                    )
-                    return
-            self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
-            if active_canonical_key:
-                self._canonical_lifecycle_state(active_canonical_key)["first_audio_started"] = True
-                self._canonical_response_state_mutate(
-                    canonical_key=active_canonical_key,
-                    turn_id=self._current_turn_id_or_unknown(),
-                    input_event_key=getattr(self, "_active_response_input_event_key", None),
-                    mutator=lambda record: (
-                        setattr(record, "created", True),
-                        setattr(record, "audio_started", True),
-                        setattr(record, "origin", str(getattr(self, "_active_response_origin", "unknown") or "unknown")),
-                        setattr(record, "response_id", str(getattr(self, "_active_response_id", "") or "")),
-                    ),
-                )
-            self._audio_playback_busy = True
-            audio_data = base64.b64decode(event["delta"])
-            self._audio_accum.extend(audio_data)
-
-            if self._mic_receive_on_first_audio and not self.mic.is_receiving:
-                self._mic_receive_on_first_audio = False
-                log_info("Starting mic receiving on first audio delta.")
-                self.mic.start_receiving()
-
-            if not self._speaking_started:
-                self._speaking_started = True
-                self.state_manager.update_state(InteractionState.SPEAKING, "audio output")
-
-            if len(self._audio_accum) >= self._audio_accum_bytes_target:
-                if self.audio_player:
-                    self.audio_player.play_audio(bytes(self._audio_accum))
-                self._audio_accum.clear()
         elif event_type == "response.output_audio.done":
             await self.handle_audio_response_done()
             self.state_manager.update_state(InteractionState.IDLE, "audio output done")
@@ -9069,8 +9234,6 @@ class RealtimeAPI:
                 InteractionState.IDLE,
                 "audio transcript done",
             )
-        elif event_type == "response.done":
-            await self.handle_response_done(event)
         elif event_type == "response.completed":
             await self.handle_response_completed(event)
         elif event_type == "error":
@@ -9088,151 +9251,6 @@ class RealtimeAPI:
                 input_event_key=transcript_input_event_key,
             ):
                 self._log_user_transcript(partial_text, final=False, event_type=event_type)
-        elif event_type == "conversation.item.input_audio_transcription.completed":
-            transcript = self._extract_transcript(event)
-            self._log_user_transcript(transcript or "", final=True, event_type=event_type)
-            input_event_key = self._resolve_input_event_key(event)
-            resolved_turn_id = self._current_turn_id_or_unknown()
-            with self._utterance_context_scope(
-                turn_id=resolved_turn_id,
-                input_event_key=input_event_key,
-            ) as utterance_context:
-                resolved_turn_id = utterance_context.turn_id
-                input_event_key = utterance_context.input_event_key
-            active_by_turn = getattr(self, "_active_input_event_key_by_turn_id", None)
-            if not isinstance(active_by_turn, dict):
-                active_by_turn = {}
-                self._active_input_event_key_by_turn_id = active_by_turn
-            active_by_turn[resolved_turn_id] = input_event_key
-            self._lifecycle_controller().on_transcript_final(
-                self._canonical_utterance_key(turn_id=resolved_turn_id, input_event_key=input_event_key)
-            )
-            self._rebind_active_response_correlation_key(
-                turn_id=resolved_turn_id,
-                replacement_input_event_key=input_event_key,
-            )
-            self._clear_stale_pending_server_auto_for_turn(
-                turn_id=resolved_turn_id,
-                active_input_event_key=input_event_key,
-                reason="new_transcript_final",
-            )
-            memory_intent = self._is_memory_intent(transcript or "")
-            logger.info(
-                "memory_intent_classification run_id=%s source=input_audio_transcription input_event_key=%s memory_intent=%s",
-                self._current_run_id() or "",
-                input_event_key,
-                str(memory_intent).lower(),
-            )
-            if memory_intent:
-                self._set_response_obligation(
-                    turn_id=self._current_turn_id_or_unknown(),
-                    input_event_key=input_event_key,
-                    source="input_audio_transcription",
-                )
-            pending_server_auto_keys = getattr(self, "_pending_server_auto_input_event_keys", None)
-            if not isinstance(pending_server_auto_keys, deque):
-                pending_server_auto_keys = deque(maxlen=64)
-                self._pending_server_auto_input_event_keys = pending_server_auto_keys
-            active_input_event_key = str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip()
-            has_active_server_auto = str(getattr(self, "_active_response_origin", "")).strip().lower() == "server_auto"
-            if not (has_active_server_auto and active_input_event_key and active_input_event_key == input_event_key):
-                pending_server_auto_keys.append(input_event_key)
-            logger.info(
-                "input_audio_transcription_linked run_id=%s input_event_key=%s pending_server_auto=%s",
-                self._current_run_id() or "",
-                input_event_key,
-                len(pending_server_auto_keys),
-            )
-            self._maybe_schedule_micro_ack(
-                turn_id=resolved_turn_id,
-                category=self._micro_ack_category_for_reason("transcript_finalized"),
-                channel="voice",
-                action=self._canonical_utterance_key(turn_id=resolved_turn_id, input_event_key=input_event_key),
-                reason="transcript_finalized",
-                expected_delay_ms=700,
-            )
-            self._start_transcript_response_watchdog(
-                turn_id=resolved_turn_id,
-                input_event_key=input_event_key,
-            )
-            turn_timestamps_store = getattr(self, "_turn_diagnostic_timestamps", None)
-            if not isinstance(turn_timestamps_store, dict):
-                turn_timestamps_store = {}
-                self._turn_diagnostic_timestamps = turn_timestamps_store
-            turn_timestamps = turn_timestamps_store.setdefault(resolved_turn_id, {})
-            turn_timestamps["transcript_final"] = time.monotonic()
-            confirmation_active = self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase()
-            if confirmation_active:
-                self._confirmation_asr_pending = False
-                self._mark_confirmation_activity(reason="transcription_completed")
-            if self._active_utterance is not None:
-                self._active_utterance["transcript"] = transcript or ""
-                self._active_utterance["transcript_len"] = len((transcript or "").strip())
-                decision = self._parse_confirmation_decision(transcript or "")
-                self._active_utterance["confirmation_candidate"] = decision in {"yes", "no"}
-                self._active_utterance["decision"] = decision
-                duration_ms = self._active_utterance.get("duration_ms")
-                suppressed = self._should_suppress_short_utterance(transcript, duration_ms)
-                self._active_utterance["suppressed"] = suppressed
-                if suppressed:
-                    await self._suppress_guardrail_response(websocket, transcript)
-                self._log_utterance_envelope(event_type)
-                if suppressed:
-                    return
-            if transcript:
-                if memory_intent:
-                    decision_path = "upgraded_response" if str(getattr(self, "_active_response_origin", "")).strip().lower() == "server_auto" else "canonical_transcript"
-                    logger.info(
-                        "memory_intent_decision_path run_id=%s turn_id=%s input_event_key=%s decision_path=%s",
-                        self._current_run_id() or "",
-                        resolved_turn_id,
-                        input_event_key,
-                        decision_path,
-                    )
-                self._record_user_input(transcript, source="input_audio_transcription")
-                if await self._maybe_handle_approval_response(transcript, websocket):
-                    return
-                if await self._handle_stop_word(
-                    transcript,
-                    websocket,
-                    source="input_audio_transcription",
-                ):
-                    return
-                if await self._maybe_handle_research_permission_response(transcript, websocket):
-                    return
-                if await self._maybe_handle_research_budget_response(transcript, websocket):
-                    return
-                if await self._maybe_apply_late_confirmation_decision(transcript, websocket):
-                    return
-                if await self._maybe_handle_preference_recall_intent(
-                    transcript,
-                    websocket,
-                    source="input_audio_transcription",
-                ):
-                    return
-                if await self._maybe_process_research_intent(
-                    transcript,
-                    websocket,
-                    source="input_audio_transcription",
-                ):
-                    return
-            elif confirmation_active and self._has_active_confirmation_token():
-                token = self._pending_confirmation_token
-                metadata = token.metadata if token is not None and isinstance(token.metadata, dict) else {}
-                empty_reprompted = bool(metadata.get("empty_transcript_reprompted", False))
-                if not empty_reprompted:
-                    metadata["empty_transcript_reprompted"] = True
-                    if token is not None:
-                        token.metadata = metadata
-                    await self.send_assistant_message(
-                        "Sorry—was that a yes or no?",
-                        websocket,
-                        response_metadata={
-                            "trigger": "confirmation_reminder",
-                            "approval_flow": "true",
-                            "confirmation_token": token.id if token is not None else "",
-                        },
-                    )
         elif event_type == "input_audio_buffer.speech_started":
             logger.info("Speech detected, listening...")
             manager = getattr(self, "_micro_ack_manager", None)
