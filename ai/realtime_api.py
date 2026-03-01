@@ -279,6 +279,8 @@ class CanonicalResponseState:
     input_event_key: str = ""
     turn_id: str = ""
     obligation: dict[str, Any] | None = None
+    empty_retry_count: int = 0
+    empty_retry_terminal: bool = False
 
 
 @dataclass(frozen=True)
@@ -879,7 +881,7 @@ class RealtimeAPI:
         self._input_event_key_counter = 0
         self._synthetic_input_event_counter = 0
         self._response_created_canonical_keys: set[str] = set()
-        self._empty_response_retry_canonical_keys: set[str] = set()
+        self._empty_response_retry_max_attempts = 2
         self._response_delivery_ledger: dict[str, str] = {}
         self._response_id_by_canonical_key: dict[str, str] = {}
         self._canonical_response_state_by_key: dict[str, CanonicalResponseState] = {}
@@ -2963,7 +2965,9 @@ class RealtimeAPI:
                 continue
             if state.created:
                 created_keys.add(canonical_key)
-            if state.done:
+            if state.empty_retry_terminal:
+                delivery_ledger[canonical_key] = "retry_terminal"
+            elif state.done:
                 delivery_ledger[canonical_key] = "done"
             elif state.cancel_sent:
                 delivery_ledger[canonical_key] = "cancelled"
@@ -3034,6 +3038,8 @@ class RealtimeAPI:
         key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
         state = self._canonical_response_state(key)
         if isinstance(state, CanonicalResponseState):
+            if state.empty_retry_terminal:
+                return "retry_terminal"
             if state.done:
                 return "done"
             if state.cancel_sent:
@@ -3075,6 +3081,8 @@ class RealtimeAPI:
                 record.done = True
             elif normalized_state == "cancelled":
                 record.cancel_sent = True
+            elif normalized_state == "retry_terminal":
+                record.empty_retry_terminal = True
 
         self._canonical_response_state_mutate(
             canonical_key=key,
@@ -3376,21 +3384,53 @@ class RealtimeAPI:
         run_id = self._current_run_id() or ""
         if not self._is_empty_response_done(canonical_key=canonical_key):
             return
+        canonical_state = self._canonical_response_state(canonical_key)
+        retry_count = (
+            canonical_state.empty_retry_count
+            if isinstance(canonical_state, CanonicalResponseState)
+            else 0
+        )
+        retry_terminal = bool(
+            isinstance(canonical_state, CanonicalResponseState) and canonical_state.empty_retry_terminal
+        )
+        if retry_terminal or delivery_state_before_done == "retry_terminal":
+            logger.info(
+                "empty_response_retry_skipped reason=terminal run_id=%s turn_id=%s retry_count=%s retry_terminal=true",
+                run_id,
+                turn_id,
+                retry_count,
+            )
+            return
         logger.info(
-            "empty_response_detected run_id=%s turn_id=%s origin=%s",
+            "empty_response_detected run_id=%s turn_id=%s origin=%s retry_count=%s retry_terminal=false",
             run_id,
             turn_id,
             normalized_origin or "unknown",
+            retry_count,
         )
-        retry_registry = getattr(self, "_empty_response_retry_canonical_keys", None)
-        if not isinstance(retry_registry, set):
-            retry_registry = set()
-            self._empty_response_retry_canonical_keys = retry_registry
-        if canonical_key in retry_registry:
+        max_attempts = max(0, int(getattr(self, "_empty_response_retry_max_attempts", 2) or 0))
+        if retry_count >= max_attempts:
+            if websocket is not None:
+                await self.send_assistant_message(
+                    "I didn’t get a usable response; please repeat.",
+                    websocket,
+                    speak=False,
+                    response_metadata={
+                        "turn_id": turn_id,
+                        "input_event_key": input_event_key,
+                        "retry_terminal": "true",
+                    },
+                )
+            self._set_response_delivery_state(
+                turn_id=turn_id,
+                input_event_key=input_event_key,
+                state="retry_terminal",
+            )
             logger.info(
-                "empty_response_retry_skipped reason=already_retried run_id=%s turn_id=%s",
+                "empty_response_retry_terminal run_id=%s turn_id=%s retry_count=%s retry_terminal=true",
                 run_id,
                 turn_id,
+                retry_count,
             )
             return
 
@@ -3401,13 +3441,23 @@ class RealtimeAPI:
         )
         if state_not_retryable:
             logger.info(
-                "empty_response_retry_skipped reason=state_not_retryable run_id=%s turn_id=%s",
+                "empty_response_retry_skipped reason=state_not_retryable run_id=%s turn_id=%s retry_count=%s retry_terminal=false",
                 run_id,
                 turn_id,
+                retry_count,
             )
             return
 
-        retry_registry.add(canonical_key)
+        def _record_retry_attempt(record: CanonicalResponseState) -> None:
+            record.empty_retry_count += 1
+
+        next_state = self._canonical_response_state_mutate(
+            canonical_key=canonical_key,
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            mutator=_record_retry_attempt,
+        )
+        next_retry_count = next_state.empty_retry_count
         retry_input_event_key = f"{input_event_key or 'unknown'}__empty_retry"
         response_create_event = {
             "type": "response.create",
@@ -3428,15 +3478,17 @@ class RealtimeAPI:
         )
         if sent:
             logger.info(
-                "empty_response_retry_scheduled run_id=%s turn_id=%s",
+                "empty_response_retry_scheduled run_id=%s turn_id=%s retry_count=%s retry_terminal=false",
                 run_id,
                 turn_id,
+                next_retry_count,
             )
         else:
             logger.info(
-                "empty_response_retry_skipped reason=state_not_retryable run_id=%s turn_id=%s",
+                "empty_response_retry_skipped reason=state_not_retryable run_id=%s turn_id=%s retry_count=%s retry_terminal=false",
                 run_id,
                 turn_id,
+                next_retry_count,
             )
 
     def _response_is_explicit_multipart(self, metadata: dict[str, Any] | None) -> bool:
