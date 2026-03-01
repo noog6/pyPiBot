@@ -338,6 +338,14 @@ class PendingConfirmationToken:
     metadata: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class ConfirmationTransitionDecision:
+    allow_response_transition: bool
+    emit_reminder: bool
+    recover_mic: bool
+    close_reason: str | None
+
+
 @dataclass
 class IntentLedgerEntry:
     tool_name: str
@@ -5682,11 +5690,55 @@ class RealtimeAPI:
             return True
         return False
 
-    def _is_awaiting_confirmation_phase(self) -> bool:
-        if getattr(self, "_pending_confirmation_token", None) is not None:
-            return True
+    def _confirmation_hold_components(self) -> tuple[bool, bool, bool, bool]:
+        token = getattr(self, "_pending_confirmation_token", None)
         phase = getattr(self.orchestration_state, "phase", None)
-        return phase == OrchestrationPhase.AWAITING_CONFIRMATION
+        token_active = token is not None or getattr(self, "_pending_action", None) is not None
+        awaiting_phase = token is not None or phase == OrchestrationPhase.AWAITING_CONFIRMATION
+        hold_active = phase == OrchestrationPhase.AWAITING_CONFIRMATION or token_active or awaiting_phase
+        return token_active, awaiting_phase, hold_active, phase == OrchestrationPhase.AWAITING_CONFIRMATION
+
+    def _build_confirmation_transition_decision(
+        self,
+        *,
+        reason: str,
+        include_reminder_gate: bool = False,
+        was_confirmation_guarded: bool = False,
+    ) -> ConfirmationTransitionDecision:
+        token = getattr(self, "_pending_confirmation_token", None)
+        token_active, awaiting_phase, hold_active, phase_is_awaiting = self._confirmation_hold_components()
+        phase = getattr(self.orchestration_state, "phase", None)
+        should_close_follow_up = (
+            phase_is_awaiting
+            and not token_active
+            and bool(getattr(self, "_awaiting_confirmation_completion", False))
+        )
+        close_reason = "confirmation_follow_up_completed" if should_close_follow_up else None
+        emit_reminder = False
+        if include_reminder_gate:
+            emit_reminder = bool(token_active and awaiting_phase)
+        recover_mic = bool(was_confirmation_guarded and hold_active)
+        logger.debug(
+            "CONFIRMATION_TRANSITION_DECISION reason=%s allow_response_transition=%s emit_reminder=%s recover_mic=%s close_reason=%s token_active=%s awaiting_phase=%s phase=%s",
+            reason,
+            not hold_active,
+            emit_reminder,
+            recover_mic,
+            close_reason or "none",
+            token_active,
+            awaiting_phase,
+            phase,
+        )
+        return ConfirmationTransitionDecision(
+            allow_response_transition=not hold_active,
+            emit_reminder=emit_reminder,
+            recover_mic=recover_mic,
+            close_reason=close_reason,
+        )
+
+    def _is_awaiting_confirmation_phase(self) -> bool:
+        _, awaiting_phase, _, _ = self._confirmation_hold_components()
+        return awaiting_phase
 
     def _is_user_confirmation_trigger(self, trigger: str, metadata: dict[str, Any]) -> bool:
         normalized = str(trigger).strip().lower()
@@ -5885,8 +5937,11 @@ class RealtimeAPI:
         return normalized_origin in {"", "unknown", "server_auto", "assistant_message", "tool_output"}
 
     def _recover_confirmation_guard_microphone(self, trigger: str) -> None:
-        pending_confirmation_active = self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase()
-        if not pending_confirmation_active or self._audio_playback_busy:
+        transition = self._build_confirmation_transition_decision(
+            reason=f"recover_mic:{trigger}",
+            was_confirmation_guarded=True,
+        )
+        if not transition.recover_mic or self._audio_playback_busy:
             return
         mic = getattr(self, "mic", None)
         if mic is None or getattr(mic, "is_recording", False):
@@ -6206,13 +6261,8 @@ class RealtimeAPI:
         self._pending_action = None
 
     def _has_active_confirmation_token(self) -> bool:
-        if getattr(self, "_pending_confirmation_token", None) is not None:
-            return True
-        legacy_pending = getattr(self, "_pending_action", None)
-        if legacy_pending is None:
-            return False
-        phase = getattr(getattr(self, "orchestration_state", None), "phase", None)
-        return phase == OrchestrationPhase.AWAITING_CONFIRMATION
+        token_active, _, _, _ = self._confirmation_hold_components()
+        return token_active
 
     def _confirmation_reminder_key(self, token: PendingConfirmationToken | None) -> str | None:
         if token is not None:
@@ -6454,9 +6504,12 @@ class RealtimeAPI:
         parsed_intent_idempotency_key: str | None = None,
     ) -> None:
         token = getattr(self, "_pending_confirmation_token", None)
-        token_active = token is not None or self._pending_action is not None
-        awaiting_phase = self._is_awaiting_confirmation_phase()
-        if not token_active or not awaiting_phase:
+        transition = self._build_confirmation_transition_decision(
+            reason=f"reminder:{reason}",
+            include_reminder_gate=True,
+        )
+        if not transition.emit_reminder:
+            token_active, awaiting_phase, _, _ = self._confirmation_hold_components()
             logger.info(
                 "CONFIRMATION_REMINDER_SUPPRESSED reason=%s suppress_reason=inactive_confirmation_context token_active=%s awaiting_phase=%s",
                 reason,
@@ -6614,8 +6667,8 @@ class RealtimeAPI:
         return True
 
     async def _maybe_apply_late_confirmation_decision(self, text: str, websocket: Any) -> bool:
-        token = getattr(self, "_pending_confirmation_token", None)
-        if token is not None:
+        transition = self._build_confirmation_transition_decision(reason="late_resolve")
+        if not transition.allow_response_transition:
             return False
         decision = self._parse_confirmation_decision(text)
         if decision not in {"yes", "no", "cancel"}:
@@ -6639,12 +6692,13 @@ class RealtimeAPI:
         if request is None:
             return False
         logger.info(
-            "CONFIRMATION_GRACE_DECISION_APPLIED token=%s kind=%s decision=%s age_s=%.1f grace_s=%.1f",
+            "CONFIRMATION_GRACE_DECISION_APPLIED token=%s kind=%s decision=%s age_s=%.1f grace_s=%.1f close_reason=%s",
             last_token.id,
             marker.get("kind"),
             decision,
             age_s,
             grace_s,
+            "late_resolve_applied",
         )
         if decision == "yes":
             self._mark_prior_research_permission_granted(request)
@@ -9989,27 +10043,23 @@ class RealtimeAPI:
                 "rate_limits": self.rate_limits,
             }
         self._emit_preference_recall_skip_trace_if_needed(turn_id=self._current_response_turn_id)
-        phase_is_awaiting_confirmation = (
-            self.orchestration_state.phase == OrchestrationPhase.AWAITING_CONFIRMATION
+        transition = self._build_confirmation_transition_decision(
+            reason="response_done",
+            include_reminder_gate=True,
+            was_confirmation_guarded=was_confirmation_guarded,
         )
-        has_active_confirmation_token = self._has_active_confirmation_token()
-        is_awaiting_confirmation_phase = self._is_awaiting_confirmation_phase()
-        confirmation_hold_active = (
-            phase_is_awaiting_confirmation
-            or has_active_confirmation_token
-            or is_awaiting_confirmation_phase
-        )
-        if confirmation_hold_active:
+        token_active, awaiting_phase, _, phase_is_awaiting_confirmation = self._confirmation_hold_components()
+        if not transition.allow_response_transition:
             logger.info(
                 "Confirmation state is holding phase progression; skipping REFLECT transition "
                 "(phase=%s token_active=%s awaiting_phase=%s).",
                 self.orchestration_state.phase,
-                has_active_confirmation_token,
-                is_awaiting_confirmation_phase,
+                token_active,
+                awaiting_phase,
             )
-            if phase_is_awaiting_confirmation and has_active_confirmation_token:
+            if phase_is_awaiting_confirmation and token_active:
                 logger.info("Staying in AWAITING_CONFIRMATION until user accepts/rejects.")
-            elif phase_is_awaiting_confirmation and self._awaiting_confirmation_completion:
+            elif transition.close_reason == "confirmation_follow_up_completed":
                 self._awaiting_confirmation_completion = False
                 self.orchestration_state.transition(
                     OrchestrationPhase.IDLE,
@@ -10026,18 +10076,17 @@ class RealtimeAPI:
                 reason="response done reflection",
             )
         if was_confirmation_guarded:
-            if self._has_active_confirmation_token():
+            if token_active:
                 self._mark_confirmation_activity(reason="guarded_response_done")
             if (
-                self.websocket is not None
-                and self._has_active_confirmation_token()
-                and self._is_awaiting_confirmation_phase()
-                and self._is_confirmation_prompt_latched(self._pending_confirmation_token)
+                transition.emit_reminder
+                and self.websocket is not None
                 and self._should_send_response_done_fallback_reminder()
                 and self._is_guarded_server_auto_reminder_allowed(reason="response_done_fallback")
             ):
                 await self._maybe_emit_confirmation_reminder(self.websocket, reason="response_done_fallback")
-            self._recover_confirmation_guard_microphone("response_done")
+            if transition.recover_mic:
+                self._recover_confirmation_guard_microphone("response_done")
         self._response_create_queue_drain_source = "response_done"
         await self._drain_response_create_queue()
         if self._pending_image_stimulus and not self._pending_image_flush_after_playback:
@@ -10101,27 +10150,19 @@ class RealtimeAPI:
                 "rate_limits": self.rate_limits,
             }
         self._emit_preference_recall_skip_trace_if_needed(turn_id=self._current_response_turn_id)
-        phase_is_awaiting_confirmation = (
-            self.orchestration_state.phase == OrchestrationPhase.AWAITING_CONFIRMATION
-        )
-        has_active_confirmation_token = self._has_active_confirmation_token()
-        is_awaiting_confirmation_phase = self._is_awaiting_confirmation_phase()
-        confirmation_hold_active = (
-            phase_is_awaiting_confirmation
-            or has_active_confirmation_token
-            or is_awaiting_confirmation_phase
-        )
-        if confirmation_hold_active:
+        transition = self._build_confirmation_transition_decision(reason="response_completed")
+        token_active, awaiting_phase, _, phase_is_awaiting_confirmation = self._confirmation_hold_components()
+        if not transition.allow_response_transition:
             logger.info(
                 "Confirmation state is holding phase progression; skipping REFLECT transition "
                 "(phase=%s token_active=%s awaiting_phase=%s).",
                 self.orchestration_state.phase,
-                has_active_confirmation_token,
-                is_awaiting_confirmation_phase,
+                token_active,
+                awaiting_phase,
             )
-            if phase_is_awaiting_confirmation and has_active_confirmation_token:
+            if phase_is_awaiting_confirmation and token_active:
                 logger.info("Staying in AWAITING_CONFIRMATION until user accepts/rejects.")
-            elif phase_is_awaiting_confirmation and self._awaiting_confirmation_completion:
+            elif transition.close_reason == "confirmation_follow_up_completed":
                 self._awaiting_confirmation_completion = False
                 self.orchestration_state.transition(
                     OrchestrationPhase.IDLE,
