@@ -81,10 +81,124 @@ def test_realtime_api_configure_event_router_registers_conversation_item_added()
         return None
 
     api._event_router = EventRouter(fallback=_fallback)
+    api._input_audio_events = type(
+        "InputAudioHandlers",
+        (),
+        {
+            "handle_input_audio_buffer_speech_started": AsyncMock(return_value=None),
+            "handle_input_audio_buffer_speech_stopped": AsyncMock(return_value=None),
+            "handle_input_audio_buffer_committed": AsyncMock(return_value=None),
+            "handle_input_audio_transcription_partial": AsyncMock(return_value=None),
+        },
+    )()
 
     api._configure_event_router()
 
     assert api._event_router._handlers["conversation.item.added"] == api._handle_response_lifecycle_event
+
+
+
+
+def test_realtime_api_configure_event_router_registers_input_audio_handlers_from_module() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+
+    async def _fallback(_event: dict[str, Any], _websocket: Any) -> None:
+        return None
+
+    class _InputAudioHandlers:
+        async def handle_input_audio_buffer_speech_started(
+            self, event: dict[str, Any], websocket: Any
+        ) -> None:
+            return None
+
+        async def handle_input_audio_buffer_speech_stopped(
+            self, event: dict[str, Any], websocket: Any
+        ) -> None:
+            return None
+
+        async def handle_input_audio_buffer_committed(
+            self, event: dict[str, Any], websocket: Any
+        ) -> None:
+            return None
+
+        async def handle_input_audio_transcription_partial(
+            self, event: dict[str, Any], websocket: Any
+        ) -> None:
+            return None
+
+    api._event_router = EventRouter(fallback=_fallback)
+    api._input_audio_events = _InputAudioHandlers()
+
+    api._configure_event_router()
+
+    assert (
+        api._event_router._handlers["input_audio_buffer.speech_started"]
+        == api._input_audio_events.handle_input_audio_buffer_speech_started
+    )
+    assert (
+        api._event_router._handlers["input_audio_buffer.speech_stopped"]
+        == api._input_audio_events.handle_input_audio_buffer_speech_stopped
+    )
+    assert (
+        api._event_router._handlers["input_audio_buffer.committed"]
+        == api._input_audio_events.handle_input_audio_buffer_committed
+    )
+    assert (
+        api._event_router._handlers["conversation.item.input_audio_transcription.partial"]
+        == api._input_audio_events.handle_input_audio_transcription_partial
+    )
+
+
+def test_realtime_api_handle_event_triggers_recovery_when_input_audio_handler_raises() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    event = {"type": "input_audio_buffer.speech_started", "id": "evt-err"}
+    websocket = object()
+
+    async def _fallback(_event: dict[str, Any], _websocket: Any) -> None:
+        return None
+
+    class _InputAudioHandlers:
+        async def handle_input_audio_buffer_speech_started(
+            self, event: dict[str, Any], websocket: Any
+        ) -> None:
+            raise RuntimeError("input handler exploded")
+
+        async def handle_input_audio_buffer_speech_stopped(
+            self, event: dict[str, Any], websocket: Any
+        ) -> None:
+            return None
+
+        async def handle_input_audio_buffer_committed(
+            self, event: dict[str, Any], websocket: Any
+        ) -> None:
+            return None
+
+        async def handle_input_audio_transcription_partial(
+            self, event: dict[str, Any], websocket: Any
+        ) -> None:
+            return None
+
+    api._event_router = EventRouter(fallback=_fallback)
+    api._input_audio_events = _InputAudioHandlers()
+    api._configure_event_router()
+    api._maybe_handle_confirmation_decision_timeout = AsyncMock(return_value=None)
+    api._recover_from_event_handler_error = AsyncMock(return_value=None)
+
+    with (
+        patch("ai.realtime_api.logger.exception") as mock_exception,
+        patch("ai.realtime_api.logger.error") as mock_error,
+    ):
+        asyncio.run(api.handle_event(event, websocket))
+
+    api._recover_from_event_handler_error.assert_awaited_once_with(
+        "input_audio_buffer.speech_started",
+        websocket,
+    )
+    assert mock_exception.call_count == 1
+    mock_error.assert_called_once_with(
+        "EVENT_HANDLER_ERROR event=%s",
+        "input_audio_buffer.speech_started",
+    )
 
 
 def test_realtime_api_handle_event_legacy_processes_assistant_conversation_item_added() -> None:
