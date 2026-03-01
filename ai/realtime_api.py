@@ -6054,6 +6054,7 @@ class RealtimeAPI:
             turn_id=turn_id,
             input_event_key=current_input_event_key,
             origin=origin,
+            response_metadata=response_metadata,
         ):
             return False
         decision = self._lifecycle_policy().decide_response_create(
@@ -6312,6 +6313,7 @@ class RealtimeAPI:
                     turn_id=picked_turn_id,
                     input_event_key=picked_input_event_key,
                     origin=picked_origin,
+                    response_metadata=metadata,
                 ):
                     skipped_reason = "canonical_terminal_state"
                     continue
@@ -6388,6 +6390,7 @@ class RealtimeAPI:
             turn_id=pending.turn_id,
             input_event_key=pending_input_event_key,
             origin=pending.origin,
+            response_metadata=response_metadata,
         ):
             self._pending_response_create = None
             if pending.reason != "legacy_queue_hydration":
@@ -6613,12 +6616,25 @@ class RealtimeAPI:
         turn_id: str,
         input_event_key: str,
         origin: str,
+        response_metadata: dict[str, Any] | None = None,
     ) -> bool:
-        canonical_key = self._canonical_utterance_key(
+        normalized_input_event_key = str(input_event_key or "").strip()
+        retry_reason = ""
+        if isinstance(response_metadata, dict):
+            retry_reason = str(response_metadata.get("retry_reason") or "").strip().lower()
+
+        terminal_state_canonical_key = self._canonical_utterance_key(
             turn_id=turn_id,
-            input_event_key=input_event_key,
+            input_event_key=normalized_input_event_key,
         )
-        prior_state = self._lifecycle_controller().state_for(canonical_key)
+        origin_canonical_key = terminal_state_canonical_key
+        if retry_reason == "empty_response_done":
+            origin_canonical_key = self._canonical_key_for_empty_retry_origin(
+                turn_id=turn_id,
+                input_event_key=normalized_input_event_key,
+            )
+
+        prior_state = self._lifecycle_controller().state_for(terminal_state_canonical_key)
         if prior_state not in {
             InteractionLifecycleState.DONE,
             InteractionLifecycleState.REPLACED,
@@ -6630,18 +6646,20 @@ class RealtimeAPI:
             "response_dropped_terminal_state run_id=%s turn_id=%s canonical_key=%s prior_state=%s",
             self._current_run_id() or "",
             turn_id,
-            canonical_key,
+            terminal_state_canonical_key,
             prior_state_value,
         )
         self._mark_transcript_response_outcome(
-            input_event_key=input_event_key,
+            input_event_key=normalized_input_event_key,
             turn_id=turn_id,
             outcome="response_not_scheduled",
             reason="canonical_delivery_terminal_state",
             details=(
                 "canonical delivery terminal state "
                 f"origin={str(origin or '').strip().lower() or 'unknown'} "
-                f"prior_state={prior_state_value}"
+                f"prior_state={prior_state_value} "
+                f"canonical_key={terminal_state_canonical_key} "
+                f"origin_canonical_key={origin_canonical_key}"
             ),
         )
         return True
