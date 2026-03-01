@@ -866,6 +866,10 @@ class RealtimeAPI:
         self._micro_ack_channel_policy = self._load_micro_ack_channel_policy(realtime_cfg)
         self._vad_turn_detection = self._resolve_vad_turn_detection(config)
         self._micro_ack_suppress_until_ts = 0.0
+        self._micro_ack_near_ready_suppress_ms = max(
+            0,
+            int(realtime_cfg.get("micro_ack_near_ready_suppress_ms", 0)),
+        )
         self._pending_micro_ack_by_turn_channel: dict[tuple[str, str], PendingMicroAckMarker] = {}
         self._micro_ack_manager = self._build_micro_ack_manager(realtime_cfg)
 
@@ -1105,6 +1109,18 @@ class RealtimeAPI:
         manager = getattr(self, "_micro_ack_manager", None)
         if manager is None or self.loop is None:
             return
+        near_ready_reason = self._micro_ack_near_ready_suppression_reason(
+            turn_id=turn_id,
+            category=category,
+        )
+        if near_ready_reason:
+            self._suppress_pending_micro_ack_near_ready(
+                turn_id=turn_id,
+                category=category,
+                channel=channel,
+                reason=near_ready_reason,
+            )
+            return
         markers = getattr(self, "_pending_micro_ack_by_turn_channel", None)
         if not isinstance(markers, dict):
             markers = {}
@@ -1148,6 +1164,81 @@ class RealtimeAPI:
             )
         finally:
             self._pending_micro_ack_reason = None
+
+    def _micro_ack_near_ready_suppression_reason(
+        self,
+        *,
+        turn_id: str,
+        category: MicroAckCategory | str,
+    ) -> str | None:
+        suppress_ms = int(getattr(self, "_micro_ack_near_ready_suppress_ms", 0) or 0)
+        if suppress_ms <= 0:
+            return None
+        normalized_category = (
+            category.value if isinstance(category, MicroAckCategory) else str(category or "").strip().lower()
+        )
+        if normalized_category == MicroAckCategory.SAFETY_GATE.value:
+            return None
+        pending = getattr(self, "_pending_response_create", None)
+        if isinstance(pending, PendingResponseCreate) and pending.turn_id == turn_id:
+            age_ms = (time.monotonic() - pending.created_at) * 1000.0
+            if age_ms >= suppress_ms:
+                return "response_create_bound"
+        last_response_create_ts = getattr(self, "_last_response_create_ts", None)
+        if isinstance(last_response_create_ts, (int, float)) and bool(getattr(self, "_response_in_flight", False)):
+            elapsed_ms = (time.monotonic() - float(last_response_create_ts)) * 1000.0
+            if elapsed_ms <= suppress_ms:
+                return "response_create_recent"
+        return None
+
+    def _suppress_pending_micro_ack_near_ready(
+        self,
+        *,
+        turn_id: str,
+        category: MicroAckCategory | str,
+        channel: str,
+        reason: str,
+    ) -> None:
+        normalized_category = (
+            category.value if isinstance(category, MicroAckCategory) else str(category or "").strip().lower()
+        )
+        if normalized_category == MicroAckCategory.SAFETY_GATE.value:
+            return
+        logger.info(
+            "micro_ack_suppressed_near_ready run_id=%s turn_id=%s category=%s channel=%s reason=%s",
+            self._current_run_id() or "",
+            turn_id,
+            normalized_category,
+            channel,
+            reason,
+        )
+        manager = getattr(self, "_micro_ack_manager", None)
+        if manager is not None and hasattr(manager, "cancel_matching"):
+            manager.cancel_matching(
+                turn_id=turn_id,
+                reason="near_ready",
+                matcher=lambda context: (
+                    context.category.value
+                    if isinstance(context.category, MicroAckCategory)
+                    else str(context.category or "").strip().lower()
+                ) != MicroAckCategory.SAFETY_GATE.value,
+            )
+        elif manager is not None:
+            manager.cancel(turn_id=turn_id, reason="near_ready")
+        markers = getattr(self, "_pending_micro_ack_by_turn_channel", None)
+        if isinstance(markers, dict):
+            for marker_key, marker in list(markers.items()):
+                marker_turn_id, _ = marker_key
+                if marker_turn_id != turn_id or not isinstance(marker, PendingMicroAckMarker):
+                    continue
+                marker_category = (
+                    marker.category.value
+                    if isinstance(marker.category, MicroAckCategory)
+                    else str(marker.category or "").strip().lower()
+                )
+                if marker_category == MicroAckCategory.SAFETY_GATE.value:
+                    continue
+                markers.pop(marker_key, None)
 
     @staticmethod
     def _micro_ack_category_for_reason(reason: str) -> MicroAckCategory:

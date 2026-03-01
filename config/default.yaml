@@ -135,6 +135,8 @@ realtime:
   confirmation_reminder_max_count: 2
   micro_ack_enabled: true
   micro_ack_delay_ms: 450
+  # Set >0 to suppress non-safety micro-acks when response.create is already bound/near-ready.
+  micro_ack_near_ready_suppress_ms: 0
   micro_ack_expected_wait_threshold_ms: 700
   micro_ack_long_wait_second_ack_ms: 4000
   micro_ack_global_cooldown_ms: 10000

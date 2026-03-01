@@ -233,6 +233,26 @@ class MicroAckManager:
             scheduled.handle.cancel()
             self._log("cancelled", turn_id, reason, None, scheduled.context)
 
+    def cancel_matching(
+        self,
+        *,
+        turn_id: str,
+        reason: str,
+        matcher: Callable[[MicroAckContext], bool],
+    ) -> None:
+        keys_for_turn = [
+            key
+            for key, item in self._scheduled.items()
+            if item.context.turn_id == turn_id and matcher(item.context)
+        ]
+        for key in keys_for_turn:
+            scheduled = self._scheduled.pop(key, None)
+            self._scheduled_reason.pop(key, None)
+            if scheduled is None:
+                continue
+            scheduled.handle.cancel()
+            self._log("cancelled", turn_id, reason, None, scheduled.context)
+
     def cancel_all(self, *, reason: str) -> None:
         for key in list(self._scheduled.keys()):
             scheduled = self._scheduled.pop(key, None)
