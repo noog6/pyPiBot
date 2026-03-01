@@ -18,6 +18,7 @@ class UtteranceContext:
 class CanonicalResponseState:
     created: bool = False
     audio_started: bool = False
+    deliverable_observed: bool = False
     done: bool = False
     cancel_sent: bool = False
     origin: str = "unknown"

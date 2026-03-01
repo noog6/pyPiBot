@@ -125,9 +125,15 @@ class ResponseLifecycleTracker:
     def is_empty_response_done(self, *, canonical_key: str) -> bool:
         response_state = self._api._canonical_response_state(canonical_key)
         audio_delta_seen = bool(getattr(response_state, "audio_started", False)) or self._api._canonical_first_audio_started(canonical_key)
+        deliverable_observed = bool(getattr(response_state, "deliverable_observed", False))
         assistant_reply_present = bool(str(getattr(self._api, "assistant_reply", "") or "").strip())
         assistant_buffer_present = bool(str(getattr(self._api, "_assistant_reply_accum", "") or "").strip())
-        return not assistant_reply_present and not assistant_buffer_present and not audio_delta_seen
+        return (
+            not assistant_reply_present
+            and not assistant_buffer_present
+            and not audio_delta_seen
+            and not deliverable_observed
+        )
 
     async def maybe_schedule_empty_response_retry(
         self,

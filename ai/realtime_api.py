@@ -1159,14 +1159,21 @@ class RealtimeAPI:
 
     async def _handle_output_item_added_event(self, event: dict[str, Any], websocket: Any) -> None:
         _ = websocket
+        item = event.get("item")
+        if isinstance(item, dict):
+            item_type = str(item.get("type") or "").strip().lower()
+            if item_type in {"function_call", "function_call_output", "tool_call", "tool_result"}:
+                self._mark_active_canonical_deliverable_observed(reason=f"response.output_item.added:{item_type}")
         await self._function_call_accumulator.handle_output_item_added(event)
 
     async def _handle_function_call_arguments_delta_event(self, event: dict[str, Any], websocket: Any) -> None:
         _ = websocket
+        self._mark_active_canonical_deliverable_observed(reason="response.function_call_arguments.delta")
         self._function_call_accumulator.handle_function_call_arguments_delta(event)
         self.function_call_args = self._function_call_accumulator.arguments_buffer
 
     async def _handle_function_call_arguments_done_event(self, event: dict[str, Any], websocket: Any) -> None:
+        self._mark_active_canonical_deliverable_observed(reason="response.function_call_arguments.done")
         self.function_call_args = self._function_call_accumulator.arguments_buffer
         await self._function_call_accumulator.handle_function_call_arguments_done(event, websocket)
         self._function_call_accumulator.reset_arguments_buffer()
@@ -3309,6 +3316,7 @@ class RealtimeAPI:
                 {
                     "created": state.created,
                     "audio_started": state.audio_started,
+                    "deliverable_observed": state.deliverable_observed,
                     "done": state.done,
                     "cancel_sent": state.cancel_sent,
                     "origin": state.origin,
@@ -3318,6 +3326,46 @@ class RealtimeAPI:
                     "turn_id": state.turn_id,
                 },
             )
+
+    def _active_canonical_key_for_deliverable_marker(self) -> str:
+        active_key = str(getattr(self, "_active_response_canonical_key", "") or "").strip()
+        if active_key:
+            return active_key
+        response_id = str(getattr(self, "_active_response_id", "") or "").strip()
+        if response_id:
+            trace_context = self._response_trace_by_id().get(response_id, {})
+            if isinstance(trace_context, dict):
+                traced_key = str(trace_context.get("canonical_key") or "").strip()
+                if traced_key:
+                    return traced_key
+        turn_id = str(self._current_turn_id_or_unknown() or "").strip()
+        input_event_key = str(getattr(self, "_active_response_input_event_key", "") or "").strip()
+        if turn_id and input_event_key:
+            return self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+        return ""
+
+    def _mark_active_canonical_deliverable_observed(self, *, reason: str) -> None:
+        canonical_key = self._active_canonical_key_for_deliverable_marker()
+        if not canonical_key:
+            logger.debug("canonical_deliverable_marker_skipped reason=%s marker_reason=%s", "canonical_key_unavailable", reason)
+            return
+
+        self._canonical_response_state_mutate(
+            canonical_key=canonical_key,
+            turn_id=self._current_turn_id_or_unknown(),
+            input_event_key=getattr(self, "_active_response_input_event_key", None),
+            mutator=lambda record: (
+                setattr(record, "created", True),
+                setattr(record, "deliverable_observed", True),
+                setattr(record, "origin", str(getattr(self, "_active_response_origin", "unknown") or "unknown")),
+                setattr(record, "response_id", str(getattr(self, "_active_response_id", "") or "")),
+            ),
+        )
+        logger.debug(
+            "canonical_deliverable_marker_set canonical_key=%s reason=%s",
+            canonical_key,
+            reason,
+        )
 
     def _response_delivery_state(self, *, turn_id: str, input_event_key: str | None) -> str | None:
         key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
