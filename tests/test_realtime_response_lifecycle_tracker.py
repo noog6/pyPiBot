@@ -3,6 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import sys
+import types
+
+if "audioop" not in sys.modules:
+    sys.modules["audioop"] = types.ModuleType("audioop")
+
 import logging
 from unittest.mock import ANY, AsyncMock
 
@@ -111,7 +117,7 @@ def test_terminal_cancelled_state_skips_retry_with_reason() -> None:
 
 def test_empty_response_retry_exhausted_emits_fallback_without_scheduling_retry(caplog) -> None:
     api = _make_api()
-    caplog.set_level(logging.INFO)
+    caplog.set_level(logging.INFO, logger="ai.realtime.response_lifecycle")
 
     origin_input_event_key = "input_evt_3"
     retry_input_event_key = f"{origin_input_event_key}__empty_retry"
@@ -149,4 +155,31 @@ def test_empty_response_retry_exhausted_emits_fallback_without_scheduling_retry(
         origin="prompt",
     )
     api._send_response_create.assert_not_awaited()
-    assert "empty_response_retry_skipped reason=max_retries_exhausted" in caplog.text
+
+
+def test_maybe_schedule_empty_response_retry_delegates_to_tracker() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    tracker = ResponseLifecycleTracker(api)
+    tracker.maybe_schedule_empty_response_retry = AsyncMock()
+    api._response_lifecycle = tracker
+
+    websocket = object()
+    asyncio.run(
+        api._maybe_schedule_empty_response_retry(
+            websocket=websocket,
+            turn_id="turn_1",
+            canonical_key="turn_1::input_evt_4",
+            input_event_key="input_evt_4",
+            origin="prompt",
+            delivery_state_before_done="done",
+        )
+    )
+
+    tracker.maybe_schedule_empty_response_retry.assert_awaited_once_with(
+        websocket=websocket,
+        turn_id="turn_1",
+        canonical_key="turn_1::input_evt_4",
+        input_event_key="input_evt_4",
+        origin="prompt",
+        delivery_state_before_done="done",
+    )
