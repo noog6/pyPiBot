@@ -2290,7 +2290,8 @@ class RealtimeAPI:
         }
         log_ws_event("Outgoing", event)
         self._track_outgoing_event(event, origin="system_context")
-        await self.websocket.send(json.dumps(event))
+        transport = self._get_or_create_transport()
+        await transport.send_json(self.websocket, event)
 
     def _format_event_for_injection(self, event: Event) -> tuple[str, bool]:
         if event.content:
@@ -3835,7 +3836,8 @@ class RealtimeAPI:
         log_ws_event("Outgoing", cancel_event)
         self._track_outgoing_event(cancel_event, origin="preference_recall_guard")
         try:
-            await websocket.send(json.dumps(cancel_event))
+            transport = self._get_or_create_transport()
+            await transport.send_json(websocket, cancel_event)
         except Exception as exc:
             message = str(exc)
             if "no active response found" in message.lower():
@@ -4262,7 +4264,8 @@ class RealtimeAPI:
         }
         log_ws_event("Outgoing", note_event)
         self._track_outgoing_event(note_event, origin="memory_brief")
-        await websocket.send(json.dumps(note_event))
+        transport = self._get_or_create_transport()
+        await transport.send_json(websocket, note_event)
 
     def _find_stop_word(self, text: str) -> str | None:
         if not text or not self._stop_words:
@@ -4809,7 +4812,8 @@ class RealtimeAPI:
         }
         log_ws_event("Outgoing", function_call_output)
         self._track_outgoing_event(function_call_output)
-        await websocket.send(json.dumps(function_call_output))
+        transport = self._get_or_create_transport()
+        await transport.send_json(websocket, function_call_output)
         if include_response_create:
             response_create_event = {"type": "response.create"}
             await self._send_response_create(websocket, response_create_event, origin=response_origin)
@@ -5882,7 +5886,8 @@ class RealtimeAPI:
             )
         log_ws_event("Outgoing", response_create_event)
         self._track_outgoing_event(response_create_event, origin=origin)
-        await websocket.send(json.dumps(response_create_event))
+        transport = self._get_or_create_transport()
+        await transport.send_json(websocket, response_create_event)
         if consumes_canonical_slot:
             self._set_response_delivery_state(
                 turn_id=turn_id,
@@ -6520,7 +6525,8 @@ class RealtimeAPI:
         }
         log_ws_event("Outgoing", instruction_event)
         self._track_outgoing_event(instruction_event)
-        await websocket.send(json.dumps(instruction_event))
+        transport = self._get_or_create_transport()
+        await transport.send_json(websocket, instruction_event)
 
     def _log_confirmation_transition(
         self,
@@ -7334,7 +7340,8 @@ class RealtimeAPI:
         cancel_event = {"type": "response.cancel"}
         log_ws_event("Outgoing", cancel_event)
         self._track_outgoing_event(cancel_event, origin="vad_guardrail")
-        await websocket.send(json.dumps(cancel_event))
+        transport = self._get_or_create_transport()
+        await transport.send_json(websocket, cancel_event)
 
     async def _maybe_handle_approval_response(
         self, text: str, websocket: Any
@@ -8287,8 +8294,9 @@ class RealtimeAPI:
 
         if self.websocket:
             try:
+                transport = self._get_or_create_transport()
                 asyncio.create_task(
-                    self.websocket.send(json.dumps({"type": "input_audio_buffer.clear"}))
+                    transport.send_json(self.websocket, {"type": "input_audio_buffer.clear"})
                 )
             except Exception:
                 logger.exception("Failed to send input_audio_buffer.clear")
@@ -8451,20 +8459,30 @@ class RealtimeAPI:
             },
         }
         log_ws_event("Outgoing", session_update)
-        await websocket.send(json.dumps(session_update))
+        transport = self._get_or_create_transport()
+        await transport.send_json(websocket, session_update)
         startup_digest_note = self._build_startup_memory_digest_note()
         if startup_digest_note:
             await self._send_memory_brief_note(websocket, startup_digest_note)
+
+    def _get_or_create_transport(self) -> RealtimeTransport:
+        transport = getattr(self, "_transport", None)
+        if transport is not None:
+            return transport
+        websockets = _require_websockets()
+        transport = RealtimeTransport(
+            connect_fn=websockets.connect,
+            validate_outbound_endpoint=_validate_outbound_endpoint,
+        )
+        self._transport = transport
+        return transport
 
     async def process_ws_messages(self, websocket: Any) -> None:
         websockets = _require_websockets()
         ConnectionClosed, _ = _resolve_websocket_exceptions(websockets)
         while True:
             try:
-                transport = self._transport or RealtimeTransport(
-                    connect_fn=websockets.connect,
-                    validate_outbound_endpoint=_validate_outbound_endpoint,
-                )
+                transport = self._transport or self._get_or_create_transport()
                 event = await transport.recv_json(websocket)
                 log_ws_event("Incoming", event)
                 await self.handle_event(event, websocket)
@@ -8654,7 +8672,8 @@ class RealtimeAPI:
                     self._lifecycle_controller().on_cancel_sent(
                         self._canonical_utterance_key(turn_id=turn_id, input_event_key=expected_input_event_key)
                     )
-                    await websocket.send(json.dumps(cancel_event))
+                    transport = self._get_or_create_transport()
+                    await transport.send_json(websocket, cancel_event)
                     return
                 if not input_event_key:
                     input_event_key = self._next_synthetic_input_event_key("server_auto")
@@ -8794,7 +8813,8 @@ class RealtimeAPI:
                     decision="transition_cancel_sent:interaction_lifecycle_controller",
                 )
                 if websocket is not None:
-                    await websocket.send(json.dumps(cancel_event))
+                    transport = self._get_or_create_transport()
+                    await transport.send_json(websocket, cancel_event)
                 return
             self._active_response_input_event_key = str(resolved_input_event_key or "").strip() or None
             self._active_response_canonical_key = lifecycle_canonical_key
@@ -8869,7 +8889,8 @@ class RealtimeAPI:
                     response_id=self._active_response_id,
                     decision=f"guard_cancel_sent:{replacement_reason}",
                 )
-                await websocket.send(json.dumps(cancel_event))
+                transport = self._get_or_create_transport()
+                await transport.send_json(websocket, cancel_event)
             elif arbitration_outcome is ServerAutoArbitrationOutcome.DEFER:
                 self._active_response_preference_guarded = True
                 logger.info(
@@ -8881,7 +8902,8 @@ class RealtimeAPI:
                 log_ws_event("Outgoing", cancel_event)
                 self._track_outgoing_event(cancel_event, origin="server_auto_arbitration_defer")
                 self._lifecycle_controller().on_cancel_sent(canonical_key)
-                await websocket.send(json.dumps(cancel_event))
+                transport = self._get_or_create_transport()
+                await transport.send_json(websocket, cancel_event)
                 return
             else:
                 if consumes_canonical_slot:
@@ -9234,7 +9256,8 @@ class RealtimeAPI:
                     log_ws_event("Outgoing", cancel_event)
                     self._track_outgoing_event(cancel_event, origin="talk_over_abort")
                     try:
-                        await websocket.send(json.dumps(cancel_event))
+                        transport = self._get_or_create_transport()
+                        await transport.send_json(websocket, cancel_event)
                     except Exception as exc:
                         logger.debug("talk_over_abort_cancel_failed turn_id=%s error=%s", turn_id, exc)
             self._utterance_counter += 1
@@ -9947,7 +9970,8 @@ class RealtimeAPI:
         }
         log_ws_event("Outgoing", function_call_output)
         self._track_outgoing_event(function_call_output)
-        await websocket.send(json.dumps(function_call_output))
+        transport = self._get_or_create_transport()
+        await transport.send_json(websocket, function_call_output)
         if inject_no_tools_instruction:
             await self._add_no_tools_follow_up_instruction(websocket)
         research_id = self._extract_research_id(result) if function_name == "perform_research" else None
@@ -10104,7 +10128,8 @@ class RealtimeAPI:
         }
         log_ws_event("Outgoing", function_call_output)
         self._track_outgoing_event(function_call_output)
-        await websocket.send(json.dumps(function_call_output))
+        transport = self._get_or_create_transport()
+        await transport.send_json(websocket, function_call_output)
         # Do not request another model response here.
         # send_assistant_message() above already produced the spoken approval prompt,
         # and a second response.create can get deferred during AWAITING_CONFIRMATION,
@@ -10167,7 +10192,8 @@ class RealtimeAPI:
         }
         log_ws_event("Outgoing", function_call_output)
         self._track_outgoing_event(function_call_output)
-        await websocket.send(json.dumps(function_call_output))
+        transport = self._get_or_create_transport()
+        await transport.send_json(websocket, function_call_output)
         response_create_event = {"type": "response.create"}
         await self._send_response_create(websocket, response_create_event, origin="tool_output")
         self._presented_actions.add(action.id)
@@ -10206,7 +10232,8 @@ class RealtimeAPI:
         }
         log_ws_event("Outgoing", function_call_output)
         self._track_outgoing_event(function_call_output)
-        await websocket.send(json.dumps(function_call_output))
+        transport = self._get_or_create_transport()
+        await transport.send_json(websocket, function_call_output)
         response_create_event = {"type": "response.create"}
         await self._send_response_create(websocket, response_create_event, origin="tool_output")
         self.function_call = None
@@ -10277,7 +10304,8 @@ class RealtimeAPI:
                 },
             }
             log_ws_event("Image", image_item)
-            await self.websocket.send(json.dumps(image_item))
+            transport = self._get_or_create_transport()
+            await transport.send_json(self.websocket, image_item)
             if self._image_response_enabled:
                 await self._stimuli_coordinator.enqueue(
                     trigger="image_message",
@@ -10307,7 +10335,8 @@ class RealtimeAPI:
             },
         }
         log_ws_event("Outgoing", assistant_item)
-        await websocket.send(json.dumps(assistant_item))
+        transport = self._get_or_create_transport()
+        await transport.send_json(websocket, assistant_item)
         if not speak:
             return
 
@@ -10384,7 +10413,8 @@ class RealtimeAPI:
             },
         }
         log_ws_event("Outgoing", error_item)
-        await websocket.send(json.dumps(error_item))
+        transport = self._get_or_create_transport()
+        await transport.send_json(websocket, error_item)
 
     async def handle_transcribe_response_done(self) -> None:
         if (
@@ -10826,7 +10856,8 @@ class RealtimeAPI:
         }
         log_ws_event("Outgoing", event)
         self._track_outgoing_event(event)
-        await websocket.send(json.dumps(event))
+        transport = self._get_or_create_transport()
+        await transport.send_json(websocket, event)
 
         if not self._allow_ai_call("startup_prompt"):
             logger.info("Skipping startup response: AI call budget exhausted.")
@@ -10887,7 +10918,8 @@ class RealtimeAPI:
         }
         log_ws_event("Outgoing", text_event)
         self._track_outgoing_event(text_event)
-        await self.websocket.send(json.dumps(text_event))
+        transport = self._get_or_create_transport()
+        await transport.send_json(self.websocket, text_event)
         if request_response:
             enqueue_metadata = {
                 "text_length": len(text_message),
@@ -11205,7 +11237,8 @@ class RealtimeAPI:
                             "type": "input_audio_buffer.append",
                             "audio": base64_audio,
                         }
-                        await websocket.send(json.dumps(audio_event))
+                        transport = self._get_or_create_transport()
+                        await transport.send_json(websocket, audio_event)
                     else:
                         logger.debug("Failed to encode audio data for sending")
 

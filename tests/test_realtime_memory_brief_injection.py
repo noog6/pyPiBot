@@ -6,6 +6,7 @@ import asyncio
 import json
 from collections import deque
 
+from ai.realtime.transport import RealtimeTransport
 from ai.realtime_api import RealtimeAPI
 
 
@@ -19,6 +20,10 @@ class _Ws:
 
 def _make_api_stub() -> RealtimeAPI:
     api = RealtimeAPI.__new__(RealtimeAPI)
+    api._transport = RealtimeTransport(
+        connect_fn=lambda *args, **kwargs: None,
+        validate_outbound_endpoint=lambda _url: None,
+    )
     api._last_response_create_ts = None
     api._response_create_debug_trace = False
     api._active_response_id = None
