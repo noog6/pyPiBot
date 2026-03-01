@@ -20,6 +20,7 @@ def _make_api() -> RealtimeAPI:
     api._current_input_event_key = None
     api._synthetic_input_event_counter = 0
     api._response_created_canonical_keys = set()
+    api._empty_response_retry_canonical_keys = set()
     api._response_delivery_ledger = {}
     api._response_in_flight = False
     api._audio_playback_busy = False
@@ -37,7 +38,72 @@ def _make_api() -> RealtimeAPI:
     api._mark_transcript_response_outcome = lambda **kwargs: None
     api._can_release_queued_response_create = lambda trigger, metadata: True
     api.state_manager = _FakeStateManager()
+    api.assistant_reply = ""
+    api._assistant_reply_accum = ""
     return api
+
+
+def test_empty_response_done_schedules_single_retry_for_prompt_origin() -> None:
+    api = _make_api()
+    sent_events: list[dict[str, object]] = []
+    canonical_key = api._canonical_utterance_key(turn_id="turn_1", input_event_key="input_evt_1")
+
+    async def _capture_send_response_create(_websocket, event, **kwargs):
+        sent_events.append({"event": event, **kwargs})
+        return True
+
+    api._send_response_create = _capture_send_response_create
+
+    asyncio.run(
+        api._maybe_schedule_empty_response_retry(
+            websocket=object(),
+            turn_id="turn_1",
+            canonical_key=canonical_key,
+            input_event_key="input_evt_1",
+            origin="prompt",
+            delivery_state_before_done="done",
+        )
+    )
+    asyncio.run(
+        api._maybe_schedule_empty_response_retry(
+            websocket=object(),
+            turn_id="turn_1",
+            canonical_key=canonical_key,
+            input_event_key="input_evt_1",
+            origin="prompt",
+            delivery_state_before_done="done",
+        )
+    )
+
+    assert len(sent_events) == 1
+    metadata = sent_events[0]["event"]["response"]["metadata"]
+    assert metadata["retry_reason"] == "empty_response_done"
+    assert metadata["idempotency_key"].startswith("empty_response_done:")
+
+
+def test_empty_response_done_retry_skipped_for_cancelled_terminal_state() -> None:
+    api = _make_api()
+    sent_events: list[dict[str, object]] = []
+    canonical_key = api._canonical_utterance_key(turn_id="turn_1", input_event_key="input_evt_1")
+
+    async def _capture_send_response_create(_websocket, event, **kwargs):
+        sent_events.append({"event": event, **kwargs})
+        return True
+
+    api._send_response_create = _capture_send_response_create
+
+    asyncio.run(
+        api._maybe_schedule_empty_response_retry(
+            websocket=object(),
+            turn_id="turn_1",
+            canonical_key=canonical_key,
+            input_event_key="input_evt_1",
+            origin="prompt",
+            delivery_state_before_done="cancelled",
+        )
+    )
+
+    assert sent_events == []
 
 
 def test_response_create_guard_blocks_duplicate_for_same_canonical_key() -> None:
