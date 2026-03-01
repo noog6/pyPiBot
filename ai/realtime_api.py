@@ -46,7 +46,7 @@ from interaction import (
 )
 from ai.tools import function_map, tools
 from ai.realtime.event_router import EventRouter
-from ai.realtime.injections import StartupInjectionCoordinator
+from ai.realtime.injections import InjectionCoordinator
 from ai.realtime.response_lifecycle import ResponseLifecycleTracker
 from ai.realtime.shutdown import ShutdownCoordinator, WebsocketCloser
 from ai.realtime.transport import RealtimeTransport
@@ -886,7 +886,7 @@ class RealtimeAPI:
             0.0,
             float(realtime_cfg.get("startup_injection_gate_timeout_s", 5.0)),
         )
-        self._startup_injections = StartupInjectionCoordinator(
+        self._startup_injections = InjectionCoordinator(
             gate_timeout_s=self._startup_injection_gate_timeout_s,
             loop_getter=lambda: self.loop,
             emit_injected_event=self._emit_injected_event,
@@ -1001,18 +1001,18 @@ class RealtimeAPI:
             self._ws_closer = closer
         return closer
 
-    def _startup_injection_coordinator(self) -> StartupInjectionCoordinator:
+    def _startup_injection_coordinator(self) -> InjectionCoordinator:
         coordinator = getattr(self, "_startup_injections", None)
-        if isinstance(coordinator, StartupInjectionCoordinator):
+        if isinstance(coordinator, InjectionCoordinator):
             return coordinator
         gate_timeout_s = float(getattr(self, "_startup_injection_gate_timeout_s", 5.0) or 0.0)
-        coordinator = StartupInjectionCoordinator(
+        coordinator = InjectionCoordinator(
             gate_timeout_s=gate_timeout_s,
             loop_getter=lambda: getattr(self, "loop", None),
             emit_injected_event=self._emit_injected_event,
             emit_system_context_payload=self._emit_system_context_payload,
         )
-        coordinator.gate_released = bool(getattr(self, "_startup_injection_gate_released", False))
+        coordinator.released = bool(getattr(self, "_startup_injection_gate_released", False))
         coordinator.first_assistant_utterance_observed = bool(
             getattr(self, "_startup_first_assistant_utterance_observed", False)
         )
@@ -1027,7 +1027,7 @@ class RealtimeAPI:
 
     def _sync_startup_injection_legacy_state(self) -> None:
         coordinator = self._startup_injection_coordinator()
-        self._startup_injection_gate_released = coordinator.gate_released
+        self._startup_injection_gate_released = coordinator.released
         self._startup_first_assistant_utterance_observed = coordinator.first_assistant_utterance_observed
         self._startup_injection_queue = list(coordinator.queue)
         self._startup_injection_timeout_task = coordinator.timeout_task
@@ -1985,25 +1985,23 @@ class RealtimeAPI:
             return False
         if self._startup_gate_is_critical_allowed(source, kind, priority):
             return False
-        deferred = self._startup_injection_coordinator().maybe_defer(
-            source=source,
-            allow_critical=False,
-            payload=payload,
-        )
+        coordinator = self._startup_injection_coordinator()
+        deferred = coordinator.should_defer(payload, source)
         if deferred:
+            coordinator.enqueue(payload)
             self._sync_startup_injection_legacy_state()
         return deferred
 
     def _release_startup_injection_gate(self, *, reason: str) -> None:
-        self._startup_injection_coordinator().release_gate(reason=reason)
+        self._startup_injection_coordinator().release(reason)
         self._sync_startup_injection_legacy_state()
 
     async def _startup_injection_timeout_release(self) -> None:
-        await self._startup_injection_coordinator().timeout_release()
+        await self._startup_injection_coordinator()._timeout_release()
         self._sync_startup_injection_legacy_state()
 
     def _ensure_startup_injection_timeout_task(self) -> None:
-        self._startup_injection_coordinator().ensure_timeout_task()
+        self._startup_injection_coordinator().schedule_timeout(getattr(self, "loop", None))
         self._sync_startup_injection_legacy_state()
 
     def get_session_health(self) -> dict[str, Any]:
