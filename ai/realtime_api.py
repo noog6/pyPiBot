@@ -45,6 +45,7 @@ from interaction import (
     InteractionStateManager,
 )
 from ai.tools import function_map, tools
+from ai.function_call_accumulator import FunctionCallAccumulator
 from ai.realtime.event_router import EventRouter
 from ai.realtime.injections import InjectionCoordinator
 from ai.realtime.input_audio_events import InputAudioEventHandlers
@@ -935,6 +936,11 @@ class RealtimeAPI:
             fallback=self._handle_unknown_event,
             on_exception=self._on_event_handler_exception,
         )
+        self._function_call_accumulator = FunctionCallAccumulator(
+            on_function_call_item=self._on_function_call_item_added,
+            on_assistant_message_item=self._on_assistant_output_item_added,
+            on_arguments_done=self.handle_function_call,
+        )
         self._configure_event_router()
 
     def _configure_event_router(self) -> None:
@@ -946,10 +952,7 @@ class RealtimeAPI:
             self._handle_input_audio_transcription_completed_event,
         )
         for event_type in {
-            "response.output_item.added",
             "conversation.item.added",
-            "response.function_call_arguments.delta",
-            "response.function_call_arguments.done",
             "response.text.delta",
             "response.output_audio.done",
             "response.output_audio_transcript.delta",
@@ -976,6 +979,15 @@ class RealtimeAPI:
         self._event_router.register(
             "conversation.item.input_audio_transcription.partial",
             self._input_audio_events.handle_input_audio_transcription_partial,
+        )
+        self._event_router.register("response.output_item.added", self._handle_output_item_added_event)
+        self._event_router.register(
+            "response.function_call_arguments.delta",
+            self._handle_function_call_arguments_delta_event,
+        )
+        self._event_router.register(
+            "response.function_call_arguments.done",
+            self._handle_function_call_arguments_done_event,
         )
         for event_type in {"session.updated", "rate_limits.updated"}:
             self._event_router.register(event_type, self._handle_session_or_rate_limit_event)
@@ -1029,6 +1041,52 @@ class RealtimeAPI:
                     extracted_parts.append(candidate)
 
         return "".join(extracted_parts), part_types
+
+    async def _handle_output_item_added_event(self, event: dict[str, Any], websocket: Any) -> None:
+        _ = websocket
+        await self._function_call_accumulator.handle_output_item_added(event)
+
+    async def _handle_function_call_arguments_delta_event(self, event: dict[str, Any], websocket: Any) -> None:
+        _ = websocket
+        self._function_call_accumulator.handle_function_call_arguments_delta(event)
+        self.function_call_args = self._function_call_accumulator.arguments_buffer
+
+    async def _handle_function_call_arguments_done_event(self, event: dict[str, Any], websocket: Any) -> None:
+        self.function_call_args = self._function_call_accumulator.arguments_buffer
+        await self._function_call_accumulator.handle_function_call_arguments_done(event, websocket)
+        self._function_call_accumulator.reset_arguments_buffer()
+
+    def _on_function_call_item_added(self, item: dict[str, Any]) -> None:
+        self.function_call = item
+        self.function_call_args = ""
+
+    def _on_assistant_output_item_added(self, item: dict[str, Any]) -> None:
+        if self._is_active_response_guarded():
+            return
+        if item.get("type") != "message" or item.get("role") != "assistant":
+            return
+        extracted_text, part_types = self._extract_assistant_text_from_content(item.get("content", []))
+        logger.debug(
+            "assistant_content_event_received event_type=response.output_item.added part_types=%s extracted_chars=%s",
+            ",".join(part_types),
+            len(extracted_text),
+        )
+        if not extracted_text:
+            return
+        self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
+        self._mark_first_assistant_utterance_observed_if_needed(extracted_text)
+        self.assistant_reply += extracted_text
+        self._assistant_reply_accum += extracted_text
+        self.state_manager.update_state(InteractionState.SPEAKING, "text output")
+        current_turn_id = self._current_turn_id_or_unknown()
+        current_input_event_key = str(getattr(self, "_active_response_input_event_key", "") or "").strip()
+        if not current_input_event_key:
+            current_input_event_key = str(getattr(self, "_current_input_event_key", "") or "").strip()
+        self._set_response_delivery_state(
+            turn_id=current_turn_id,
+            input_event_key=current_input_event_key,
+            state="delivered",
+        )
 
     async def _handle_session_or_rate_limit_event(self, event: dict[str, Any], websocket: Any) -> None:
         await self._handle_event_legacy(event, websocket)
@@ -9278,11 +9336,11 @@ class RealtimeAPI:
     async def _handle_event_legacy(self, event: dict[str, Any], websocket: Any) -> None:
         event_type = event.get("type")
         if event_type == "response.output_item.added":
-            await self.handle_output_item_added(event)
+            await self._handle_output_item_added_event(event, websocket)
         elif event_type == "response.function_call_arguments.delta":
-            self.function_call_args += event.get("delta", "")
+            await self._handle_function_call_arguments_delta_event(event, websocket)
         elif event_type == "response.function_call_arguments.done":
-            await self.handle_function_call(event, websocket)
+            await self._handle_function_call_arguments_done_event(event, websocket)
         elif event_type == "response.text.delta":
             if self._is_active_response_guarded():
                 return
@@ -9428,39 +9486,7 @@ class RealtimeAPI:
             self._ensure_startup_injection_timeout_task()
 
     async def handle_output_item_added(self, event: dict[str, Any]) -> None:
-        item = event.get("item", {})
-        if item.get("type") == "function_call":
-            self.function_call = item
-            self.function_call_args = ""
-            return
-        if self._is_active_response_guarded():
-            return
-        if not isinstance(item, dict):
-            return
-        if item.get("type") != "message" or item.get("role") != "assistant":
-            return
-        extracted_text, part_types = self._extract_assistant_text_from_content(item.get("content", []))
-        logger.debug(
-            "assistant_content_event_received event_type=response.output_item.added part_types=%s extracted_chars=%s",
-            ",".join(part_types),
-            len(extracted_text),
-        )
-        if not extracted_text:
-            return
-        self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
-        self._mark_first_assistant_utterance_observed_if_needed(extracted_text)
-        self.assistant_reply += extracted_text
-        self._assistant_reply_accum += extracted_text
-        self.state_manager.update_state(InteractionState.SPEAKING, "text output")
-        current_turn_id = self._current_turn_id_or_unknown()
-        current_input_event_key = str(getattr(self, "_active_response_input_event_key", "") or "").strip()
-        if not current_input_event_key:
-            current_input_event_key = str(getattr(self, "_current_input_event_key", "") or "").strip()
-        self._set_response_delivery_state(
-            turn_id=current_turn_id,
-            input_event_key=current_input_event_key,
-            state="delivered",
-        )
+        await self._function_call_accumulator.handle_output_item_added(event)
 
     async def handle_function_call(self, event: dict[str, Any], websocket: Any) -> None:
         if self.function_call:

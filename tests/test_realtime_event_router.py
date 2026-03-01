@@ -7,7 +7,17 @@ from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 from ai.realtime.event_router import EventRouter
+from ai.function_call_accumulator import FunctionCallAccumulator
 from ai.realtime_api import RealtimeAPI
+
+
+def _attach_function_call_accumulator(api: RealtimeAPI) -> None:
+    api._function_call_accumulator = FunctionCallAccumulator(
+        on_function_call_item=api._on_function_call_item_added,
+        on_assistant_message_item=api._on_assistant_output_item_added,
+        on_arguments_done=api.handle_function_call,
+    )
+
 
 
 def test_dispatch_invokes_registered_handler() -> None:
@@ -91,6 +101,7 @@ def test_realtime_api_configure_event_router_registers_conversation_item_added()
             "handle_input_audio_transcription_partial": AsyncMock(return_value=None),
         },
     )()
+    _attach_function_call_accumulator(api)
 
     api._configure_event_router()
 
@@ -128,6 +139,7 @@ def test_realtime_api_configure_event_router_registers_input_audio_handlers_from
 
     api._event_router = EventRouter(fallback=_fallback)
     api._input_audio_events = _InputAudioHandlers()
+    _attach_function_call_accumulator(api)
 
     api._configure_event_router()
 
@@ -180,6 +192,7 @@ def test_realtime_api_handle_event_triggers_recovery_when_input_audio_handler_ra
 
     api._event_router = EventRouter(fallback=_fallback)
     api._input_audio_events = _InputAudioHandlers()
+    _attach_function_call_accumulator(api)
     api._configure_event_router()
     api._maybe_handle_confirmation_decision_timeout = AsyncMock(return_value=None)
     api._recover_from_event_handler_error = AsyncMock(return_value=None)
@@ -212,6 +225,7 @@ def test_realtime_api_handle_event_legacy_processes_assistant_conversation_item_
     api._mark_first_assistant_utterance_observed_if_needed = Mock()
     api._set_response_delivery_state = Mock()
     api.state_manager = type("StateManager", (), {"update_state": Mock()})()
+    _attach_function_call_accumulator(api)
 
     event = {
         "type": "conversation.item.added",
@@ -250,6 +264,7 @@ def test_realtime_api_handle_event_legacy_processes_assistant_response_output_it
     api._mark_first_assistant_utterance_observed_if_needed = Mock()
     api._set_response_delivery_state = Mock()
     api.state_manager = type("StateManager", (), {"update_state": Mock()})()
+    _attach_function_call_accumulator(api)
 
     event = {
         "type": "response.output_item.added",
@@ -329,3 +344,32 @@ def test_realtime_api_handle_event_triggers_recovery_when_router_dispatch_raises
     api._recover_from_event_handler_error.assert_awaited_once_with("response.done", websocket)
     assert mock_exception.call_count == 1
     mock_error.assert_called_once_with("EVENT_HANDLER_ERROR event=%s", "response.done")
+
+
+def test_realtime_api_configure_event_router_registers_function_call_accumulator_handlers() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+
+    async def _fallback(_event: dict[str, Any], _websocket: Any) -> None:
+        return None
+
+    api._event_router = EventRouter(fallback=_fallback)
+    api._input_audio_events = type(
+        "InputAudioHandlers",
+        (),
+        {
+            "handle_input_audio_buffer_speech_started": AsyncMock(return_value=None),
+            "handle_input_audio_buffer_speech_stopped": AsyncMock(return_value=None),
+            "handle_input_audio_buffer_committed": AsyncMock(return_value=None),
+            "handle_input_audio_transcription_partial": AsyncMock(return_value=None),
+        },
+    )()
+    _attach_function_call_accumulator(api)
+
+    api._configure_event_router()
+
+    assert api._event_router._handlers["response.output_item.added"] == api._handle_output_item_added_event
+    assert (
+        api._event_router._handlers["response.function_call_arguments.done"]
+        == api._handle_function_call_arguments_done_event
+    )
+
