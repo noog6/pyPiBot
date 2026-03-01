@@ -866,6 +866,7 @@ class RealtimeAPI:
         self._input_event_key_counter = 0
         self._synthetic_input_event_counter = 0
         self._response_created_canonical_keys: set[str] = set()
+        self._empty_response_retry_canonical_keys: set[str] = set()
         self._response_delivery_ledger: dict[str, str] = {}
         self._response_id_by_canonical_key: dict[str, str] = {}
         self._canonical_response_state_by_key: dict[str, CanonicalResponseState] = {}
@@ -3046,6 +3047,97 @@ class RealtimeAPI:
     def _response_has_safety_override(self, response_create_event: dict[str, Any]) -> bool:
         metadata = self._extract_response_create_metadata(response_create_event)
         return str(metadata.get("safety_override", "")).strip().lower() in {"true", "1", "yes"}
+
+    def _empty_response_retry_idempotency_key(self, *, canonical_key: str) -> str:
+        normalized_canonical_key = str(canonical_key or "").strip() or "unknown"
+        digest = hashlib.sha1(normalized_canonical_key.encode("utf-8")).hexdigest()[:16]
+        return f"empty_response_done:{digest}"
+
+    def _is_empty_response_done(self, *, canonical_key: str) -> bool:
+        response_state = self._canonical_response_state(canonical_key)
+        audio_delta_seen = bool(
+            isinstance(response_state, CanonicalResponseState) and response_state.audio_started
+        ) or self._canonical_first_audio_started(canonical_key)
+        assistant_reply_present = bool(str(getattr(self, "assistant_reply", "") or "").strip())
+        assistant_buffer_present = bool(str(getattr(self, "_assistant_reply_accum", "") or "").strip())
+        return not assistant_reply_present and not assistant_buffer_present and not audio_delta_seen
+
+    async def _maybe_schedule_empty_response_retry(
+        self,
+        *,
+        websocket: Any,
+        turn_id: str,
+        canonical_key: str,
+        input_event_key: str,
+        origin: str,
+        delivery_state_before_done: str | None,
+    ) -> None:
+        normalized_origin = str(origin or "unknown").strip().lower()
+        run_id = self._current_run_id() or ""
+        if not self._is_empty_response_done(canonical_key=canonical_key):
+            return
+        logger.info(
+            "empty_response_detected run_id=%s turn_id=%s origin=%s",
+            run_id,
+            turn_id,
+            normalized_origin or "unknown",
+        )
+        retry_registry = getattr(self, "_empty_response_retry_canonical_keys", None)
+        if not isinstance(retry_registry, set):
+            retry_registry = set()
+            self._empty_response_retry_canonical_keys = retry_registry
+        if canonical_key in retry_registry:
+            logger.info(
+                "empty_response_retry_skipped reason=already_retried run_id=%s turn_id=%s",
+                run_id,
+                turn_id,
+            )
+            return
+
+        state_not_retryable = (
+            websocket is None
+            or normalized_origin not in {"prompt", "server_auto", "user_transcript"}
+            or delivery_state_before_done == "cancelled"
+        )
+        if state_not_retryable:
+            logger.info(
+                "empty_response_retry_skipped reason=state_not_retryable run_id=%s turn_id=%s",
+                run_id,
+                turn_id,
+            )
+            return
+
+        retry_registry.add(canonical_key)
+        retry_input_event_key = f"{input_event_key or 'unknown'}__empty_retry"
+        response_create_event = {
+            "type": "response.create",
+            "response": {
+                "metadata": {
+                    "turn_id": turn_id,
+                    "input_event_key": retry_input_event_key,
+                    "retry_reason": "empty_response_done",
+                    "idempotency_key": self._empty_response_retry_idempotency_key(canonical_key=canonical_key),
+                }
+            },
+        }
+        sent = await self._send_response_create(
+            websocket,
+            response_create_event,
+            origin=normalized_origin,
+            record_ai_call=True,
+        )
+        if sent:
+            logger.info(
+                "empty_response_retry_scheduled run_id=%s turn_id=%s",
+                run_id,
+                turn_id,
+            )
+        else:
+            logger.info(
+                "empty_response_retry_skipped reason=state_not_retryable run_id=%s turn_id=%s",
+                run_id,
+                turn_id,
+            )
 
     def _response_is_explicit_multipart(self, metadata: dict[str, Any] | None) -> bool:
         if not isinstance(metadata, dict):
@@ -10001,6 +10093,10 @@ class RealtimeAPI:
             turn_id=turn_id,
             input_event_key=done_input_event_key,
         )
+        delivery_state_before_done = self._response_delivery_state(
+            turn_id=turn_id,
+            input_event_key=done_input_event_key,
+        )
         active_response_id_before_clear = getattr(self, "_active_response_id", None)
         active_response_origin_before_clear = getattr(self, "_active_response_origin", "unknown")
         active_response_input_event_key_before_clear = getattr(self, "_active_response_input_event_key", None)
@@ -10037,11 +10133,7 @@ class RealtimeAPI:
                 canonical_key=done_canonical_key,
                 trigger="response_done",
             )
-            existing_delivery_state = self._response_delivery_state(
-                turn_id=turn_id,
-                input_event_key=done_input_event_key,
-            )
-            if existing_delivery_state != "cancelled":
+            if delivery_state_before_done != "cancelled":
                 self._set_response_delivery_state(
                     turn_id=turn_id,
                     input_event_key=done_input_event_key,
@@ -10126,6 +10218,14 @@ class RealtimeAPI:
                 "Skipping IDLE transition for response.done while still listening; deferring until speech stop."
             )
         logger.info("Received response.done event.")
+        await self._maybe_schedule_empty_response_retry(
+            websocket=self.websocket,
+            turn_id=turn_id,
+            canonical_key=done_canonical_key,
+            input_event_key=done_input_event_key,
+            origin=active_response_origin_before_clear,
+            delivery_state_before_done=delivery_state_before_done,
+        )
         if event:
             self._last_response_metadata = {
                 "event_type": event.get("type"),
