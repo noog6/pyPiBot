@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 from ai.realtime.event_router import EventRouter
+from ai.realtime_api import RealtimeAPI
 
 
 def test_dispatch_invokes_registered_handler() -> None:
@@ -70,3 +72,47 @@ def test_handler_exception_triggers_exception_callback_once() -> None:
     asyncio.run(_run())
 
     assert exception_calls == [("response.done", "boom")]
+
+
+def test_realtime_api_handle_event_dispatches_via_event_router_once() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    event = {"type": "response.created", "id": "evt-123"}
+    websocket = object()
+
+    async def _fallback(_event: dict[str, Any], _websocket: Any) -> None:
+        return None
+
+    router = EventRouter(fallback=_fallback)
+    router.dispatch = AsyncMock(return_value=None)
+    api._event_router = router
+    api._maybe_handle_confirmation_decision_timeout = AsyncMock(return_value=None)
+
+    asyncio.run(api.handle_event(event, websocket))
+
+    router.dispatch.assert_awaited_once_with(event, websocket)
+
+
+def test_realtime_api_handle_event_triggers_recovery_when_router_dispatch_raises() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    event = {"type": "response.done", "id": "evt-err"}
+    websocket = object()
+
+    async def _fallback(_event: dict[str, Any], _websocket: Any) -> None:
+        return None
+
+    router = EventRouter(fallback=_fallback)
+    router.dispatch = AsyncMock(side_effect=RuntimeError("router exploded"))
+    api._event_router = router
+    api._maybe_handle_confirmation_decision_timeout = AsyncMock(return_value=None)
+    api._recover_from_event_handler_error = AsyncMock(return_value=None)
+
+    with (
+        patch("ai.realtime_api.logger.exception") as mock_exception,
+        patch("ai.realtime_api.logger.error") as mock_error,
+    ):
+        asyncio.run(api.handle_event(event, websocket))
+
+    router.dispatch.assert_awaited_once_with(event, websocket)
+    api._recover_from_event_handler_error.assert_awaited_once_with("response.done", websocket)
+    assert mock_exception.call_count == 1
+    mock_error.assert_called_once_with("EVENT_HANDLER_ERROR event=%s", "response.done")
