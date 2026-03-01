@@ -29,6 +29,7 @@ from config import ConfigController
 from core.alert_policy import Alert, AlertPolicy
 from core.budgeting import RollingWindowBudget
 from core.logging import (
+    configure_websocket_library_logging,
     logger,
     log_error,
     log_info,
@@ -121,6 +122,7 @@ Response metadata: {response_metadata}
 
 ALLOWED_OUTBOUND_HOSTS = {"api.openai.com"}
 ALLOWED_OUTBOUND_SCHEMES = {"https", "wss"}
+
 
 _EMAIL_REDACT_RE = re.compile(r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[A-Za-z]{2,}\b")
 _PHONE_REDACT_RE = re.compile(r"(?:(?<=\s)|^)(?:\+?\d[\d()\-\s]{7,}\d)(?=\s|$)")
@@ -8370,6 +8372,7 @@ class RealtimeAPI:
             on_playback_complete=_playback_complete_from_thread,
             output_device_name=self._audio_output_device_name,
         )
+        configure_websocket_library_logging()
 
         try:
             while True:

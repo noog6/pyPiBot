@@ -219,6 +219,31 @@ _BEARER_TOKEN_RE = re.compile(r"(Bearer\s+)([^\s]+)")
 _API_KEY_RE = re.compile(r"sk-[A-Za-z0-9-_]{10,}")
 
 
+class WebsocketAuthorizationRedactionFilter(logging.Filter):
+    """Redact Authorization Bearer tokens in third-party websocket logs."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        redacted = _redact_text(message)
+        if redacted != message:
+            record.msg = redacted
+            record.args = ()
+        return True
+
+
+_WEBSOCKET_LOGGERS = ("websockets.client", "websockets.protocol")
+_websocket_redaction_filter = WebsocketAuthorizationRedactionFilter()
+
+
+def configure_websocket_library_logging() -> None:
+    """Ensure websocket debug logs redact Bearer auth headers before emission."""
+
+    for logger_name in _WEBSOCKET_LOGGERS:
+        target_logger = logging.getLogger(logger_name)
+        if _websocket_redaction_filter not in target_logger.filters:
+            target_logger.addFilter(_websocket_redaction_filter)
+
+
 def _redact_text(message: str) -> str:
     redacted = _BEARER_TOKEN_RE.sub(r"\1<redacted>", message)
     return _API_KEY_RE.sub("<redacted>", redacted)
