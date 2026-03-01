@@ -403,6 +403,18 @@ class PendingResponseCreate:
     enqueued_done_serial: int = 0
 
 
+@dataclass
+class ConversationEfficiencyState:
+    ack_count: int = 0
+    substantive_count: int = 0
+    duplicate_prevented: int = 0
+    dropped_queued_creates: int = 0
+    estimated_token_overhead: int = 0
+    estimated_audio_overhead_ms: int = 0
+    substantive_count_by_canonical: dict[str, int] | None = None
+    duplicate_alerted_canonical_keys: set[str] | None = None
+
+
 def _validate_outbound_endpoint(url: str) -> None:
     parsed = urlparse(url)
     if parsed.scheme not in ALLOWED_OUTBOUND_SCHEMES:
@@ -926,6 +938,8 @@ class RealtimeAPI:
         )
         self._pending_micro_ack_by_turn_channel: dict[tuple[str, str], PendingMicroAckMarker] = {}
         self._micro_ack_manager = self._build_micro_ack_manager(realtime_cfg)
+        self._conversation_efficiency_by_turn: dict[str, ConversationEfficiencyState] = {}
+        self._conversation_efficiency_logged_turns: set[str] = set()
 
     @staticmethod
     def _load_micro_ack_channel_policy(realtime_cfg: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -1032,6 +1046,7 @@ class RealtimeAPI:
             )
             return
         if event == "emitted":
+            self._record_conversation_micro_ack(turn_id=turn_id)
             logger.info(
                 "micro_ack_emitted run_id=%s turn_id=%s phrase_id=%s category=%s channel=%s intent=%s action=%s tool_call_id=%s dedupe_fp=%s",
                 run_id,
@@ -1353,6 +1368,105 @@ class RealtimeAPI:
             )
 
         self.loop.create_task(_emit())
+
+    def _conversation_efficiency_state(self, *, turn_id: str) -> ConversationEfficiencyState:
+        normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
+        state = self._conversation_efficiency_by_turn.get(normalized_turn_id)
+        if state is None:
+            state = ConversationEfficiencyState(
+                substantive_count_by_canonical={},
+                duplicate_alerted_canonical_keys=set(),
+            )
+            self._conversation_efficiency_by_turn[normalized_turn_id] = state
+        if state.substantive_count_by_canonical is None:
+            state.substantive_count_by_canonical = {}
+        if state.duplicate_alerted_canonical_keys is None:
+            state.duplicate_alerted_canonical_keys = set()
+        return state
+
+    def _record_conversation_micro_ack(self, *, turn_id: str) -> None:
+        state = self._conversation_efficiency_state(turn_id=turn_id)
+        state.ack_count += 1
+        state.estimated_token_overhead += 6
+        state.estimated_audio_overhead_ms += 900
+
+    def _record_duplicate_create_attempt(self, *, turn_id: str, canonical_key: str, reason: str) -> None:
+        state = self._conversation_efficiency_state(turn_id=turn_id)
+        state.duplicate_prevented += 1
+        logger.debug(
+            "conversation_efficiency_duplicate run_id=%s turn_id=%s canonical_key=%s reason=%s duplicate_prevented=%s",
+            self._current_run_id() or "",
+            turn_id,
+            canonical_key or "unknown",
+            reason,
+            state.duplicate_prevented,
+        )
+
+    def _record_dropped_queued_creates(self, *, turn_id: str, dropped_count: int) -> None:
+        if dropped_count <= 0:
+            return
+        state = self._conversation_efficiency_state(turn_id=turn_id)
+        state.dropped_queued_creates += int(dropped_count)
+        state.estimated_token_overhead += int(dropped_count) * 4
+
+    def _record_substantive_response(self, *, turn_id: str, canonical_key: str) -> None:
+        normalized_key = str(canonical_key or "").strip() or "canonical-unknown"
+        state = self._conversation_efficiency_state(turn_id=turn_id)
+        counts = state.substantive_count_by_canonical or {}
+        next_count = int(counts.get(normalized_key, 0)) + 1
+        counts[normalized_key] = next_count
+        state.substantive_count_by_canonical = counts
+        state.substantive_count += 1
+        if next_count > 1:
+            state.estimated_token_overhead += 120
+            state.estimated_audio_overhead_ms += 2500
+            alerted_keys = state.duplicate_alerted_canonical_keys or set()
+            if normalized_key not in alerted_keys:
+                alerted_keys.add(normalized_key)
+                state.duplicate_alerted_canonical_keys = alerted_keys
+                self._emit_alert(
+                    Alert(
+                        key="conversation_efficiency_substantive_duplicates",
+                        message=(
+                            "Multiple substantive responses emitted for one canonical user input."
+                        ),
+                        severity="warning",
+                        metadata={
+                            "turn_id": turn_id,
+                            "canonical_key": normalized_key,
+                            "substantive_count": next_count,
+                        },
+                    )
+                )
+
+    def _log_turn_conversation_efficiency(
+        self,
+        *,
+        turn_id: str,
+        canonical_key: str,
+        close_reason: str,
+    ) -> None:
+        normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
+        if normalized_turn_id in self._conversation_efficiency_logged_turns:
+            return
+        state = self._conversation_efficiency_by_turn.get(normalized_turn_id)
+        if state is None:
+            return
+        self._conversation_efficiency_logged_turns.add(normalized_turn_id)
+        logger.info(
+            "conversation_efficiency run_id=%s turn_id=%s canonical_key=%s ack_count=%s substantive_count=%s "
+            "duplicate_prevented=%s estimated_token_overhead=%s estimated_audio_overhead_ms=%s dropped_queued_creates=%s close_reason=%s",
+            self._current_run_id() or "",
+            normalized_turn_id,
+            str(canonical_key or "").strip() or "canonical-unknown",
+            state.ack_count,
+            state.substantive_count,
+            state.duplicate_prevented,
+            state.estimated_token_overhead,
+            state.estimated_audio_overhead_ms,
+            state.dropped_queued_creates,
+            close_reason,
+        )
 
     def _should_speak_micro_ack(self, channel: str) -> bool:
         if self._micro_ack_runtime_mode == "quiet":
@@ -3300,6 +3414,7 @@ class RealtimeAPI:
             if pending_origin == normalized_origin:
                 self._pending_response_create = None
                 self._sync_pending_response_create_queue()
+                self._record_dropped_queued_creates(turn_id=turn_id, dropped_count=1)
                 logger.info(
                     "response_schedule_drop run_id=%s turn_id=%s origin=%s reason=preference_recall_suppressed",
                     self._current_run_id() or "",
@@ -3325,6 +3440,7 @@ class RealtimeAPI:
         if dropped:
             self._response_create_queue = kept
             self._sync_pending_response_create_queue()
+            self._record_dropped_queued_creates(turn_id=turn_id, dropped_count=dropped)
             logger.info(
                 "response_schedule_drop run_id=%s turn_id=%s origin=%s dropped=%s reason=preference_recall_suppressed",
                 self._current_run_id() or "",
@@ -4999,6 +5115,11 @@ class RealtimeAPI:
             getattr(self, "_response_done_serial", 0),
         )
         if self._is_response_already_delivered(turn_id=turn_id, input_event_key=current_input_event_key):
+            self._record_duplicate_create_attempt(
+                turn_id=turn_id,
+                canonical_key=canonical_key,
+                reason="already_delivered",
+            )
             logger.debug(
                 "duplicate_response_prevented run_id=%s turn_id=%s input_event_key=%s reason=already_delivered origin=%s",
                 self._current_run_id() or "",
@@ -5038,6 +5159,11 @@ class RealtimeAPI:
             and canonical_key in created_keys
             and not self._response_has_safety_override(response_create_event)
         ):
+            self._record_duplicate_create_attempt(
+                turn_id=turn_id,
+                canonical_key=canonical_key,
+                reason="canonical_response_already_created",
+            )
             logger.info(
                 "response_schedule_blocked run_id=%s turn_id=%s origin=%s mode=queued reason=canonical_response_already_created canonical_key=%s",
                 self._current_run_id() or "",
@@ -5332,6 +5458,11 @@ class RealtimeAPI:
             )
         if decision.action is ResponseCreateDecisionAction.BLOCK:
             if decision.reason_code == "already_delivered":
+                self._record_duplicate_create_attempt(
+                    turn_id=turn_id,
+                    canonical_key=canonical_key,
+                    reason="already_delivered",
+                )
                 logger.debug(
                     "duplicate_response_prevented run_id=%s turn_id=%s input_event_key=%s reason=already_delivered origin=%s",
                     self._current_run_id() or "",
@@ -5350,6 +5481,12 @@ class RealtimeAPI:
                     canonical_key=canonical_key,
                     block_reason=decision.reason_code,
                 )
+                if decision.reason_code == "canonical_response_already_created":
+                    self._record_duplicate_create_attempt(
+                        turn_id=turn_id,
+                        canonical_key=canonical_key,
+                        reason=decision.reason_code,
+                    )
                 return False
             if decision.reason_code == "preference_recall_suppressed":
                 self._drop_suppressed_scheduled_response_creates(turn_id=turn_id, origin=normalized_origin)
@@ -8274,6 +8411,11 @@ class RealtimeAPI:
                     ),
                 )
             created_keys_size_after = len(getattr(self, "_response_created_canonical_keys", set()) or ())
+            if consumes_canonical_slot:
+                self._record_substantive_response(
+                    turn_id=turn_id,
+                    canonical_key=canonical_key,
+                )
             logger.debug(
                 "[RESPTRACE] response_created run_id=%s turn_id=%s origin=%s response_id=%s resolved_input_event_key=%s "
                 "canonical_key=%s consumes_canonical_slot=%s created_keys_size_before=%s created_keys_size_after=%s "
@@ -10133,6 +10275,11 @@ class RealtimeAPI:
                 "rate_limits": self.rate_limits,
             }
         self._emit_preference_recall_skip_trace_if_needed(turn_id=self._current_response_turn_id)
+        self._log_turn_conversation_efficiency(
+            turn_id=turn_id,
+            canonical_key=resolved_canonical_key,
+            close_reason="response_done",
+        )
         transition = self._build_confirmation_transition_decision(
             reason="response_done",
             include_reminder_gate=True,
@@ -10240,6 +10387,11 @@ class RealtimeAPI:
                 "rate_limits": self.rate_limits,
             }
         self._emit_preference_recall_skip_trace_if_needed(turn_id=self._current_response_turn_id)
+        self._log_turn_conversation_efficiency(
+            turn_id=turn_id,
+            canonical_key=self._canonical_utterance_key(turn_id=turn_id, input_event_key=done_input_event_key),
+            close_reason="response_completed",
+        )
         transition = self._build_confirmation_transition_decision(reason="response_completed")
         token_active, awaiting_phase, _, phase_is_awaiting_confirmation = self._confirmation_hold_components()
         if not transition.allow_response_transition:
