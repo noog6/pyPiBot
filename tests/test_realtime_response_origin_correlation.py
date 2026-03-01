@@ -4,6 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+import sys
+import types
+
+
+if "audioop" not in sys.modules:
+    sys.modules["audioop"] = types.ModuleType("audioop")
 
 from ai.orchestration import OrchestrationPhase
 from ai.realtime_api import RealtimeAPI
@@ -60,6 +66,16 @@ def _build_api() -> RealtimeAPI:
     api.state_manager = _StateManager()
     api.mic = _Mic()
     api._memory_manager = _MemoryManager()
+    api._input_audio_events = type(
+        "_InputAudioEvents",
+        (),
+        {
+            "handle_input_audio_buffer_speech_started": staticmethod(lambda *_args, **_kwargs: None),
+            "handle_input_audio_buffer_speech_stopped": staticmethod(lambda *_args, **_kwargs: None),
+            "handle_input_audio_buffer_committed": staticmethod(lambda *_args, **_kwargs: None),
+            "handle_input_audio_transcription_partial": staticmethod(lambda *_args, **_kwargs: None),
+        },
+    )()
     return api
 
 
@@ -272,3 +288,85 @@ def test_resolve_response_create_turn_id_keeps_micro_ack_turn_id() -> None:
 
     assert turn_id == "turn_1"
     assert api._current_response_turn_id == "turn_1"
+
+
+def test_response_lifecycle_trace_continuity_created_content_done(monkeypatch) -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._active_response_id = "resp_trace_1"
+    api._active_response_origin = "assistant_message"
+    api._active_response_input_event_key = "input_evt_trace_1"
+    api._active_response_canonical_key = "turn_trace_1::input_evt_trace_1"
+    api._response_trace_context_by_id = {}
+    api._current_turn_id_or_unknown = lambda: "turn_trace_1"
+    api._canonical_utterance_key = lambda turn_id, input_event_key: f"{turn_id}::{input_event_key}"
+
+    async def _legacy_handler(_event, _websocket) -> None:
+        return None
+
+    api._handle_event_legacy = _legacy_handler
+
+    info_logs: list[str] = []
+    debug_logs: list[str] = []
+
+    def _capture_info(message: str, *args) -> None:
+        info_logs.append(message % args)
+
+    def _capture_debug(message: str, *args) -> None:
+        debug_logs.append(message % args)
+
+    monkeypatch.setattr("ai.realtime_api.logger.info", _capture_info)
+    monkeypatch.setattr("ai.realtime_api.logger.debug", _capture_debug)
+
+    api._record_response_trace_context(
+        "resp_trace_1",
+        turn_id="turn_trace_1",
+        input_event_key="input_evt_trace_1",
+        canonical_key="turn_trace_1::input_evt_trace_1",
+        origin="assistant_message",
+    )
+    api._emit_response_lifecycle_trace(
+        event_type="response.created",
+        response_id="resp_trace_1",
+        turn_id="turn_trace_1",
+        input_event_key="input_evt_trace_1",
+        canonical_key="turn_trace_1::input_evt_trace_1",
+        origin="assistant_message",
+        active_input_event_key="input_evt_trace_1",
+        active_canonical_key="turn_trace_1::input_evt_trace_1",
+        payload_summary="anchor=created",
+    )
+
+    asyncio.run(
+        api._handle_response_lifecycle_event(
+            {"type": "response.text.delta", "response": {"id": "resp_trace_1"}, "delta": "hello"},
+            websocket=None,
+        )
+    )
+
+    api._emit_response_lifecycle_trace(
+        event_type="response.done",
+        response_id="resp_trace_1",
+        turn_id="turn_trace_1",
+        input_event_key="input_evt_trace_1",
+        canonical_key="turn_trace_1::input_evt_trace_1",
+        origin="assistant_message",
+        active_input_event_key="input_evt_trace_1",
+        active_canonical_key="turn_trace_1::input_evt_trace_1",
+        payload_summary="anchor=done",
+    )
+
+    lifecycle_anchors = [
+        line
+        for line in info_logs
+        if line.startswith("response_lifecycle_trace response_id=resp_trace_1")
+    ]
+    assert any("event_type=response.created" in line for line in lifecycle_anchors)
+    assert any("event_type=response.text.delta" in line for line in lifecycle_anchors)
+    assert any("event_type=response.done" in line for line in lifecycle_anchors)
+    assert all("turn_id=turn_trace_1" in line for line in lifecycle_anchors)
+    assert all("input_event_key=input_evt_trace_1" in line for line in lifecycle_anchors)
+    assert all("canonical_key=turn_trace_1::input_evt_trace_1" in line for line in lifecycle_anchors)
+    assert any(
+        "response_lifecycle_trace_detail response_id=resp_trace_1 event_type=response.text.delta" in line
+        for line in debug_logs
+    )

@@ -994,8 +994,123 @@ class RealtimeAPI:
         _ = websocket
         logger.debug("Unhandled realtime event type=%s", str(event.get("type") or "unknown"))
 
+    def _response_trace_by_id(self) -> dict[str, dict[str, str]]:
+        trace_by_id = getattr(self, "_response_trace_context_by_id", None)
+        if isinstance(trace_by_id, dict):
+            return trace_by_id
+        trace_by_id = {}
+        self._response_trace_context_by_id = trace_by_id
+        return trace_by_id
+
+    def _record_response_trace_context(self, response_id: str, **fields: str) -> dict[str, str]:
+        response_key = str(response_id or "").strip()
+        if not response_key:
+            return {}
+        trace_by_id = self._response_trace_by_id()
+        current = trace_by_id.setdefault(response_key, {})
+        for key, value in fields.items():
+            normalized_value = str(value or "").strip()
+            if normalized_value:
+                current[key] = normalized_value
+        return current
+
+    def _emit_response_lifecycle_trace(
+        self,
+        *,
+        event_type: str,
+        response_id: str,
+        turn_id: str,
+        input_event_key: str,
+        canonical_key: str,
+        origin: str,
+        active_input_event_key: str,
+        active_canonical_key: str,
+        payload_summary: str = "",
+    ) -> None:
+        response_key = str(response_id or "").strip() or "unknown"
+        resolved_turn_id = str(turn_id or "").strip() or "unknown"
+        resolved_input_key = str(input_event_key or "").strip() or "unknown"
+        resolved_canonical_key = str(canonical_key or "").strip() or "unknown"
+        resolved_origin = str(origin or "").strip() or "unknown"
+        active_input_key = str(active_input_event_key or "").strip() or "none"
+        active_key = str(active_canonical_key or "").strip() or "none"
+        normalized_event_type = str(event_type or "").strip() or "unknown"
+        logger.info(
+            "response_lifecycle_trace response_id=%s event_type=%s turn_id=%s input_event_key=%s canonical_key=%s "
+            "origin=%s active_input_event_key=%s active_canonical_key=%s",
+            response_key,
+            normalized_event_type,
+            resolved_turn_id,
+            resolved_input_key,
+            resolved_canonical_key,
+            resolved_origin,
+            active_input_key,
+            active_key,
+        )
+        if payload_summary:
+            logger.debug(
+                "response_lifecycle_trace_detail response_id=%s event_type=%s turn_id=%s input_event_key=%s "
+                "canonical_key=%s origin=%s active_input_event_key=%s active_canonical_key=%s payload=%s",
+                response_key,
+                normalized_event_type,
+                resolved_turn_id,
+                resolved_input_key,
+                resolved_canonical_key,
+                resolved_origin,
+                active_input_key,
+                active_key,
+                payload_summary,
+            )
+
     async def _handle_response_lifecycle_event(self, event: dict[str, Any], websocket: Any) -> None:
         event_type = str(event.get("type") or "unknown")
+        response = event.get("response")
+        response_id = ""
+        if isinstance(response, dict):
+            response_id = str(response.get("id") or "").strip()
+        if not response_id:
+            response_id = str(getattr(self, "_active_response_id", "") or "").strip()
+        trace_context = self._response_trace_by_id().get(response_id, {}) if response_id else {}
+        active_turn_id = str(self._current_turn_id_or_unknown() or "").strip() or "unknown"
+        active_input_event_key = str(getattr(self, "_active_response_input_event_key", "") or "").strip()
+        active_canonical_key = str(getattr(self, "_active_response_canonical_key", "") or "").strip()
+        turn_id = str(trace_context.get("turn_id") or active_turn_id or "unknown").strip() or "unknown"
+        input_event_key = str(
+            trace_context.get("input_event_key") or active_input_event_key or "unknown"
+        ).strip() or "unknown"
+        canonical_key = str(
+            trace_context.get("canonical_key")
+            or active_canonical_key
+            or self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+        ).strip() or "unknown"
+        origin = str(
+            trace_context.get("origin") or getattr(self, "_active_response_origin", "unknown") or "unknown"
+        ).strip() or "unknown"
+        item = event.get("item")
+        item_type = str(item.get("type") or "") if isinstance(item, dict) else ""
+        payload_summary = (
+            f"has_item={isinstance(item, dict)} item_type={item_type or 'unknown'} "
+            f"has_delta={bool('delta' in event)} has_transcript={bool('transcript' in event)}"
+        )
+        if response_id:
+            self._record_response_trace_context(
+                response_id,
+                turn_id=turn_id,
+                input_event_key=input_event_key,
+                canonical_key=canonical_key,
+                origin=origin,
+            )
+        self._emit_response_lifecycle_trace(
+            event_type=event_type,
+            response_id=response_id,
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            canonical_key=canonical_key,
+            origin=origin,
+            active_input_event_key=active_input_event_key,
+            active_canonical_key=active_canonical_key,
+            payload_summary=payload_summary,
+        )
         logger.debug(
             "realtime_lifecycle_event_received event_type=%s has_item=%s has_delta=%s",
             event_type,
@@ -8903,6 +9018,27 @@ class RealtimeAPI:
             input_event_key=self._active_response_input_event_key,
         )
         self._active_response_canonical_key = lifecycle_canonical_key
+        if self._active_response_id:
+            self._record_response_trace_context(
+                self._active_response_id,
+                turn_id=turn_id,
+                input_event_key=self._active_response_input_event_key or "",
+                canonical_key=lifecycle_canonical_key,
+                origin=origin,
+            )
+        self._emit_response_lifecycle_trace(
+            event_type="response.created",
+            response_id=str(self._active_response_id or ""),
+            turn_id=turn_id,
+            input_event_key=str(self._active_response_input_event_key or ""),
+            canonical_key=lifecycle_canonical_key,
+            origin=origin,
+            active_input_event_key=str(self._active_response_input_event_key or ""),
+            active_canonical_key=lifecycle_canonical_key,
+            payload_summary=(
+                "arbitration=%s consumes_canonical_slot=%s" % (arbitration_outcome.value, consumes_canonical_slot)
+            ),
+        )
         if consumes_canonical_slot:
             self._canonical_lifecycle_state(canonical_key).setdefault("first_audio_started", False)
             self._set_response_delivery_state(
