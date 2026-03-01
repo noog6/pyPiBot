@@ -9214,9 +9214,7 @@ class RealtimeAPI:
                 return
             self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
             delta = event.get("delta", "")
-            if delta and not self._startup_injection_coordinator().first_assistant_utterance_observed:
-                self._startup_injection_coordinator().first_assistant_utterance_observed = True
-                self._release_startup_injection_gate(reason="first_turn_complete")
+            self._mark_first_assistant_utterance_observed_if_needed(delta)
             self.assistant_reply += delta
             self._assistant_reply_accum += delta
             self.state_manager.update_state(InteractionState.SPEAKING, "text output")
@@ -9227,9 +9225,7 @@ class RealtimeAPI:
             if self._is_active_response_guarded():
                 return
             delta = event.get("delta", "")
-            if delta and not self._startup_injection_coordinator().first_assistant_utterance_observed:
-                self._startup_injection_coordinator().first_assistant_utterance_observed = True
-                self._release_startup_injection_gate(reason="first_turn_complete")
+            self._mark_first_assistant_utterance_observed_if_needed(delta)
             self.assistant_reply += delta
             self._assistant_reply_accum += delta
         elif event_type == "response.output_audio_transcript.done":
@@ -9263,6 +9259,7 @@ class RealtimeAPI:
                 manager.on_user_speech_started()
                 if talk_over_active:
                     manager.mark_talk_over_incident()
+
                 manager.cancel_all(reason="speech_active")
             if talk_over_active:
                 self._clear_all_pending_response_creates(reason="talk_over_abort")
@@ -10958,6 +10955,12 @@ class RealtimeAPI:
                 metadata=enqueue_metadata,
                 priority=self._get_injection_priority("text_message"),
             )
+
+    def _mark_first_assistant_utterance_observed_if_needed(self, delta: str) -> None:
+        coordinator = self._startup_injection_coordinator()
+        if delta and not coordinator.first_assistant_utterance_observed:
+            coordinator.first_assistant_utterance_observed = True
+            self._release_startup_injection_gate(reason="first_turn_complete")
 
     def _is_critical_sensor_trigger(self, source: str, severity: str) -> bool:
         normalized_source = str(source).strip().lower()
