@@ -45,7 +45,7 @@ from interaction import (
     InteractionStateManager,
 )
 from ai.tools import function_map, tools
-from ai.realtime.event_router import RealtimeEventRouter
+from ai.realtime.event_router import EventRouter
 from ai.realtime.injections import StartupInjectionCoordinator
 from ai.realtime.response_lifecycle import ResponseLifecycleCoordinator
 from ai.realtime.shutdown import ShutdownCoordinator, WebsocketCloser
@@ -926,29 +926,63 @@ class RealtimeAPI:
         self._silent_turn_incident_count = 0
         self._response_lifecycle = ResponseLifecycleCoordinator(self)
         self._transport: RealtimeTransport | None = None
-        self._event_router = RealtimeEventRouter(fallback=self._handle_event_via_legacy_router)
+        self._event_router = EventRouter(
+            fallback=self._handle_unknown_event,
+            on_exception=self._on_event_handler_exception,
+        )
         self._configure_event_router()
 
     def _configure_event_router(self) -> None:
-        self._event_router.register("response.output_item.added", self._route_output_item_added)
-        self._event_router.register("response.function_call_arguments.delta", self._route_function_call_delta)
-        self._event_router.register("response.function_call_arguments.done", self._route_function_call_done)
+        for event_type in {
+            "response.created",
+            "response.output_item.added",
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done",
+            "response.text.delta",
+            "response.output_audio.delta",
+            "response.output_audio.done",
+            "response.output_audio_transcript.delta",
+            "response.output_audio_transcript.done",
+            "response.done",
+            "response.completed",
+        }:
+            self._event_router.register(event_type, self._handle_response_lifecycle_event)
+        for event_type in {
+            "conversation.item.input_audio_transcription.delta",
+            "conversation.item.input_audio_transcription.partial",
+            "conversation.item.input_audio_transcription.completed",
+            "input_audio_buffer.speech_started",
+            "input_audio_buffer.speech_stopped",
+            "input_audio_buffer.committed",
+        }:
+            self._event_router.register(event_type, self._handle_input_audio_event)
+        for event_type in {"session.updated", "rate_limits.updated"}:
+            self._event_router.register(event_type, self._handle_session_or_rate_limit_event)
+        for event_type in {
+            "error",
+            "conversation.item.created",
+            "response.audio_transcript.done",
+            "response.output_text.delta",
+        }:
+            self._event_router.register(event_type, self._handle_error_or_system_event)
 
-    async def _route_output_item_added(self, event: dict[str, Any], websocket: Any) -> bool:
+    def _on_event_handler_exception(self, event_type: str, exc: Exception) -> None:
+        logger.debug("event_handler_exception event=%s error=%s", event_type, exc)
+
+    async def _handle_unknown_event(self, event: dict[str, Any], websocket: Any) -> None:
         _ = websocket
-        await self.handle_output_item_added(event)
-        return True
+        logger.debug("Unhandled realtime event type=%s", str(event.get("type") or "unknown"))
 
-    async def _route_function_call_delta(self, event: dict[str, Any], websocket: Any) -> bool:
-        _ = websocket
-        self.function_call_args += event.get("delta", "")
-        return True
+    async def _handle_response_lifecycle_event(self, event: dict[str, Any], websocket: Any) -> None:
+        await self._handle_event_legacy(event, websocket)
 
-    async def _route_function_call_done(self, event: dict[str, Any], websocket: Any) -> bool:
-        await self.handle_function_call(event, websocket)
-        return True
+    async def _handle_input_audio_event(self, event: dict[str, Any], websocket: Any) -> None:
+        await self._handle_event_legacy(event, websocket)
 
-    async def _handle_event_via_legacy_router(self, event: dict[str, Any], websocket: Any) -> None:
+    async def _handle_session_or_rate_limit_event(self, event: dict[str, Any], websocket: Any) -> None:
+        await self._handle_event_legacy(event, websocket)
+
+    async def _handle_error_or_system_event(self, event: dict[str, Any], websocket: Any) -> None:
         await self._handle_event_legacy(event, websocket)
 
     def _shutdown_coordinator(self) -> ShutdownCoordinator:
@@ -8434,21 +8468,7 @@ class RealtimeAPI:
                 )
                 event = await transport.recv_json(websocket)
                 log_ws_event("Incoming", event)
-                try:
-                    await self.handle_event(event, websocket)
-                except Exception:
-                    event_type = str(event.get("type") or "unknown")
-                    token = getattr(self, "_pending_confirmation_token", None)
-                    phase = getattr(getattr(self, "orchestration_state", None), "phase", None)
-                    logger.exception(
-                        "Unhandled event handler exception event=%s token_id=%s token_kind=%s phase=%s",
-                        event_type,
-                        getattr(token, "id", "none"),
-                        getattr(token, "kind", "none"),
-                        getattr(phase, "value", str(phase)),
-                    )
-                    logger.error("EVENT_HANDLER_ERROR event=%s", event_type)
-                    await self._recover_from_event_handler_error(event_type, websocket)
+                await self.handle_event(event, websocket)
             except asyncio.CancelledError:
                 log_info("WebSocket receive loop cancelled.")
                 self._note_disconnect("websocket loop cancelled")
@@ -8544,21 +8564,27 @@ class RealtimeAPI:
 
     async def handle_event(self, event: dict[str, Any], websocket: Any) -> None:
         event_type = str(event.get("type") or "")
-        if event_type in {
-            "response.output_item.added",
-            "response.function_call_arguments.delta",
-            "response.function_call_arguments.done",
-        }:
+        await self._maybe_handle_confirmation_decision_timeout(
+            websocket,
+            source_event=event_type or "unknown",
+        )
+        try:
             await self._event_router.dispatch(event, websocket)
-            return
-        await self._handle_event_legacy(event, websocket)
+        except Exception:
+            token = getattr(self, "_pending_confirmation_token", None)
+            phase = getattr(getattr(self, "orchestration_state", None), "phase", None)
+            logger.exception(
+                "Unhandled event handler exception event=%s token_id=%s token_kind=%s phase=%s",
+                event_type,
+                getattr(token, "id", "none"),
+                getattr(token, "kind", "none"),
+                getattr(phase, "value", str(phase)),
+            )
+            logger.error("EVENT_HANDLER_ERROR event=%s", event_type)
+            await self._recover_from_event_handler_error(event_type, websocket)
 
     async def _handle_event_legacy(self, event: dict[str, Any], websocket: Any) -> None:
         event_type = event.get("type")
-        await self._maybe_handle_confirmation_decision_timeout(
-            websocket,
-            source_event=str(event_type or "unknown"),
-        )
         if event_type == "response.created":
             origin = self._consume_response_origin(event)
             log_info(f"response.created: origin={origin}")
