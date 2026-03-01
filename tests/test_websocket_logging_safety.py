@@ -44,3 +44,27 @@ def test_websocket_filter_redacts_bearer_authorization_value(
     finally:
         websocket_logger.setLevel(original_level)
         websocket_logger.propagate = original_propagate
+
+
+def test_websocket_filter_redacts_cookie_headers(caplog) -> None:
+    core_logging.configure_websocket_library_logging()
+    websocket_logger = logging.getLogger("websockets.client")
+    original_level = websocket_logger.level
+    original_propagate = websocket_logger.propagate
+
+    try:
+        websocket_logger.setLevel(logging.DEBUG)
+        websocket_logger.propagate = True
+
+        caplog.set_level(logging.DEBUG)
+        websocket_logger.debug("< Set-Cookie: __Secure-next-auth.session-token=super-secret; HttpOnly")
+        websocket_logger.debug("> Cookie: __Secure-next-auth.session-token=super-secret; csrftoken=abc")
+
+        messages = [record.getMessage() for record in caplog.records]
+
+        assert any("Set-Cookie: <redacted>" in message for message in messages)
+        assert any("Cookie: <redacted>" in message for message in messages)
+        assert all("super-secret" not in message for message in messages)
+    finally:
+        websocket_logger.setLevel(original_level)
+        websocket_logger.propagate = original_propagate

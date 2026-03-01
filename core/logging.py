@@ -217,6 +217,8 @@ if unknown_event_log_env:
 
 _BEARER_TOKEN_RE = re.compile(r"(Bearer\s+)([^\s]+)")
 _API_KEY_RE = re.compile(r"sk-[A-Za-z0-9-_]{10,}")
+_SET_COOKIE_HEADER_RE = re.compile(r"(?im)(set-cookie\s*:\s*)([^\r\n]+)")
+_COOKIE_HEADER_RE = re.compile(r"(?im)(cookie\s*:\s*)([^\r\n]+)")
 
 
 class WebsocketAuthorizationRedactionFilter(logging.Filter):
@@ -246,6 +248,8 @@ def configure_websocket_library_logging() -> None:
 
 def _redact_text(message: str) -> str:
     redacted = _BEARER_TOKEN_RE.sub(r"\1<redacted>", message)
+    redacted = _SET_COOKIE_HEADER_RE.sub(r"\1<redacted>", redacted)
+    redacted = _COOKIE_HEADER_RE.sub(r"\1<redacted>", redacted)
     return _API_KEY_RE.sub("<redacted>", redacted)
 
 
@@ -392,6 +396,10 @@ SENSITIVE_KEYS = {
     "openai-api-key",
     "x-api-key",
     "x-openai-api-key",
+    "cookie",
+    "Cookie",
+    "set-cookie",
+    "Set-Cookie",
     "token",
     "access_token",
     "refresh_token",
