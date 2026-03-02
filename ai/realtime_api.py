@@ -47,6 +47,13 @@ from interaction import (
 from ai.tools import function_map, tools
 from ai.function_call_accumulator import FunctionCallAccumulator
 from ai.realtime.event_router import EventRouter
+from ai.realtime.confirmation import (
+    ConfirmationCoordinator,
+    ConfirmationReminderDecision,
+    ConfirmationState,
+    ConfirmationTransitionDecision,
+    normalize_confirmation_decision,
+)
 from ai.realtime.injections import InjectionCoordinator
 from ai.realtime.input_audio_events import InputAudioEventHandlers
 from ai.realtime.response_lifecycle import ResponseLifecycleTracker
@@ -277,14 +284,6 @@ class PendingMicroAckMarker:
     reason: str
 
 
-class ConfirmationState(str, Enum):
-    IDLE = "idle"
-    PENDING_PROMPT = "pending_prompt"
-    AWAITING_DECISION = "awaiting_decision"
-    RESOLVING = "resolving"
-    COMPLETED = "completed"
-
-
 class ServerAutoArbitrationOutcome(str, Enum):
     ALLOW = "allow"
     CANCEL_PRE_AUDIO = "cancel_pre_audio"
@@ -352,14 +351,6 @@ class PendingConfirmationToken:
     prompt_sent: bool = False
     reminder_sent: bool = False
     metadata: dict[str, Any] | None = None
-
-
-@dataclass(frozen=True)
-class ConfirmationTransitionDecision:
-    allow_response_transition: bool
-    emit_reminder: bool
-    recover_mic: bool
-    close_reason: str | None
 
 
 @dataclass
@@ -697,6 +688,15 @@ class RealtimeAPI:
         )
         self._confirmation_timeout_check_last_logged_at: dict[str, float] = {}
         self._confirmation_timeout_check_last_pause_reason: dict[str, str] = {}
+        self._confirmation_coordinator = ConfirmationCoordinator(
+            reminder_interval_s=self._confirmation_reminder_interval_s,
+            reminder_max_count=self._confirmation_reminder_max_count,
+            awaiting_decision_timeout_s=self._confirmation_awaiting_decision_timeout_s,
+            research_permission_timeout_s=self._research_permission_awaiting_decision_timeout_s,
+            timeout_check_log_interval_s=self._confirmation_timeout_check_log_interval_s,
+            on_transition=self._log_confirmation_transition,
+            on_timeout_check=self._log_confirmation_timeout_check,
+        )
         self._confirmation_last_closed_token: dict[str, Any] | None = None
         self._confirmation_timeout_debounce_window_s = float(
             config.get("confirmation_timeout_debounce_window_s", 5.0)
@@ -6720,19 +6720,32 @@ class RealtimeAPI:
         token = getattr(self, "_pending_confirmation_token", None)
         if token is None:
             return None
-        if getattr(self, "_confirmation_state", ConfirmationState.IDLE) != ConfirmationState.AWAITING_DECISION:
-            return None
-        timeout_s = self._get_confirmation_timeout_s(token)
-        if timeout_s <= 0.0:
-            return None
-        self._refresh_confirmation_pause()
-        pause_reason = self._confirmation_pause_reason()
-        remaining_s = self._confirmation_remaining_seconds()
-        self._log_confirmation_timeout_check(token, remaining_s=remaining_s, pause_reason=pause_reason)
-        if pause_reason is not None:
-            return None
-        if remaining_s > 0.0:
-            return None
+        coordinator = getattr(self, "_confirmation_coordinator", None)
+        if coordinator is not None:
+            coordinator.pending_token = token
+            coordinator.state = getattr(self, "_confirmation_state", ConfirmationState.IDLE)
+            coordinator.token_created_at = getattr(self, "_confirmation_token_created_at", None)
+            coordinator.pause_started_at = getattr(self, "_confirmation_pause_started_at", None)
+            coordinator.paused_accum_s = float(getattr(self, "_confirmation_paused_accum_s", 0.0))
+            coordinator.speech_active = bool(getattr(self, "_confirmation_speech_active", False))
+            coordinator.asr_pending = bool(getattr(self, "_confirmation_asr_pending", False))
+            timeout_decision = coordinator.check_timeout(time.monotonic())
+            self._confirmation_pause_started_at = coordinator.pause_started_at
+            self._confirmation_paused_accum_s = coordinator.paused_accum_s
+            if not timeout_decision.expired:
+                return None
+        else:
+            if getattr(self, "_confirmation_state", ConfirmationState.IDLE) != ConfirmationState.AWAITING_DECISION:
+                return None
+            timeout_s = self._get_confirmation_timeout_s(token)
+            if timeout_s <= 0.0:
+                return None
+            self._refresh_confirmation_pause()
+            pause_reason = self._confirmation_pause_reason()
+            remaining_s = self._confirmation_remaining_seconds()
+            self._log_confirmation_timeout_check(token, remaining_s=remaining_s, pause_reason=pause_reason)
+            if pause_reason is not None or remaining_s > 0.0:
+                return None
         self._set_confirmation_state(ConfirmationState.RESOLVING, reason="awaiting_decision_timeout")
         self._close_confirmation_token(outcome="awaiting_decision_timeout")
         self._awaiting_confirmation_completion = False
@@ -6885,6 +6898,16 @@ class RealtimeAPI:
     def _set_confirmation_state(self, state: ConfirmationState, *, reason: str) -> None:
         previous = getattr(self, "_confirmation_state", ConfirmationState.IDLE)
         token = getattr(self, "_pending_confirmation_token", None)
+        coordinator = getattr(self, "_confirmation_coordinator", None)
+        if coordinator is not None:
+            coordinator.pending_token = token
+            coordinator.awaiting_confirmation_completion = bool(
+                getattr(self, "_awaiting_confirmation_completion", False)
+            )
+            coordinator.state = previous
+            coordinator.transition(reason, {"state": state, "now": time.monotonic()})
+            self._confirmation_state = coordinator.state
+            return
         if previous != state:
             self._log_confirmation_transition(previous, state, reason=reason, token=token)
         self._confirmation_state = state
@@ -6899,6 +6922,11 @@ class RealtimeAPI:
         return max(0.0, float(getattr(self, "_confirmation_awaiting_decision_timeout_s", 20.0)))
 
     def _confirmation_pause_reason(self) -> str | None:
+        coordinator = getattr(self, "_confirmation_coordinator", None)
+        if coordinator is not None:
+            coordinator.speech_active = bool(getattr(self, "_confirmation_speech_active", False))
+            coordinator.asr_pending = bool(getattr(self, "_confirmation_asr_pending", False))
+            return coordinator._pause_reason()
         if getattr(self, "_confirmation_speech_active", False):
             return "speech_active"
         if getattr(self, "_confirmation_asr_pending", False):
@@ -6935,27 +6963,48 @@ class RealtimeAPI:
         return lock
 
     def _refresh_confirmation_pause(self) -> None:
-        token = getattr(self, "_pending_confirmation_token", None)
-        if token is None:
-            self._confirmation_pause_started_at = None
+        coordinator = getattr(self, "_confirmation_coordinator", None)
+        if coordinator is None:
+            token = getattr(self, "_pending_confirmation_token", None)
+            if token is None:
+                self._confirmation_pause_started_at = None
+                return
+            now = time.monotonic()
+            if self._confirmation_pause_reason() is None:
+                started = getattr(self, "_confirmation_pause_started_at", None)
+                if isinstance(started, (int, float)):
+                    self._confirmation_paused_accum_s += max(0.0, now - float(started))
+                self._confirmation_pause_started_at = None
+                return
+            if self._confirmation_pause_started_at is None:
+                self._confirmation_pause_started_at = now
             return
-        now = time.monotonic()
-        if self._confirmation_pause_reason() is None:
-            started = getattr(self, "_confirmation_pause_started_at", None)
-            if isinstance(started, (int, float)):
-                self._confirmation_paused_accum_s += max(0.0, now - float(started))
-            self._confirmation_pause_started_at = None
-            return
-        if self._confirmation_pause_started_at is None:
-            self._confirmation_pause_started_at = now
+        coordinator.pending_token = getattr(self, "_pending_confirmation_token", None)
+        coordinator.speech_active = bool(getattr(self, "_confirmation_speech_active", False))
+        coordinator.asr_pending = bool(getattr(self, "_confirmation_asr_pending", False))
+        coordinator.pause_started_at = getattr(self, "_confirmation_pause_started_at", None)
+        coordinator.paused_accum_s = float(getattr(self, "_confirmation_paused_accum_s", 0.0))
+        coordinator._refresh_pause(now=time.monotonic())
+        self._confirmation_pause_started_at = coordinator.pause_started_at
+        self._confirmation_paused_accum_s = coordinator.paused_accum_s
 
     def _mark_confirmation_activity(self, *, reason: str, now: float | None = None) -> None:
         token = getattr(self, "_pending_confirmation_token", None)
         if token is None:
             return
         current = time.monotonic() if now is None else float(now)
-        self._confirmation_last_activity_at = current
-        self._refresh_confirmation_pause()
+        coordinator = getattr(self, "_confirmation_coordinator", None)
+        if coordinator is not None:
+            coordinator.pending_token = token
+            coordinator.speech_active = bool(getattr(self, "_confirmation_speech_active", False))
+            coordinator.asr_pending = bool(getattr(self, "_confirmation_asr_pending", False))
+            coordinator.on_user_activity(reason, current)
+            self._confirmation_last_activity_at = coordinator.last_activity_at
+            self._confirmation_pause_started_at = coordinator.pause_started_at
+            self._confirmation_paused_accum_s = coordinator.paused_accum_s
+        else:
+            self._confirmation_last_activity_at = current
+            self._refresh_confirmation_pause()
         remaining_s = self._confirmation_remaining_seconds(now=current)
         logger.info(
             "CONFIRMATION_ACTIVITY token=%s kind=%s reason=%s remaining_s=%.1f paused_reason=%s",
@@ -6971,6 +7020,15 @@ class RealtimeAPI:
         if token is None:
             return 0.0
         current = time.monotonic() if now is None else float(now)
+        coordinator = getattr(self, "_confirmation_coordinator", None)
+        if coordinator is not None:
+            coordinator.pending_token = token
+            coordinator.token_created_at = getattr(self, "_confirmation_token_created_at", None)
+            coordinator.pause_started_at = getattr(self, "_confirmation_pause_started_at", None)
+            coordinator.paused_accum_s = float(getattr(self, "_confirmation_paused_accum_s", 0.0))
+            coordinator.speech_active = bool(getattr(self, "_confirmation_speech_active", False))
+            coordinator.asr_pending = bool(getattr(self, "_confirmation_asr_pending", False))
+            return coordinator.effective_elapsed_s(now=current)
         started_at = self._confirmation_token_created_at
         if not isinstance(started_at, (int, float)):
             started_at = token.created_at
@@ -6984,6 +7042,16 @@ class RealtimeAPI:
         token = getattr(self, "_pending_confirmation_token", None)
         if token is None:
             return 0.0
+        current = time.monotonic() if now is None else float(now)
+        coordinator = getattr(self, "_confirmation_coordinator", None)
+        if coordinator is not None:
+            coordinator.pending_token = token
+            coordinator.token_created_at = getattr(self, "_confirmation_token_created_at", None)
+            coordinator.pause_started_at = getattr(self, "_confirmation_pause_started_at", None)
+            coordinator.paused_accum_s = float(getattr(self, "_confirmation_paused_accum_s", 0.0))
+            coordinator.speech_active = bool(getattr(self, "_confirmation_speech_active", False))
+            coordinator.asr_pending = bool(getattr(self, "_confirmation_asr_pending", False))
+            return coordinator.remaining_seconds(now=current)
         timeout_s = self._get_confirmation_timeout_s(token)
         return max(0.0, timeout_s - self._confirmation_effective_elapsed_s(now=now))
 
@@ -7017,6 +7085,9 @@ class RealtimeAPI:
         self._confirmation_asr_pending = False
         self._confirmation_pause_started_at = None
         self._confirmation_paused_accum_s = 0.0
+        coordinator = getattr(self, "_confirmation_coordinator", None)
+        if coordinator is not None:
+            coordinator.on_token_started(token, now)
         self._set_confirmation_state(ConfirmationState.PENDING_PROMPT, reason=f"token_created:{kind}")
         logger.info(
             "CONFIRMATION_TOKEN_CREATED token=%s kind=%s tool=%s",
@@ -7131,6 +7202,10 @@ class RealtimeAPI:
                 prompt_latches.discard(latch_key)
         self._clear_queued_confirmation_reminder_markers(token)
         self._pending_confirmation_token = None
+        coordinator = getattr(self, "_confirmation_coordinator", None)
+        if coordinator is not None:
+            coordinator.pending_token = None
+            coordinator.token_created_at = None
         self._confirmation_token_created_at = None
         self._confirmation_last_activity_at = None
         self._confirmation_speech_active = False
@@ -7232,14 +7307,32 @@ class RealtimeAPI:
         reason: str,
     ) -> tuple[bool, str | None, int, float | None, str | None, float | None]:
         key = self._confirmation_reminder_key(token)
+        now = time.monotonic()
         if key is None:
             logger.info(
                 "CONFIRMATION_REMINDER_SUPPRESSED reason=%s suppress_reason=no_confirmation_key",
                 reason,
             )
             return False, None, 0, None, "no_confirmation_key", None
-        now = time.monotonic()
-        max_reminders, schedule, min_interval_s = self._confirmation_reminder_schedule(token)
+        _max_reminders, schedule, _min_interval_s = self._confirmation_reminder_schedule(token)
+        coordinator = getattr(self, "_confirmation_coordinator", None)
+        if coordinator is not None:
+            coordinator.pending_token = token
+            coordinator.token_created_at = (
+                float(token.created_at) if token is not None and isinstance(token.created_at, (int, float)) else now
+            )
+            coordinator.reminder_tracker = getattr(self, "_confirmation_reminder_tracker", {})
+            decision = coordinator.evaluate_reminder(key=key, schedule=schedule, now=now)
+            self._confirmation_reminder_tracker = coordinator.reminder_tracker
+            return (
+                decision.allowed,
+                decision.key,
+                decision.sent_count,
+                decision.sent_at,
+                decision.suppress_reason,
+                decision.now,
+            )
+        max_reminders, _schedule, min_interval_s = self._confirmation_reminder_schedule(token)
         if max_reminders <= 0:
             return False, key, 0, None, "max_count", now
         reminder_tracker = getattr(self, "_confirmation_reminder_tracker", None)
@@ -7275,17 +7368,25 @@ class RealtimeAPI:
         )
         if not allowed:
             return False, key, sent_count, sent_at, suppress_reason
-        reminder_tracker = getattr(self, "_confirmation_reminder_tracker", None)
-        if not isinstance(reminder_tracker, dict):
-            reminder_tracker = {}
-            self._confirmation_reminder_tracker = reminder_tracker
-        reminder_tracker[key] = {
-            "count": sent_count,
-            "last_sent_at": now,
-            "last_reason": reason,
-            "last_token_id": token.id if token is not None else None,
-            "last_run_id": self._current_run_id(),
-        }
+        coordinator = getattr(self, "_confirmation_coordinator", None)
+        if coordinator is not None:
+            coordinator.pending_token = token
+            coordinator.reminder_tracker = getattr(self, "_confirmation_reminder_tracker", {})
+            coordinator.mark_reminder_sent(
+                ConfirmationReminderDecision(
+                    allowed=True,
+                    key=key,
+                    sent_count=sent_count,
+                    sent_at=now,
+                    suppress_reason=None,
+                    now=now,
+                ),
+                reason=reason,
+            )
+            entry = coordinator.reminder_tracker.get(key or "") if key is not None else None
+            if isinstance(entry, dict):
+                entry["last_run_id"] = self._current_run_id()
+            self._confirmation_reminder_tracker = coordinator.reminder_tracker
         return True, key, sent_count, now, None
 
     def _should_send_response_done_fallback_reminder(self) -> bool:
@@ -7491,23 +7592,7 @@ class RealtimeAPI:
         await self._maybe_emit_confirmation_reminder(websocket, reason=reason)
 
     def _parse_confirmation_decision(self, text: str) -> str:
-        normalized = " ".join(re.sub(r"[^\w\s]", " ", text.lower()).split())
-        if not normalized:
-            return "unclear"
-        yes_pattern = re.compile(
-            r"^(yes|y|yeah|yep|sure|ok|okay|approve|proceed|go ahead|go ahead and do it|do it|please do|please go ahead)( please| thanks| thank you)?$"
-        )
-        no_pattern = re.compile(
-            r"^(no|n|nope|nah|deny|do not|dont|don t|don t do that|don t do it|do not do that|do not do it)( please| thanks| thank you)?$"
-        )
-        cancel_pattern = re.compile(r"^(cancel|cancel that|never mind|nevermind|stop|ignore that|ignore it)( please)?$")
-        if yes_pattern.fullmatch(normalized):
-            return "yes"
-        if no_pattern.fullmatch(normalized):
-            return "no"
-        if cancel_pattern.fullmatch(normalized):
-            return "cancel"
-        return "unclear"
+        return normalize_confirmation_decision(text)
 
     def _detect_alternate_intent_while_confirmation_pending(
         self,
