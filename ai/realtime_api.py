@@ -55,6 +55,8 @@ from ai.realtime.confirmation import (
     normalize_confirmation_decision,
 )
 from ai.realtime.confirmation_service import ConfirmationService
+from ai.realtime.battery_injection_policy import BatteryInjectionPolicy
+from ai.realtime.injection_bus import InjectionBus
 from ai.realtime.injections import InjectionCoordinator
 from ai.realtime.input_audio_events import InputAudioEventHandlers
 from ai.realtime.lifecycle_state import LifecycleStateCoordinator
@@ -902,6 +904,8 @@ class RealtimeAPI:
             emit_injected_event=self._emit_injected_event,
             emit_system_context_payload=self._emit_system_context_payload,
         )
+        self._battery_injection_policy = BatteryInjectionPolicy(self)
+        self._injection_bus = InjectionBus(self, self._startup_injections)
         self._utterance_counter = 0
         self._active_utterance: dict[str, Any] | None = None
         self._utterance_info_summary: dict[str, bool] = {}
@@ -1238,28 +1242,39 @@ class RealtimeAPI:
         return coordinator
 
     def _startup_injection_coordinator(self) -> InjectionCoordinator:
+        bus = getattr(self, "_injection_bus", None)
+        if isinstance(bus, InjectionBus):
+            return bus.coordinator
         coordinator = getattr(self, "_startup_injections", None)
-        if isinstance(coordinator, InjectionCoordinator):
-            return coordinator
-        gate_timeout_s = float(getattr(self, "_startup_injection_gate_timeout_s", 5.0) or 0.0)
-        coordinator = InjectionCoordinator(
-            gate_timeout_s=gate_timeout_s,
-            loop_getter=lambda: getattr(self, "loop", None),
-            emit_injected_event=self._emit_injected_event,
-            emit_system_context_payload=self._emit_system_context_payload,
-        )
-        coordinator.released = bool(getattr(self, "_startup_injection_gate_released", False))
-        coordinator.first_assistant_utterance_observed = bool(
-            getattr(self, "_startup_first_assistant_utterance_observed", False)
-        )
-        queue = getattr(self, "_startup_injection_queue", None)
-        if isinstance(queue, list):
-            coordinator.queue.extend(queue)
-        elif isinstance(queue, deque):
-            coordinator.queue = queue
-        coordinator.timeout_task = getattr(self, "_startup_injection_timeout_task", None)
-        self._startup_injections = coordinator
+        if not isinstance(coordinator, InjectionCoordinator):
+            gate_timeout_s = float(getattr(self, "_startup_injection_gate_timeout_s", 5.0) or 0.0)
+            coordinator = InjectionCoordinator(
+                gate_timeout_s=gate_timeout_s,
+                loop_getter=lambda: getattr(self, "loop", None),
+                emit_injected_event=self._emit_injected_event,
+                emit_system_context_payload=self._emit_system_context_payload,
+            )
+            coordinator.released = bool(self.__dict__.get("_startup_injection_gate_released", False))
+            coordinator.first_assistant_utterance_observed = bool(
+                self.__dict__.get("_startup_first_assistant_utterance_observed", False)
+            )
+            queue = self.__dict__.get("_startup_injection_queue")
+            if isinstance(queue, list):
+                coordinator.queue.extend(queue)
+            elif isinstance(queue, deque):
+                coordinator.queue = queue
+            coordinator.timeout_task = self.__dict__.get("_startup_injection_timeout_task")
+            self._startup_injections = coordinator
+        self._injection_bus = InjectionBus(self, coordinator)
         return coordinator
+
+    def _injection_bus_instance(self) -> InjectionBus:
+        bus = getattr(self, "_injection_bus", None)
+        if isinstance(bus, InjectionBus):
+            return bus
+        bus = InjectionBus(self, self._startup_injection_coordinator())
+        self._injection_bus = bus
+        return bus
 
     @property
     def _startup_injection_gate_released(self) -> bool:
@@ -2136,47 +2151,19 @@ class RealtimeAPI:
         priority: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> tuple[bool, str]:
-        self._expire_confirmation_awaiting_decision_timeout()
-        phase = getattr(self.orchestration_state, "phase", None)
-        phase_name = getattr(phase, "value", str(phase))
-        normalized_source = str(source).lower()
-        normalized_kind = self._normalize_external_stimulus_kind(kind, metadata)
-        normalized_priority = (priority or "").lower()
-
-        pending_action = getattr(self, "_pending_confirmation_token", None)
-        response_in_progress = bool(getattr(self, "response_in_progress", False))
-
-        if (
-            pending_action is not None
-            and self._is_awaiting_confirmation_phase()
-            and not self._is_allowed_awaiting_confirmation_stimulus(
-                normalized_source,
-                normalized_kind,
-                normalized_priority,
-            )
-        ):
-            return False, "awaiting_confirmation_policy"
-
-        if response_in_progress:
-            return False, "response_in_progress"
-
-        state = getattr(self.state_manager, "state", None)
-        if state not in (InteractionState.IDLE, InteractionState.LISTENING):
-            state_name = getattr(state, "value", str(state))
-            return False, f"interaction_state={state_name}"
-
-        return True, f"phase={phase_name}"
+        return self._injection_bus_instance().can_accept_external_stimulus(
+            source,
+            kind,
+            priority=priority,
+            metadata=metadata,
+        )
 
     def _normalize_external_stimulus_kind(
         self,
         kind: str,
         metadata: dict[str, Any] | None = None,
     ) -> str:
-        if metadata:
-            severity = metadata.get("severity")
-            if isinstance(severity, str) and severity.strip():
-                return severity.strip().lower()
-        return str(kind).strip().lower() or "unknown"
+        return self._injection_bus_instance().normalize_external_stimulus_kind(kind, metadata)
 
     def _is_allowed_awaiting_confirmation_stimulus(
         self,
@@ -2205,17 +2192,10 @@ class RealtimeAPI:
         )
 
     def _startup_injection_gate_active(self) -> bool:
-        return self._startup_injection_coordinator().gate_active()
+        return self._injection_bus_instance().startup_injection_gate_active()
 
     def _startup_gate_is_critical_allowed(self, source: str, kind: str, priority: str) -> bool:
-        normalized_source = str(source).strip().lower()
-        normalized_kind = str(kind).strip().lower()
-        normalized_priority = str(priority).strip().lower()
-        return self._is_allowed_awaiting_confirmation_stimulus(
-            normalized_source,
-            normalized_kind,
-            normalized_priority,
-        )
+        return self._injection_bus_instance().startup_gate_is_critical_allowed(source, kind, priority)
 
     def _maybe_defer_startup_injection(
         self,
@@ -2225,24 +2205,21 @@ class RealtimeAPI:
         priority: str,
         payload: dict[str, Any],
     ) -> bool:
-        if not self._startup_injection_gate_active():
-            return False
-        if self._startup_gate_is_critical_allowed(source, kind, priority):
-            return False
-        coordinator = self._startup_injection_coordinator()
-        deferred = coordinator.should_defer(payload, source)
-        if deferred:
-            coordinator.enqueue(payload)
-        return deferred
+        return self._injection_bus_instance().maybe_defer_startup_injection(
+            source=source,
+            kind=kind,
+            priority=priority,
+            payload=payload,
+        )
 
     def _release_startup_injection_gate(self, *, reason: str) -> None:
-        self._startup_injection_coordinator().release(reason)
+        self._injection_bus_instance().release_startup_injection_gate(reason=reason)
 
     async def _startup_injection_timeout_release(self) -> None:
-        await self._startup_injection_coordinator()._timeout_release()
+        await self._injection_bus_instance().startup_injection_timeout_release()
 
     def _ensure_startup_injection_timeout_task(self) -> None:
-        self._startup_injection_coordinator().schedule_timeout(getattr(self, "loop", None))
+        self._injection_bus_instance().ensure_startup_injection_timeout_task()
 
     def get_session_health(self) -> dict[str, Any]:
         retrieval_metrics = self._memory_manager.get_retrieval_health_metrics(
@@ -2594,60 +2571,13 @@ class RealtimeAPI:
 
 
     def _should_request_battery_response(self, event: Event, *, fallback: bool = False) -> bool:
-        metadata = event.metadata or {}
-        severity = str(metadata.get("severity", "info"))
-        event_type = str(metadata.get("event_type", "status"))
-        transition = str(metadata.get("transition", "steady"))
-
-        if "battery" in getattr(self, "_suppressed_topics", set()) and not self._is_battery_safety_override(event):
-            logger.info("battery_response_suppressed reason=topic_suppression")
-            return False
-
-        if event_type == "clear" or severity == "info":
-            return self._is_battery_query_context_active()
-        if not self._battery_response_enabled:
-            return self._is_battery_query_context_active()
-
-        if self._is_battery_query_context_active():
-            return True
-
-        if severity == "critical" and self._battery_response_allow_critical:
-            if self._battery_response_require_transition:
-                return not transition.startswith("steady_")
-            return True
-
-        if severity == "warning" and self._battery_response_allow_warning:
-            if self._battery_response_require_transition:
-                return transition in {"enter_warning", "enter_critical", "delta_drop"}
-            return transition in {"enter_warning", "enter_critical", "delta_drop"}
-
-        return fallback and not transition.startswith("steady_")
+        return self._battery_policy().should_request_response(event, fallback=fallback)
 
     def _is_battery_status_query(self, text: str) -> bool:
-        lowered = text.strip().lower()
-        if not lowered:
-            return False
-        query_tokens = (
-            "battery",
-            "battery level",
-            "charge",
-            "charging",
-            "voltage",
-            "power level",
-            "low battery",
-            "how's battery",
-            "hows battery",
-            "how is battery",
-        )
-        return any(token in lowered for token in query_tokens)
+        return self._battery_policy().is_battery_status_query(text)
 
     def _is_battery_query_context_active(self) -> bool:
-        if self._last_user_battery_query_time is None:
-            return False
-        return (
-            time.monotonic() - self._last_user_battery_query_time
-            <= self._battery_query_context_window_s
-        )
+        return self._battery_policy().is_query_context_active()
 
     def _handle_state_gesture(self, state: InteractionState) -> None:
         """Hook for gesture cues on state transitions."""
@@ -3943,12 +3873,15 @@ class RealtimeAPI:
                 logger.info("topic_suppression_updated topic=battery suppressed=false")
 
     def _is_battery_safety_override(self, event: Event) -> bool:
-        metadata = event.metadata or {}
-        severity = str(metadata.get("severity", "")).strip().lower()
-        if severity != "critical":
-            return False
-        percent = float(metadata.get("percent_of_range", 1.0)) * 100.0
-        return percent <= self._battery_redline_percent
+        return self._battery_policy().is_safety_override(event)
+
+    def _battery_policy(self) -> BatteryInjectionPolicy:
+        policy = getattr(self, "_battery_injection_policy", None)
+        if isinstance(policy, BatteryInjectionPolicy):
+            return policy
+        policy = BatteryInjectionPolicy(self)
+        self._battery_injection_policy = policy
+        return policy
 
     def _next_input_event_key(self) -> str:
         counter = int(getattr(self, "_input_event_key_counter", 0)) + 1
@@ -11137,157 +11070,8 @@ class RealtimeAPI:
         await self.maybe_request_response(window.trigger, summary_metadata)
 
     async def maybe_request_response(self, trigger: str, metadata: dict[str, Any]) -> None:
-        if await self._should_defer_sensor_response(trigger, metadata):
-            return
+        await self._injection_bus_instance().maybe_request_response(trigger, metadata)
 
-        if not self.websocket:
-            log_warning("Skipping injected response (%s): websocket unavailable.", trigger)
-            return
-
-        if self._has_active_confirmation_token():
-            if not self._is_user_confirmation_trigger(trigger, metadata):
-                logger.info(
-                    "Suppressing duplicate non-user response request trigger=%s phase=%s pending_action=%s",
-                    trigger,
-                    getattr(getattr(self.orchestration_state, "phase", None), "value", "unknown"),
-                    self._pending_action is not None,
-                )
-                return
-
-        trigger_config = self._injection_response_triggers.get(trigger, {})
-        trigger_cooldown_s = float(
-            trigger_config.get("cooldown_s", self._injection_response_cooldown_s)
-        )
-        trigger_max_per_minute = int(
-            trigger_config.get("max_per_minute", self._max_injection_responses_per_minute)
-        )
-        trigger_priority = int(trigger_config.get("priority", 0))
-        trigger_timestamps = self._injection_response_trigger_timestamps.setdefault(
-            trigger, deque()
-        )
-        bypass_limits = bool(metadata.get("bypass_limits", False))
-
-        if self.response_in_progress and not bypass_limits:
-            if trigger == "image_message":
-                self._queue_pending_image_stimulus(trigger, metadata)
-                return
-            logger.info("Skipping injected response (%s): response already in progress.", trigger)
-            return
-
-        if (
-            self.state_manager.state not in (InteractionState.IDLE, InteractionState.LISTENING)
-            and not bypass_limits
-        ):
-            logger.info(
-                "Skipping injected response (%s): invalid state %s.",
-                trigger,
-                self.state_manager.state.value,
-            )
-            return
-
-        if trigger_cooldown_s > 0.0 and not bypass_limits:
-            now = time.monotonic()
-            last_ts = trigger_timestamps[-1] if trigger_timestamps else None
-            if last_ts is not None and now - last_ts < trigger_cooldown_s:
-                logger.info(
-                    "Skipping injected response (%s): trigger cooldown %.2fs remaining.",
-                    trigger,
-                    trigger_cooldown_s - (now - last_ts),
-                )
-                return
-
-        if trigger_max_per_minute > 0 and not bypass_limits:
-            now = time.monotonic()
-            while trigger_timestamps and now - trigger_timestamps[0] > 60:
-                trigger_timestamps.popleft()
-            if len(trigger_timestamps) >= trigger_max_per_minute:
-                logger.info(
-                    "Skipping injected response (%s): trigger rate limit %s/minute reached.",
-                    trigger,
-                    trigger_max_per_minute,
-                )
-                return
-
-        bypass_global_limits = trigger_priority > 0 or bypass_limits
-
-        if self._injection_response_cooldown_s > 0.0 and not bypass_global_limits:
-            now = time.monotonic()
-            last_ts = (
-                self._injection_response_timestamps[-1]
-                if self._injection_response_timestamps
-                else None
-            )
-            if last_ts is not None and now - last_ts < self._injection_response_cooldown_s:
-                logger.info(
-                    "Skipping injected response (%s): cooldown %.2fs remaining.",
-                    trigger,
-                    self._injection_response_cooldown_s - (now - last_ts),
-                )
-                return
-
-        if self._max_injection_responses_per_minute > 0 and not bypass_global_limits:
-            now = time.monotonic()
-            while self._injection_response_timestamps and now - self._injection_response_timestamps[0] > 60:
-                self._injection_response_timestamps.popleft()
-            if len(self._injection_response_timestamps) >= self._max_injection_responses_per_minute:
-                logger.info(
-                    "Skipping injected response (%s): rate limit %s/minute reached.",
-                    trigger,
-                    self._max_injection_responses_per_minute,
-                )
-                return
-
-        if self.rate_limits:
-            for limit_name in ("requests", "responses"):
-                rate_limit = self.rate_limits.get(limit_name)
-                if not rate_limit:
-                    continue
-                remaining = rate_limit.get("remaining")
-                if remaining is not None and remaining <= 0:
-                    logger.info(
-                        "Skipping injected response (%s): %s rate limit exhausted.",
-                        trigger,
-                        limit_name,
-                    )
-                    return
-
-        bypass_budget = trigger == "text_message"
-        if not self._allow_ai_call(f"injection:{trigger}", bypass=bypass_budget):
-            logger.info("Skipping injected response (%s): AI call budget exhausted.", trigger)
-            return
-        response_metadata = {
-            "trigger": trigger,
-            "priority": str(trigger_priority),
-            "stimulus": json.dumps(metadata, sort_keys=True),
-            "origin": "injection",
-            "sensor_aggregation_metrics": json.dumps(
-                self._sensor_event_aggregation_metrics,
-                sort_keys=True,
-            ),
-        }
-        if bool(metadata.get("safety_override", False)):
-            response_metadata["safety_override"] = "true"
-        if self._has_active_confirmation_token():
-            response_metadata["approval_flow"] = "true"
-        memory_brief_note = self._consume_pending_memory_brief_note()
-        response_create_event = {
-            "type": "response.create",
-            "response": {"metadata": response_metadata},
-        }
-        log_info(
-            f"Requesting injected response for {trigger} with metadata {response_metadata}."
-        )
-        sent_now = await self._send_response_create(
-            self.websocket,
-            response_create_event,
-            origin="injection",
-            record_ai_call=True,
-            memory_brief_note=memory_brief_note,
-        )
-        if sent_now:
-            now = time.monotonic()
-            self._injection_response_timestamps.append(now)
-            trigger_timestamps.append(now)
 
     def _get_injection_priority(self, trigger: str) -> int:
         trigger_config = self._injection_response_triggers.get(trigger, {})
