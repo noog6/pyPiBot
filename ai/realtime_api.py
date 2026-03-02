@@ -2780,14 +2780,47 @@ class RealtimeAPI:
             if token in _PREFERENCE_RECALL_DOMAINS and token not in domain_tokens:
                 domain_tokens.append(token)
 
+        keyword_entities = [
+            token
+            for token in normalized_keywords
+            if token not in domain_tokens and token not in preference_cue_tokens
+        ]
+
         ordered_parts: list[str] = []
-        for item in normalized_keywords + entity_tokens + domain_tokens + preference_cue_tokens + canonical:
+        # Keep semantically important preference cues first so low token limits do not drop
+        # either the requested domain (editor) or concrete entity (vim).
+        for item in domain_tokens + keyword_entities + preference_cue_tokens + canonical + normalized_keywords + entity_tokens:
             normalized = item.strip().lower()
             if normalized and normalized not in ordered_parts:
                 ordered_parts.append(normalized)
         if not ordered_parts:
             return "user preference"
         return " ".join(ordered_parts[:8])
+
+    def _build_preference_recall_query_variants(self, query: str) -> list[str]:
+        normalized_tokens = self._extract_preference_keywords(query)
+        if not normalized_tokens:
+            return [query]
+        domain_tokens = [token for token in normalized_tokens if token in _PREFERENCE_RECALL_DOMAINS]
+        marker_tokens = [token for token in normalized_tokens if token in {"favorite", "preferred", "preference", "prefer"}]
+        value_tokens = [token for token in normalized_tokens if token not in domain_tokens and token not in marker_tokens]
+
+        variants: list[str] = []
+
+        def _append_variant(parts: list[str]) -> None:
+            candidate = " ".join(part.strip().lower() for part in parts if part).strip()
+            if candidate and candidate not in variants:
+                variants.append(candidate)
+
+        _append_variant(normalized_tokens[:8])
+        if domain_tokens:
+            _append_variant(domain_tokens + marker_tokens + value_tokens)
+            _append_variant(["preferred"] + domain_tokens + value_tokens)
+            _append_variant(["favorite"] + domain_tokens + value_tokens)
+        if value_tokens:
+            _append_variant(value_tokens + domain_tokens)
+        _append_variant(domain_tokens + ["user", "preference"])
+        return variants
 
     def _preference_recall_memories_from_payload(self, payload: dict[str, Any] | None) -> list[dict[str, Any]]:
         if not isinstance(payload, dict):
@@ -2879,7 +2912,7 @@ class RealtimeAPI:
         query: str,
     ) -> tuple[dict[str, Any], bool]:
         scope = str(getattr(self, "_memory_retrieval_scope", MemoryScope.USER_GLOBAL.value))
-        recall_queries = [query]
+        recall_queries = self._build_preference_recall_query_variants(query)
         fallback_query = self._preference_recall_fallback_query(query)
         max_attempts = int(getattr(self, "_preference_recall_max_attempts", 1))
         if fallback_query and max_attempts > 1 and fallback_query not in recall_queries:
