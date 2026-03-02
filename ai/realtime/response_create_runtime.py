@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from copy import deepcopy
 from collections import deque
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -21,6 +22,31 @@ class ResponseCreateRuntimeAPI(Protocol):
 @dataclass
 class ResponseCreateRuntime:
     api: ResponseCreateRuntimeAPI
+
+    def _build_tool_output_followup_event(
+        self,
+        *,
+        response_create_event: dict[str, Any],
+        turn_id: str,
+        input_event_key: str,
+    ) -> dict[str, Any]:
+        followup_event = deepcopy(response_create_event)
+        response_payload = followup_event.setdefault("response", {})
+        if not isinstance(response_payload, dict):
+            response_payload = {}
+            followup_event["response"] = response_payload
+        metadata = response_payload.setdefault("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+            response_payload["metadata"] = metadata
+        followup_input_event_key = f"{input_event_key}:tool_followup"
+        metadata["turn_id"] = turn_id
+        metadata["input_event_key"] = followup_input_event_key
+        metadata["consumes_canonical_slot"] = "false"
+        metadata["explicit_multipart"] = "true"
+        metadata["tool_followup"] = "true"
+        metadata["tool_followup_reason"] = "already_created"
+        return followup_event
 
     def schedule_pending_response_create(
         self,
@@ -464,6 +490,27 @@ class ResponseCreateRuntime:
             if decision.reason_code == "preference_recall_lock_blocked":
                 return False
             if single_flight_block_reason and decision.reason_code == single_flight_block_reason:
+                if normalized_origin == "tool_output" and decision.reason_code == "already_created":
+                    followup_event = self._build_tool_output_followup_event(
+                        response_create_event=response_create_event,
+                        turn_id=turn_id,
+                        input_event_key=current_input_event_key or "unknown",
+                    )
+                    logger.info(
+                        "response_schedule_followup run_id=%s turn_id=%s origin=%s reason=already_created mode=tool_output_followup",
+                        api._current_run_id() or "",
+                        turn_id,
+                        normalized_origin,
+                    )
+                    return api._schedule_pending_response_create(
+                        websocket=websocket,
+                        response_create_event=followup_event,
+                        origin=origin,
+                        reason="tool_output_followup_already_created",
+                        record_ai_call=record_ai_call,
+                        debug_context=debug_context,
+                        memory_brief_note=memory_brief_note,
+                    )
                 api._log_response_create_blocked(
                     turn_id=turn_id,
                     origin=normalized_origin,

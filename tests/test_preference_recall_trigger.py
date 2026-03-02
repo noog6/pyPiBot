@@ -69,6 +69,8 @@ def _make_api_stub() -> RealtimeAPI:
     api._active_utterance = None
     api.orchestration_state = type("_Orch", (), {"transition": lambda self, *_args, **_kwargs: None})()
     api._current_run_id = lambda: "run-test"
+    api._response_create_runtime = realtime_api.ResponseCreateRuntime(api)
+    api._response_terminal_handlers = realtime_api.ResponseTerminalHandlers(api)
     api.state_manager = type(
         "_State",
         (),
@@ -902,6 +904,64 @@ def test_memory_intent_micro_ack_does_not_consume_canonical_slot(monkeypatch) ->
 
     assert canonical_key in api._response_created_canonical_keys
     assert api._response_obligations == {}
+
+
+def test_research_tool_output_deliverable_even_if_server_auto_created(monkeypatch) -> None:
+    api = _make_api_stub()
+    ws = _RecordingWs()
+    blocked_lifecycle: list[str] = []
+
+    api._track_outgoing_event = lambda *_args, **_kwargs: None
+
+    def _capture_lifecycle(**kwargs) -> None:
+        decision = str(kwargs.get("decision") or "")
+        if "guard_blocked" in decision:
+            blocked_lifecycle.append(decision)
+
+    monkeypatch.setattr(api, "_log_lifecycle_event", _capture_lifecycle)
+
+    turn_id = "turn_7"
+    input_event_key = "item_research"
+    api._current_response_turn_id = turn_id
+    api._current_input_event_key = input_event_key
+    api._active_input_event_key_by_turn_id[turn_id] = input_event_key
+    api._set_response_delivery_state(turn_id=turn_id, input_event_key=input_event_key, state="created")
+
+    scheduled = asyncio.run(
+        api._send_response_create(
+            ws,
+            {"type": "response.create", "response": {"metadata": {"turn_id": turn_id, "input_event_key": input_event_key}}},
+            origin="tool_output",
+        )
+    )
+
+    assert scheduled is True
+    assert api._pending_response_create is not None
+    pending_metadata = api._extract_response_create_metadata(api._pending_response_create.event)
+    assert pending_metadata.get("tool_followup") == "true"
+    assert pending_metadata.get("consumes_canonical_slot") == "false"
+    assert pending_metadata.get("input_event_key") == f"{input_event_key}:tool_followup"
+    assert not any("guard_blocked:already_created" in item for item in blocked_lifecycle)
+
+
+def test_response_output_text_done_transitions_speaking_to_idle() -> None:
+    api = _make_api_stub()
+    transitions: list[tuple[InteractionState, str]] = []
+
+    class _State:
+        state = InteractionState.SPEAKING
+
+        def update_state(self, new_state: InteractionState, reason: str) -> None:
+            transitions.append((new_state, reason))
+            self.state = new_state
+
+    api.state_manager = _State()
+    api._audio_playback_busy = False
+    api._is_active_response_guarded = lambda: False
+
+    asyncio.run(api._handle_event_legacy({"type": "response.output_text.done"}, _RecordingWs()))
+
+    assert transitions == [(InteractionState.IDLE, "text output done")]
 
 
 def test_guarded_server_auto_does_not_satisfy_obligation_then_transcript_still_responds(monkeypatch) -> None:
