@@ -7,15 +7,31 @@ import time
 from typing import Protocol
 
 from core.logging import logger
+from services.memory_manager import render_realtime_memory_brief_item, render_startup_memory_digest_item
 from services.memory_manager import MemoryScope
+
+
+MEMORY_INTENT_MARKERS = (
+    "remember",
+    "memory",
+    "memories",
+    "recall",
+    "do you know",
+    "what's my name",
+    "what is my name",
+    "my name",
+    "prefer",
+    "preferred",
+    "preference",
+    "favorite",
+    "favourite",
+)
 
 
 class MemoryRuntimeAPI(Protocol):
     _pending_turn_memory_brief: object | None
     _memory_retrieval_last_error_log_at: float
     _memory_retrieval_suppressed_errors: int
-
-    def _should_skip_turn_memory_retrieval(self, user_text: str) -> bool: ...
 
 
 @dataclass
@@ -24,9 +40,24 @@ class MemoryRuntime:
 
     api: MemoryRuntimeAPI
 
+    def is_memory_intent(self, text: str) -> bool:
+        normalized = " ".join((text or "").lower().split())
+        if not normalized:
+            return False
+        return any(marker in normalized for marker in MEMORY_INTENT_MARKERS)
+
+    def should_skip_turn_memory_retrieval(self, user_text: str) -> bool:
+        text = user_text.strip()
+        if len(text) < int(getattr(self.api, "_memory_retrieval_min_user_chars", 12)):
+            return True
+        if len(text.split()) < int(getattr(self.api, "_memory_retrieval_min_user_tokens", 3)):
+            return True
+        noisy = {"ok", "okay", "thanks", "thank you", "yes", "no", "cool", "nice", "got it"}
+        return text.lower() in noisy
+
     def prepare_turn_memory_brief(self, user_text: str, *, source: str, memory_intent: bool = False) -> None:
         api = self.api
-        if api._should_skip_turn_memory_retrieval(user_text):
+        if self.should_skip_turn_memory_retrieval(user_text):
             api._pending_turn_memory_brief = None
             return
         if not getattr(api, "_memory_retrieval_enabled", False):
@@ -130,3 +161,42 @@ class MemoryRuntime:
                 api._memory_retrieval_suppressed_errors = 0
             else:
                 api._memory_retrieval_suppressed_errors += 1
+
+    def consume_pending_memory_brief_note(self) -> str | None:
+        brief = getattr(self.api, "_pending_turn_memory_brief", None)
+        self.api._pending_turn_memory_brief = None
+        if brief is None or not brief.items:
+            return None
+        lines = [
+            "Turn memory brief (retrieved long-term context; do not quote verbatim unless asked):"
+        ]
+        for index, item in enumerate(brief.items, start=1):
+            lines.append(render_realtime_memory_brief_item(index=index, item=item))
+        if brief.truncated:
+            lines.append("Additional relevant memories were omitted due to retrieval limits.")
+        return "\n".join(lines)
+
+    def build_startup_memory_digest_note(self) -> str | None:
+        api = self.api
+        if not getattr(api, "_startup_memory_digest_enabled", True):
+            return None
+        manager = getattr(api, "_memory_manager", None)
+        if manager is None:
+            return None
+        try:
+            digest = manager.retrieve_startup_digest(
+                max_items=int(getattr(api, "_startup_memory_digest_max_items", 2)),
+                max_chars=int(getattr(api, "_startup_memory_digest_max_chars", 280)),
+                user_id=manager.get_active_user_id(),
+            )
+        except Exception as exc:  # pragma: no cover - defensive fail-open
+            logger.warning("Startup memory digest retrieval failed: %s", exc)
+            return None
+        if digest is None or not digest.items:
+            return None
+        lines = ["Startup memory digest (stable user context):"]
+        for index, item in enumerate(digest.items, start=1):
+            lines.append(render_startup_memory_digest_item(index=index, item=item))
+        if digest.truncated:
+            lines.append("Additional pinned memories were omitted due to startup digest limits.")
+        return "\n".join(lines)

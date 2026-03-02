@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, replace
+import hashlib
+import json
+import time
 from typing import Any, Protocol
 
 from ai.realtime.confirmation import ConfirmationState
+from ai.orchestration import OrchestrationPhase
 from core.logging import logger
 from services.research import ResearchRequest, has_research_intent
+from storage.trusted_domains import merge_allowlists
 
 
 class ResearchRuntimeAPI(Protocol):
@@ -18,6 +23,48 @@ class ResearchRuntimeAPI(Protocol):
 @dataclass
 class ResearchRuntime:
     api: ResearchRuntimeAPI
+
+    def build_research_fingerprint(self, *, query: str, source: str | None) -> str:
+        api = self.api
+        normalized = {
+            "query": api._normalize_research_query_text(query),
+            "source": api._normalize_research_source_text(source),
+        }
+        payload = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def prune_research_permission_outcomes(self, now: float | None = None) -> None:
+        api = self.api
+        now_ts = time.monotonic() if now is None else now
+        outcomes = getattr(api, "_research_permission_outcomes", None)
+        if not isinstance(outcomes, dict):
+            api._research_permission_outcomes = {}
+            api._research_suppressed_fingerprints = {}
+            return
+        ttl_s = float(getattr(api, "_research_permission_outcome_ttl_s", 20.0))
+        expired = [
+            fingerprint
+            for fingerprint, payload in outcomes.items()
+            if now_ts - float(payload.get("recorded_at", 0.0)) > ttl_s
+        ]
+        for fingerprint in expired:
+            outcomes.pop(fingerprint, None)
+            if isinstance(getattr(api, "_research_suppressed_fingerprints", None), dict):
+                api._research_suppressed_fingerprints.pop(fingerprint, None)
+
+    def record_research_permission_outcome(self, fingerprint: str, *, approved: bool) -> None:
+        api = self.api
+        self.prune_research_permission_outcomes()
+        if not isinstance(getattr(api, "_research_permission_outcomes", None), dict):
+            api._research_permission_outcomes = {}
+        api._research_permission_outcomes[fingerprint] = {
+            "approved": approved,
+            "recorded_at": time.monotonic(),
+        }
+        if not isinstance(getattr(api, "_research_suppressed_fingerprints", None), dict):
+            api._research_suppressed_fingerprints = {}
+        if approved:
+            api._research_suppressed_fingerprints.pop(fingerprint, None)
 
     async def maybe_handle_research_permission_response(self, text: str, websocket: Any) -> bool:
         api = self.api
@@ -273,4 +320,3 @@ class ResearchRuntime:
         await api._dispatch_research_request(request, websocket)
         return True
     
-
