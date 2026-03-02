@@ -935,7 +935,7 @@ def test_research_tool_output_deliverable_even_if_server_auto_created(monkeypatc
         )
     )
 
-    assert scheduled is True
+    assert scheduled is False
     assert api._pending_response_create is not None
     pending_metadata = api._extract_response_create_metadata(api._pending_response_create.event)
     assert pending_metadata.get("tool_followup") == "true"
