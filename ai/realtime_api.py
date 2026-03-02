@@ -1044,6 +1044,8 @@ class RealtimeAPI:
             "conversation.item.created",
             "response.audio_transcript.done",
             "response.output_text.delta",
+            "response.output_text.done",
+            "response.text.done",
         }:
             self._event_router.register(event_type, self._handle_error_or_system_event)
 
@@ -8011,6 +8013,11 @@ class RealtimeAPI:
             self.assistant_reply += delta
             self._assistant_reply_accum += delta
             self.state_manager.update_state(InteractionState.SPEAKING, "text output")
+        elif event_type in {"response.output_text.done", "response.text.done"}:
+            if self._is_active_response_guarded():
+                return
+            if self.state_manager.state == InteractionState.SPEAKING and not self._audio_playback_busy:
+                self.state_manager.update_state(InteractionState.IDLE, "text output done")
         elif event_type == "response.output_audio.done":
             await self.handle_audio_response_done()
             self.state_manager.update_state(InteractionState.IDLE, "audio output done")
@@ -8702,6 +8709,7 @@ class RealtimeAPI:
         self._track_outgoing_event(function_call_output)
         transport = self._get_or_create_transport()
         await transport.send_json(websocket, function_call_output)
+        self._mark_utterance_info_summary(deliverable_seen=True)
         if inject_no_tools_instruction:
             await self._add_no_tools_follow_up_instruction(websocket)
         research_id = self._extract_research_id(result) if function_name == "perform_research" else None
