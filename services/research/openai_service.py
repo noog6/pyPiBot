@@ -8,10 +8,12 @@ from html.parser import HTMLParser
 import json
 import os
 from pathlib import Path
+import random
 import re
 import socket
 import time
 from typing import Any
+from urllib import error
 from urllib import parse, request
 
 from core.logging import logger as LOGGER
@@ -259,6 +261,10 @@ class OpenAIResearchService(ResearchService):
         if reservation is None:
             return self._safe_error_packet("budget_reservation_failed")
 
+        search_result: dict[str, Any] = {}
+        sources: list[dict[str, str]] = []
+        safety_notes: list[str] = []
+        fetch_meta = self._default_fetch_metadata()
         try:
             search_result = self._search_candidates(request_packet)
             if "error" in search_result:
@@ -267,7 +273,7 @@ class OpenAIResearchService(ResearchService):
                 return self._safe_error_packet(str(search_result["error"]))
 
             best_url = str(search_result.get("best_url") or "").strip()
-            sources = self._sanitize_sources(search_result.get("sources") or [])
+            sources = self._collect_candidate_sources(search_result)
             safety_notes = self._sanitize_notes(search_result.get("safety_notes") or [])
 
             fetch_url, url_skip_reason = self._choose_fetch_url(
@@ -276,7 +282,6 @@ class OpenAIResearchService(ResearchService):
                 best_url,
                 prefer_pdf=_query_prefers_pdf(request_packet.prompt),
             )
-            fetch_meta = self._default_fetch_metadata()
             markdown = ""
 
             if not fetch_url:
@@ -372,9 +377,32 @@ class OpenAIResearchService(ResearchService):
             LOGGER.info("[Research] rounds_used=%s budget_remaining=%s", rounds_used, remaining_after)
             return packet
         except Exception as exc:  # noqa: BLE001
-            LOGGER.exception("[Research] request failed before completion: %s", exc)
+            phase = self._phase_from_exception(exc)
+            timeout_used = self._timeout_s if phase in {"search_candidates", "extract_from_markdown"} else self._firecrawl_timeout_s
+            LOGGER.error(
+                "[Research] request_failed research_id=%s phase=%s provider=%s timeout_s=%s exception=%s",
+                self._request_research_id(request_packet),
+                phase,
+                "openai_responses_web_search",
+                timeout_used,
+                type(exc).__name__,
+            )
+            LOGGER.debug("[Research] request_failed_traceback", exc_info=True)
             self._record_budget_spend(reservation, execution_success=False)
-            return self._safe_error_packet("research_execution_failed")
+            return self._error_packet_with_sources(
+                reason="research_execution_failed",
+                search_result=search_result,
+                sources=sources,
+                safety_notes=safety_notes,
+                metadata_extra={
+                    **fetch_meta,
+                    "content_fetch_status": "failed" if fetch_meta.get("content_fetch_attempted") else "skipped",
+                    "content_fetch_skip_reason": fetch_meta.get("content_fetch_skip_reason") or "upstream_failure",
+                    "content_fetch_error": type(exc).__name__,
+                    "failure_phase": phase,
+                    "failure_provider": "openai_responses_web_search",
+                },
+            )
 
     def discover_domains(self, request_packet: ResearchRequest) -> list[str]:
         """Run lightweight source discovery and return candidate hostnames."""
@@ -460,14 +488,18 @@ class OpenAIResearchService(ResearchService):
             },
             "rules": ["Prefer official vendor PDFs or official pages.", "Return JSON only."],
         }
-        raw_text = self._responses_call(
-            input_messages=[
-                {"role": "system", "content": [{"type": "input_text", "text": self._system_instructions}]},
-                {"role": "user", "content": [{"type": "input_text", "text": json.dumps(prompt)}]},
-            ],
-            use_web_search=True,
-            max_output_tokens=500,
-        )
+        try:
+            raw_text = self._responses_call(
+                input_messages=[
+                    {"role": "system", "content": [{"type": "input_text", "text": self._system_instructions}]},
+                    {"role": "user", "content": [{"type": "input_text", "text": json.dumps(prompt)}]},
+                ],
+                use_web_search=True,
+                max_output_tokens=500,
+                phase="search_candidates",
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("search_candidates_failed") from exc
         parsed = self._load_json_or_none(raw_text)
         if parsed is None:
             return {"error": "search_non_json_response"}
@@ -498,14 +530,18 @@ class OpenAIResearchService(ResearchService):
             ],
             "markdown": _clip(markdown, self._firecrawl_max_markdown_chars),
         }
-        raw_text = self._responses_call(
-            input_messages=[
-                {"role": "system", "content": [{"type": "input_text", "text": self._system_instructions}]},
-                {"role": "user", "content": [{"type": "input_text", "text": json.dumps(prompt)}]},
-            ],
-            use_web_search=False,
-            max_output_tokens=700,
-        )
+        try:
+            raw_text = self._responses_call(
+                input_messages=[
+                    {"role": "system", "content": [{"type": "input_text", "text": self._system_instructions}]},
+                    {"role": "user", "content": [{"type": "input_text", "text": json.dumps(prompt)}]},
+                ],
+                use_web_search=False,
+                max_output_tokens=700,
+                phase="extract_from_markdown",
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("extract_from_markdown_failed") from exc
         parsed = self._load_json_or_none(raw_text)
         if parsed is None:
             return self._safe_error_packet("extract_non_json_response")
@@ -539,6 +575,7 @@ class OpenAIResearchService(ResearchService):
         input_messages: list[dict[str, Any]],
         use_web_search: bool,
         max_output_tokens: int,
+        phase: str,
     ) -> str:
         payload: dict[str, Any] = {
             "model": self._model,
@@ -559,8 +596,27 @@ class OpenAIResearchService(ResearchService):
             },
             method="POST",
         )
-        with request.urlopen(http_request, timeout=self._timeout_s) as response:
-            body = response.read().decode("utf-8")
+        timeout_s = self._timeout_s
+        attempts = 2 if phase == "search_candidates" else 1
+        body = ""
+        for attempt in range(1, attempts + 1):
+            try:
+                with request.urlopen(http_request, timeout=timeout_s) as response:
+                    body = response.read().decode("utf-8")
+                break
+            except Exception as exc:  # noqa: BLE001
+                if attempt >= attempts or not self._is_timeout_error(exc):
+                    raise
+                jitter_s = round(random.uniform(0.05, 0.2), 3)
+                LOGGER.warning(
+                    "[Research] timeout_retry phase=%s provider=%s timeout_s=%s attempt=%s jitter_s=%s",
+                    phase,
+                    "openai_responses_web_search",
+                    timeout_s,
+                    attempt,
+                    jitter_s,
+                )
+                time.sleep(jitter_s)
         response_payload = json.loads(body)
         if isinstance(response_payload.get("output_text"), str):
             return response_payload["output_text"].strip()
@@ -572,6 +628,63 @@ class OpenAIResearchService(ResearchService):
                 if isinstance(text, str) and text.strip():
                     chunks.append(text.strip())
         return "\n".join(chunks).strip()
+
+    def _is_timeout_error(self, exc: Exception) -> bool:
+        if isinstance(exc, TimeoutError):
+            return True
+        if isinstance(exc, error.URLError):
+            return isinstance(exc.reason, TimeoutError)
+        reason = getattr(exc, "reason", None)
+        return isinstance(reason, TimeoutError)
+
+    def _phase_from_exception(self, exc: Exception) -> str:
+        details = str(exc).lower()
+        if "search_candidates" in details:
+            return "search_candidates"
+        if "extract_from_markdown" in details:
+            return "extract_from_markdown"
+        cause = exc.__cause__
+        if cause is not None:
+            cause_details = str(cause).lower()
+            if "search_candidates" in cause_details:
+                return "search_candidates"
+            if "extract_from_markdown" in cause_details:
+                return "extract_from_markdown"
+        return "request_research"
+
+    def _collect_candidate_sources(self, search_result: dict[str, Any]) -> list[dict[str, str]]:
+        candidate_sources = list(self._sanitize_sources(search_result.get("sources") or []))
+        seen_urls = {str(item.get("url") or "").strip() for item in candidate_sources if isinstance(item, dict)}
+        for candidate in search_result.get("candidate_urls") or []:
+            url = str(candidate or "").strip()
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            candidate_sources.append({"title": "Candidate source", "url": _clip(url, 360)})
+            if len(candidate_sources) >= self._max_sources:
+                break
+        return candidate_sources
+
+    def _error_packet_with_sources(
+        self,
+        *,
+        reason: str,
+        search_result: dict[str, Any],
+        sources: list[dict[str, str]],
+        safety_notes: list[str],
+        metadata_extra: dict[str, Any],
+    ) -> ResearchPacket:
+        candidate_sources = sources or self._collect_candidate_sources(search_result)
+        packet = self._safe_error_packet(reason)
+        return ResearchPacket(
+            schema=packet.schema,
+            status=packet.status,
+            answer_summary=packet.answer_summary,
+            extracted_facts=packet.extracted_facts,
+            sources=candidate_sources,
+            safety_notes=self._sanitize_notes(packet.safety_notes + safety_notes),
+            metadata={**packet.metadata, **metadata_extra},
+        )
 
     def _load_json_or_none(self, text: str) -> dict[str, Any] | None:
         try:
@@ -786,6 +899,10 @@ class OpenAIResearchService(ResearchService):
 
     def _request_run_id(self, request_packet: ResearchRequest) -> str:
         raw = request_packet.context.get("run_id")
+        return str(raw) if raw is not None else "unknown"
+
+    def _request_research_id(self, request_packet: ResearchRequest) -> str:
+        raw = request_packet.context.get("research_id")
         return str(raw) if raw is not None else "unknown"
 
     def _log_firecrawl_enabled_banner(self, run_id: str) -> None:
