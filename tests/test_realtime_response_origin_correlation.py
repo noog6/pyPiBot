@@ -443,3 +443,92 @@ def test_response_lifecycle_trace_continuity_created_content_done(monkeypatch) -
         "response_lifecycle_trace_detail response_id=resp_trace_1 event_type=response.text.delta" in line
         for line in debug_logs
     )
+
+
+def test_response_output_audio_transcript_delta_trace_is_debug_with_sampling(monkeypatch) -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._lifecycle_trace_transcript_delta_sample_n = 3
+    api._lifecycle_trace_transcript_delta_inactivity_ms = 750
+    api._lifecycle_trace_transcript_delta_state = {}
+    api._lifecycle_trace_item_added_unknown_events = deque()
+    api._lifecycle_trace_item_added_unknown_threshold = 3
+    api._lifecycle_trace_item_added_unknown_window_s = 10.0
+    api._lifecycle_trace_item_added_unknown_cooldown_s = 30.0
+    api._lifecycle_trace_item_added_unknown_last_escalation_ts = 0.0
+
+    debug_logs: list[str] = []
+    info_logs: list[str] = []
+    monotonic_values = iter([10.0, 10.1, 10.2, 10.3])
+
+    monkeypatch.setattr("ai.realtime_api.time.monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr("ai.realtime_api.logger.debug", lambda message, *args: debug_logs.append(message % args))
+    monkeypatch.setattr("ai.realtime_api.logger.info", lambda message, *args: info_logs.append(message % args))
+
+    for _ in range(4):
+        api._emit_response_lifecycle_trace(
+            event_type="response.output_audio_transcript.delta",
+            response_id="resp_trace_2",
+            turn_id="turn_trace_2",
+            input_event_key="input_evt_trace_2",
+            canonical_key="turn_trace_2::input_evt_trace_2",
+            origin="assistant_message",
+            active_input_event_key="input_evt_trace_2",
+            active_canonical_key="turn_trace_2::input_evt_trace_2",
+            payload_summary="has_delta=true",
+        )
+
+    transcript_trace_logs = [
+        line for line in debug_logs if "response_lifecycle_trace response_id=resp_trace_2" in line
+    ]
+    assert len(transcript_trace_logs) == 2
+    assert "seq=1 sampled=false first=true last=false" in transcript_trace_logs[0]
+    assert "seq=3 sampled=true first=false last=false" in transcript_trace_logs[1]
+    assert all("event_type=response.output_audio_transcript.delta" in line for line in transcript_trace_logs)
+    assert not any(
+        "response_lifecycle_trace response_id=resp_trace_2 event_type=response.output_audio_transcript.delta" in line
+        for line in info_logs
+    )
+
+
+def test_conversation_item_added_trace_debug_with_unknown_escalation_cooldown(monkeypatch) -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._lifecycle_trace_transcript_delta_sample_n = 20
+    api._lifecycle_trace_transcript_delta_inactivity_ms = 750
+    api._lifecycle_trace_transcript_delta_state = {}
+    api._lifecycle_trace_item_added_unknown_events = deque()
+    api._lifecycle_trace_item_added_unknown_threshold = 3
+    api._lifecycle_trace_item_added_unknown_window_s = 10.0
+    api._lifecycle_trace_item_added_unknown_cooldown_s = 30.0
+    api._lifecycle_trace_item_added_unknown_last_escalation_ts = 0.0
+
+    debug_logs: list[str] = []
+    info_logs: list[str] = []
+    monotonic_values = iter([0.0, 1.0, 2.0, 3.0, 20.0, 21.0, 22.0])
+
+    monkeypatch.setattr("ai.realtime_api.time.monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr("ai.realtime_api.logger.debug", lambda message, *args: debug_logs.append(message % args))
+    monkeypatch.setattr("ai.realtime_api.logger.info", lambda message, *args: info_logs.append(message % args))
+
+    for _ in range(7):
+        api._emit_response_lifecycle_trace(
+            event_type="conversation.item.added",
+            response_id="",
+            turn_id="turn_trace_3",
+            input_event_key="input_evt_trace_3",
+            canonical_key="turn_trace_3::input_evt_trace_3",
+            origin="assistant_message",
+            active_input_event_key="input_evt_trace_3",
+            active_canonical_key="turn_trace_3::input_evt_trace_3",
+            payload_summary="has_item=true item_type=message",
+        )
+
+    item_added_debug_logs = [
+        line
+        for line in debug_logs
+        if "event_type=conversation.item.added" in line and line.startswith("response_lifecycle_trace ")
+    ]
+    assert len(item_added_debug_logs) == 7
+    escalation_logs = [
+        line for line in info_logs if "response_lifecycle_trace_unknown_item_added_spike" in line
+    ]
+    assert len(escalation_logs) == 1
