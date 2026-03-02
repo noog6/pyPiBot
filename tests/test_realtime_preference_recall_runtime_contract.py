@@ -1,29 +1,146 @@
-
 from __future__ import annotations
 
-import pytest
+import asyncio
+import os
+import sys
+import types
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
-from unittest.mock import AsyncMock, patch
+if "audioop" not in sys.modules:
+    sys.modules["audioop"] = types.ModuleType("audioop")
+os.environ.setdefault("OPENAI_API_KEY", "test-key")
 
 from ai.realtime_api import RealtimeAPI
 
 
+def _base_api() -> RealtimeAPI:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._stop_words = {"halt"}
+    api._preference_recall_cache = {}
+    api._preference_recall_cooldown_s = 10.0
+    api._pending_preference_recall_trace = None
+    api._tool_call_records = []
+    api._turn_diagnostic_timestamps = {}
+    api._preference_recall_max_attempts = 1
+    api._preference_recall_min_semantic_score = 0.15
+    api._preference_recall_min_lexical_score = 0.1
+    api._preference_recall_allow_low_score_debug = False
+    api._memory_retrieval_scope = "user_global"
+    api._current_run_id = lambda: "run-test"
+    api._current_turn_id_or_unknown = lambda: "turn_1"
+    api._extract_preference_keywords = RealtimeAPI._extract_preference_keywords.__get__(api, RealtimeAPI)
+    api._preference_recall_memories_from_payload = RealtimeAPI._preference_recall_memories_from_payload.__get__(api, RealtimeAPI)
+    api._sanitize_memory_cards_text_for_user = RealtimeAPI._sanitize_memory_cards_text_for_user.__get__(api, RealtimeAPI)
+    api._build_preference_query_fingerprint = RealtimeAPI._build_preference_query_fingerprint.__get__(api, RealtimeAPI)
+    return api
+
+
 def test_find_stop_word_delegates_to_runtime() -> None:
-    api = RealtimeAPI(prompts=[])
+    api = _base_api()
     with patch("ai.realtime_api.preference_recall_runtime._find_stop_word", return_value="halt") as mocked:
         result = api._find_stop_word("please halt now")
     mocked.assert_called_once_with(api, "please halt now")
     assert result == "halt"
 
 
-@pytest.mark.asyncio
-async def test_preference_recall_intent_delegates_to_runtime() -> None:
-    api = RealtimeAPI(prompts=[])
+def test_preference_recall_intent_delegates_to_runtime() -> None:
+    api = _base_api()
     websocket = object()
     with patch(
         "ai.realtime_api.preference_recall_runtime._maybe_handle_preference_recall_intent",
         new=AsyncMock(return_value=True),
     ) as mocked:
-        result = await api._maybe_handle_preference_recall_intent("text", websocket, source="test")
+        result = asyncio.run(api._maybe_handle_preference_recall_intent("text", websocket, source="test"))
     mocked.assert_awaited_once_with(api, "text", websocket, source="test")
     assert result is True
+
+
+def test_preference_recall_filters_irrelevant_low_score() -> None:
+    api = _base_api()
+    api._filter_preference_recall_payload_for_user = RealtimeAPI._filter_preference_recall_payload_for_user.__get__(api, RealtimeAPI)
+    payload = {
+        "memories": [
+            {"content": "User's preferred editor is Vim."},
+            {"content": "User's pants are grey in color."},
+        ],
+        "memory_cards": [
+            {
+                "memory": "User's preferred editor is Vim.",
+                "why_relevant": "It matches your query about 'editor'. Evidence: lexical exact match on 'editor'.",
+                "confidence": "High",
+            },
+            {
+                "memory": "User's pants are grey in color.",
+                "why_relevant": "It matches your query about 'preference'. Evidence: semantic similarity=0.00.",
+                "confidence": "Low",
+            },
+        ],
+        "memory_cards_text": "placeholder",
+    }
+
+    filtered = api._filter_preference_recall_payload_for_user(payload, query="favorite editor")
+
+    assert len(filtered["memory_cards"]) == 1
+    assert "pants" not in filtered["memory_cards_text"].lower()
+
+
+def test_preference_recall_no_double_attempt_by_default() -> None:
+    api = _base_api()
+    api._preference_recall_fallback_query = RealtimeAPI._preference_recall_fallback_query.__get__(api, RealtimeAPI)
+    api._filter_preference_recall_payload_for_user = RealtimeAPI._filter_preference_recall_payload_for_user.__get__(api, RealtimeAPI)
+    recall_fn = AsyncMock(return_value={"memories": [], "memory_cards": [], "memory_cards_text": ""})
+
+    asyncio.run(
+        RealtimeAPI._run_preference_recall_with_fallbacks(
+            api,
+            recall_fn=recall_fn,
+            source="test",
+            resolved_turn_id="turn_1",
+            query="favorite editor",
+        )
+    )
+
+    assert recall_fn.await_count == 1
+
+
+def test_preference_recall_does_not_block_response_when_audio_started() -> None:
+    api = _base_api()
+    api._is_preference_recall_intent = Mock(return_value=(True, ["editor"]))
+    api._build_preference_recall_query = Mock(return_value="editor")
+    api._mark_preference_recall_candidate = Mock()
+    api._clear_preference_recall_candidate = Mock()
+    api._run_preference_recall_with_fallbacks = AsyncMock(return_value=({"memories": [], "memory_cards": [], "memory_cards_text": ""}, True))
+
+    with patch("ai.realtime.preference_recall_runtime.function_map", {"recall_memories": AsyncMock()}):
+        handled = asyncio.run(api._maybe_handle_preference_recall_intent("remember my editor", object(), source="input_audio_transcription"))
+
+    assert handled is False
+
+
+def test_deliverable_seen_true_for_tool_output_turn() -> None:
+    api = _base_api()
+    api._utterance_info_summary = {"deliverable_seen": False}
+    api._mark_utterance_info_summary = RealtimeAPI._mark_utterance_info_summary.__get__(api, RealtimeAPI)
+    api._extract_assistant_text_from_content = RealtimeAPI._extract_assistant_text_from_content.__get__(api, RealtimeAPI)
+    api._is_active_response_guarded = lambda: False
+    api._cancel_micro_ack = lambda **_kwargs: None
+    api._mark_first_assistant_utterance_observed_if_needed = lambda _text: None
+    api.state_manager = SimpleNamespace(update_state=lambda *_args, **_kwargs: None)
+    api._set_response_delivery_state = lambda **_kwargs: None
+    api._current_turn_id_or_unknown = lambda: "turn_4"
+    api._active_response_input_event_key = "evt_4"
+    api._current_input_event_key = "evt_4"
+    api.assistant_reply = ""
+    api._assistant_reply_accum = ""
+
+    RealtimeAPI._on_assistant_output_item_added(
+        api,
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Found Vim memories."}],
+        },
+    )
+
+    assert bool(api._utterance_info_summary.get("deliverable_seen")) is True

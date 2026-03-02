@@ -73,6 +73,12 @@ memory_retrieval:
   cooldown_s: 10.0
   min_user_chars: 12
   min_user_tokens: 3
+  preference_recall:
+    cooldown_s: 10.0
+    max_attempts: 1
+    min_semantic_score: 0.15
+    min_lexical_score: 0.10
+    allow_low_score_debug: false
 
 # Semantic memory retrieval and embedding sidecar behavior
 memory_semantic:
