@@ -735,3 +735,26 @@ def test_fetch_skipped_preserves_candidate_sources_for_transcript(tmp_path: Path
     assert packet.metadata["content_fetch_skip_reason"] == "firecrawl_disabled"
     assert packet.sources
     assert packet.sources[0]["url"] == "https://example.com/official"
+
+
+def test_malformed_candidate_sources_returns_safe_error_packet(tmp_path: Path) -> None:
+    svc = _FakeOpenAIResearchService(
+        search_result={
+            "best_url": "https://example.com/official",
+            "candidate_urls": {"unexpected": "shape"},
+            "sources": {"title": "Official", "url": "https://example.com/official"},
+            "search_summary": "found",
+            "safety_notes": [],
+        },
+        extract_result="{}",
+        budget_state_file=str(tmp_path / "budget.json"),
+        cache_dir=str(tmp_path / "cache"),
+    )
+
+    packet = svc.request_research(ResearchRequest(prompt="find official docs", context={"research_id": "research-1"}))
+
+    assert packet.status == "error"
+    assert packet.sources == []
+    assert packet.metadata["content_fetch_status"] == "skipped"
+    assert packet.metadata["content_fetch_skip_reason"] == "unsupported"
+    assert packet.metadata["failure_phase"] == "request_research"

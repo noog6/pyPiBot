@@ -674,7 +674,7 @@ class OpenAIResearchService(ResearchService):
         safety_notes: list[str],
         metadata_extra: dict[str, Any],
     ) -> ResearchPacket:
-        candidate_sources = sources or self._collect_candidate_sources(search_result)
+        candidate_sources = list(sources) if isinstance(sources, list) else []
         packet = self._safe_error_packet(reason)
         return ResearchPacket(
             schema=packet.schema,
