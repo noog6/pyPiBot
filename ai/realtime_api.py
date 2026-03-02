@@ -926,6 +926,29 @@ class RealtimeAPI:
         )
         self._transcript_response_watchdog_tasks: dict[str, asyncio.Task] = {}
         self._transcript_response_outcome_logged_keys: set[str] = set()
+        self._lifecycle_trace_transcript_delta_sample_n = max(
+            1,
+            int(realtime_cfg.get("lifecycle_trace_transcript_delta_sample_n", 20)),
+        )
+        self._lifecycle_trace_transcript_delta_inactivity_ms = max(
+            250,
+            int(realtime_cfg.get("lifecycle_trace_transcript_delta_inactivity_ms", 750)),
+        )
+        self._lifecycle_trace_item_added_unknown_threshold = max(
+            1,
+            int(realtime_cfg.get("lifecycle_trace_item_added_unknown_threshold", 3)),
+        )
+        self._lifecycle_trace_item_added_unknown_window_s = max(
+            1.0,
+            float(realtime_cfg.get("lifecycle_trace_item_added_unknown_window_s", 10.0)),
+        )
+        self._lifecycle_trace_item_added_unknown_cooldown_s = max(
+            1.0,
+            float(realtime_cfg.get("lifecycle_trace_item_added_unknown_cooldown_s", 30.0)),
+        )
+        self._lifecycle_trace_transcript_delta_state: dict[str, dict[str, float | int]] = {}
+        self._lifecycle_trace_item_added_unknown_events: deque[float] = deque()
+        self._lifecycle_trace_item_added_unknown_last_escalation_ts = 0.0
         self._minimum_non_confirmation_duration_ms = int(
             realtime_cfg.get("minimum_non_confirmation_duration_ms", 120)
         )
@@ -1064,6 +1087,7 @@ class RealtimeAPI:
         active_canonical_key: str,
         payload_summary: str = "",
     ) -> None:
+        now = time.monotonic()
         response_key = str(response_id or "").strip() or "unknown"
         resolved_turn_id = str(turn_id or "").strip() or "unknown"
         resolved_input_key = str(input_event_key or "").strip() or "unknown"
@@ -1072,18 +1096,63 @@ class RealtimeAPI:
         active_input_key = str(active_input_event_key or "").strip() or "none"
         active_key = str(active_canonical_key or "").strip() or "none"
         normalized_event_type = str(event_type or "").strip() or "unknown"
-        logger.info(
-            "response_lifecycle_trace response_id=%s event_type=%s turn_id=%s input_event_key=%s canonical_key=%s "
-            "origin=%s active_input_event_key=%s active_canonical_key=%s",
-            response_key,
-            normalized_event_type,
-            resolved_turn_id,
-            resolved_input_key,
-            resolved_canonical_key,
-            resolved_origin,
-            active_input_key,
-            active_key,
-        )
+        trace_flags: list[str] = []
+        if normalized_event_type == "response.output_audio_transcript.delta":
+            self._prune_lifecycle_trace_transcript_delta_state(now=now)
+            transcript_state = self._lifecycle_trace_transcript_delta_state.setdefault(
+                response_key,
+                {"seq": 0, "last_seen": now},
+            )
+            seq = int(transcript_state.get("seq", 0)) + 1
+            transcript_state["seq"] = seq
+            transcript_state["last_seen"] = now
+            is_first = seq == 1
+            sampled = (seq % self._lifecycle_trace_transcript_delta_sample_n) == 0
+            if is_first or sampled:
+                trace_flags.append(
+                    f"seq={seq} sampled={str(sampled).lower()} first={str(is_first).lower()} last=false"
+                )
+                logger.debug(
+                    "response_lifecycle_trace response_id=%s event_type=%s turn_id=%s input_event_key=%s canonical_key=%s "
+                    "origin=%s active_input_event_key=%s active_canonical_key=%s %s",
+                    response_key,
+                    normalized_event_type,
+                    resolved_turn_id,
+                    resolved_input_key,
+                    resolved_canonical_key,
+                    resolved_origin,
+                    active_input_key,
+                    active_key,
+                    trace_flags[-1],
+                )
+        elif normalized_event_type == "conversation.item.added":
+            logger.debug(
+                "response_lifecycle_trace response_id=%s event_type=%s turn_id=%s input_event_key=%s canonical_key=%s "
+                "origin=%s active_input_event_key=%s active_canonical_key=%s",
+                response_key,
+                normalized_event_type,
+                resolved_turn_id,
+                resolved_input_key,
+                resolved_canonical_key,
+                resolved_origin,
+                active_input_key,
+                active_key,
+            )
+            if response_key == "unknown":
+                self._maybe_escalate_unknown_item_added(now=now)
+        else:
+            logger.info(
+                "response_lifecycle_trace response_id=%s event_type=%s turn_id=%s input_event_key=%s canonical_key=%s "
+                "origin=%s active_input_event_key=%s active_canonical_key=%s",
+                response_key,
+                normalized_event_type,
+                resolved_turn_id,
+                resolved_input_key,
+                resolved_canonical_key,
+                resolved_origin,
+                active_input_key,
+                active_key,
+            )
         if payload_summary:
             logger.debug(
                 "response_lifecycle_trace_detail response_id=%s event_type=%s turn_id=%s input_event_key=%s "
@@ -1098,6 +1167,47 @@ class RealtimeAPI:
                 active_key,
                 payload_summary,
             )
+
+    def _prune_lifecycle_trace_transcript_delta_state(self, *, now: float) -> None:
+        state = self._lifecycle_trace_transcript_delta_state
+        if not state:
+            return
+        inactivity_s = self._lifecycle_trace_transcript_delta_inactivity_ms / 1000.0
+        stale_response_ids = [
+            response_id
+            for response_id, entry in state.items()
+            if now - float(entry.get("last_seen", now)) > inactivity_s
+        ]
+        for response_id in stale_response_ids:
+            state.pop(response_id, None)
+        if len(state) <= 256:
+            return
+        oldest = sorted(
+            state.items(),
+            key=lambda pair: float(pair[1].get("last_seen", now)),
+        )
+        for response_id, _ in oldest[: len(state) - 256]:
+            state.pop(response_id, None)
+
+    def _maybe_escalate_unknown_item_added(self, *, now: float) -> None:
+        events = self._lifecycle_trace_item_added_unknown_events
+        window_s = self._lifecycle_trace_item_added_unknown_window_s
+        while events and now - events[0] > window_s:
+            events.popleft()
+        events.append(now)
+        if len(events) < self._lifecycle_trace_item_added_unknown_threshold:
+            return
+        last_escalation = self._lifecycle_trace_item_added_unknown_last_escalation_ts
+        if last_escalation > 0.0 and now - last_escalation < self._lifecycle_trace_item_added_unknown_cooldown_s:
+            return
+        self._lifecycle_trace_item_added_unknown_last_escalation_ts = now
+        logger.info(
+            "response_lifecycle_trace_unknown_item_added_spike event_type=conversation.item.added response_id=unknown "
+            "count=%s window_s=%s cooldown_s=%s",
+            len(events),
+            self._lifecycle_trace_item_added_unknown_window_s,
+            self._lifecycle_trace_item_added_unknown_cooldown_s,
+        )
 
     async def _handle_response_lifecycle_event(self, event: dict[str, Any], websocket: Any) -> None:
         event_type = str(event.get("type") or "unknown")
