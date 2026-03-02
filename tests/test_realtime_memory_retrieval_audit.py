@@ -80,7 +80,7 @@ def test_prepare_turn_memory_brief_logs_semantic_runtime_health_when_streak_non_
     def _capture(message, *args):
         captured["message"] = message % args
 
-    monkeypatch.setattr("ai.realtime_api.logger.info", _capture)
+    monkeypatch.setattr("ai.realtime.memory_runtime.logger.info", _capture)
     api._prepare_turn_memory_brief("please remember this", source="unit-test")
 
     message = captured["message"]

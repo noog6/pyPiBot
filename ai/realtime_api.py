@@ -115,8 +115,6 @@ from services.memory_manager import (
     MemoryBrief,
     MemoryManager,
     MemoryScope,
-    render_realtime_memory_brief_item,
-    render_startup_memory_digest_item,
 )
 from services.research import ResearchRequest, build_openai_service_or_null, has_research_intent
 from services.research.grounding import (
@@ -159,21 +157,6 @@ _PREFERENCE_RECALL_MARKERS = (
     "favourite",
     "what do i use",
     "which",
-)
-_MEMORY_INTENT_MARKERS = (
-    "remember",
-    "memory",
-    "memories",
-    "recall",
-    "do you know",
-    "what's my name",
-    "what is my name",
-    "my name",
-    "prefer",
-    "preferred",
-    "preference",
-    "favorite",
-    "favourite",
 )
 _PREFERENCE_RECALL_DOMAINS = {
     "editor",
@@ -2725,10 +2708,14 @@ class RealtimeAPI:
         self._prepare_turn_memory_brief(clean_text, source=source, memory_intent=memory_intent)
 
     def _is_memory_intent(self, text: str) -> bool:
-        normalized = " ".join((text or "").lower().split())
-        if not normalized:
-            return False
-        return any(marker in normalized for marker in _MEMORY_INTENT_MARKERS)
+        return self._get_memory_runtime().is_memory_intent(text)
+
+    def _get_memory_runtime(self) -> MemoryRuntime:
+        runtime = getattr(self, "_memory_runtime", None)
+        if runtime is None:
+            runtime = MemoryRuntime(self)
+            self._memory_runtime = runtime
+        return runtime
 
     def _extract_preference_keywords(self, text: str) -> list[str]:
         tokens = re.findall(r"[a-zA-Z][a-zA-Z0-9_+-]{1,}", text.lower())
@@ -4369,58 +4356,20 @@ class RealtimeAPI:
 
 
     def _should_skip_turn_memory_retrieval(self, user_text: str) -> bool:
-        text = user_text.strip()
-        if len(text) < int(getattr(self, "_memory_retrieval_min_user_chars", 12)):
-            return True
-        if len(text.split()) < int(getattr(self, "_memory_retrieval_min_user_tokens", 3)):
-            return True
-        noisy = {"ok", "okay", "thanks", "thank you", "yes", "no", "cool", "nice", "got it"}
-        return text.lower() in noisy
+        return self._get_memory_runtime().should_skip_turn_memory_retrieval(user_text)
 
     def _prepare_turn_memory_brief(self, user_text: str, *, source: str, memory_intent: bool = False) -> None:
-        self._memory_runtime.prepare_turn_memory_brief(
+        self._get_memory_runtime().prepare_turn_memory_brief(
             user_text,
             source=source,
             memory_intent=memory_intent,
         )
 
     def _consume_pending_memory_brief_note(self) -> str | None:
-        brief = getattr(self, "_pending_turn_memory_brief", None)
-        self._pending_turn_memory_brief = None
-        if brief is None or not brief.items:
-            return None
-        lines = [
-            "Turn memory brief (retrieved long-term context; do not quote verbatim unless asked):"
-        ]
-        for index, item in enumerate(brief.items, start=1):
-            lines.append(render_realtime_memory_brief_item(index=index, item=item))
-        if brief.truncated:
-            lines.append("Additional relevant memories were omitted due to retrieval limits.")
-        return "\n".join(lines)
+        return self._get_memory_runtime().consume_pending_memory_brief_note()
 
     def _build_startup_memory_digest_note(self) -> str | None:
-        if not getattr(self, "_startup_memory_digest_enabled", True):
-            return None
-        manager = getattr(self, "_memory_manager", None)
-        if manager is None:
-            return None
-        try:
-            digest = manager.retrieve_startup_digest(
-                max_items=int(getattr(self, "_startup_memory_digest_max_items", 2)),
-                max_chars=int(getattr(self, "_startup_memory_digest_max_chars", 280)),
-                user_id=manager.get_active_user_id(),
-            )
-        except Exception as exc:  # pragma: no cover - defensive fail-open
-            logger.warning("Startup memory digest retrieval failed: %s", exc)
-            return None
-        if digest is None or not digest.items:
-            return None
-        lines = ["Startup memory digest (stable user context):"]
-        for index, item in enumerate(digest.items, start=1):
-            lines.append(render_startup_memory_digest_item(index=index, item=item))
-        if digest.truncated:
-            lines.append("Additional pinned memories were omitted due to startup digest limits.")
-        return "\n".join(lines)
+        return self._get_memory_runtime().build_startup_memory_digest_note()
 
     async def _send_memory_brief_note(self, websocket: Any, note_text: str) -> None:
         note_event = {
@@ -5296,12 +5245,14 @@ class RealtimeAPI:
         return str(source or "").strip().lower()
 
     def _build_research_fingerprint(self, *, query: str, source: str | None) -> str:
-        normalized = {
-            "query": self._normalize_research_query_text(query),
-            "source": self._normalize_research_source_text(source),
-        }
-        payload = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        return self._get_research_runtime().build_research_fingerprint(query=query, source=source)
+
+    def _get_research_runtime(self) -> ResearchRuntime:
+        runtime = getattr(self, "_research_runtime", None)
+        if runtime is None:
+            runtime = ResearchRuntime(self)
+            self._research_runtime = runtime
+        return runtime
 
     def _build_research_query_fingerprint(self, query: str) -> str:
         return self._build_research_fingerprint(query=query, source=None)
@@ -5342,35 +5293,10 @@ class RealtimeAPI:
         return True
 
     def _prune_research_permission_outcomes(self, now: float | None = None) -> None:
-        now_ts = time.monotonic() if now is None else now
-        outcomes = getattr(self, "_research_permission_outcomes", None)
-        if not isinstance(outcomes, dict):
-            self._research_permission_outcomes = {}
-            self._research_suppressed_fingerprints = {}
-            return
-        ttl_s = float(getattr(self, "_research_permission_outcome_ttl_s", 20.0))
-        expired = [
-            fingerprint
-            for fingerprint, payload in outcomes.items()
-            if now_ts - float(payload.get("recorded_at", 0.0)) > ttl_s
-        ]
-        for fingerprint in expired:
-            outcomes.pop(fingerprint, None)
-            if isinstance(getattr(self, "_research_suppressed_fingerprints", None), dict):
-                self._research_suppressed_fingerprints.pop(fingerprint, None)
+        self._get_research_runtime().prune_research_permission_outcomes(now=now)
 
     def _record_research_permission_outcome(self, fingerprint: str, *, approved: bool) -> None:
-        self._prune_research_permission_outcomes()
-        if not isinstance(getattr(self, "_research_permission_outcomes", None), dict):
-            self._research_permission_outcomes = {}
-        self._research_permission_outcomes[fingerprint] = {
-            "approved": approved,
-            "recorded_at": time.monotonic(),
-        }
-        if not isinstance(getattr(self, "_research_suppressed_fingerprints", None), dict):
-            self._research_suppressed_fingerprints = {}
-        if approved:
-            self._research_suppressed_fingerprints.pop(fingerprint, None)
+        self._get_research_runtime().record_research_permission_outcome(fingerprint, approved=approved)
 
     def _get_research_permission_outcome(self, fingerprint: str) -> bool | None:
         self._prune_research_permission_outcomes()
@@ -7034,7 +6960,7 @@ class RealtimeAPI:
         return await self._confirmation_runtime.maybe_handle_approval_response(text, websocket)
 
     async def _maybe_handle_research_permission_response(self, text: str, websocket: Any) -> bool:
-        return await self._research_runtime.maybe_handle_research_permission_response(text, websocket)
+        return await self._get_research_runtime().maybe_handle_research_permission_response(text, websocket)
     async def _maybe_handle_research_budget_response(self, text: str, websocket: Any) -> bool:
         token = getattr(self, "_pending_confirmation_token", None)
         if token is None or token.kind != "research_budget":
@@ -7070,7 +6996,7 @@ class RealtimeAPI:
         return True
 
     async def _maybe_process_research_intent(self, text: str, websocket: Any, *, source: str) -> bool:
-        return await self._research_runtime.maybe_process_research_intent(
+        return await self._get_research_runtime().maybe_process_research_intent(
             text,
             websocket,
             source=source,
