@@ -9,7 +9,9 @@ from typing import Any, Protocol
 
 from ai.interaction_lifecycle_policy import ResponseCreateDecisionAction
 from ai.realtime.types import PendingResponseCreate
-from core.logging import logger
+from core.logging import logger, log_ws_event
+from interaction import InteractionState
+from ai.realtime.types import UtteranceContext
 
 
 class ResponseCreateRuntimeAPI(Protocol):
@@ -339,5 +341,448 @@ class ResponseCreateRuntime:
                 getattr(api, "_response_done_serial", 0),
             )
         return False
-    
 
+    async def send_response_create(
+        self,
+        websocket: Any,
+        response_create_event: dict[str, Any],
+        *,
+        origin: str,
+        utterance_context: UtteranceContext | None = None,
+        record_ai_call: bool = False,
+        debug_context: dict[str, Any] | None = None,
+        memory_brief_note: str | None = None,
+    ) -> bool:
+        api = self.api
+        now = time.monotonic()
+        delta_ms = None
+        if api._last_response_create_ts is not None:
+            delta_ms = (now - api._last_response_create_ts) * 1000.0
+        if api._response_create_debug_trace:
+            ctx = debug_context or {}
+            logger.info(
+                "[Debug][response.create] active_response_id=%s origin=%s tool=%s call_id=%s research_id=%s delta_ms=%s",
+                api._active_response_id,
+                origin,
+                ctx.get("tool_name"),
+                ctx.get("call_id"),
+                ctx.get("research_id"),
+                f"{delta_ms:.1f}" if delta_ms is not None else "n/a",
+            )
+
+        # Migration (phase 1): delegated policy decisions keep signature stable.
+        if memory_brief_note:
+            try:
+                await api._send_memory_brief_note(websocket, memory_brief_note)
+            except Exception as exc:  # pragma: no cover - defensive fail-open
+                logger.warning("Memory brief injection skipped due to error: %s", exc)
+        context_hint = utterance_context or getattr(api, "_utterance_context", None)
+        if context_hint is not None:
+            metadata = api._extract_response_create_metadata(response_create_event)
+            metadata.setdefault("turn_id", context_hint.turn_id)
+            if context_hint.input_event_key:
+                metadata.setdefault("input_event_key", context_hint.input_event_key)
+        turn_id = api._resolve_response_create_turn_id(origin=origin, response_create_event=response_create_event)
+        current_input_event_key = api._ensure_response_create_correlation(
+            response_create_event=response_create_event,
+            origin=origin,
+            turn_id=turn_id,
+        )
+        api._bind_active_input_event_key_for_turn(
+            turn_id=turn_id,
+            input_event_key=current_input_event_key,
+        )
+        with api._utterance_context_scope(turn_id=turn_id, input_event_key=current_input_event_key) as resolved_context:
+            turn_id = resolved_context.turn_id
+            current_input_event_key = resolved_context.input_event_key
+            canonical_key = resolved_context.canonical_key
+
+        response_metadata = api._extract_response_create_metadata(response_create_event)
+        normalized_origin = str(origin or "").strip().lower()
+        consumes_canonical_slot = api._response_consumes_canonical_slot(response_metadata)
+        explicit_multipart = api._response_is_explicit_multipart(response_metadata)
+        suppression_turns = getattr(api, "_preference_recall_suppressed_turns", set())
+        created_keys = getattr(api, "_response_created_canonical_keys", set())
+        single_flight_block_reason = api._single_flight_block_reason(
+            turn_id=turn_id,
+            input_event_key=current_input_event_key,
+        ) if consumes_canonical_slot else ""
+        suppression_active = turn_id in suppression_turns and not current_input_event_key
+        preference_recall_lock_blocked = api._is_preference_recall_lock_blocked(
+            turn_id=turn_id,
+            input_event_key=current_input_event_key,
+            normalized_origin=normalized_origin,
+            response_metadata=response_metadata,
+        )
+        if api._drop_response_create_for_terminal_state(
+            turn_id=turn_id,
+            input_event_key=current_input_event_key,
+            origin=origin,
+            response_metadata=response_metadata,
+        ):
+            return False
+        decision = api._lifecycle_policy().decide_response_create(
+            response_in_flight=bool(api._response_in_flight),
+            audio_playback_busy=bool(api._audio_playback_busy),
+            consumes_canonical_slot=consumes_canonical_slot,
+            canonical_audio_started=api._canonical_first_audio_started(canonical_key),
+            explicit_multipart=explicit_multipart,
+            single_flight_block_reason=single_flight_block_reason,
+            already_delivered=api._is_response_already_delivered(turn_id=turn_id, input_event_key=current_input_event_key),
+            preference_recall_lock_blocked=preference_recall_lock_blocked,
+            canonical_key_already_created=canonical_key in created_keys,
+            has_safety_override=api._response_has_safety_override(response_create_event),
+            suppression_active=suppression_active,
+            normalized_origin=normalized_origin,
+        )
+
+        if decision.action is ResponseCreateDecisionAction.SCHEDULE:
+            return api._schedule_pending_response_create(
+                websocket=websocket,
+                response_create_event=response_create_event,
+                origin=origin,
+                reason=str(decision.queue_reason or decision.reason_code),
+                record_ai_call=record_ai_call,
+                debug_context=debug_context,
+                memory_brief_note=memory_brief_note,
+            )
+        if decision.action is ResponseCreateDecisionAction.BLOCK:
+            if decision.reason_code == "already_delivered":
+                api._record_duplicate_create_attempt(
+                    turn_id=turn_id,
+                    canonical_key=canonical_key,
+                    reason="already_delivered",
+                )
+                logger.debug(
+                    "duplicate_response_prevented run_id=%s turn_id=%s input_event_key=%s reason=already_delivered origin=%s",
+                    api._current_run_id() or "",
+                    turn_id,
+                    current_input_event_key or "unknown",
+                    normalized_origin,
+                )
+                return False
+            if decision.reason_code == "preference_recall_lock_blocked":
+                return False
+            if single_flight_block_reason and decision.reason_code == single_flight_block_reason:
+                api._log_response_create_blocked(
+                    turn_id=turn_id,
+                    origin=normalized_origin,
+                    input_event_key=current_input_event_key,
+                    canonical_key=canonical_key,
+                    block_reason=decision.reason_code,
+                )
+                if decision.reason_code == "canonical_response_already_created":
+                    api._record_duplicate_create_attempt(
+                        turn_id=turn_id,
+                        canonical_key=canonical_key,
+                        reason=decision.reason_code,
+                    )
+                return False
+            if decision.reason_code == "preference_recall_suppressed":
+                api._drop_suppressed_scheduled_response_creates(turn_id=turn_id, origin=normalized_origin)
+                api._mark_transcript_response_outcome(
+                    input_event_key=current_input_event_key,
+                    turn_id=turn_id,
+                    outcome="response_not_scheduled",
+                    reason=decision.reason_code,
+                    details="direct response.create blocked",
+                )
+            logger.info(
+                "response_schedule_blocked run_id=%s turn_id=%s origin=%s mode=direct reason=%s canonical_key=%s",
+                api._current_run_id() or "",
+                turn_id,
+                normalized_origin,
+                decision.reason_code,
+                canonical_key,
+            )
+            return False
+
+        obligation_present = api._response_obligation_key(
+            turn_id=turn_id,
+            input_event_key=current_input_event_key,
+        ) in getattr(api, "_response_obligations", {})
+        pending_server_auto_len = len(getattr(api, "_pending_server_auto_input_event_keys", deque()) or ())
+        logger.debug(
+            "[RESPTRACE] response_create_request run_id=%s turn_id=%s origin=%s trigger_reason=%s input_event_key=%s "
+            "canonical_key=%s sent_now=false scheduled=false replaced=false queue_len=%s pending_server_auto_len=%s "
+            "suppression_active=%s suppression_reason=%s obligation_present=%s response_done_serial=%s",
+            api._current_run_id() or "",
+            turn_id,
+            normalized_origin,
+            decision.reason_code,
+            current_input_event_key or "unknown",
+            canonical_key,
+            len(getattr(api, "_response_create_queue", deque()) or ()),
+            pending_server_auto_len,
+            bool(turn_id in suppression_turns),
+            api._resptrace_suppression_reason(turn_id=turn_id, input_event_key=current_input_event_key),
+            obligation_present,
+            getattr(api, "_response_done_serial", 0),
+        )
+        schedule_logged_turn_ids = getattr(api, "_response_schedule_logged_turn_ids", None)
+        if not isinstance(schedule_logged_turn_ids, set):
+            schedule_logged_turn_ids = set()
+            api._response_schedule_logged_turn_ids = schedule_logged_turn_ids
+        if turn_id not in schedule_logged_turn_ids:
+            schedule_logged_turn_ids.add(turn_id)
+            turn_timestamps_store = getattr(api, "_turn_diagnostic_timestamps", None)
+            if not isinstance(turn_timestamps_store, dict):
+                turn_timestamps_store = {}
+                api._turn_diagnostic_timestamps = turn_timestamps_store
+            turn_timestamps = turn_timestamps_store.setdefault(turn_id, {})
+            turn_timestamps["response_schedule"] = now
+            logger.info(
+                "response_schedule_marker run_id=%s turn_id=%s origin=%s input_event_key=%s canonical_key=%s suppression_active=%s mode=direct",
+                api._current_run_id() or "",
+                turn_id,
+                origin,
+                current_input_event_key or "unknown",
+                canonical_key,
+                suppression_active,
+            )
+            logger.debug(
+                "turn_diagnostic_timestamps run_id=%s turn_id=%s transcript_final_ts=%s preference_recall_start_ts=%s preference_recall_end_ts=%s response_schedule_ts=%s",
+                api._current_run_id() or "",
+                turn_id,
+                turn_timestamps.get("transcript_final"),
+                turn_timestamps.get("preference_recall_start"),
+                turn_timestamps.get("preference_recall_end"),
+                turn_timestamps.get("response_schedule"),
+            )
+        log_ws_event("Outgoing", response_create_event)
+        api._track_outgoing_event(response_create_event, origin=origin)
+        transport = api._get_or_create_transport()
+        await transport.send_json(websocket, response_create_event)
+        if consumes_canonical_slot:
+            api._set_response_delivery_state(
+                turn_id=turn_id,
+                input_event_key=current_input_event_key,
+                state="created",
+            )
+        api._mark_input_event_key_scheduled(input_event_key=current_input_event_key)
+        api._last_response_create_ts = now
+        api._response_in_flight = True
+        if record_ai_call:
+            api._record_ai_call()
+        logger.debug(
+            "[RESPTRACE] response_create_request run_id=%s turn_id=%s origin=%s trigger_reason=%s input_event_key=%s "
+            "canonical_key=%s sent_now=true scheduled=false replaced=false queue_len=%s pending_server_auto_len=%s "
+            "suppression_active=%s suppression_reason=%s obligation_present=%s response_done_serial=%s",
+            api._current_run_id() or "",
+            turn_id,
+            normalized_origin,
+            decision.reason_code,
+            current_input_event_key or "unknown",
+            canonical_key,
+            len(getattr(api, "_response_create_queue", deque()) or ()),
+            len(getattr(api, "_pending_server_auto_input_event_keys", deque()) or ()),
+            bool(turn_id in suppression_turns),
+            api._resptrace_suppression_reason(turn_id=turn_id, input_event_key=current_input_event_key),
+            obligation_present,
+            getattr(api, "_response_done_serial", 0),
+        )
+        return True
+
+    async def drain_response_create_queue(self, source_trigger: str | None = None) -> None:
+        api = self.api
+        source_candidate = source_trigger
+        if source_candidate is None:
+            source_candidate = getattr(api, "_response_create_queue_drain_source", "explicit_caller")
+        api._response_create_queue_drain_source = "explicit_caller"
+        normalized_source_trigger = str(source_candidate or "").strip().lower()
+        if normalized_source_trigger not in {"response_done", "playback_complete"}:
+            normalized_source_trigger = "explicit_caller"
+
+        selected_pending_origin = "none"
+        selected_pending_turn_id = "none"
+        selected_pending_input_event_key = "unknown"
+        selected_pending_canonical_key = "unknown"
+        selected_pending_trigger = "none"
+        selected_pending_enqueued_done_serial = "none"
+        selected_pending_serial_relation = "none"
+        drain_result = "none"
+        skipped_reason = "none"
+
+        def _serial_relation(serial: int | None) -> str:
+            if serial is None:
+                return "none"
+            if serial < api._response_done_serial:
+                return "older"
+            if serial > api._response_done_serial:
+                return "newer"
+            return "equal"
+
+        def _emit_drain_trace(*, stage: str, queue_len_before_value: int, queue_len_after_value: int) -> None:
+            logger.debug(
+                "[RESPTRACE] queue_drain_%s source_trigger=%s run_id=%s turn_id=%s input_event_key=%s canonical_key=%s "
+                "queue_len_before=%s queue_len_after=%s picked_origin=%s picked_turn_id=%s "
+                "picked_input_event_key=%s picked_canonical_key=%s selected_pending_trigger=%s skipped_reason=%s "
+                "enqueued_done_serial=%s enqueued_done_serial_relation=%s response_done_serial=%s drain_result=%s",
+                stage,
+                normalized_source_trigger,
+                api._current_run_id() or "",
+                trace_turn_id,
+                trace_input_event_key or "unknown",
+                trace_canonical_key,
+                queue_len_before_value,
+                queue_len_after_value,
+                selected_pending_origin,
+                selected_pending_turn_id,
+                selected_pending_input_event_key,
+                selected_pending_canonical_key,
+                selected_pending_trigger,
+                skipped_reason,
+                selected_pending_enqueued_done_serial,
+                selected_pending_serial_relation,
+                getattr(api, "_response_done_serial", 0),
+                drain_result,
+            )
+
+        current_state = getattr(api.state_manager, "state", InteractionState.IDLE)
+        queue_len_before = len(getattr(api, "_response_create_queue", deque()) or ())
+        trace_turn_id = api._current_turn_id_or_unknown()
+        trace_input_event_key = str(getattr(api, "_current_input_event_key", "") or "").strip()
+        trace_canonical_key = api._canonical_utterance_key(
+            turn_id=trace_turn_id,
+            input_event_key=trace_input_event_key,
+        )
+        _emit_drain_trace(
+            stage="pre",
+            queue_len_before_value=queue_len_before,
+            queue_len_after_value=queue_len_before,
+        )
+        if (
+            api._response_in_flight
+            or api._audio_playback_busy
+            or current_state == InteractionState.LISTENING
+        ):
+            drain_result = "state_or_flight_gate"
+            _emit_drain_trace(
+                stage="post",
+                queue_len_before_value=queue_len_before,
+                queue_len_after_value=queue_len_before,
+            )
+            return
+
+        if api._pending_response_create is None and api._response_create_queue:
+            api._dedupe_queued_confirmation_reminders()
+            queue_len = len(api._response_create_queue)
+            for _ in range(queue_len):
+                queued = api._response_create_queue.popleft()
+                metadata = api._extract_response_create_metadata(queued.get("event") or {})
+                queued_trigger = api._extract_response_create_trigger(metadata)
+                picked_turn_id = str(queued.get("turn_id") or "turn-unknown")
+                picked_origin = str(queued.get("origin") or "unknown")
+                picked_input_event_key = str(metadata.get("input_event_key") or "").strip()
+                if api._drop_response_create_for_terminal_state(
+                    turn_id=picked_turn_id,
+                    input_event_key=picked_input_event_key,
+                    origin=picked_origin,
+                    response_metadata=metadata,
+                ):
+                    skipped_reason = "canonical_terminal_state"
+                    continue
+                if not api._can_release_queued_response_create(queued_trigger, metadata):
+                    api._response_create_queue.append(queued)
+                    skipped_reason = "release_gate_blocked"
+                    continue
+                picked_input_event_key = picked_input_event_key or "unknown"
+                enqueued_done_serial_value = int(queued.get("enqueued_done_serial") or api._response_done_serial)
+                selected_pending_origin = picked_origin
+                selected_pending_turn_id = picked_turn_id
+                selected_pending_input_event_key = picked_input_event_key
+                selected_pending_canonical_key = api._canonical_utterance_key(
+                    turn_id=picked_turn_id,
+                    input_event_key=str(metadata.get("input_event_key") or "").strip(),
+                )
+                selected_pending_trigger = queued_trigger
+                selected_pending_enqueued_done_serial = str(enqueued_done_serial_value)
+                selected_pending_serial_relation = _serial_relation(enqueued_done_serial_value)
+                api._pending_response_create = PendingResponseCreate(
+                    websocket=queued["websocket"],
+                    event=queued["event"],
+                    origin=queued["origin"],
+                    turn_id=str(queued.get("turn_id") or api._next_response_turn_id()),
+                    created_at=time.monotonic(),
+                    reason="legacy_queue_hydration",
+                    record_ai_call=bool(queued.get("record_ai_call", False)),
+                    debug_context=queued.get("debug_context"),
+                    memory_brief_note=queued.get("memory_brief_note"),
+                    queued_reminder_key=api._queued_response_reminder_key(queued),
+                    enqueued_done_serial=enqueued_done_serial_value,
+                )
+                break
+        if api._pending_response_create is None:
+            drain_result = skipped_reason if skipped_reason != "none" else "no_pending"
+            _emit_drain_trace(
+                stage="post",
+                queue_len_before_value=queue_len_before,
+                queue_len_after_value=len(getattr(api, "_response_create_queue", deque()) or ()),
+            )
+            return
+
+        pending = api._pending_response_create
+        response_metadata = api._extract_response_create_metadata(pending.event)
+        queued_trigger = api._extract_response_create_trigger(response_metadata)
+        pending_input_event_key = str(response_metadata.get("input_event_key") or "").strip()
+        selected_pending_origin = pending.origin
+        selected_pending_turn_id = pending.turn_id
+        selected_pending_input_event_key = pending_input_event_key or "unknown"
+        selected_pending_canonical_key = api._canonical_utterance_key(
+            turn_id=pending.turn_id,
+            input_event_key=pending_input_event_key,
+        )
+        selected_pending_trigger = queued_trigger
+        selected_pending_enqueued_done_serial = str(pending.enqueued_done_serial)
+        selected_pending_serial_relation = _serial_relation(pending.enqueued_done_serial)
+        if not api._can_release_queued_response_create(queued_trigger, response_metadata):
+            if pending.reason != "legacy_queue_hydration":
+                api._sync_pending_response_create_queue()
+            logger.info(
+                "Deferring queued response.create origin=%s trigger=%s while awaiting confirmation.",
+                pending.origin,
+                queued_trigger,
+            )
+            drain_result = "release_gate_blocked"
+            _emit_drain_trace(
+                stage="post",
+                queue_len_before_value=queue_len_before,
+                queue_len_after_value=len(getattr(api, "_response_create_queue", deque()) or ()),
+            )
+            return
+
+        if api._drop_response_create_for_terminal_state(
+            turn_id=pending.turn_id,
+            input_event_key=pending_input_event_key,
+            origin=pending.origin,
+            response_metadata=response_metadata,
+        ):
+            api._pending_response_create = None
+            if pending.reason != "legacy_queue_hydration":
+                api._sync_pending_response_create_queue()
+            drain_result = "dropped_terminal_state"
+            skipped_reason = "canonical_terminal_state"
+            _emit_drain_trace(
+                stage="post",
+                queue_len_before_value=queue_len_before,
+                queue_len_after_value=len(getattr(api, "_response_create_queue", deque()) or ()),
+            )
+            return
+
+        api._pending_response_create = None
+        if pending.reason != "legacy_queue_hydration":
+            api._sync_pending_response_create_queue()
+        await api._send_response_create(
+            pending.websocket,
+            pending.event,
+            origin=pending.origin,
+            record_ai_call=pending.record_ai_call,
+            debug_context=pending.debug_context,
+            memory_brief_note=pending.memory_brief_note,
+        )
+        drain_result = "sent_to_send_response_create"
+        _emit_drain_trace(
+            stage="post",
+            queue_len_before_value=queue_len_before,
+            queue_len_after_value=len(getattr(api, "_response_create_queue", deque()) or ()),
+        )
