@@ -62,6 +62,7 @@ from ai.realtime.input_audio_events import InputAudioEventHandlers
 from ai.realtime.lifecycle_state import LifecycleStateCoordinator
 from ai.realtime.response_lifecycle import ResponseLifecycleTracker
 from ai.realtime.response_terminal_handlers import ResponseTerminalHandlers
+from ai.realtime.runtime_tasks import RuntimeTaskRegistry
 from ai.realtime.shutdown import ShutdownCoordinator
 from ai.realtime.transport import RealtimeTransport
 from ai.realtime.types import CanonicalResponseState, PendingResponseCreate, UtteranceContext
@@ -533,6 +534,7 @@ class RealtimeAPI:
         self._shutdown = ShutdownCoordinator(
             close_timeout_s=float(config.get("websocket_close_timeout_s", 5.0))
         )
+        self._runtime_tasks = RuntimeTaskRegistry()
 
         self.assistant_reply = ""
         self._assistant_reply_accum = ""
@@ -1231,6 +1233,13 @@ class RealtimeAPI:
 
     async def _handle_error_or_system_event(self, event: dict[str, Any], websocket: Any) -> None:
         await self._handle_event_legacy(event, websocket)
+
+    def _runtime_task_registry(self) -> RuntimeTaskRegistry:
+        registry = getattr(self, "_runtime_tasks", None)
+        if not isinstance(registry, RuntimeTaskRegistry):
+            registry = RuntimeTaskRegistry()
+            self._runtime_tasks = registry
+        return registry
 
     def _shutdown_coordinator(self) -> ShutdownCoordinator:
         coordinator = getattr(self, "_shutdown", None)
@@ -1999,7 +2008,8 @@ class RealtimeAPI:
             logged_keys = set()
             self._transcript_response_outcome_logged_keys = logged_keys
         logged_keys.discard(normalized_key)
-        watchdog_tasks[normalized_key] = asyncio.create_task(
+        watchdog_tasks[normalized_key] = self._runtime_task_registry().spawn(
+            f"watchdog.{normalized_key}",
             self._watch_transcript_response_outcome(
                 turn_id=turn_id,
                 input_event_key=normalized_key,
@@ -8708,7 +8718,10 @@ class RealtimeAPI:
         self.mic.start_recording()
         if self._response_create_queue:
             self._response_create_queue_drain_source = "playback_complete"
-            asyncio.create_task(self._drain_response_create_queue())
+            self._runtime_task_registry().spawn(
+                "response_queue_drain.playback_complete",
+                self._drain_response_create_queue(),
+            )
         if self._pending_image_flush_after_playback and self._pending_image_stimulus:
             self._pending_image_flush_after_playback = False
             self._schedule_pending_image_flush("playback complete")
@@ -8813,6 +8826,8 @@ class RealtimeAPI:
                     elif self._session_connected:
                         self._note_disconnect("clean shutdown")
         finally:
+            self._runtime_task_registry().cancel_all("run_finally")
+            await self._runtime_task_registry().await_all(timeout_s=1.0)
             self._event_injector.stop()
 
     async def initialize_session(self, websocket: Any) -> None:
@@ -11037,8 +11052,9 @@ class RealtimeAPI:
                 )
                 task = self._sensor_event_aggregation_tasks.get(aggregate_key)
                 if task is None or task.done():
-                    self._sensor_event_aggregation_tasks[aggregate_key] = asyncio.create_task(
-                        self._flush_sensor_aggregation_window(aggregate_key)
+                    self._sensor_event_aggregation_tasks[aggregate_key] = self._runtime_task_registry().spawn(
+                        f"sensor_aggregate_flush.{aggregate_key}",
+                        self._flush_sensor_aggregation_window(aggregate_key),
                     )
             else:
                 window.last_seen_monotonic = now
@@ -11086,7 +11102,10 @@ class RealtimeAPI:
         if not self._pending_image_stimulus:
             return
         if self.loop and self.loop.is_running():
-            self.loop.create_task(self._flush_pending_image_stimulus(reason))
+            self._runtime_task_registry().spawn(
+                f"pending_image_flush.{reason.replace(' ', '_')}",
+                self._flush_pending_image_stimulus(reason),
+            )
         else:
             logger.warning(
                 "Unable to flush pending image stimulus after %s: event loop unavailable.",
@@ -11171,6 +11190,7 @@ class RealtimeAPI:
     def _request_shutdown(self) -> None:
         self.exit_event.set()
         coordinator = self._shutdown_coordinator()
+        self._runtime_task_registry().cancel_all("request_shutdown")
         close_task = None
         if self.websocket:
             close_task = self.loop.create_task(self._close_websocket("signal"))
