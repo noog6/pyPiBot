@@ -270,6 +270,64 @@ def test_preference_recall_scope_forwarded_to_recall_tool() -> None:
     assert observed_scopes == ["user_global", "user_profile"]
 
 
+
+def test_preference_query_variants_keep_domain_and_value_tokens() -> None:
+    api = _base_api()
+    api._build_preference_recall_query_variants = RealtimeAPI._build_preference_recall_query_variants.__get__(api, RealtimeAPI)
+
+    variants = RealtimeAPI._build_preference_recall_query_variants(api, "editor favorite vim user preference")
+
+    assert any("editor" in variant and "vim" in variant for variant in variants)
+
+
+def test_preference_recall_uses_variant_retry_for_run441_style_miss() -> None:
+    api = _base_api()
+    api._preference_recall_max_attempts = 2
+    api._build_preference_recall_query_variants = RealtimeAPI._build_preference_recall_query_variants.__get__(api, RealtimeAPI)
+    api._preference_recall_fallback_query = RealtimeAPI._preference_recall_fallback_query.__get__(api, RealtimeAPI)
+    api._filter_preference_recall_payload_for_user = RealtimeAPI._filter_preference_recall_payload_for_user.__get__(api, RealtimeAPI)
+
+    calls: list[str] = []
+
+    async def _fake_recall(*, query: str, limit: int, scope: str):
+        _ = (limit, scope)
+        calls.append(query)
+        if "preferred editor vim" in query or "favorite editor vim" in query:
+            return {
+                "memories": [
+                    {"content": "User's preferred editor is Vim."},
+                    {"content": "User's favorite editor is Vim."},
+                ],
+                "memory_cards": [
+                    {
+                        "memory": "User's preferred editor is Vim.",
+                        "why_relevant": "It matches your query about 'Vim'. Evidence: lexical exact match on 'vim'.",
+                        "confidence": "High",
+                    },
+                    {
+                        "memory": "User's favorite editor is Vim.",
+                        "why_relevant": "It matches your query about 'editor'. Evidence: lexical exact match on 'editor'.",
+                        "confidence": "High",
+                    },
+                ],
+                "memory_cards_text": "Relevant memory:\n- \"User's favorite editor is Vim.\"",
+                "trace": {"retrieval_mode": "hybrid", "candidate_counts": {"lexical_candidates": 2, "semantic_candidates": 0, "combined_candidates": 2}},
+            }
+        return {"memories": [], "memory_cards": [], "memory_cards_text": "", "trace": {"retrieval_mode": "hybrid", "candidate_counts": {"lexical_candidates": 0, "semantic_candidates": 0, "combined_candidates": 0}}}
+
+    payload, _ = asyncio.run(
+        RealtimeAPI._run_preference_recall_with_fallbacks(
+            api,
+            recall_fn=_fake_recall,
+            source="input_audio_transcription",
+            resolved_turn_id="turn_2",
+            query="editor favorite vim user preference",
+        )
+    )
+
+    assert len(calls) == 2
+    assert any("Vim" in memory["content"] for memory in payload["memories"])
+
 def test_preference_recall_does_not_block_response_when_audio_started() -> None:
     api = _base_api()
     api._is_preference_recall_intent = Mock(return_value=(True, ["editor"]))

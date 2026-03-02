@@ -9,11 +9,11 @@
 ## Query generation
 - Primary query: `_build_preference_recall_query(...)` now builds a compact, intent-specific query from extracted keywords/entities plus domain canonicals.
 - Query normalization now drops conversational noise (`hey`, `remember`, `check`, `memories`) while preserving preference/domain cues and subject terms (for example, `favorite`, `preferred`, `editor`, `vim`).
-- Attempt=0 uses only the normalized primary query.
-- Fallback is now conditional:
+- Attempt=0 uses the normalized primary query built from domain + value tokens first (for example, `editor favorite vim user preference`).
+- When `preference_recall.max_attempts > 1`, attempt=1 uses deterministic query variants (domain-first and marker-first forms such as `preferred editor vim`) before optional narrow fallback.
+- Fallback remains conditional:
   - only if a strict fallback marker is present,
-  - only if a narrow fallback query can be derived,
-  - only when `preference_recall.max_attempts > 1`.
+  - only if a narrow fallback query can be derived.
 
 ## Retrieval backend + thresholds
 - Recall execution uses `recall_memories` (tool), which uses `MemoryManager.recall_memories_with_trace(...)` and emits `memory_cards`.
@@ -33,3 +33,8 @@
 - Preference recall no longer suppresses or cancels active `server_auto` responses in the intent handler.
 - `handled_preference_recall` now means context collection completed, not lifecycle ownership.
 - This prevents preference recall from competing with in-flight canonical audio and avoids delivery suppression side effects.
+
+## Run-441 corrective summary
+- The run-441 misses were caused by query compaction that could drop salient preference/value tokens before retrieval.
+- Preference recall now retries deterministic query variants while staying on the same `recall_memories` backend (same scope, same manager, same lexical/semantic behavior).
+- INFO logs include the retrieval backend summary and `empty_reason` to explain why any empty result was produced.

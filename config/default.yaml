@@ -75,7 +75,7 @@ memory_retrieval:
   min_user_tokens: 3
   preference_recall:
     cooldown_s: 10.0
-    max_attempts: 1
+    max_attempts: 2
     min_semantic_score: 0.15
     min_lexical_score: 0.10
     allow_low_score_debug: false
