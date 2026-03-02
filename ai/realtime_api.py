@@ -225,6 +225,16 @@ _PREFERENCE_KEYWORD_STOPWORDS = {
     "favorite",
     "favourite",
 }
+_PREFERENCE_QUERY_NOISE_TOKENS = {
+    "hey",
+    "theo",
+    "remember",
+    "memories",
+    "memory",
+    "check",
+    "anything",
+    "related",
+}
 
 
 @dataclass
@@ -2736,6 +2746,7 @@ class RealtimeAPI:
 
     def _build_preference_recall_query(self, user_text: str, *, keywords: list[str]) -> str:
         canonical = list(_PREFERENCE_QUERY_FALLBACK_CANONICAL)
+        domain_hits = [domain for domain in _PREFERENCE_RECALL_DOMAINS if domain in user_text]
         for domain in _PREFERENCE_RECALL_DOMAINS:
             if domain in user_text:
                 canonical = list(_PREFERENCE_QUERY_CANONICAL_BY_DOMAIN.get(domain, canonical))
@@ -2749,14 +2760,34 @@ class RealtimeAPI:
                     if token not in entity_tokens:
                         entity_tokens.append(token)
 
+        normalized_keywords: list[str] = []
+        for keyword in keywords:
+            normalized = keyword.strip().lower()
+            if not normalized or normalized in _PREFERENCE_QUERY_NOISE_TOKENS:
+                continue
+            if normalized not in normalized_keywords:
+                normalized_keywords.append(normalized)
+
+        preference_cue_tokens: list[str] = []
+        if any(marker in user_text for marker in ("favorite", "favourite", "prefer", "preferred")):
+            preference_cue_tokens.extend(["favorite", "preferred"])
+
+        domain_tokens: list[str] = []
+        for domain in domain_hits:
+            if domain not in domain_tokens:
+                domain_tokens.append(domain)
+        for token in entity_tokens:
+            if token in _PREFERENCE_RECALL_DOMAINS and token not in domain_tokens:
+                domain_tokens.append(token)
+
         ordered_parts: list[str] = []
-        for item in keywords + entity_tokens + canonical:
+        for item in normalized_keywords + entity_tokens + domain_tokens + preference_cue_tokens + canonical:
             normalized = item.strip().lower()
             if normalized and normalized not in ordered_parts:
                 ordered_parts.append(normalized)
         if not ordered_parts:
             return "user preference"
-        return " ".join(ordered_parts[:4])
+        return " ".join(ordered_parts[:8])
 
     def _preference_recall_memories_from_payload(self, payload: dict[str, Any] | None) -> list[dict[str, Any]]:
         if not isinstance(payload, dict):
@@ -2864,25 +2895,51 @@ class RealtimeAPI:
             memories = self._preference_recall_memories_from_payload(payload)
             cards = payload.get("memory_cards") if isinstance(payload, dict) else None
             cards_count = len(cards) if isinstance(cards, list) else 0
+            trace = payload.get("trace") if isinstance(payload.get("trace"), dict) else {}
+            candidate_counts = trace.get("candidate_counts") if isinstance(trace.get("candidate_counts"), dict) else {}
+            retrieval_backend = str(trace.get("retrieval_mode", "unknown"))
+            filters_applied = [
+                "min_semantic_score",
+                "min_lexical_score",
+                "token_overlap",
+            ]
+            memory_cards_text = (
+                str(payload.get("memory_cards_text", "")).strip() if isinstance(payload, dict) else ""
+            )
+            hit = bool(memory_cards_text) or bool(cards_count) or bool(memories)
+            empty_reason = "none"
+            if not hit:
+                if not payload_keys:
+                    empty_reason = "invalid_payload"
+                elif candidate_counts.get("lexical_candidates", 0) == 0 and candidate_counts.get("semantic_candidates", 0) == 0:
+                    empty_reason = "no_candidates"
+                elif not cards_count and memories:
+                    empty_reason = "filtered_by_card_thresholds"
+                else:
+                    empty_reason = "no_ranked_matches"
+
             logger.info(
                 "preference_recall_tool_result run_id=%s resolved_turn_id=%s query=%s payload_keys=%s "
-                "memories_count=%s cards_count=%s memory_cards_text_len=%s scope=%s attempt=%s source=%s",
+                "memories_count=%s cards_count=%s memory_cards_text_len=%s scope=%s attempt=%s source=%s "
+                "retrieval_backend=%s filters_applied=%s candidate_count=%s returned_count=%s empty_reason=%s",
                 self._current_run_id() or "",
                 resolved_turn_id,
                 candidate_query,
                 ",".join(payload_keys),
                 len(memories),
                 cards_count,
-                len(str(payload.get("memory_cards_text", "")).strip()) if isinstance(payload, dict) else 0,
+                len(memory_cards_text),
                 scope,
                 attempt_index,
                 source,
+                retrieval_backend,
+                ",".join(filters_applied),
+                candidate_counts.get("combined_candidates", candidate_counts.get("lexical_candidates", 0)),
+                len(memories),
+                empty_reason,
             )
             self._preference_recall_cache[candidate_query] = {"timestamp": time.monotonic(), "payload": payload}
             cards_list = cards if isinstance(cards, list) else []
-            memory_cards_text = (
-                str(payload.get("memory_cards_text", "")).strip() if isinstance(payload, dict) else ""
-            )
             hit = bool(memory_cards_text) or bool(cards_list) or bool(memories)
             if hit:
                 if attempt_index > 0:
