@@ -131,24 +131,12 @@ def _emit_preference_recall_skip_trace_if_needed(controller, *, turn_id: str | N
         controller._clear_preference_recall_candidate()
 
 async def _maybe_handle_preference_recall_intent(controller, text: str, websocket: Any, *, source: str) -> bool:
+        _ = websocket
         matched, keywords = controller._is_preference_recall_intent(text)
         if not matched:
             return False
 
         resolved_turn_id = controller._current_turn_id_or_unknown()
-        replacement_input_event_key = str(getattr(controller, "_current_input_event_key", "") or "").strip()
-        locked_input_event_keys = getattr(controller, "_preference_recall_locked_input_event_keys", None)
-        if not isinstance(locked_input_event_keys, set):
-            locked_input_event_keys = set()
-            controller._preference_recall_locked_input_event_keys = locked_input_event_keys
-        if replacement_input_event_key:
-            locked_input_event_keys.add(replacement_input_event_key)
-            logger.debug(
-                "preference_recall_lock_set run_id=%s input_event_key=%s reason=intent_matched",
-                controller._current_run_id() or "",
-                replacement_input_event_key,
-            )
-
         turn_timestamps_store = getattr(controller, "_turn_diagnostic_timestamps", None)
         if not isinstance(turn_timestamps_store, dict):
             turn_timestamps_store = {}
@@ -156,184 +144,80 @@ async def _maybe_handle_preference_recall_intent(controller, text: str, websocke
         turn_timestamps = turn_timestamps_store.setdefault(resolved_turn_id, {})
         turn_timestamps["preference_recall_start"] = time.monotonic()
         controller._mark_preference_recall_candidate(text, source=source)
-        try:
-            query = controller._build_preference_recall_query(text.lower(), keywords=keywords)
-            now = time.monotonic()
-            cooldown_s = max(0.0, float(getattr(controller, "_preference_recall_cooldown_s", 0.0)))
-            cached = controller._preference_recall_cache.get(query)
-            result_payload: dict[str, Any] | None = None
-            recall_invoked = False
-            if (
-                cached
-                and cooldown_s > 0.0
-                and now - float(cached.get("timestamp", 0.0)) < cooldown_s
-            ):
-                result_payload = cached.get("payload") if isinstance(cached.get("payload"), dict) else None
-                logger.info(
-                    "Preference recall reused cached result source=%s query=%s cooldown_s=%.2f",
-                    source,
-                    query,
-                    cooldown_s,
-                )
-            if result_payload is None:
-                recall_fn = function_map.get("recall_memories")
-                if recall_fn is None:
-                    if isinstance(controller._pending_preference_recall_trace, dict):
-                        controller._pending_preference_recall_trace["reason"] = "policy_skip"
-                    logger.warning("Preference recall intent matched but recall_memories tool unavailable.")
-                    return False
-                recall_invoked = True
-                tool_call_records = getattr(controller, "_tool_call_records", None)
-                if isinstance(tool_call_records, list):
-                    tool_call_records.append(
-                        {
-                            "name": "recall_memories",
-                            "source": "preference_recall",
-                            "turn_id": controller._current_turn_id_or_unknown(),
-                            "query": query,
-                        }
-                    )
+
+        query = controller._build_preference_recall_query(text.lower(), keywords=keywords)
+        now = time.monotonic()
+        cooldown_s = max(0.0, float(getattr(controller, "_preference_recall_cooldown_s", 0.0)))
+        cached = controller._preference_recall_cache.get(query)
+        result_payload: dict[str, Any] | None = None
+        if (
+            cached
+            and cooldown_s > 0.0
+            and now - float(cached.get("timestamp", 0.0)) < cooldown_s
+        ):
+            result_payload = cached.get("payload") if isinstance(cached.get("payload"), dict) else None
+            logger.info(
+                "Preference recall reused cached result source=%s query=%s cooldown_s=%.2f",
+                source,
+                query,
+                cooldown_s,
+            )
+
+        recall_invoked = False
+        if result_payload is None:
+            recall_fn = function_map.get("recall_memories")
+            if recall_fn is None:
                 if isinstance(controller._pending_preference_recall_trace, dict):
-                    controller._pending_preference_recall_trace["decision"] = "invoked_tool"
-                    controller._pending_preference_recall_trace["reason"] = "preference_intent_matched"
-                result_payload, recall_invoked = await controller._run_preference_recall_with_fallbacks(
-                    recall_fn=recall_fn,
-                    source=source,
-                    resolved_turn_id=resolved_turn_id,
-                    query=query,
-                )
-                logger.info(
-                    "Preference recall executed source=%s query=%s keywords=%s",
-                    source,
-                    query,
-                    ",".join(keywords),
-                )
-
-            memories = controller._preference_recall_memories_from_payload(result_payload)
-            cards = result_payload.get("memory_cards") if isinstance(result_payload, dict) else None
-            cards_list = cards if isinstance(cards, list) else []
-            memory_cards_text = ""
-            if isinstance(result_payload, dict):
-                memory_cards_text = controller._sanitize_memory_cards_text_for_user(
-                    str(result_payload.get("memory_cards_text", "")).strip()
-                )
-            hit = (
-                bool(memory_cards_text)
-                or bool(cards_list)
-                or (isinstance(memories, list) and len(memories) > 0)
-            )
-            await controller._suppress_preference_recall_server_auto_response(websocket)
-            # preference_recall is an internal tool pathway: suppress server_auto output,
-            # then guarantee a replacement assistant response for this input_event_key.
-            if replacement_input_event_key and controller._is_input_event_key_already_scheduled(
-                input_event_key=replacement_input_event_key
-            ):
-                logger.info(
-                    "preference_recall_replacement_skip run_id=%s turn_id=%s input_event_key=%s reason=already_scheduled_for_input_event_key",
-                    controller._current_run_id() or "",
-                    resolved_turn_id,
-                    replacement_input_event_key,
-                )
-                controller._clear_preference_recall_candidate()
-                return True
-            if not hit:
-                await controller.send_assistant_message(
-                    "I don’t have that saved yet. If you share it, I can remember it for next time.",
-                    websocket,
-                    response_metadata={
+                    controller._pending_preference_recall_trace["reason"] = "policy_skip"
+                logger.warning("Preference recall intent matched but recall_memories tool unavailable.")
+                return False
+            recall_invoked = True
+            tool_call_records = getattr(controller, "_tool_call_records", None)
+            if isinstance(tool_call_records, list):
+                tool_call_records.append(
+                    {
+                        "name": "recall_memories",
+                        "source": "preference_recall",
                         "turn_id": resolved_turn_id,
-                        "input_event_key": replacement_input_event_key,
-                        "trigger": "preference_recall",
-                    },
+                        "query": query,
+                    }
                 )
-                controller._mark_input_event_key_scheduled(input_event_key=replacement_input_event_key)
-                turn_timestamps["preference_recall_end"] = time.monotonic()
-                handled_logged_turn_ids = getattr(controller, "_preference_recall_handled_logged_turn_ids", None)
-                if not isinstance(handled_logged_turn_ids, set):
-                    handled_logged_turn_ids = set()
-                    controller._preference_recall_handled_logged_turn_ids = handled_logged_turn_ids
-                if resolved_turn_id not in handled_logged_turn_ids:
-                    handled_logged_turn_ids.add(resolved_turn_id)
-                    logger.info(
-                        "preference_recall_handled run_id=%s resolved_turn_id=%s source=%s query=%s",
-                        controller._current_run_id() or "",
-                        resolved_turn_id,
-                        source,
-                        query,
-                    )
-                    logger.debug(
-                        "turn_diagnostic_timestamps run_id=%s turn_id=%s transcript_final_ts=%s preference_recall_start_ts=%s preference_recall_end_ts=%s response_schedule_ts=%s",
-                        controller._current_run_id() or "",
-                        resolved_turn_id,
-                        turn_timestamps.get("transcript_final"),
-                        turn_timestamps.get("preference_recall_start"),
-                        turn_timestamps.get("preference_recall_end"),
-                        turn_timestamps.get("response_schedule"),
-                    )
-                controller._clear_preference_recall_candidate()
-                return True
-
-            response_lines: list[str] = []
-            if recall_invoked:
-                response_lines.append("I’m checking what I remember.")
-            if memory_cards_text:
-                response_lines.append(memory_cards_text)
-            else:
-                first_memory = memories[0] if isinstance(memories[0], dict) else {}
-                memory_text = str(first_memory.get("content", "")).strip()
-                if not memory_text:
-                    memory_text = "I found a saved preference, but it does not include enough detail to quote yet."
-                response_lines.append(f'Relevant memory: "{memory_text}"')
-                response_lines.append("Why it's relevant: " + '"It matches your preference question."')
-                response_lines.append("Confidence: medium")
-
-            if controller._memory_pin_followup_needed(cards=cards_list, memories=memories, query=query):
-                response_lines.append("Want me to pin or rename this memory so it’s easier to recall later?")
-
-            response_text = controller._normalize_memory_recall_answer("\n".join(response_lines))
-            await controller.send_assistant_message(
-                response_text,
-                websocket,
-                response_metadata={
-                    "turn_id": resolved_turn_id,
-                    "input_event_key": replacement_input_event_key,
-                    "trigger": "preference_recall",
-                },
+            if isinstance(controller._pending_preference_recall_trace, dict):
+                controller._pending_preference_recall_trace["decision"] = "invoked_tool"
+                controller._pending_preference_recall_trace["reason"] = "preference_intent_matched"
+            result_payload, _ = await controller._run_preference_recall_with_fallbacks(
+                recall_fn=recall_fn,
+                source=source,
+                resolved_turn_id=resolved_turn_id,
+                query=query,
             )
-            controller._mark_input_event_key_scheduled(input_event_key=replacement_input_event_key)
-            turn_timestamps["preference_recall_end"] = time.monotonic()
-            handled_logged_turn_ids = getattr(controller, "_preference_recall_handled_logged_turn_ids", None)
-            if not isinstance(handled_logged_turn_ids, set):
-                handled_logged_turn_ids = set()
-                controller._preference_recall_handled_logged_turn_ids = handled_logged_turn_ids
-            if resolved_turn_id not in handled_logged_turn_ids:
-                handled_logged_turn_ids.add(resolved_turn_id)
-                logger.info(
-                    "preference_recall_handled run_id=%s resolved_turn_id=%s source=%s query=%s",
-                    controller._current_run_id() or "",
-                    resolved_turn_id,
-                    source,
-                    query,
-                )
-                logger.debug(
-                    "turn_diagnostic_timestamps run_id=%s turn_id=%s transcript_final_ts=%s preference_recall_start_ts=%s preference_recall_end_ts=%s response_schedule_ts=%s",
-                    controller._current_run_id() or "",
-                    resolved_turn_id,
-                    turn_timestamps.get("transcript_final"),
-                    turn_timestamps.get("preference_recall_start"),
-                    turn_timestamps.get("preference_recall_end"),
-                    turn_timestamps.get("response_schedule"),
-                )
-            controller._clear_preference_recall_candidate()
-            return True
-        finally:
-            if replacement_input_event_key:
-                locked_input_event_keys.discard(replacement_input_event_key)
-                logger.debug(
-                    "preference_recall_lock_cleared run_id=%s input_event_key=%s reason=completed",
-                    controller._current_run_id() or "",
-                    replacement_input_event_key,
-                )
+            logger.info(
+                "Preference recall executed source=%s query=%s keywords=%s",
+                source,
+                query,
+                ",".join(keywords),
+            )
+
+        result_payload = result_payload if isinstance(result_payload, dict) else {}
+        memories = controller._preference_recall_memories_from_payload(result_payload)
+        cards = result_payload.get("memory_cards") if isinstance(result_payload.get("memory_cards"), list) else []
+        memory_cards_text = controller._sanitize_memory_cards_text_for_user(
+            str(result_payload.get("memory_cards_text", "")).strip()
+        )
+        hit = bool(memory_cards_text) or bool(cards) or bool(memories)
+        turn_timestamps["preference_recall_end"] = time.monotonic()
+        controller._clear_preference_recall_candidate()
+        logger.info(
+            "preference_recall_handled run_id=%s resolved_turn_id=%s source=%s query=%s context_gathered=%s recall_invoked=%s",
+            controller._current_run_id() or "",
+            resolved_turn_id,
+            source,
+            query,
+            str(hit).lower(),
+            str(recall_invoked).lower(),
+        )
+        # Preference recall only gathers context and must not own the response lifecycle.
+        return False
 
 def _find_stop_word(controller, text: str) -> str | None:
         if not text or not controller._stop_words:

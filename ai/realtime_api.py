@@ -44,7 +44,7 @@ from interaction import (
     InteractionState,
     InteractionStateManager,
 )
-from ai.tools import function_map, tools
+from ai.tools import function_map, render_memory_cards_for_assistant, tools
 from ai.function_call_accumulator import FunctionCallAccumulator
 from ai.realtime.event_router import EventRouter
 from ai.realtime.confirmation import (
@@ -175,7 +175,7 @@ _PREFERENCE_QUERY_CANONICAL_BY_DOMAIN = {
     "ide": ("preferred editor", "favorite editor", "user preference"),
 }
 _PREFERENCE_QUERY_FALLBACK_CANONICAL = ("user preference", "favorite preference", "preferred setting")
-_PREFERENCE_TAG_FALLBACK_QUERIES = ("preference", "favorite", "preferred")
+_PREFERENCE_FALLBACK_MARKERS = ("remember", "recall", "search", "memory", "memories")
 _MEMORY_RECALL_ANSWER_MARKERS = (
     "relevant memory",
     "i found a saved preference",
@@ -782,7 +782,12 @@ class RealtimeAPI:
         self._memory_retrieval_error_throttle_s = 60.0
         self._memory_retrieval_last_error_log_at = 0.0
         self._memory_retrieval_suppressed_errors = 0
-        self._preference_recall_cooldown_s = self._memory_retrieval_cooldown_s
+        preference_recall_cfg = memory_retrieval_cfg.get("preference_recall") or {}
+        self._preference_recall_cooldown_s = float(preference_recall_cfg.get("cooldown_s", self._memory_retrieval_cooldown_s))
+        self._preference_recall_max_attempts = max(1, int(preference_recall_cfg.get("max_attempts", 1)))
+        self._preference_recall_min_semantic_score = float(preference_recall_cfg.get("min_semantic_score", 0.15))
+        self._preference_recall_min_lexical_score = float(preference_recall_cfg.get("min_lexical_score", 0.1))
+        self._preference_recall_allow_low_score_debug = bool(preference_recall_cfg.get("allow_low_score_debug", False))
         self._preference_recall_cache: dict[str, dict[str, Any]] = {}
         self._pending_preference_recall_trace: dict[str, Any] | None = None
         self._preference_recall_skip_logged_turn_ids: set[str] = set()
@@ -1205,6 +1210,7 @@ class RealtimeAPI:
         )
         if not extracted_text:
             return
+        self._mark_utterance_info_summary(deliverable_seen=True)
         self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
         self._mark_first_assistant_utterance_observed_if_needed(extracted_text)
         self.assistant_reply += extracted_text
@@ -2730,27 +2736,27 @@ class RealtimeAPI:
 
     def _build_preference_recall_query(self, user_text: str, *, keywords: list[str]) -> str:
         canonical = list(_PREFERENCE_QUERY_FALLBACK_CANONICAL)
-        entity_phrases: list[str] = []
         for domain in _PREFERENCE_RECALL_DOMAINS:
             if domain in user_text:
                 canonical = list(_PREFERENCE_QUERY_CANONICAL_BY_DOMAIN.get(domain, canonical))
                 break
 
+        entity_tokens: list[str] = []
         for marker in ("prefer", "preferred", "favorite", "favourite"):
-            for match in re.finditer(rf"\\b{marker}\\b(?P<entity>[^?.!,;:]{{0,40}})", user_text):
+            for match in re.finditer(rf"\b{marker}\b(?P<entity>[^?.!,;:]{{0,40}})", user_text):
                 entity = " ".join(match.group("entity").split())
-                if entity:
-                    entity_phrases.append(entity)
-
-        if "editor" in user_text:
-            canonical.extend(("editor", "user preferred editor"))
+                for token in self._extract_preference_keywords(entity):
+                    if token not in entity_tokens:
+                        entity_tokens.append(token)
 
         ordered_parts: list[str] = []
-        for item in canonical + entity_phrases + keywords:
+        for item in keywords + entity_tokens + canonical:
             normalized = item.strip().lower()
             if normalized and normalized not in ordered_parts:
                 ordered_parts.append(normalized)
-        return ", ".join(ordered_parts)
+        if not ordered_parts:
+            return "user preference"
+        return " ".join(ordered_parts[:4])
 
     def _preference_recall_memories_from_payload(self, payload: dict[str, Any] | None) -> list[dict[str, Any]]:
         if not isinstance(payload, dict):
@@ -2763,6 +2769,76 @@ class RealtimeAPI:
             return [item for item in items if isinstance(item, dict)]
         return []
 
+    def _preference_recall_fallback_query(self, query: str) -> str | None:
+        query_tokens = self._extract_preference_keywords(query)
+        if not query_tokens:
+            return None
+        marker_present = any(marker in query for marker in _PREFERENCE_FALLBACK_MARKERS)
+        if not marker_present:
+            return None
+        fallback_tokens = [token for token in query_tokens if token in _PREFERENCE_RECALL_DOMAINS]
+        if not fallback_tokens:
+            fallback_tokens = query_tokens[:1]
+        fallback_query = " ".join(fallback_tokens[:2]).strip().lower()
+        return fallback_query or None
+
+    def _filter_preference_recall_payload_for_user(self, payload: dict[str, Any], *, query: str) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {"memories": [], "memory_cards": [], "memory_cards_text": ""}
+        cards = payload.get("memory_cards")
+        if not isinstance(cards, list):
+            return payload
+        min_semantic = float(getattr(self, "_preference_recall_min_semantic_score", 0.15))
+        min_lexical = float(getattr(self, "_preference_recall_min_lexical_score", 0.1))
+        allow_low_score_debug = bool(getattr(self, "_preference_recall_allow_low_score_debug", False))
+        query_tokens = set(self._extract_preference_keywords(query))
+        filtered_cards: list[dict[str, Any]] = []
+        filtered_memories: list[dict[str, Any]] = []
+        dropped_count = 0
+        memories = self._preference_recall_memories_from_payload(payload)
+
+        for idx, card in enumerate(cards):
+            if not isinstance(card, dict):
+                continue
+            why = str(card.get("why_relevant", ""))
+            semantic_match = re.search(r"semantic similarity=([0-9]*\.?[0-9]+)", why.lower())
+            lexical_match = re.search(r"lexical score=([0-9]*\.?[0-9]+)", why.lower())
+            semantic_score = float(semantic_match.group(1)) if semantic_match else 0.0
+            lexical_score = float(lexical_match.group(1)) if lexical_match else 0.0
+            memory_text = str(card.get("memory", ""))
+            memory_tokens = set(self._extract_preference_keywords(memory_text))
+            overlaps = bool(query_tokens and query_tokens.intersection(memory_tokens))
+            keep = (
+                overlaps
+                or semantic_score >= min_semantic
+                or lexical_score >= min_lexical
+                or "lexical exact match" in why.lower()
+            )
+            if keep or allow_low_score_debug:
+                filtered_cards.append(card)
+                if idx < len(memories):
+                    filtered_memories.append(memories[idx])
+            else:
+                dropped_count += 1
+
+        if dropped_count > 0:
+            logger.debug(
+                "preference_recall_cards_filtered run_id=%s dropped=%s query=%s min_semantic=%.2f min_lexical=%.2f",
+                self._current_run_id() or "",
+                dropped_count,
+                query,
+                min_semantic,
+                min_lexical,
+            )
+        filtered_payload = dict(payload)
+        filtered_payload["memory_cards"] = filtered_cards
+        filtered_payload["memories"] = filtered_memories
+        filtered_payload["memory_cards_text"] = render_memory_cards_for_assistant(
+            filtered_cards,
+            total_memories=len(filtered_memories),
+        )
+        return filtered_payload
+
     async def _run_preference_recall_with_fallbacks(
         self,
         *,
@@ -2773,12 +2849,17 @@ class RealtimeAPI:
     ) -> tuple[dict[str, Any], bool]:
         scope = str(getattr(self, "_memory_retrieval_scope", MemoryScope.USER_GLOBAL.value))
         recall_queries = [query]
-        if "editor" in query:
-            recall_queries.append("editor")
-        recall_queries.extend(_PREFERENCE_TAG_FALLBACK_QUERIES)
+        fallback_query = self._preference_recall_fallback_query(query)
+        max_attempts = int(getattr(self, "_preference_recall_max_attempts", 1))
+        if fallback_query and max_attempts > 1 and fallback_query not in recall_queries:
+            recall_queries.append(fallback_query)
 
-        for attempt_index, candidate_query in enumerate(recall_queries):
+        for attempt_index, candidate_query in enumerate(recall_queries[:max_attempts]):
             payload = await recall_fn(query=candidate_query, limit=3, scope=scope)
+            payload = self._filter_preference_recall_payload_for_user(
+                payload if isinstance(payload, dict) else {},
+                query=candidate_query,
+            )
             payload_keys = sorted(payload.keys()) if isinstance(payload, dict) else []
             memories = self._preference_recall_memories_from_payload(payload)
             cards = payload.get("memory_cards") if isinstance(payload, dict) else None
@@ -2814,7 +2895,7 @@ class RealtimeAPI:
                         scope,
                     )
                 return payload, True
-        return {"memories": []}, True
+        return {"memories": [], "memory_cards": [], "memory_cards_text": ""}, True
 
     def _is_preference_recall_intent(self, text: str) -> tuple[bool, list[str]]:
         normalized = " ".join((text or "").lower().split())
