@@ -22,6 +22,7 @@ def _make_api() -> RealtimeAPI:
     api._confirmation_timeout_check_last_pause_reason = {}
     api._current_run_id = lambda: "run-contract"
     from ai.realtime.confirmation import ConfirmationCoordinator
+    from ai.realtime.confirmation_service import ConfirmationService
 
     api._confirmation_coordinator = ConfirmationCoordinator(
         reminder_interval_s=api._confirmation_reminder_interval_s,
@@ -31,6 +32,10 @@ def _make_api() -> RealtimeAPI:
         timeout_check_log_interval_s=api._confirmation_timeout_check_log_interval_s,
     )
     api._pending_action = None
+    api._confirmation_service = ConfirmationService(
+        awaiting_timeout_s=api._confirmation_awaiting_decision_timeout_s,
+        late_decision_grace_s=15.0,
+    )
     api._pending_confirmation_token = PendingConfirmationToken(
         id="confirm_contract",
         kind="tool_governance",
@@ -66,3 +71,19 @@ def test_minimal_event_sequence_does_not_introduce_extra_confirmation_loops(monk
     assert denied_interval[4] == "interval"
     assert allowed_3[0] is True
     assert len([item for item in (allowed_1, denied_burst, allowed_2, denied_interval, allowed_3) if item[0]]) == 2
+
+
+def test_realtime_api_build_prompt_routes_through_confirmation_service() -> None:
+    api = _make_api()
+    action = api._pending_confirmation_token.pending_action.action
+
+    prompt = api._build_approval_prompt(
+        action,
+        action_summary="tool=perform_research tier=2 cost=low confidence=0.91 requires_confirmation=True",
+        confirm_reason="expensive_read",
+    )
+
+    assert prompt == (
+        "Action summary: tool=perform_research tier=2 cost=low confidence=0.91 requires_confirmation=True. "
+        "Reason: expensive_read.; options: Approve / Deny / Dry-run."
+    )

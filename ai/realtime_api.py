@@ -54,6 +54,7 @@ from ai.realtime.confirmation import (
     ConfirmationTransitionDecision,
     normalize_confirmation_decision,
 )
+from ai.realtime.confirmation_service import ConfirmationService
 from ai.realtime.injections import InjectionCoordinator
 from ai.realtime.input_audio_events import InputAudioEventHandlers
 from ai.realtime.lifecycle_state import LifecycleStateCoordinator
@@ -706,6 +707,10 @@ class RealtimeAPI:
         self._confirmation_timeout_causes: dict[str, str] = {}
         self._recent_confirmation_outcomes: dict[str, dict[str, Any]] = {}
         self._confirmation_transition_lock: asyncio.Lock | None = None
+        self._confirmation_service = ConfirmationService(
+            awaiting_timeout_s=self._confirmation_awaiting_decision_timeout_s,
+            late_decision_grace_s=self._confirmation_late_decision_grace_s,
+        )
         self._websocket_close_timeout_s = float(config.get("websocket_close_timeout_s", 5.0))
         self._tool_definitions = {tool["name"]: tool for tool in tools}
         self._storage = StorageController.get_instance()
@@ -4970,50 +4975,30 @@ class RealtimeAPI:
     ) -> str:
         tool_metadata = self._governance.describe_tool(action.tool_name)
         dry_run_supported = bool(tool_metadata.get("dry_run_supported"))
-        options = "Approve / Deny / Dry-run" if dry_run_supported else "Approve / Deny"
-        options_suffix = f"options: {options}."
-
-        def _normalize_sentence(value: str | None) -> str:
-            normalized = " ".join(str(value or "").split()).strip()
-            if normalized.endswith("."):
-                return normalized
-            return f"{normalized}."
-
-        normalized_summary_sentence = _normalize_sentence(action_summary)
-        normalized_reason_sentence = _normalize_sentence(confirm_reason)
-
-        def _is_contract_compliant(prompt_text: str) -> bool:
-            parts = [part.strip() for part in prompt_text.split(" Reason: ", maxsplit=1)]
-            if len(parts) != 2:
-                return False
-            if not parts[0].startswith("Action summary: "):
-                return False
-            reason_clause = parts[1]
-            expected_suffix = f"; {options_suffix}"
-            if not reason_clause.endswith(expected_suffix):
-                return False
-            action_body = parts[0][len("Action summary: ") :].strip()
-            reason_body = reason_clause[: -len(expected_suffix)].strip()
-            return bool(action_body.endswith(".") and reason_body.endswith("."))
-
+        service = getattr(self, "_confirmation_service", None)
+        if service is None:
+            service = ConfirmationService(awaiting_timeout_s=20.0, late_decision_grace_s=15.0)
+        prompt = service.build_prompt(
+            action_summary=str(action_summary or ""),
+            confirm_reason=str(confirm_reason or ""),
+            dry_run_supported=dry_run_supported,
+            confirm_prompt=confirm_prompt,
+        )
         if confirm_prompt:
-            prompt_override = " ".join(str(confirm_prompt).split()).strip()
-            if _is_contract_compliant(prompt_override):
+            normalized_override = " ".join(str(confirm_prompt).split()).strip()
+            if prompt == normalized_override:
                 logger.info(
                     "Approval prompt override accepted | tool=%s details=%s",
                     action.tool_name,
-                    json.dumps({"confirm_prompt": prompt_override}, sort_keys=True),
+                    json.dumps({"confirm_prompt": normalized_override}, sort_keys=True),
                 )
-                return prompt_override
-            logger.info(
-                "Approval prompt override ignored due to contract violation | tool=%s details=%s",
-                action.tool_name,
-                json.dumps({"confirm_prompt": prompt_override}, sort_keys=True),
-            )
-        return (
-            f"Action summary: {normalized_summary_sentence} "
-            f"Reason: {normalized_reason_sentence}; {options_suffix}"
-        )
+            else:
+                logger.info(
+                    "Approval prompt override ignored due to contract violation | tool=%s details=%s",
+                    action.tool_name,
+                    json.dumps({"confirm_prompt": normalized_override}, sort_keys=True),
+                )
+        return prompt
 
     def _log_structured_noop_event(
         self,
@@ -5343,6 +5328,11 @@ class RealtimeAPI:
 
     def _record_confirmation_timeout(self, action: ActionPacket, cause: str) -> None:
         fingerprint = self._build_tool_call_fingerprint(action.tool_name, action.tool_args)
+        service = getattr(self, "_confirmation_service", None)
+        if service is not None:
+            service.timeout_markers[fingerprint] = time.monotonic()
+            service.timeout_causes[fingerprint] = cause
+            return
         self._confirmation_timeout_markers[fingerprint] = time.monotonic()
         self._confirmation_timeout_causes[fingerprint] = cause
 
@@ -5350,10 +5340,15 @@ class RealtimeAPI:
         normalized_key = str(idempotency_key or "").strip()
         if not normalized_key:
             return
-        self._recent_confirmation_outcomes[normalized_key] = {
+        payload = {
             "outcome": str(outcome),
             "timestamp": time.monotonic(),
         }
+        service = getattr(self, "_confirmation_service", None)
+        if service is not None:
+            service.recent_outcomes[normalized_key] = payload
+            return
+        self._recent_confirmation_outcomes[normalized_key] = payload
 
     def _suppressed_confirmation_outcome(
         self,
@@ -5366,7 +5361,8 @@ class RealtimeAPI:
         normalized_key = str(idempotency_key or "").strip()
         if not normalized_key:
             return None
-        outcomes = getattr(self, "_recent_confirmation_outcomes", {})
+        service = getattr(self, "_confirmation_service", None)
+        outcomes = service.recent_outcomes if service is not None else getattr(self, "_recent_confirmation_outcomes", {})
         payload = outcomes.get(normalized_key)
         if not isinstance(payload, dict):
             return None
@@ -5385,16 +5381,19 @@ class RealtimeAPI:
         self, tool_name: str, args: dict[str, Any]
     ) -> bool:
         now = time.monotonic()
+        service = getattr(self, "_confirmation_service", None)
+        timeout_markers = service.timeout_markers if service is not None else self._confirmation_timeout_markers
+        timeout_causes = service.timeout_causes if service is not None else self._confirmation_timeout_causes
         expired = [
             marker
-            for marker, ts in self._confirmation_timeout_markers.items()
+            for marker, ts in timeout_markers.items()
             if now - ts > self._confirmation_timeout_debounce_window_s
         ]
         for marker in expired:
-            self._confirmation_timeout_markers.pop(marker, None)
-            self._confirmation_timeout_causes.pop(marker, None)
+            timeout_markers.pop(marker, None)
+            timeout_causes.pop(marker, None)
         fingerprint = self._build_tool_call_fingerprint(tool_name, args)
-        ts = self._confirmation_timeout_markers.get(fingerprint)
+        ts = timeout_markers.get(fingerprint)
         if ts is None:
             return False
         return now - ts <= self._confirmation_timeout_debounce_window_s
@@ -7068,6 +7067,9 @@ class RealtimeAPI:
             metadata=metadata or {},
         )
         self._pending_confirmation_token = token
+        service = getattr(self, "_confirmation_service", None)
+        if service is not None:
+            service.start_pending(token, pending_action, now)
         self._confirmation_token_created_at = now
         self._confirmation_last_activity_at = now
         self._confirmation_speech_active = False
@@ -7164,12 +7166,16 @@ class RealtimeAPI:
             deferred_action,
         )
         self._research_pending_call_ids.clear()
+        closed_at = time.monotonic()
         self._confirmation_last_closed_token = {
             "token": token,
             "kind": token.kind,
-            "closed_at": time.monotonic(),
+            "closed_at": closed_at,
             "outcome": outcome,
         }
+        service = getattr(self, "_confirmation_service", None)
+        if service is not None:
+            service.close(outcome=outcome, now=closed_at)
         if token.pending_action:
             self._presented_actions.discard(token.pending_action.action.id)
         self._confirmation_timeout_check_last_logged_at.pop(token.id, None)
@@ -7637,7 +7643,8 @@ class RealtimeAPI:
         decision = self._parse_confirmation_decision(text)
         if decision not in {"yes", "no", "cancel"}:
             return False
-        marker = getattr(self, "_confirmation_last_closed_token", None)
+        service = getattr(self, "_confirmation_service", None)
+        marker = service.last_closed if service is not None else getattr(self, "_confirmation_last_closed_token", None)
         if not isinstance(marker, dict):
             return False
         closed_at = marker.get("closed_at")
@@ -7841,8 +7848,14 @@ class RealtimeAPI:
             if not normalized:
                 return False
 
-            decision = self._parse_confirmation_decision(normalized)
             now = time.monotonic()
+            service = getattr(self, "_confirmation_service", None)
+            service_decision = (
+                service.handle_user_text(normalized, now=now)
+                if service is not None and token is not None
+                else None
+            )
+            decision = service_decision.parsed_decision if service_decision is not None else self._parse_confirmation_decision(normalized)
             if self._approval_expired_for_action(action, now=now, decision=decision):
                 if token is not None:
                     self._set_confirmation_state(ConfirmationState.RESOLVING, reason="approval_expired")
@@ -7950,7 +7963,10 @@ class RealtimeAPI:
                 )
                 return False
 
-            if token is not None:
+            if service_decision is not None:
+                retry_count = service_decision.retry_count
+                max_retries = token.max_retries if token is not None else pending.max_retries
+            elif token is not None:
                 token.retry_count += 1
                 retry_count = token.retry_count
                 max_retries = token.max_retries
@@ -7959,7 +7975,7 @@ class RealtimeAPI:
                 retry_count = pending.retry_count
                 max_retries = pending.max_retries
 
-            if retry_count > max_retries:
+            if (service_decision is not None and service_decision.retry_exhausted) or retry_count > max_retries:
                 if token is not None:
                     self._set_confirmation_state(ConfirmationState.RESOLVING, reason="tool_confirmation_retry_exhausted")
                 logger.info("CONFIRMATION_TIMEOUT tool=%s cause=retry_exhausted", action.tool_name)
@@ -10550,13 +10566,17 @@ class RealtimeAPI:
             reason=f"needs confirmation for {action.tool_name}",
         )
         self._awaiting_confirmation_completion = False
+        token = getattr(self, "_pending_confirmation_token", None)
+        if token is not None:
+            service = getattr(self, "_confirmation_service", None)
+            if service is not None:
+                service.start_pending(token, token.pending_action, time.monotonic())
         message = self._build_approval_prompt(
             action,
             action_summary=action_summary,
             confirm_prompt=confirm_prompt,
             confirm_reason=confirm_reason,
         )
-        token = getattr(self, "_pending_confirmation_token", None)
         latch_key = self._confirmation_prompt_latch_key(token)
         if token is not None and latch_key is not None and latch_key in self._pending_confirmation_prompt_latches:
             logger.info(
