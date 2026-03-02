@@ -4,7 +4,7 @@ This map decomposes `ai/realtime_api.py` into explicit ownership regions, docume
 
 ## 1) Responsibility map of `ai/realtime_api.py` (functional regions + function pointers)
 
-> Current monolith size: **11,316 LOC**.
+> Current monolith size: **11,214 LOC** (measured on **2026-03-02** via `wc -l ai/realtime_api.py`).
 
 ### A. Bootstrapping, dependency wiring, and runtime guards
 - Core constructor and dependency initialization:
@@ -139,6 +139,12 @@ Ownership intent:
 ## 4) Prioritized slice plan (3–6 slices)
 
 ## Slice 1 (P0): `lifecycle_state.py` extraction
+**Status**
+
+| planned/moved/in-progress | key functions moved | tests covering moved behavior |
+|---|---|---|
+| in-progress | `_build_utterance_context`, `_canonical_utterance_key`, `_schedule_pending_response_create` (target set for this slice) | `tests/test_realtime_lifecycle_state_coordinator.py` (new), `tests/test_realtime_lifecycle_invariants.py`, `tests/test_realtime_response_origin_correlation.py` |
+
 **Moved code/functions**
 - Correlation and canonical key management:
   - `_build_utterance_context`, `_utterance_context_scope`, `_canonical_utterance_key`
@@ -166,9 +172,20 @@ Ownership intent:
 - Risk: mis-correlated turn IDs causing dropped/duplicate response creates.
 - Rollback: keep adapter shim methods in `RealtimeAPI` forwarding to old code path behind a config flag (`realtime.lifecycle_state_v2=false`).
 
+**Slice completion LOC reporting (required acceptance evidence)**
+- Record pre-change LOC: `wc -l ai/realtime_api.py` and attach in PR notes.
+- Record post-change LOC: `wc -l ai/realtime_api.py ai/realtime/lifecycle_state.py` and report monolith delta + new module LOC.
+- Update section 5 with a completion row containing before LOC, after LOC, and net delta.
+
 ---
 
 ## Slice 2 (P0): `confirmation_coordinator.py` extraction
+**Status**
+
+| planned/moved/in-progress | key functions moved | tests covering moved behavior |
+|---|---|---|
+| planned | `_stage_action`, `_normalize_confirmation_decision`, `_parse_confirmation_decision` (planned move set) | `tests/test_realtime_confirmation_coordinator.py` (new), `tests/test_realtime_confirmation_flow.py`, `tests/test_tool_governance_metadata.py` |
+
 **Moved code/functions**
 - Action staging + normalization:
   - `_stage_action`, `_normalize_confirmation_decision`, `_describe_staged_action`
@@ -195,9 +212,20 @@ Ownership intent:
 - Risk: confirmation loops or false approvals.
 - Rollback: dual-run mode that logs both legacy + coordinator decisions and executes legacy decision until parity reaches threshold.
 
+**Slice completion LOC reporting (required acceptance evidence)**
+- Record pre-change LOC: `wc -l ai/realtime_api.py`.
+- Record post-change LOC: `wc -l ai/realtime_api.py ai/realtime/confirmation_coordinator.py` and include before/after delta in the slice completion entry.
+- Confirm tests covering moved behavior are listed in the completion entry and passed in CI.
+
 ---
 
 ## Slice 3 (P1): `injection_bus.py` extraction
+**Status**
+
+| planned/moved/in-progress | key functions moved | tests covering moved behavior |
+|---|---|---|
+| planned | `_can_accept_external_stimulus`, `_is_allowed_awaiting_confirmation_stimulus`, `_emit_injected_event` (planned move set) | `tests/test_realtime_injection_bus.py` (new), `tests/test_realtime_injections.py`, `tests/test_realtime_stimulus_gating.py`, `tests/test_system_context_injection.py` |
+
 **Moved code/functions**
 - Stimulus policy + startup gate checks:
   - `_can_accept_external_stimulus`, `_is_allowed_awaiting_confirmation_stimulus`
@@ -222,9 +250,20 @@ Ownership intent:
 - Risk: over-suppression (missed critical stimuli) or under-suppression (chatter during confirmation).
 - Rollback: fallback to direct `RealtimeAPI` path via one feature flag and retain queue serialization format unchanged.
 
+**Slice completion LOC reporting (required acceptance evidence)**
+- Record pre-change LOC: `wc -l ai/realtime_api.py`.
+- Record post-change LOC: `wc -l ai/realtime_api.py ai/realtime/injection_bus.py` and include before/after delta in the slice completion entry.
+- Include the moved-function list and proving tests with pass/fail outcomes in the completion entry.
+
 ---
 
 ## Slice 4 (P1): `tool_pipeline.py` extraction
+**Status**
+
+| planned/moved/in-progress | key functions moved | tests covering moved behavior |
+|---|---|---|
+| planned | `_extract_dry_run_flag`, `_build_tool_runtime_context`, `_is_duplicate_tool_call` (planned move set) | `tests/test_realtime_tool_pipeline.py` (new), `tests/test_realtime_research_flow.py`, `tests/test_tool_governance_metadata.py` |
+
 **Moved code/functions**
 - Argument normalization/runtime context:
   - `_extract_dry_run_flag`, `_build_tool_runtime_context`, `_normalize_tool_intent`
@@ -250,9 +289,20 @@ Ownership intent:
 - Risk: accidental behavior change in governance/no-op telemetry.
 - Rollback: preserve existing `ActionPacket` fields and logger keys; route through legacy execution when pipeline returns unknown state.
 
+**Slice completion LOC reporting (required acceptance evidence)**
+- Record pre-change LOC: `wc -l ai/realtime_api.py`.
+- Record post-change LOC: `wc -l ai/realtime_api.py ai/realtime/tool_pipeline.py` and include before/after delta in the slice completion entry.
+- Verify and record coverage tests tied to moved behavior before marking the slice `moved`.
+
 ---
 
 ## Slice 5 (P2): `adapter.py` extraction (outer orchestration shell)
+**Status**
+
+| planned/moved/in-progress | key functions moved | tests covering moved behavior |
+|---|---|---|
+| planned | `run`, `_note_connection_attempt`, `_note_connected`, `_get_or_create_transport` (planned move set) | `tests/test_realtime_adapter_reconnect.py` (new), `tests/test_realtime_event_routing_regression.py`, `tests/test_realtime_session_health.py`, `tests/test_realtime_websocket_close_guard.py` |
+
 **Moved code/functions**
 - Websocket loop orchestration currently in `run` + event dispatch glue.
 - Connection/reconnect accountings:
@@ -277,7 +327,29 @@ Ownership intent:
 - Risk: reconnect regressions or shutdown ordering drift.
 - Rollback: keep `RealtimeAPI.run()` as a thin switch with `adapter_enabled` guard, defaulting off until parity tests pass.
 
-## 5) Completed slices: before/after LOC tracking
+**Slice completion LOC reporting (required acceptance evidence)**
+- Record pre-change LOC: `wc -l ai/realtime_api.py`.
+- Record post-change LOC: `wc -l ai/realtime_api.py ai/realtime/adapter.py` and include before/after delta in the slice completion entry.
+- Require a parity test run summary before changing status to `moved`.
+
+## 5) Not moved yet (major method clusters still in `RealtimeAPI`)
+
+These clusters remain in `ai/realtime_api.py` and should be treated as migration backlog anchors to prevent plan drift.
+
+- Bootstrapping + runtime guards:
+  - `__init__`, `_require_websockets`, `_resolve_websocket_exceptions`, `_validate_outbound_endpoint`
+- Turn/response correlation internals:
+  - `_build_utterance_context`, `_canonical_utterance_key`, `_response_obligation_key`, `_sync_pending_response_create_queue`
+- Confirmation/governance internals:
+  - `_stage_action`, `_build_approval_prompt`, `_parse_confirmation_decision`, `_evaluate_intent_guard`
+- Tool pipeline internals:
+  - `_build_tool_runtime_context`, `_normalize_tool_intent`, `_build_tool_call_fingerprint`, `_log_structured_noop_event`
+- Injection + stimulus gating internals:
+  - `_can_accept_external_stimulus`, `_is_allowed_awaiting_confirmation_stimulus`, `_emit_injected_event`, `_emit_system_context_payload`
+- Memory/research policy internals:
+  - `_prepare_turn_memory_brief`, `_should_store_auto_memory`, `should_request_research_permission`, `_research_request_domains_allowlisted`
+
+## 6) Completed slices: before/after LOC tracking
 
 The following slices are already complete (extracted today in-tree). LOC figures are direct file line counts.
 
@@ -293,8 +365,12 @@ The following slices are already complete (extracted today in-tree). LOC figures
 | Shared realtime types extraction | 44 | -44 | `types.py` centralizes dataclasses used across collaborators. |
 
 ### Aggregate tracking snapshot
-- `ai/realtime_api.py` current size: **11,316 LOC**.
+- `ai/realtime_api.py` current size: **11,214 LOC** (measured 2026-03-02).
 - Extracted helper modules total: **1,124 LOC**.
-- Approximate pre-extraction monolith equivalent: **12,440 LOC** (current monolith + extracted LOC).
+- Approximate pre-extraction monolith equivalent: **12,338 LOC** (current monolith + extracted LOC).
 
-> Tracking rule for future completed slices: capture `wc -l ai/realtime_api.py ai/realtime/<new_module>.py` before and after merge, then append a delta row in this table.
+> Tracking rule for future completed slices (required per completion entry):
+> 1) capture `wc -l ai/realtime_api.py` immediately before extraction,
+> 2) capture `wc -l ai/realtime_api.py ai/realtime/<new_module>.py` immediately after extraction,
+> 3) report before/after LOC and net delta in the completion table row,
+> 4) list the moved functions and the exact tests that passed for moved behavior.
