@@ -104,6 +104,172 @@ def test_preference_recall_no_double_attempt_by_default() -> None:
     assert recall_fn.await_count == 1
 
 
+def test_preference_query_builder_keeps_preference_cues_and_domain() -> None:
+    api = _base_api()
+
+    query = RealtimeAPI._build_preference_recall_query(
+        api,
+        "hey theo do you remember what my favorite editor is",
+        keywords=["hey", "theo", "remember", "editor"],
+    )
+
+    assert "editor" in query
+    assert "favorite" in query
+    assert "preferred" in query
+
+
+def test_preference_query_builder_keeps_keyword_lookup_token() -> None:
+    api = _base_api()
+
+    query = RealtimeAPI._build_preference_recall_query(
+        api,
+        "can you check your memories for anything related to vim",
+        keywords=["can", "check", "your", "memories", "anything", "related", "vim"],
+    )
+
+    assert "vim" in query
+
+
+def test_preference_recall_run441_query_variants_return_vim() -> None:
+    api = _base_api()
+    api._preference_recall_fallback_query = RealtimeAPI._preference_recall_fallback_query.__get__(api, RealtimeAPI)
+    api._filter_preference_recall_payload_for_user = RealtimeAPI._filter_preference_recall_payload_for_user.__get__(api, RealtimeAPI)
+
+    async def _fake_recall(*, query: str, limit: int, scope: str):
+        _ = (limit, scope)
+        if "editor" in query or "vim" in query:
+            return {
+                "memories": [
+                    {"content": "User's preferred editor is Vim."},
+                    {"content": "User's favorite editor is Vim."},
+                ],
+                "memory_cards": [
+                    {
+                        "memory": "User's preferred editor is Vim.",
+                        "why_relevant": "It matches your query about 'Vim'. Evidence: lexical exact match on 'vim'.",
+                        "confidence": "High",
+                    },
+                    {
+                        "memory": "User's favorite editor is Vim.",
+                        "why_relevant": "It matches your query about 'editor'. Evidence: lexical exact match on 'editor'.",
+                        "confidence": "High",
+                    },
+                ],
+                "memory_cards_text": "Relevant memory:\n- \"User's favorite editor is Vim.\"",
+                "trace": {
+                    "retrieval_mode": "lexical",
+                    "candidate_counts": {
+                        "lexical_candidates": 2,
+                        "semantic_candidates": 0,
+                        "combined_candidates": 2,
+                    },
+                },
+            }
+        return {"memories": [], "memory_cards": [], "memory_cards_text": "", "trace": {"retrieval_mode": "lexical", "candidate_counts": {"lexical_candidates": 0, "semantic_candidates": 0, "combined_candidates": 0}}}
+
+    query_1 = RealtimeAPI._build_preference_recall_query(
+        api,
+        "hey theo do you remember what my favorite editor is",
+        keywords=["hey", "theo", "remember", "editor"],
+    )
+    payload_1, _ = asyncio.run(
+        RealtimeAPI._run_preference_recall_with_fallbacks(
+            api,
+            recall_fn=_fake_recall,
+            source="input_audio_transcription",
+            resolved_turn_id="turn_2",
+            query=query_1,
+        )
+    )
+    assert any("Vim" in memory["content"] for memory in payload_1["memories"])
+
+    query_2 = RealtimeAPI._build_preference_recall_query(
+        api,
+        "can you check your memories for anything related to vim",
+        keywords=["can", "check", "your", "memories", "anything", "related", "vim"],
+    )
+    payload_2, _ = asyncio.run(
+        RealtimeAPI._run_preference_recall_with_fallbacks(
+            api,
+            recall_fn=_fake_recall,
+            source="input_audio_transcription",
+            resolved_turn_id="turn_3",
+            query=query_2,
+        )
+    )
+    assert any("Vim" in memory["content"] for memory in payload_2["memories"])
+
+
+def test_preference_recall_empty_logs_empty_reason() -> None:
+    api = _base_api()
+    api._preference_recall_fallback_query = RealtimeAPI._preference_recall_fallback_query.__get__(api, RealtimeAPI)
+    api._filter_preference_recall_payload_for_user = RealtimeAPI._filter_preference_recall_payload_for_user.__get__(api, RealtimeAPI)
+    recall_fn = AsyncMock(
+        return_value={
+            "memories": [],
+            "memory_cards": [],
+            "memory_cards_text": "",
+            "trace": {
+                "retrieval_mode": "lexical",
+                "candidate_counts": {
+                    "lexical_candidates": 0,
+                    "semantic_candidates": 0,
+                    "combined_candidates": 0,
+                },
+            },
+        }
+    )
+
+    with patch("ai.realtime_api.logger.info") as mocked_info:
+        asyncio.run(
+            RealtimeAPI._run_preference_recall_with_fallbacks(
+                api,
+                recall_fn=recall_fn,
+                source="input_audio_transcription",
+                resolved_turn_id="turn_2",
+                query="favorite editor",
+            )
+        )
+
+    rendered = "\n".join(str(call.args[0]) % call.args[1:] for call in mocked_info.call_args_list if call.args)
+    assert "empty_reason=no_candidates" in rendered
+
+
+def test_preference_recall_scope_forwarded_to_recall_tool() -> None:
+    api = _base_api()
+    api._preference_recall_fallback_query = RealtimeAPI._preference_recall_fallback_query.__get__(api, RealtimeAPI)
+    api._filter_preference_recall_payload_for_user = RealtimeAPI._filter_preference_recall_payload_for_user.__get__(api, RealtimeAPI)
+    observed_scopes: list[str] = []
+
+    async def _fake_recall(*, query: str, limit: int, scope: str):
+        _ = (query, limit)
+        observed_scopes.append(scope)
+        return {"memories": [], "memory_cards": [], "memory_cards_text": ""}
+
+    api._memory_retrieval_scope = "user_global"
+    asyncio.run(
+        RealtimeAPI._run_preference_recall_with_fallbacks(
+            api,
+            recall_fn=_fake_recall,
+            source="input_audio_transcription",
+            resolved_turn_id="turn_1",
+            query="favorite editor",
+        )
+    )
+    api._memory_retrieval_scope = "user_profile"
+    asyncio.run(
+        RealtimeAPI._run_preference_recall_with_fallbacks(
+            api,
+            recall_fn=_fake_recall,
+            source="input_audio_transcription",
+            resolved_turn_id="turn_1",
+            query="favorite editor",
+        )
+    )
+
+    assert observed_scopes == ["user_global", "user_profile"]
+
+
 def test_preference_recall_does_not_block_response_when_audio_started() -> None:
     api = _base_api()
     api._is_preference_recall_intent = Mock(return_value=(True, ["editor"]))

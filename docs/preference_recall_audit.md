@@ -8,6 +8,7 @@
 
 ## Query generation
 - Primary query: `_build_preference_recall_query(...)` now builds a compact, intent-specific query from extracted keywords/entities plus domain canonicals.
+- Query normalization now drops conversational noise (`hey`, `remember`, `check`, `memories`) while preserving preference/domain cues and subject terms (for example, `favorite`, `preferred`, `editor`, `vim`).
 - Attempt=0 uses only the normalized primary query.
 - Fallback is now conditional:
   - only if a strict fallback marker is present,
@@ -21,6 +22,7 @@
   - lexical score floor,
   - or token overlap / lexical exact match.
 - Low-score entries are excluded from user-facing output unless debug override is enabled.
+- Preference-recall result logging now emits a structured retrieval summary (`retrieval_backend`, `filters_applied`, `candidate_count`, `returned_count`, `empty_reason`) so empty responses can be diagnosed from a single INFO line.
 
 ## Result injection path
 - Tool payload formatting comes from `render_memory_cards_for_assistant(...)`.
