@@ -33,7 +33,7 @@ class _FakeOpenAIResearchService(OpenAIResearchService):
         self.search_calls += 1
         return self._search_result
 
-    def _responses_call(self, *, input_messages, use_web_search: bool, max_output_tokens: int) -> str:
+    def _responses_call(self, *, input_messages, use_web_search: bool, max_output_tokens: int, phase: str) -> str:
         return self._extract_result
 
     def _probe_content_type(self, url: str) -> str:
@@ -674,3 +674,87 @@ def test_budget_remaining_persists_across_service_recreation(monkeypatch, tmp_pa
         if controller is not None:
             controller.close()
         StorageController._instance = None
+
+
+def test_request_timeout_preserves_candidate_sources(tmp_path: Path) -> None:
+    class _TimeoutAfterSearchService(_FakeOpenAIResearchService):
+        def _fetch_markdown_for_url(self, url: str, *, run_id: str) -> tuple[str, str]:
+            return "# markdown", "simple_requests_html"
+
+        def _responses_call(self, *, input_messages, use_web_search: bool, max_output_tokens: int, phase: str) -> str:
+            if phase == "extract_from_markdown":
+                raise TimeoutError("read operation timed out")
+            return super()._responses_call(
+                input_messages=input_messages,
+                use_web_search=use_web_search,
+                max_output_tokens=max_output_tokens,
+                phase=phase,
+            )
+
+    svc = _TimeoutAfterSearchService(
+        search_result={
+            "best_url": "https://example.com/official",
+            "candidate_urls": ["https://example.com/official", "https://docs.example.com/spec"],
+            "sources": [{"title": "Official", "url": "https://example.com/official"}],
+            "search_summary": "found",
+            "safety_notes": [],
+        },
+        extract_result='{"schema":"research_packet_v1","status":"ok","answer_summary":"ok","extracted_facts":[],"sources":[],"safety_notes":[]}',
+        firecrawl_enabled=True,
+        budget_state_file=str(tmp_path / "budget.json"),
+        cache_dir=str(tmp_path / "cache"),
+    )
+
+    packet = svc.request_research(ResearchRequest(prompt="find official docs", context={"research_id": "research-1"}))
+
+    assert packet.status == "error"
+    assert packet.sources
+    assert packet.sources[0]["url"] == "https://example.com/official"
+    assert packet.metadata["content_fetch_status"] == "failed"
+    assert packet.metadata["failure_phase"] == "extract_from_markdown"
+
+
+def test_fetch_skipped_preserves_candidate_sources_for_transcript(tmp_path: Path) -> None:
+    svc = _FakeOpenAIResearchService(
+        search_result={
+            "best_url": "https://example.com/official",
+            "candidate_urls": ["https://example.com/official"],
+            "sources": [{"title": "Official", "url": "https://example.com/official"}],
+            "search_summary": "found",
+            "safety_notes": [],
+        },
+        extract_result="{}",
+        firecrawl_enabled=False,
+        budget_state_file=str(tmp_path / "budget.json"),
+        cache_dir=str(tmp_path / "cache"),
+    )
+
+    packet = svc.request_research(ResearchRequest(prompt="find official docs"))
+
+    assert packet.metadata["content_fetch_status"] == "skipped"
+    assert packet.metadata["content_fetch_skip_reason"] == "firecrawl_disabled"
+    assert packet.sources
+    assert packet.sources[0]["url"] == "https://example.com/official"
+
+
+def test_malformed_candidate_sources_returns_safe_error_packet(tmp_path: Path) -> None:
+    svc = _FakeOpenAIResearchService(
+        search_result={
+            "best_url": "https://example.com/official",
+            "candidate_urls": {"unexpected": "shape"},
+            "sources": {"title": "Official", "url": "https://example.com/official"},
+            "search_summary": "found",
+            "safety_notes": [],
+        },
+        extract_result="{}",
+        budget_state_file=str(tmp_path / "budget.json"),
+        cache_dir=str(tmp_path / "cache"),
+    )
+
+    packet = svc.request_research(ResearchRequest(prompt="find official docs", context={"research_id": "research-1"}))
+
+    assert packet.status == "error"
+    assert packet.sources == []
+    assert packet.metadata["content_fetch_status"] == "skipped"
+    assert packet.metadata["content_fetch_skip_reason"] == "unsupported"
+    assert packet.metadata["failure_phase"] == "request_research"

@@ -67,3 +67,30 @@ def test_resolve_research_transcript_run_context_reads_storage_info(tmp_path: Pa
 
     assert resolved_run_dir == run_dir
     assert resolved_run_id == 8
+
+
+def test_write_research_transcript_keeps_sources_when_fetch_skipped(tmp_path: Path) -> None:
+    run_dir = tmp_path / "log" / "44"
+    request = ResearchRequest(prompt="find top story")
+    packet = ResearchPacket(
+        status="error",
+        answer_summary="upstream timeout",
+        extracted_facts=[],
+        sources=[{"title": "Candidate", "url": "https://slashdot.org"}],
+        safety_notes=["research_error:research_execution_failed"],
+        metadata={"content_fetch_status": "skipped", "content_fetch_skip_reason": "upstream_failure"},
+    )
+
+    json_path = write_research_transcript(
+        run_dir=run_dir,
+        run_id=44,
+        request=request,
+        packet=packet,
+        research_id="research_skip1234",
+    )
+
+    assert json_path is not None
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    assert payload["packet"]["metadata"]["content_fetch_status"] == "skipped"
+    assert payload["packet"]["sources"][0]["url"] == "https://slashdot.org"
+    assert "https://slashdot.org" in json_path.with_suffix(".md").read_text(encoding="utf-8")
