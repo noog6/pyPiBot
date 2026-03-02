@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import sys
+import types
+
+if "audioop" not in sys.modules:
+    sys.modules["audioop"] = types.ModuleType("audioop")
+
 import asyncio
 import json
 from collections import defaultdict
@@ -199,6 +205,12 @@ def test_startup_prompt_speech_started_and_assistant_message_preserve_turn_key_b
     api._pending_confirmation_token = None
     api._is_awaiting_confirmation_phase = lambda: False
 
+    class _FakeTransport:
+        async def send_json(self, _websocket, _payload):
+            return None
+
+    api._get_or_create_transport = lambda: _FakeTransport()
+
     # Guard applies when assistant_message has no explicit parent key.
     asyncio.run(api.send_assistant_message("guard me", websocket, utterance_context=None))
     assert len(scheduled_responses) == 0
@@ -211,3 +223,29 @@ def test_startup_prompt_speech_started_and_assistant_message_preserve_turn_key_b
     assert scheduled_responses[0]["origin"] == "assistant_message"
     assert scheduled_responses[0]["turn_id"] == user_turn_id
     assert scheduled_responses[0]["input_event_key"] == user_input_event_key
+
+
+def test_lifecycle_state_coordinator_parity_with_realtime_api_methods() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._current_run_id = lambda: "run-parity"
+    api._pending_confirmation_token = None
+    api._is_awaiting_confirmation_phase = lambda: False
+    api._has_active_confirmation_token = lambda: False
+
+    canonical = api._canonical_utterance_key(turn_id=" turn_1 ", input_event_key=" evt_1 ")
+    assert canonical == "run-parity:turn_1:evt_1"
+
+    obligation = api._response_obligation_key(turn_id="turn_1", input_event_key="evt_1")
+    assert obligation == canonical
+
+    assert api._can_release_queued_response_create("assistant_message", {"source": "assistant"}) is True
+
+    api._pending_confirmation_token = "tok"
+    api._is_awaiting_confirmation_phase = lambda: True
+    api._has_active_confirmation_token = lambda: True
+
+    assert api._can_release_queued_response_create("assistant_message", {"source": "assistant"}) is False
+    assert api._can_release_queued_response_create("text_message", {"source": "assistant"}) is True
+    assert api._can_release_queued_response_create(
+        "assistant_message", {"source": "assistant", "approval_flow": "yes"}
+    ) is True

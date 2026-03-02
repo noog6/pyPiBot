@@ -56,6 +56,7 @@ from ai.realtime.confirmation import (
 )
 from ai.realtime.injections import InjectionCoordinator
 from ai.realtime.input_audio_events import InputAudioEventHandlers
+from ai.realtime.lifecycle_state import LifecycleStateCoordinator
 from ai.realtime.response_lifecycle import ResponseLifecycleTracker
 from ai.realtime.response_terminal_handlers import ResponseTerminalHandlers
 from ai.realtime.shutdown import ShutdownCoordinator
@@ -3004,24 +3005,24 @@ class RealtimeAPI:
         input_event_key: str | None = None,
         utterance_seq: int | None = None,
     ) -> UtteranceContext:
-        resolved_turn_id = str(turn_id or self._current_turn_id_or_unknown()).strip() or "turn-unknown"
-        resolved_input_event_key = str(
-            input_event_key
-            if input_event_key is not None
-            else getattr(self, "_current_input_event_key", "")
-            or ""
-        ).strip()
-        resolved_utterance_seq = int(utterance_seq or self._current_utterance_seq() or 0)
-        canonical_key = self._canonical_utterance_key(
-            turn_id=resolved_turn_id,
-            input_event_key=resolved_input_event_key,
+        return self._lifecycle_state_coordinator().build_utterance_context(
+            run_id=self._current_run_id(),
+            turn_id=str(turn_id or self._current_turn_id_or_unknown()).strip() or "turn-unknown",
+            input_event_key=str(
+                input_event_key
+                if input_event_key is not None
+                else getattr(self, "_current_input_event_key", "")
+                or ""
+            ).strip(),
+            utterance_seq=int(utterance_seq or self._current_utterance_seq() or 0),
         )
-        return UtteranceContext(
-            turn_id=resolved_turn_id,
-            input_event_key=resolved_input_event_key,
-            canonical_key=canonical_key,
-            utterance_seq=resolved_utterance_seq,
-        )
+
+    def _lifecycle_state_coordinator(self) -> LifecycleStateCoordinator:
+        coordinator = getattr(self, "_lifecycle_state_coordinator_instance", None)
+        if not isinstance(coordinator, LifecycleStateCoordinator):
+            coordinator = LifecycleStateCoordinator()
+            self._lifecycle_state_coordinator_instance = coordinator
+        return coordinator
 
     @contextmanager
     def _utterance_context_scope(
@@ -3057,18 +3058,18 @@ class RealtimeAPI:
         if not isinstance(active_by_turn, dict):
             active_by_turn = {}
             self._active_input_event_key_by_turn_id = active_by_turn
-        return str(active_by_turn.get(turn_id) or "").strip()
+        return self._lifecycle_state_coordinator().active_input_event_key_for_turn(active_by_turn, turn_id=turn_id)
 
     def _bind_active_input_event_key_for_turn(self, *, turn_id: str, input_event_key: str | None) -> None:
-        normalized_turn_id = str(turn_id or "").strip()
-        normalized_key = str(input_event_key or "").strip()
-        if not normalized_turn_id or not normalized_key:
-            return
         active_by_turn = getattr(self, "_active_input_event_key_by_turn_id", None)
         if not isinstance(active_by_turn, dict):
             active_by_turn = {}
             self._active_input_event_key_by_turn_id = active_by_turn
-        active_by_turn[normalized_turn_id] = normalized_key
+        self._lifecycle_state_coordinator().bind_active_input_event_key_for_turn(
+            active_by_turn,
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+        )
 
     def _log_response_binding_event(self, *, response_key: str, turn_id: str, origin: str) -> None:
         logger.info(
@@ -3111,10 +3112,11 @@ class RealtimeAPI:
         )
 
     def _canonical_utterance_key(self, *, turn_id: str, input_event_key: str | None) -> str:
-        resolved_turn_id = str(turn_id or "").strip() or "turn-unknown"
-        resolved_input_event_key = str(input_event_key or "").strip() or f"synthetic:{resolved_turn_id}"
-        run_id = str(self._current_run_id() or "").strip() or "run-unknown"
-        return f"{run_id}:{resolved_turn_id}:{resolved_input_event_key}"
+        return self._lifecycle_state_coordinator().canonical_utterance_key(
+            run_id=self._current_run_id(),
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+        )
 
     def _lifecycle_controller(self) -> InteractionLifecycleController:
         controller = getattr(self, "_interaction_lifecycle_controller", None)
@@ -3217,7 +3219,11 @@ class RealtimeAPI:
         return "none"
 
     def _response_obligation_key(self, *, turn_id: str, input_event_key: str | None) -> str:
-        return self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+        return self._lifecycle_state_coordinator().response_obligation_key(
+            run_id=self._current_run_id(),
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+        )
 
     def _canonical_response_state_store(self) -> dict[str, CanonicalResponseState]:
         state_store = getattr(self, "_canonical_response_state_by_key", None)
@@ -3537,33 +3543,22 @@ class RealtimeAPI:
 
     def _set_response_obligation(self, *, turn_id: str, input_event_key: str, source: str) -> None:
         obligation_key = self._response_obligation_key(turn_id=turn_id, input_event_key=input_event_key)
-        prior_state = self._canonical_response_state(obligation_key)
-        obligation_present_before = bool(
-            isinstance(prior_state, CanonicalResponseState) and prior_state.obligation_present
-        )
         active_response_input_event_key = str(
             getattr(self, "_active_response_input_event_key", "") or ""
         ).strip() or "none"
         active_server_auto_input_event_key = str(
             getattr(self, "_active_server_auto_input_event_key", "") or ""
         ).strip() or "none"
-
-        def _mutate(record: CanonicalResponseState) -> None:
-            record.obligation_present = True
-            record.origin = str(source or "").strip() or record.origin
-            record.obligation = {
-                "turn_id": turn_id,
-                "input_event_key": input_event_key,
-                "source": source,
-                "created_at": time.monotonic(),
-            }
-
-        updated_state = self._canonical_response_state_mutate(
-            canonical_key=obligation_key,
+        updated_state, obligation_present_before = self._lifecycle_state_coordinator().transition_response_obligation(
+            state_store=self._canonical_response_state_store(),
+            obligation_key=obligation_key,
             turn_id=turn_id,
             input_event_key=input_event_key,
-            mutator=_mutate,
+            source=source,
+            present=True,
         )
+        self._sync_legacy_response_state_mirrors()
+        self._debug_assert_canonical_state_invariants(canonical_key=obligation_key, state=updated_state)
         total_obligations = sum(
             1
             for state in self._canonical_response_state_store().values()
@@ -3605,24 +3600,22 @@ class RealtimeAPI:
         prior_state = self._canonical_response_state(obligation_key)
         if not isinstance(prior_state, CanonicalResponseState) or not prior_state.obligation_present:
             return
-        obligation_present_before = prior_state.obligation_present
         active_response_input_event_key = str(
             getattr(self, "_active_response_input_event_key", "") or ""
         ).strip() or "none"
         active_server_auto_input_event_key = str(
             getattr(self, "_active_server_auto_input_event_key", "") or ""
         ).strip() or "none"
-
-        def _mutate(record: CanonicalResponseState) -> None:
-            record.obligation_present = False
-            record.obligation = None
-
-        updated_state = self._canonical_response_state_mutate(
-            canonical_key=obligation_key,
+        updated_state, obligation_present_before = self._lifecycle_state_coordinator().transition_response_obligation(
+            state_store=self._canonical_response_state_store(),
+            obligation_key=obligation_key,
             turn_id=turn_id,
             input_event_key=input_event_key,
-            mutator=_mutate,
+            source=origin,
+            present=False,
         )
+        self._sync_legacy_response_state_mirrors()
+        self._debug_assert_canonical_state_invariants(canonical_key=obligation_key, state=updated_state)
         normalized_input_event_key = str(input_event_key or "").strip() or "unknown"
         total_obligations = sum(
             1
@@ -6615,19 +6608,15 @@ class RealtimeAPI:
         return awaiting_phase
 
     def _is_user_confirmation_trigger(self, trigger: str, metadata: dict[str, Any]) -> bool:
-        normalized = str(trigger).strip().lower()
-        if normalized == "text_message":
-            return True
-        source = str(metadata.get("source", "")).strip().lower()
-        return source in {"user_audio", "user_text", "voice_confirmation", "text_confirmation"}
+        return self._lifecycle_state_coordinator().is_user_confirmation_trigger(trigger, metadata)
 
     def _can_release_queued_response_create(self, trigger: str, metadata: dict[str, Any]) -> bool:
-        if not self._has_active_confirmation_token() and not self._is_awaiting_confirmation_phase():
-            return True
-        if self._is_user_confirmation_trigger(trigger, metadata):
-            return True
-        approval_flow = str(metadata.get("approval_flow", "")).strip().lower()
-        return approval_flow in {"true", "1", "yes"}
+        return self._lifecycle_state_coordinator().can_release_queued_response_create(
+            has_active_confirmation_token=self._has_active_confirmation_token(),
+            is_awaiting_confirmation_phase=self._is_awaiting_confirmation_phase(),
+            trigger=trigger,
+            metadata=metadata,
+        )
 
     def _drop_response_create_for_terminal_state(
         self,
