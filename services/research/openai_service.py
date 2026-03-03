@@ -39,6 +39,16 @@ INJECTION_MARKERS: tuple[str, ...] = (
     "<script",
 )
 
+SITE_INTENT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\b(?:on|from)\s+slashdot\b", re.IGNORECASE), "slashdot.org"),
+    (re.compile(r"\b(?:on|from)\s+hacker\s+news\b", re.IGNORECASE), "news.ycombinator.com"),
+    (re.compile(r"\b(?:on|from)\s+reddit\b", re.IGNORECASE), "reddit.com"),
+)
+
+SITE_INTENT_RSS_URLS: dict[str, str] = {
+    "slashdot.org": "https://rss.slashdot.org/Slashdot/slashdotMain",
+}
+
 
 def _strip_html(text: str) -> str:
     return re.sub(r"<[^>]+>", "", text).strip()
@@ -56,6 +66,26 @@ def _is_pdf_url(url: str) -> bool:
 def _query_prefers_pdf(prompt: str) -> bool:
     lowered = str(prompt or "").lower()
     return "datasheet pdf" in lowered or lowered.startswith("pdf") or " pdf" in lowered
+
+
+def _detect_site_intent(prompt: str) -> str | None:
+    text = str(prompt or "")
+    for pattern, domain in SITE_INTENT_PATTERNS:
+        if pattern.search(text):
+            return domain
+    return None
+
+
+def _url_matches_site_intent(url: str, intent_domain: str) -> bool:
+    host = (parse.urlparse(url).hostname or "").lower().lstrip("www.")
+    canonical = intent_domain.lower().lstrip("www.")
+    if host == canonical or host.endswith(f".{canonical}"):
+        return True
+    rss_url = SITE_INTENT_RSS_URLS.get(canonical)
+    if not rss_url:
+        return False
+    rss_host = (parse.urlparse(rss_url).hostname or "").lower().lstrip("www.")
+    return host == rss_host or host.endswith(f".{rss_host}")
 
 
 class _HTMLToMarkdownParser(HTMLParser):
@@ -265,6 +295,7 @@ class OpenAIResearchService(ResearchService):
         sources: list[dict[str, str]] = []
         safety_notes: list[str] = []
         fetch_meta = self._default_fetch_metadata()
+        site_intent_domain = _detect_site_intent(request_packet.prompt)
         try:
             search_result = self._search_candidates(request_packet)
             if "error" in search_result:
@@ -274,7 +305,78 @@ class OpenAIResearchService(ResearchService):
 
             best_url = str(search_result.get("best_url") or "").strip()
             sources = self._collect_candidate_sources(search_result)
+            retry_reasons: list[str] = []
+            if site_intent_domain and not self._has_site_intent_match(sources, best_url, site_intent_domain):
+                retry_reasons.append("invalid_sources_off_domain")
+                constrained_prompt = f"{request_packet.prompt} site:{site_intent_domain}".strip()
+                LOGGER.info(
+                    "[Research] site_intent_retry run_id=%s domain=%s reason=%s constrained_query=%s",
+                    run_id,
+                    site_intent_domain,
+                    retry_reasons[-1],
+                    constrained_prompt,
+                )
+                retry_request = ResearchRequest(prompt=constrained_prompt, context=dict(request_packet.context or {}))
+                retried = self._search_candidates(retry_request)
+                retry_error = str(retried.get("error") or "").strip()
+                if retry_error:
+                    retry_reasons.append("site_intent_retry_failed")
+                    rss_url = SITE_INTENT_RSS_URLS.get(site_intent_domain)
+                    if rss_url:
+                        best_url = rss_url
+                        sources = [{"title": "Site RSS feed", "url": rss_url}]
+                        LOGGER.info(
+                            "[Research] site_intent_retry_result run_id=%s domain=%s decision=fallback_rss_retry_error error=%s",
+                            run_id,
+                            site_intent_domain,
+                            retry_error,
+                        )
+                    else:
+                        LOGGER.warning(
+                            "[Research] site_intent_retry_result run_id=%s domain=%s decision=retry_failed_closed error=%s",
+                            run_id,
+                            site_intent_domain,
+                            retry_error,
+                        )
+                        if not self._record_budget_spend(reservation, execution_success=False):
+                            return self._safe_error_packet("budget_finalize_failed")
+                        return self._safe_error_packet(retry_error)
+                else:
+                    retry_best_url = str(retried.get("best_url") or "").strip()
+                    retry_sources = self._collect_candidate_sources(retried)
+                    if self._has_site_intent_match(retry_sources, retry_best_url, site_intent_domain):
+                        search_result = retried
+                        best_url = retry_best_url
+                        sources = retry_sources
+                        LOGGER.info(
+                            "[Research] site_intent_retry_result run_id=%s domain=%s decision=accepted_retried_sources",
+                            run_id,
+                            site_intent_domain,
+                        )
+                    else:
+                        rss_url = SITE_INTENT_RSS_URLS.get(site_intent_domain)
+                        if rss_url:
+                            best_url = rss_url
+                            if not any(str(item.get("url") or "").strip() == rss_url for item in retry_sources):
+                                retry_sources.insert(0, {"title": "Site RSS feed", "url": rss_url})
+                            sources = retry_sources[: self._max_sources]
+                            LOGGER.info(
+                                "[Research] site_intent_retry_result run_id=%s domain=%s decision=fallback_rss",
+                                run_id,
+                                site_intent_domain,
+                            )
+                        else:
+                            search_result = retried
+                            best_url = retry_best_url
+                            sources = retry_sources
+                            LOGGER.info(
+                                "[Research] site_intent_retry_result run_id=%s domain=%s decision=accepted_unvalidated_retry",
+                                run_id,
+                                site_intent_domain,
+                            )
             safety_notes = self._sanitize_notes(search_result.get("safety_notes") or [])
+            if retry_reasons:
+                safety_notes = self._sanitize_notes(safety_notes + retry_reasons)
 
             fetch_url, url_skip_reason = self._choose_fetch_url(
                 search_result,
@@ -664,6 +766,17 @@ class OpenAIResearchService(ResearchService):
             if len(candidate_sources) >= self._max_sources:
                 break
         return candidate_sources
+
+    def _has_site_intent_match(self, sources: list[dict[str, str]], best_url: str, intent_domain: str) -> bool:
+        urls = [best_url]
+        for source in sources:
+            urls.append(str(source.get("url") or "").strip())
+        for url in urls:
+            if not url:
+                continue
+            if _url_matches_site_intent(url, intent_domain):
+                return True
+        return False
 
     def _error_packet_with_sources(
         self,
