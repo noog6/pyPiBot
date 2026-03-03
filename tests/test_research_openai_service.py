@@ -28,9 +28,11 @@ class _FakeOpenAIResearchService(OpenAIResearchService):
         self._search_result = search_result
         self._extract_result = extract_result
         self.search_calls = 0
+        self.search_prompts: list[str] = []
 
     def _search_candidates(self, req: ResearchRequest) -> dict:
         self.search_calls += 1
+        self.search_prompts.append(req.prompt)
         return self._search_result
 
     def _responses_call(self, *, input_messages, use_web_search: bool, max_output_tokens: int, phase: str) -> str:
@@ -92,6 +94,58 @@ def test_query_cache_skips_repeat_search(tmp_path: Path) -> None:
     assert first.answer_summary == "summary"
     assert second.answer_summary == "summary"
     assert svc.search_calls == 1
+
+
+def test_slashdot_intent_retries_with_site_constraint_and_keeps_domain_sources(tmp_path: Path, monkeypatch) -> None:
+    from services.research import openai_service as openai_module
+
+    class _SequencedService(_FakeOpenAIResearchService):
+        def __init__(self, *, search_results: list[dict], **kwargs) -> None:
+            super().__init__(search_result=search_results[0], extract_result="{}", **kwargs)
+            self._search_results = list(search_results)
+
+        def _search_candidates(self, req: ResearchRequest) -> dict:
+            self.search_calls += 1
+            self.search_prompts.append(req.prompt)
+            idx = min(self.search_calls - 1, len(self._search_results) - 1)
+            return self._search_results[idx]
+
+    svc = _SequencedService(
+        search_results=[
+            {
+                "best_url": "https://docs.fcc.gov/something.pdf",
+                "sources": [{"title": "FCC", "url": "https://docs.fcc.gov/something.pdf"}],
+                "search_summary": "off domain",
+                "safety_notes": [],
+            },
+            {
+                "best_url": "https://slashdot.org/story/26/01/01/12345/example",
+                "sources": [{"title": "Slashdot", "url": "https://slashdot.org/story/26/01/01/12345/example"}],
+                "search_summary": "on domain",
+                "safety_notes": [],
+            },
+        ],
+        firecrawl_enabled=False,
+        budget_state_file=str(tmp_path / "budget.json"),
+        cache_dir=str(tmp_path / "cache"),
+    )
+
+    info_logs: list[str] = []
+    original_info = openai_module.LOGGER.info
+
+    def _capture_info(message: str, *args) -> None:
+        rendered = message % args if args else message
+        info_logs.append(rendered)
+        original_info(message, *args)
+
+    monkeypatch.setattr(openai_module.LOGGER, "info", _capture_info)
+    packet = svc.request_research(ResearchRequest(prompt="current top story on Slashdot", context={"run_id": "run-444"}))
+
+    assert svc.search_calls == 2
+    assert "site:slashdot.org" in svc.search_prompts[1]
+    assert packet.sources
+    assert all("slashdot.org" in source["url"] for source in packet.sources if "url" in source)
+    assert any("run_id=run-444" in line and "site_intent_retry" in line for line in info_logs)
 
 
 
