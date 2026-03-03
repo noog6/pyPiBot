@@ -148,6 +148,43 @@ def test_slashdot_intent_retries_with_site_constraint_and_keeps_domain_sources(t
     assert any("run_id=run-444" in line and "site_intent_retry" in line for line in info_logs)
 
 
+def test_slashdot_intent_retry_error_falls_back_to_rss_instead_of_off_domain_sources(tmp_path: Path) -> None:
+    class _SequencedService(_FakeOpenAIResearchService):
+        def __init__(self, *, search_results: list[dict], **kwargs) -> None:
+            super().__init__(search_result=search_results[0], extract_result="{}", **kwargs)
+            self._search_results = list(search_results)
+
+        def _search_candidates(self, req: ResearchRequest) -> dict:
+            self.search_calls += 1
+            self.search_prompts.append(req.prompt)
+            idx = min(self.search_calls - 1, len(self._search_results) - 1)
+            return self._search_results[idx]
+
+    svc = _SequencedService(
+        search_results=[
+            {
+                "best_url": "https://docs.fcc.gov/something.pdf",
+                "sources": [{"title": "FCC", "url": "https://docs.fcc.gov/something.pdf"}],
+                "search_summary": "off domain",
+                "safety_notes": [],
+            },
+            {"error": "search_non_json_response"},
+        ],
+        firecrawl_enabled=False,
+        budget_state_file=str(tmp_path / "budget.json"),
+        cache_dir=str(tmp_path / "cache"),
+    )
+
+    packet = svc.request_research(ResearchRequest(prompt="current top story on Slashdot", context={"run_id": "run-445"}))
+
+    assert svc.search_calls == 2
+    assert packet.status == "ok"
+    assert packet.sources
+    assert packet.sources[0]["url"] == "https://rss.slashdot.org/Slashdot/slashdotMain"
+    assert all("docs.fcc.gov" not in source.get("url", "") for source in packet.sources)
+    assert "site_intent_retry_failed" in packet.safety_notes
+
+
 
 
 

@@ -318,7 +318,30 @@ class OpenAIResearchService(ResearchService):
                 )
                 retry_request = ResearchRequest(prompt=constrained_prompt, context=dict(request_packet.context or {}))
                 retried = self._search_candidates(retry_request)
-                if not retried.get("error"):
+                retry_error = str(retried.get("error") or "").strip()
+                if retry_error:
+                    retry_reasons.append("site_intent_retry_failed")
+                    rss_url = SITE_INTENT_RSS_URLS.get(site_intent_domain)
+                    if rss_url:
+                        best_url = rss_url
+                        sources = [{"title": "Site RSS feed", "url": rss_url}]
+                        LOGGER.info(
+                            "[Research] site_intent_retry_result run_id=%s domain=%s decision=fallback_rss_retry_error error=%s",
+                            run_id,
+                            site_intent_domain,
+                            retry_error,
+                        )
+                    else:
+                        LOGGER.warning(
+                            "[Research] site_intent_retry_result run_id=%s domain=%s decision=retry_failed_closed error=%s",
+                            run_id,
+                            site_intent_domain,
+                            retry_error,
+                        )
+                        if not self._record_budget_spend(reservation, execution_success=False):
+                            return self._safe_error_packet("budget_finalize_failed")
+                        return self._safe_error_packet(retry_error)
+                else:
                     retry_best_url = str(retried.get("best_url") or "").strip()
                     retry_sources = self._collect_candidate_sources(retried)
                     if self._has_site_intent_match(retry_sources, retry_best_url, site_intent_domain):
