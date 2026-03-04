@@ -167,3 +167,56 @@ def test_server_auto_response_create_consumes_preference_context_from_turn_scope
     ]
     assert "Vim" in ws.events[0]["item"]["content"][0]["text"]
     assert len([event for event in ws.events if event["type"] == "response.create"]) == 1
+
+
+def test_server_auto_response_prefers_turn_scoped_hit_after_transition_replaced() -> None:
+    api = _make_api_stub()
+    ws = _Ws()
+
+    synthetic_canonical_key = api._canonical_utterance_key(turn_id="turn_7", input_event_key="synthetic_server_auto_1")
+    item_canonical_key = api._canonical_utterance_key(turn_id="turn_7", input_event_key="item_ABC")
+    api._active_server_auto_input_event_key = "synthetic_server_auto_1"
+    api._active_input_event_key_by_turn_id = {"turn_7": "item_ABC"}
+
+    api._pending_preference_memory_context_by_canonical_key = {
+        synthetic_canonical_key: {
+            "prompt_note": "Preference recall context for this SAME response: no stored preference matched this query.",
+            "hit": False,
+            "returned_count": 0,
+        },
+        item_canonical_key: {
+            "prompt_note": "Preference recall context for this SAME response: matched stored preference(s). Top recalled value: preferred editor is Vim",
+            "hit": True,
+            "returned_count": 2,
+        },
+    }
+    api._pending_preference_memory_context_by_turn_id = {
+        "turn_7": {
+            "prompt_note": "Preference recall context for this SAME response: matched stored preference(s). Top recalled value: preferred editor is Vim",
+            "hit": True,
+            "returned_count": 2,
+        }
+    }
+
+    asyncio.run(
+        api._send_response_create(
+            ws,
+            {
+                "type": "response.create",
+                "response": {
+                    "metadata": {
+                        "turn_id": "turn_7",
+                        "input_event_key": "synthetic_server_auto_1",
+                    }
+                },
+            },
+            origin="server_auto",
+        )
+    )
+
+    assert [event["type"] for event in ws.events] == [
+        "conversation.item.create",
+        "response.create",
+    ]
+    assert "preferred editor is Vim" in ws.events[0]["item"]["content"][0]["text"]
+    assert len([event for event in ws.events if event["type"] == "response.create"]) == 1
