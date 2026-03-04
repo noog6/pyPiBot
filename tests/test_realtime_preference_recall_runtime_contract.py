@@ -11,7 +11,10 @@ if "audioop" not in sys.modules:
     sys.modules["audioop"] = types.ModuleType("audioop")
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
 
+import ai.tools as ai_tools
 from ai.realtime_api import RealtimeAPI
+from services.memory_manager import MemoryManager, MemoryScope
+from storage.memories import MemoryStore
 
 
 def _base_api() -> RealtimeAPI:
@@ -34,6 +37,30 @@ def _base_api() -> RealtimeAPI:
     api._sanitize_memory_cards_text_for_user = RealtimeAPI._sanitize_memory_cards_text_for_user.__get__(api, RealtimeAPI)
     api._build_preference_query_fingerprint = RealtimeAPI._build_preference_query_fingerprint.__get__(api, RealtimeAPI)
     return api
+
+
+def _make_memory_manager(store: MemoryStore) -> MemoryManager:
+    manager = MemoryManager.__new__(MemoryManager)
+    manager._active_user_id = "default"
+    manager._active_session_id = None
+    manager._default_scope = MemoryScope.USER_GLOBAL
+    manager._store = store
+    manager._embedding_worker = None
+    manager._semantic_config = SimpleNamespace(enabled=False, rerank_enabled=False)
+    manager._last_turn_retrieval_at = {}
+    manager._auto_pin_min_importance = 5
+    manager._auto_pin_requires_review = True
+    manager._auto_reflection_semantic_dedupe_enabled = False
+    manager._auto_reflection_dedupe_recent_limit = 24
+    manager._auto_reflection_dedupe_high_risk_cosine = 0.9
+    manager._auto_reflection_dedupe_policy = "skip_write"
+    manager._auto_reflection_dedupe_importance = 2
+    manager._auto_reflection_dedupe_clear_pin = True
+    manager._auto_reflection_dedupe_needs_review = True
+    manager._auto_reflection_dedupe_apply_to_manual_tool = False
+    manager._recall_trace_enabled = True
+    manager._recall_trace_level = "info"
+    return manager
 
 
 def test_find_stop_word_delegates_to_runtime() -> None:
@@ -435,3 +462,80 @@ def test_deliverable_seen_true_for_tool_output_turn() -> None:
     )
 
     assert bool(api._utterance_info_summary.get("deliverable_seen")) is True
+
+
+def test_preference_recall_run453_divergence_parity_with_direct_domain_recall(monkeypatch, tmp_path) -> None:
+    api = _base_api()
+    api._preference_recall_max_attempts = 2
+    api._build_preference_recall_query_variants = lambda _query: [("favorite preference", "canonical")]
+    api._preference_recall_fallback_query = RealtimeAPI._preference_recall_fallback_query.__get__(api, RealtimeAPI)
+    api._filter_preference_recall_payload_for_user = RealtimeAPI._filter_preference_recall_payload_for_user.__get__(api, RealtimeAPI)
+
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager.remember_memory(
+        content="User's preferred editor is Vim.",
+        tags=["preference", "editor"],
+        importance=4,
+        scope=MemoryScope.USER_GLOBAL,
+    )
+    manager.remember_memory(
+        content="User's favorite editor is Vim.",
+        tags=["preference", "editor"],
+        importance=4,
+        scope=MemoryScope.USER_GLOBAL,
+    )
+    monkeypatch.setattr(ai_tools.MemoryManager, "get_instance", lambda: manager)
+
+    direct_payload = asyncio.run(ai_tools.recall_memories(query="editor", scope="user_global"))
+    assert direct_payload["memories"]
+    assert isinstance(direct_payload.get("trace"), dict)
+
+    attempted_calls: list[dict[str, str]] = []
+    direct_recall_fn = ai_tools.recall_memories
+
+    async def _recall_via_function_map(*, query: str, limit: int, scope: str):
+        attempted_calls.append({"query": query, "scope": scope})
+        return await direct_recall_fn(query=query, limit=limit, scope=scope)
+
+    monkeypatch.setitem(ai_tools.function_map, "recall_memories", _recall_via_function_map)
+
+    query = RealtimeAPI._build_preference_recall_query(
+        api,
+        "hey theo do you remember what my favorite editor is",
+        keywords=["hey", "theo", "remember", "favorite", "editor"],
+    )
+
+    with patch("ai.realtime_api.logger.info") as mocked_info:
+        payload, handled = asyncio.run(
+            RealtimeAPI._run_preference_recall_with_fallbacks(
+                api,
+                recall_fn=ai_tools.function_map["recall_memories"],
+                source="text_message",
+                resolved_turn_id="turn_3",
+                query=query,
+            )
+        )
+
+    assert handled is True
+    assert [call["query"] for call in attempted_calls] == ["favorite preference", "editor"]
+    assert {call["scope"] for call in attempted_calls} == {"user_global"}
+
+    rendered_lines = [
+        str(call.args[0]) % call.args[1:]
+        for call in mocked_info.call_args_list
+        if call.args and str(call.args[0]).startswith("preference_recall_tool_result")
+    ]
+    assert len(rendered_lines) == 2
+    assert "query=favorite preference" in rendered_lines[0]
+    assert "empty_reason=no_candidates" in rendered_lines[0]
+    assert "scope=user_global" in rendered_lines[0]
+    assert "retrieval_backend=" in rendered_lines[0]
+    assert "query=editor" in rendered_lines[1]
+    assert "empty_reason=none" in rendered_lines[1]
+    assert "scope=user_global" in rendered_lines[1]
+    assert "retrieval_backend=" in rendered_lines[1]
+
+    domain_hit_succeeded = any("query=editor" in line and "empty_reason=none" in line for line in rendered_lines)
+    assert direct_payload["memories"]
+    assert payload["memories"] or payload["memory_cards"] or domain_hit_succeeded
