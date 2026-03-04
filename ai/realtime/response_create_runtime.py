@@ -75,6 +75,8 @@ class ResponseCreateRuntime:
             canonical_key = resolved_context.canonical_key
         response_metadata = api._extract_response_create_metadata(response_create_event)
         normalized_origin = str(origin or "").strip().lower()
+        tool_followup = str(response_metadata.get("tool_followup", "")).strip().lower() in {"true", "1", "yes"}
+        tool_call_id = str(response_metadata.get("tool_call_id") or "").strip()
         consumes_canonical_slot = api._response_consumes_canonical_slot(response_metadata)
         explicit_multipart = api._response_is_explicit_multipart(response_metadata)
         if consumes_canonical_slot and api._canonical_first_audio_started(canonical_key) and not explicit_multipart:
@@ -425,6 +427,8 @@ class ResponseCreateRuntime:
 
         response_metadata = api._extract_response_create_metadata(response_create_event)
         normalized_origin = str(origin or "").strip().lower()
+        tool_followup = str(response_metadata.get("tool_followup", "")).strip().lower() in {"true", "1", "yes"}
+        tool_call_id = str(response_metadata.get("tool_call_id") or "").strip()
         consumes_canonical_slot = api._response_consumes_canonical_slot(response_metadata)
         explicit_multipart = api._response_is_explicit_multipart(response_metadata)
         suppression_turns = getattr(api, "_preference_recall_suppressed_turns", set())
@@ -461,6 +465,15 @@ class ResponseCreateRuntime:
             suppression_active=suppression_active,
             normalized_origin=normalized_origin,
         )
+        if tool_followup:
+            arbitration_outcome = "deny" if decision.action is ResponseCreateDecisionAction.BLOCK else "allow"
+            logger.info(
+                "tool_followup_arbitration outcome=%s reason=%s call_id=%s canonical_key=%s",
+                arbitration_outcome,
+                decision.reason_code,
+                tool_call_id or "unknown",
+                canonical_key,
+            )
 
         if decision.action is ResponseCreateDecisionAction.SCHEDULE:
             return api._schedule_pending_response_create(
