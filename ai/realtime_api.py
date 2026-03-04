@@ -4705,6 +4705,19 @@ class RealtimeAPI:
         prompt_note = str(payload.get("prompt_note") or "").strip()
         return prompt_note or None
 
+    def _peek_pending_preference_memory_context_payload(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str,
+    ) -> dict[str, Any] | None:
+        payload, _ = self._resolve_pending_preference_memory_context_payload(
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            consume=False,
+        )
+        return payload if isinstance(payload, dict) else None
+
     def _tool_execution_cooldown_remaining(self) -> float:
         remaining = self._tool_execution_disabled_until - time.monotonic()
         return remaining if remaining > 0 else 0.0

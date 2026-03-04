@@ -411,28 +411,19 @@ class ResponseCreateRuntime:
             turn_id=turn_id,
         )
 
-        preference_note = None
-        had_pending_preference_context = False
-        if hasattr(api, "_has_pending_preference_memory_context"):
-            had_pending_preference_context = bool(
-                api._has_pending_preference_memory_context(
-                    turn_id=turn_id,
-                    input_event_key=current_input_event_key,
-                )
-            )
-        if hasattr(api, "_consume_pending_preference_memory_context_note"):
-            preference_note = api._consume_pending_preference_memory_context_note(
+        preference_payload = None
+        if hasattr(api, "_peek_pending_preference_memory_context_payload"):
+            preference_payload = api._peek_pending_preference_memory_context_payload(
                 turn_id=turn_id,
                 input_event_key=current_input_event_key,
             )
-        effective_memory_note = memory_brief_note or preference_note
-
-        # Migration (phase 1): delegated policy decisions keep signature stable.
-        if effective_memory_note:
-            try:
-                await api._send_memory_brief_note(websocket, effective_memory_note)
-            except Exception as exc:  # pragma: no cover - defensive fail-open
-                logger.warning("Memory brief injection skipped due to error: %s", exc)
+        had_pending_preference_context = isinstance(preference_payload, dict)
+        preference_note = (
+            str(preference_payload.get("prompt_note") or "").strip()
+            if isinstance(preference_payload, dict)
+            else ""
+        )
+        effective_memory_note = memory_brief_note or preference_note or None
         api._bind_active_input_event_key_for_turn(
             turn_id=turn_id,
             input_event_key=current_input_event_key,
@@ -470,6 +461,25 @@ class ResponseCreateRuntime:
             str(pref_len > 0).lower(),
             pref_len,
         )
+        if str(origin or "").strip().lower() == "server_auto":
+            pref_hit = bool(isinstance(preference_payload, dict) and preference_payload.get("hit", False))
+            attached_sources = []
+            if isinstance(preference_payload, dict):
+                source = str(preference_payload.get("source") or "").strip()
+                if source:
+                    attached_sources.append(source)
+            logger.info(
+                "response_context_snapshot run_id=%s turn_id=%s input_event_key=%s canonical_key=%s origin=%s pref_ctx_present=%s pref_hit=%s pref_text_len=%s attached_sources=%s",
+                api._current_run_id() or "",
+                turn_id,
+                current_input_event_key or "unknown",
+                canonical_key,
+                str(origin or "").strip().lower(),
+                str(pref_len > 0).lower(),
+                str(pref_hit).lower(),
+                pref_len,
+                ",".join(attached_sources) if attached_sources else "none",
+            )
         if pref_len == 0 and had_pending_preference_context:
             logger.debug(
                 "response_prompt_compile_missing_pref_recall response_id=%s run_id=%s turn_id=%s origin=%s input_event_key=%s reason=no_alias",
@@ -542,7 +552,7 @@ class ResponseCreateRuntime:
                 reason=str(decision.queue_reason or decision.reason_code),
                 record_ai_call=record_ai_call,
                 debug_context=debug_context,
-                memory_brief_note=memory_brief_note,
+                memory_brief_note=effective_memory_note,
             )
         if decision.action is ResponseCreateDecisionAction.BLOCK:
             if decision.reason_code == "already_delivered":
@@ -615,6 +625,18 @@ class ResponseCreateRuntime:
                 canonical_key,
             )
             return False
+
+        memory_note_to_send = memory_brief_note
+        if not memory_note_to_send and hasattr(api, "_consume_pending_preference_memory_context_note"):
+            memory_note_to_send = api._consume_pending_preference_memory_context_note(
+                turn_id=turn_id,
+                input_event_key=current_input_event_key,
+            )
+        if memory_note_to_send:
+            try:
+                await api._send_memory_brief_note(websocket, memory_note_to_send)
+            except Exception as exc:  # pragma: no cover - defensive fail-open
+                logger.warning("Memory brief injection skipped due to error: %s", exc)
 
         obligation_present = api._response_obligation_key(
             turn_id=turn_id,
