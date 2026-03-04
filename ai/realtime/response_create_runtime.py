@@ -79,6 +79,7 @@ class ResponseCreateRuntime:
         tool_call_id = str(response_metadata.get("tool_call_id") or "").strip()
         consumes_canonical_slot = api._response_consumes_canonical_slot(response_metadata)
         explicit_multipart = api._response_is_explicit_multipart(response_metadata)
+        transcript_upgrade_replacement = str(response_metadata.get("transcript_upgrade_replacement", "")).strip().lower() in {"true", "1", "yes"}
         if consumes_canonical_slot and api._canonical_first_audio_started(canonical_key) and not explicit_multipart:
             logger.info(
                 "response_schedule_blocked run_id=%s turn_id=%s origin=%s mode=direct reason=canonical_audio_already_started canonical_key=%s",
@@ -91,7 +92,7 @@ class ResponseCreateRuntime:
         suppression_turns = getattr(api, "_preference_recall_suppressed_turns", set())
         created_keys = getattr(api, "_response_created_canonical_keys", set())
         if consumes_canonical_slot:
-            single_flight_block_reason = api._single_flight_block_reason(
+            single_flight_block_reason = "" if transcript_upgrade_replacement else api._single_flight_block_reason(
                 turn_id=turn_id,
                 input_event_key=current_input_event_key,
             )
@@ -500,12 +501,13 @@ class ResponseCreateRuntime:
         tool_call_id = str(response_metadata.get("tool_call_id") or "").strip()
         consumes_canonical_slot = api._response_consumes_canonical_slot(response_metadata)
         explicit_multipart = api._response_is_explicit_multipart(response_metadata)
+        transcript_upgrade_replacement = str(response_metadata.get("transcript_upgrade_replacement", "")).strip().lower() in {"true", "1", "yes"}
         suppression_turns = getattr(api, "_preference_recall_suppressed_turns", set())
         created_keys = getattr(api, "_response_created_canonical_keys", set())
-        single_flight_block_reason = api._single_flight_block_reason(
+        single_flight_block_reason = ("" if transcript_upgrade_replacement else api._single_flight_block_reason(
             turn_id=turn_id,
             input_event_key=current_input_event_key,
-        ) if consumes_canonical_slot else ""
+        )) if consumes_canonical_slot else ""
         suppression_active = turn_id in suppression_turns and not current_input_event_key
         preference_recall_lock_blocked = api._is_preference_recall_lock_blocked(
             turn_id=turn_id,

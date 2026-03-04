@@ -182,6 +182,16 @@ class ResponseTerminalHandlers:
                     input_event_key=done_input_event_key,
                     state="done",
                 )
+        if delivery_state_before_done == "cancelled":
+            logger.info(
+                "deliverable_selected response_id=%s selected=false reason=cancelled",
+                active_response_id or "unknown",
+            )
+        else:
+            logger.info(
+                "deliverable_selected response_id=%s selected=true reason=normal",
+                active_response_id or "unknown",
+            )
         suppressed_turn_id = api._current_turn_id_or_unknown()
         suppressed_turn_present_before = suppressed_turn_id in suppressed_turns
         logger.debug(
