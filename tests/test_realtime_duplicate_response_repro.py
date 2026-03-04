@@ -4,7 +4,9 @@ import asyncio
 import json
 from collections import deque
 
+from ai.realtime.response_create_runtime import ResponseCreateRuntime
 from ai.realtime_api import InteractionState, RealtimeAPI
+from core.logging import logger
 
 
 class _RecordingWs:
@@ -13,6 +15,19 @@ class _RecordingWs:
 
     async def send(self, payload: str) -> None:
         self.sent.append(json.loads(payload))
+
+
+class _Transport:
+    async def send_json(self, websocket: _RecordingWs, payload: dict[str, object]) -> None:
+        await websocket.send(json.dumps(payload))
+
+
+def _wire_runtime(api: RealtimeAPI) -> None:
+    api._response_create_runtime = ResponseCreateRuntime(api)
+    transport = _Transport()
+    api._get_or_create_transport = lambda: transport
+    api._spoken_research_response_ids = {}
+    api._research_spoken_response_dedupe_ttl_s = 60.0
 
 
 def _make_api_stub() -> RealtimeAPI:
@@ -558,3 +573,102 @@ def test_canonical_audio_started_allows_explicit_multipart_and_micro_ack() -> No
     assert multipart_sent is True
     assert micro_ack_sent is True
 
+
+def test_tool_followup_response_scheduled_exactly_once_per_tool_call_id(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_response_turn_id = "turn_tool_1"
+    api._current_input_event_key = "item_user_1"
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+
+    async def _fake_add_no_tools(*_args, **_kwargs) -> None:
+        return None
+
+    async def _fake_research(**_kwargs):
+        return {"research_id": "research_1", "summary": "done"}
+
+    api._add_no_tools_follow_up_instruction = _fake_add_no_tools
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "perform_research", _fake_research)
+
+    asyncio.run(api.execute_function_call("perform_research", "call_research_1", {"query": "uptime"}, ws))
+
+    response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert len(response_create_events) == 1
+    metadata = ((response_create_events[0].get("response") or {}).get("metadata") or {})
+    assert metadata.get("tool_followup") == "true"
+    assert metadata.get("tool_call_id") == "call_research_1"
+    assert metadata.get("input_event_key") == "tool:call_research_1"
+
+
+def test_duplicate_tool_result_is_deduped_by_tool_followup_canonical_key(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_response_turn_id = "turn_tool_2"
+    api._current_input_event_key = "item_user_2"
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+
+    async def _fake_add_no_tools(*_args, **_kwargs) -> None:
+        return None
+
+    async def _fake_research(**_kwargs):
+        return {"summary": "done"}
+
+    api._add_no_tools_follow_up_instruction = _fake_add_no_tools
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "perform_research", _fake_research)
+    captured_logs: list[str] = []
+
+    original_info = logger.info
+
+    def _capture_info(message: str, *args, **kwargs):
+        rendered = str(message)
+        if args:
+            rendered = rendered % args
+        captured_logs.append(rendered)
+        return original_info(message, *args, **kwargs)
+
+    monkeypatch.setattr(logger, "info", _capture_info)
+
+    asyncio.run(api.execute_function_call("perform_research", "call_research_2", {"query": "logs"}, ws))
+    api._response_in_flight = False
+    asyncio.run(api.execute_function_call("perform_research", "call_research_2", {"query": "logs"}, ws))
+
+    response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert len(response_create_events) == 1
+    canonical_key = api._canonical_utterance_key(turn_id="turn_tool_2", input_event_key="tool:call_research_2")
+    assert any(
+        "tool_followup_arbitration outcome=deny reason=already_created" in entry
+        and f"canonical_key={canonical_key}" in entry
+        for entry in captured_logs
+    )
+
+
+def test_non_tool_response_create_path_still_single_flight_guarded() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_response_turn_id = "turn_user_1"
+    api._current_input_event_key = "item_user_3"
+
+    asyncio.run(
+        api._send_response_create(
+            ws,
+            {"type": "response.create", "response": {"metadata": {"turn_id": "turn_user_1", "input_event_key": "item_user_3"}}},
+            origin="assistant_message",
+        )
+    )
+    api._response_in_flight = False
+    asyncio.run(
+        api._send_response_create(
+            ws,
+            {"type": "response.create", "response": {"metadata": {"turn_id": "turn_user_1", "input_event_key": "item_user_3"}}},
+            origin="assistant_message",
+        )
+    )
+
+    response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert len(response_create_events) == 1

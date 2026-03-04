@@ -3919,6 +3919,34 @@ class RealtimeAPI:
         metadata["input_event_key"] = str(metadata.get("input_event_key") or "").strip() or input_event_key
         return input_event_key
 
+    def _tool_followup_input_event_key(self, *, call_id: str) -> str:
+        return f"tool:{str(call_id or '').strip() or 'unknown'}"
+
+    def _build_tool_followup_response_create_event(
+        self,
+        *,
+        call_id: str,
+        response_create_event: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], str]:
+        event: dict[str, Any] = response_create_event or {"type": "response.create"}
+        response_payload = event.setdefault("response", {})
+        if not isinstance(response_payload, dict):
+            response_payload = {}
+            event["response"] = response_payload
+        metadata = response_payload.setdefault("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+            response_payload["metadata"] = metadata
+        tool_call_id = str(call_id or "").strip() or "unknown"
+        turn_id = self._current_turn_id_or_unknown()
+        tool_input_event_key = self._tool_followup_input_event_key(call_id=tool_call_id)
+        metadata["turn_id"] = turn_id
+        metadata["input_event_key"] = tool_input_event_key
+        metadata["tool_followup"] = "true"
+        metadata["tool_call_id"] = tool_call_id
+        canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_input_event_key)
+        return event, canonical_key
+
     def _response_has_safety_override(self, response_create_event: dict[str, Any]) -> bool:
         metadata = self._extract_response_create_metadata(response_create_event)
         return str(metadata.get("safety_override", "")).strip().lower() in {"true", "1", "yes"}
@@ -4881,7 +4909,15 @@ class RealtimeAPI:
         transport = self._get_or_create_transport()
         await transport.send_json(websocket, function_call_output)
         if include_response_create:
-            response_create_event = {"type": "response.create"}
+            response_create_event, tool_followup_canonical_key = self._build_tool_followup_response_create_event(
+                call_id=call_id,
+                response_create_event={"type": "response.create"},
+            )
+            logger.info(
+                "tool_followup_response_scheduled call_id=%s canonical_key=%s",
+                call_id,
+                tool_followup_canonical_key,
+            )
             await self._send_response_create(websocket, response_create_event, origin=response_origin)
 
     def _format_action_packet(self, action: ActionPacket) -> str:
@@ -8645,6 +8681,12 @@ class RealtimeAPI:
             try:
                 result = await function_map[function_name](**args)
                 log_tool_call(function_name, args, result)
+                logger.info(
+                    "tool_result_received run_id=%s turn_id=%s call_id=%s",
+                    self._current_run_id() or "",
+                    self._current_turn_id_or_unknown(),
+                    call_id,
+                )
             except Exception as exc:
                 error_message = f"Error executing function '{function_name}': {exc}"
                 log_error(error_message)
@@ -8709,6 +8751,11 @@ class RealtimeAPI:
         self._track_outgoing_event(function_call_output)
         transport = self._get_or_create_transport()
         await transport.send_json(websocket, function_call_output)
+        logger.info(
+            "tool_result_enqueued_to_realtime call_id=%s conversation_item_id=%s",
+            call_id,
+            None,
+        )
         self._mark_utterance_info_summary(deliverable_seen=True)
         if inject_no_tools_instruction:
             await self._add_no_tools_follow_up_instruction(websocket)
@@ -8717,9 +8764,21 @@ class RealtimeAPI:
             self.function_call = None
             self.function_call_args = ""
             return
-        response_create_event: dict[str, Any] = {"type": "response.create"}
+        response_create_event, tool_followup_canonical_key = self._build_tool_followup_response_create_event(
+            call_id=call_id,
+            response_create_event={"type": "response.create"},
+        )
         if force_no_tools_followup:
-            response_create_event["response"] = {"tool_choice": "none"}
+            response_payload = response_create_event.setdefault("response", {})
+            if not isinstance(response_payload, dict):
+                response_payload = {}
+                response_create_event["response"] = response_payload
+            response_payload["tool_choice"] = "none"
+        logger.info(
+            "tool_followup_response_scheduled call_id=%s canonical_key=%s",
+            call_id,
+            tool_followup_canonical_key,
+        )
         await self._send_response_create(
             websocket,
             response_create_event,
@@ -8936,7 +8995,15 @@ class RealtimeAPI:
         self._track_outgoing_event(function_call_output)
         transport = self._get_or_create_transport()
         await transport.send_json(websocket, function_call_output)
-        response_create_event = {"type": "response.create"}
+        response_create_event, tool_followup_canonical_key = self._build_tool_followup_response_create_event(
+            call_id=action.id,
+            response_create_event={"type": "response.create"},
+        )
+        logger.info(
+            "tool_followup_response_scheduled call_id=%s canonical_key=%s",
+            action.id,
+            tool_followup_canonical_key,
+        )
         await self._send_response_create(websocket, response_create_event, origin="tool_output")
         self._presented_actions.add(action.id)
 
@@ -8976,7 +9043,15 @@ class RealtimeAPI:
         self._track_outgoing_event(function_call_output)
         transport = self._get_or_create_transport()
         await transport.send_json(websocket, function_call_output)
-        response_create_event = {"type": "response.create"}
+        response_create_event, tool_followup_canonical_key = self._build_tool_followup_response_create_event(
+            call_id=action.id,
+            response_create_event={"type": "response.create"},
+        )
+        logger.info(
+            "tool_followup_response_scheduled call_id=%s canonical_key=%s",
+            action.id,
+            tool_followup_canonical_key,
+        )
         await self._send_response_create(websocket, response_create_event, origin="tool_output")
         self.function_call = None
         self.function_call_args = ""
