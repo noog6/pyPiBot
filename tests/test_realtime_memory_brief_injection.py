@@ -220,3 +220,70 @@ def test_server_auto_response_prefers_turn_scoped_hit_after_transition_replaced(
     ]
     assert "preferred editor is Vim" in ws.events[0]["item"]["content"][0]["text"]
     assert len([event for event in ws.events if event["type"] == "response.create"]) == 1
+
+
+def test_upgraded_server_auto_replacement_keeps_preference_context_for_final_response() -> None:
+    api = _make_api_stub()
+    ws = _Ws()
+
+    final_input_event_key = "item_editor"
+    initial_input_event_key = "synthetic_server_auto_1"
+    canonical_key = api._canonical_utterance_key(turn_id="turn_9", input_event_key=final_input_event_key)
+    payload = {
+        "source": "preference_recall",
+        "prompt_note": "Preference recall context for this SAME response: matched stored preference(s). Top recalled value: Vim",
+        "hit": True,
+        "returned_count": 1,
+    }
+    api._pending_preference_memory_context_by_canonical_key = {canonical_key: dict(payload)}
+    api._pending_preference_memory_context_by_turn_id = {"turn_9": dict(payload)}
+
+    api._response_in_flight = True
+    scheduled = asyncio.run(
+        api._send_response_create(
+            ws,
+            {
+                "type": "response.create",
+                "response": {
+                    "metadata": {
+                        "turn_id": "turn_9",
+                        "input_event_key": initial_input_event_key,
+                    }
+                },
+            },
+            origin="server_auto",
+        )
+    )
+
+    assert scheduled is False
+    assert len(api._response_create_queue) == 1
+
+    # Simulate transition replacement dropping the queued server_auto create.
+    api._response_create_queue.clear()
+
+    api._response_in_flight = False
+    sent = asyncio.run(
+        api._send_response_create(
+            ws,
+            {
+                "type": "response.create",
+                "response": {
+                    "metadata": {
+                        "turn_id": "turn_9",
+                        "input_event_key": final_input_event_key,
+                        "canonical_key": canonical_key,
+                    }
+                },
+            },
+            origin="server_auto",
+        )
+    )
+
+    assert sent is True
+    assert [event["type"] for event in ws.events] == [
+        "conversation.item.create",
+        "response.create",
+    ]
+    assert "Vim" in ws.events[0]["item"]["content"][0]["text"]
+    assert ws.events[1]["response"]["metadata"]["canonical_key"] == canonical_key
+    assert len([event for event in ws.events if event["type"] == "response.create"]) == 1
