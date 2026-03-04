@@ -4137,6 +4137,103 @@ class RealtimeAPI:
         canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_input_event_key)
         return event, canonical_key
 
+
+    def _build_preference_recall_followup_event(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str,
+        canonical_key: str,
+    ) -> dict[str, Any]:
+        followup_event: dict[str, Any] = {"type": "response.create"}
+        response_payload = followup_event.setdefault("response", {})
+        metadata = response_payload.setdefault("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+            response_payload["metadata"] = metadata
+        followup_input_event_key = f"{input_event_key}:pref_recall_followup"
+        metadata["turn_id"] = turn_id
+        metadata["input_event_key"] = followup_input_event_key
+        metadata["trigger"] = "preference_recall"
+        metadata["pref_recall_followup"] = "true"
+        metadata["pref_recall_canonical_key"] = canonical_key
+        metadata["consumes_canonical_slot"] = "false"
+        metadata["explicit_multipart"] = "true"
+        return followup_event
+
+    async def _attach_preference_recall_result_to_response(
+        self,
+        *,
+        websocket: Any,
+        turn_id: str,
+        input_event_key: str,
+        query: str,
+        result_payload: dict[str, Any],
+    ) -> None:
+        resolved_input_event_key = str(input_event_key or "").strip() or self._active_input_event_key_for_turn(turn_id)
+        run_id = str(self._current_run_id() or "").strip() or "run-unknown"
+        canonical_key = f"{run_id}:{turn_id}:pref_recall:{resolved_input_event_key or 'unknown'}"
+        memory_cards_text = str(result_payload.get("memory_cards_text", "")).strip()
+        hit = bool(result_payload.get("hit", False))
+        if hit and not memory_cards_text:
+            memory_cards_text = "Relevant memory was retrieved but no card text was provided."
+        if hit:
+            context_text = (
+                "Preference recall context for this turn. Use only this saved memory when answering.\n"
+                f"Query: {query}\n"
+                f"{memory_cards_text}"
+            )
+        else:
+            context_text = (
+                "Preference recall for this turn returned no saved memory.\n"
+                f"Query: {query}\n"
+                "Grounding rule: do not assert a specific preference/fact; explicitly say it is not stored "
+                "and ask the user to share it."
+            )
+
+        note_event = {
+            "type": "conversation.item.create",
+            "item": {
+                "type": "message",
+                "role": "system",
+                "content": [{"type": "input_text", "text": context_text}],
+            },
+        }
+        log_ws_event("Outgoing", note_event)
+        self._track_outgoing_event(note_event, origin="preference_recall")
+        transport = self._get_or_create_transport()
+        await transport.send_json(websocket, note_event)
+
+        base_canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=resolved_input_event_key)
+        response_id = str(getattr(self, "_response_id_by_canonical_key", {}).get(base_canonical_key) or "").strip()
+        logger.info(
+            "pref_recall_attached_to_response response_id=%s canonical_key=%s bytes=%s",
+            response_id or "pending",
+            canonical_key,
+            len(context_text.encode("utf-8")),
+        )
+
+        response_already_created = bool(response_id or base_canonical_key in getattr(self, "_response_created_canonical_keys", set()))
+        if not response_already_created:
+            return
+
+        followup_event = self._build_preference_recall_followup_event(
+            turn_id=turn_id,
+            input_event_key=resolved_input_event_key or "unknown",
+            canonical_key=canonical_key,
+        )
+        followup_sent = await self._send_response_create(
+            websocket,
+            followup_event,
+            origin="preference_recall",
+        )
+        logger.info(
+            "pref_recall_followup_scheduled canonical_key=%s response_id=%s sent=%s",
+            canonical_key,
+            response_id or "unknown",
+            str(bool(followup_sent)).lower(),
+        )
+
     def _response_has_safety_override(self, response_create_event: dict[str, Any]) -> bool:
         metadata = self._extract_response_create_metadata(response_create_event)
         return str(metadata.get("safety_override", "")).strip().lower() in {"true", "1", "yes"}
