@@ -937,6 +937,7 @@ class RealtimeAPI:
         self._preference_recall_locked_input_event_keys: set[str] = set()
         self._preference_recall_followup_enabled = bool(preference_recall_cfg.get("followup_enabled", False))
         self._pending_preference_memory_context_by_canonical_key: dict[str, dict[str, Any]] = {}
+        self._pending_preference_memory_context_by_turn_id: dict[str, dict[str, Any]] = {}
         self._pending_server_auto_input_event_keys: deque[str] = deque(maxlen=64)
         self._active_server_auto_input_event_key: str | None = None
         self._current_input_event_key: str | None = None
@@ -4593,12 +4594,35 @@ class RealtimeAPI:
         input_event_key: str,
         memory_context: dict[str, Any],
     ) -> None:
+        normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
         canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
         store = getattr(self, "_pending_preference_memory_context_by_canonical_key", None)
         if not isinstance(store, dict):
             store = {}
             self._pending_preference_memory_context_by_canonical_key = store
-        store[canonical_key] = dict(memory_context)
+        turn_store = getattr(self, "_pending_preference_memory_context_by_turn_id", None)
+        if not isinstance(turn_store, dict):
+            turn_store = {}
+            self._pending_preference_memory_context_by_turn_id = turn_store
+        payload = dict(memory_context)
+        store[canonical_key] = payload
+        turn_store[normalized_turn_id] = payload
+        prompt_note = str(payload.get("prompt_note") or "").strip()
+        logger.debug(
+            "pref_recall_context_attached key=%s len=%s hit=%s",
+            canonical_key,
+            len(prompt_note),
+            str(bool(payload.get("hit", False))).lower(),
+        )
+
+    def _has_pending_preference_memory_context(self, *, turn_id: str, input_event_key: str) -> bool:
+        canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+        store = getattr(self, "_pending_preference_memory_context_by_canonical_key", None)
+        if isinstance(store, dict) and isinstance(store.get(canonical_key), dict):
+            return True
+        turn_store = getattr(self, "_pending_preference_memory_context_by_turn_id", None)
+        normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
+        return isinstance(turn_store, dict) and isinstance(turn_store.get(normalized_turn_id), dict)
 
     def _consume_pending_preference_memory_context_note(
         self,
@@ -4606,11 +4630,21 @@ class RealtimeAPI:
         turn_id: str,
         input_event_key: str,
     ) -> str | None:
+        normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
         canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
         store = getattr(self, "_pending_preference_memory_context_by_canonical_key", None)
         if not isinstance(store, dict):
-            return None
+            store = {}
+            self._pending_preference_memory_context_by_canonical_key = store
+        turn_store = getattr(self, "_pending_preference_memory_context_by_turn_id", None)
+        if not isinstance(turn_store, dict):
+            turn_store = {}
+            self._pending_preference_memory_context_by_turn_id = turn_store
         payload = store.pop(canonical_key, None)
+        if not isinstance(payload, dict):
+            payload = turn_store.pop(normalized_turn_id, None)
+        else:
+            turn_store.pop(normalized_turn_id, None)
         if not isinstance(payload, dict):
             return None
         prompt_note = str(payload.get("prompt_note") or "").strip()
