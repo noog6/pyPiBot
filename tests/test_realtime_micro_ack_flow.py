@@ -154,6 +154,16 @@ def test_response_audio_delta_cancels_pending_micro_ack() -> None:
     event = {"type": "response.output_audio.delta", "delta": base64.b64encode(b"abc").decode("ascii")}
     asyncio.run(api.handle_event(event, api.websocket))
     assert ("turn-1", "response_started") in api._micro_ack_manager.cancelled
+
+
+def test_append_assistant_reply_text_inserts_separator_between_ack_and_answer() -> None:
+    api = _api_stub()
+
+    api._append_assistant_reply_text("Let me think.")
+    api._append_assistant_reply_text("Here are your saved preferences.")
+
+    assert api.assistant_reply == "Let me think. Here are your saved preferences."
+    assert api._assistant_reply_accum == "Let me think. Here are your saved preferences."
     api.loop.close()
 
 

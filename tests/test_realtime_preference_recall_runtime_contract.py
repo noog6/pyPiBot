@@ -285,6 +285,84 @@ def test_preference_recall_empty_without_trace_logs_trace_unavailable_reason() -
     assert "query_lineage=0:editor|domain_only" in rendered
 
 
+def test_preference_recall_hit_contract_sets_none_reason_and_synthesizes_text() -> None:
+    api = _base_api()
+    api._preference_recall_fallback_query = RealtimeAPI._preference_recall_fallback_query.__get__(api, RealtimeAPI)
+    api._filter_preference_recall_payload_for_user = RealtimeAPI._filter_preference_recall_payload_for_user.__get__(api, RealtimeAPI)
+    recall_fn = AsyncMock(
+        return_value={
+            "memories": [{"content": "User's preferred editor is Vim."}],
+            "memory_cards": [
+                {
+                    "memory": "User's preferred editor is Vim.",
+                    "why_relevant": "It matches your query about 'editor'. Evidence: lexical exact match on 'editor'.",
+                    "confidence": "High",
+                }
+            ],
+            "memory_cards_text": "",
+            "trace": {
+                "retrieval_mode": "lexical",
+                "candidate_counts": {
+                    "lexical_candidates": 2,
+                    "semantic_candidates": 0,
+                    "combined_candidates": 2,
+                },
+            },
+        }
+    )
+
+    payload, handled = asyncio.run(
+        RealtimeAPI._run_preference_recall_with_fallbacks(
+            api,
+            recall_fn=recall_fn,
+            source="input_audio_transcription",
+            resolved_turn_id="turn_2",
+            query="favorite editor",
+        )
+    )
+
+    assert handled is True
+    assert payload["hit"] is True
+    assert payload["empty_reason"] == "none"
+    assert payload["returned_count"] >= 1
+    assert "Relevant memory" in payload["memory_cards_text"]
+
+
+def test_preference_recall_miss_contract_sets_non_none_empty_reason() -> None:
+    api = _base_api()
+    api._preference_recall_fallback_query = RealtimeAPI._preference_recall_fallback_query.__get__(api, RealtimeAPI)
+    api._filter_preference_recall_payload_for_user = RealtimeAPI._filter_preference_recall_payload_for_user.__get__(api, RealtimeAPI)
+    recall_fn = AsyncMock(
+        return_value={
+            "memories": [],
+            "memory_cards": [],
+            "memory_cards_text": "",
+            "trace": {
+                "retrieval_mode": "lexical",
+                "candidate_counts": {
+                    "lexical_candidates": 0,
+                    "semantic_candidates": 0,
+                    "combined_candidates": 0,
+                },
+            },
+        }
+    )
+
+    payload, handled = asyncio.run(
+        RealtimeAPI._run_preference_recall_with_fallbacks(
+            api,
+            recall_fn=recall_fn,
+            source="input_audio_transcription",
+            resolved_turn_id="turn_2",
+            query="favorite editor",
+        )
+    )
+
+    assert handled is True
+    assert payload["hit"] is False
+    assert payload["empty_reason"] != "none"
+
+
 def test_preference_recall_scope_forwarded_to_recall_tool() -> None:
     api = _base_api()
     api._preference_recall_fallback_query = RealtimeAPI._preference_recall_fallback_query.__get__(api, RealtimeAPI)

@@ -1409,8 +1409,7 @@ class RealtimeAPI:
         self._mark_utterance_info_summary(deliverable_seen=True)
         self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
         self._mark_first_assistant_utterance_observed_if_needed(extracted_text)
-        self.assistant_reply += extracted_text
-        self._assistant_reply_accum += extracted_text
+        self._append_assistant_reply_text(extracted_text)
         self.state_manager.update_state(InteractionState.SPEAKING, "text output")
         current_turn_id = self._current_turn_id_or_unknown()
         current_input_event_key = str(getattr(self, "_active_response_input_event_key", "") or "").strip()
@@ -3150,6 +3149,7 @@ class RealtimeAPI:
                 planned_attempts = planned_attempts[: max_attempts - 1]
             planned_attempts.append(strict_variant)
 
+        last_empty_reason = "no_ranked_matches"
         for attempt_index, (candidate_query, variant_class) in enumerate(planned_attempts):
             attempted_variants = planned_attempts[: attempt_index + 1]
             query_lineage = ";".join(
@@ -3173,7 +3173,8 @@ class RealtimeAPI:
             payload_keys = sorted(payload.keys()) if isinstance(payload, dict) else []
             memories = self._preference_recall_memories_from_payload(payload)
             cards = payload.get("memory_cards") if isinstance(payload, dict) else None
-            cards_count = len(cards) if isinstance(cards, list) else 0
+            cards_list = cards if isinstance(cards, list) else []
+            cards_count = len(cards_list)
             trace_present = isinstance(payload.get("trace"), dict) if isinstance(payload, dict) else False
             trace = payload.get("trace") if trace_present else {}
             candidate_counts = trace.get("candidate_counts") if isinstance(trace.get("candidate_counts"), dict) else {}
@@ -3186,7 +3187,21 @@ class RealtimeAPI:
             memory_cards_text = (
                 str(payload.get("memory_cards_text", "")).strip() if isinstance(payload, dict) else ""
             )
-            hit = bool(memory_cards_text) or bool(cards_count) or bool(memories)
+            payload_returned_count = payload.get("returned_count") if isinstance(payload, dict) else None
+            derived_returned_count = len(memories) + cards_count
+            returned_count = payload_returned_count if isinstance(payload_returned_count, int) and payload_returned_count >= 0 else derived_returned_count
+            hit = bool(returned_count > 0 or derived_returned_count > 0)
+
+            if hit and not memory_cards_text:
+                best_memory = ""
+                if cards_list and isinstance(cards_list[0], dict):
+                    best_memory = str(cards_list[0].get("memory", "")).strip()
+                if not best_memory and memories and isinstance(memories[0], dict):
+                    best_memory = str(memories[0].get("content", "")).strip()
+                if best_memory:
+                    memory_cards_text = f'Relevant memory:\n- "{best_memory}"'
+                    payload["memory_cards_text"] = memory_cards_text
+
             empty_reason = "none"
             if not hit:
                 if not payload_keys:
@@ -3199,6 +3214,11 @@ class RealtimeAPI:
                     empty_reason = "filtered_by_card_thresholds"
                 else:
                     empty_reason = "no_ranked_matches"
+            if isinstance(payload, dict):
+                payload["hit"] = hit
+                payload["returned_count"] = returned_count
+                payload["empty_reason"] = empty_reason
+            last_empty_reason = empty_reason
 
             logger.info(
                 "preference_recall_tool_result run_id=%s resolved_turn_id=%s query=%s payload_keys=%s "
@@ -3217,7 +3237,7 @@ class RealtimeAPI:
                 retrieval_backend,
                 ",".join(filters_applied),
                 candidate_counts.get("combined_candidates", candidate_counts.get("lexical_candidates", 0)),
-                len(memories),
+                returned_count,
                 empty_reason,
                 query_lineage,
             )
@@ -3230,8 +3250,6 @@ class RealtimeAPI:
                 hit,
             )
             self._preference_recall_cache[candidate_query] = {"timestamp": time.monotonic(), "payload": payload}
-            cards_list = cards if isinstance(cards, list) else []
-            hit = bool(memory_cards_text) or bool(cards_list) or bool(memories)
             if hit:
                 if attempt_index > 0:
                     logger.info(
@@ -3243,7 +3261,14 @@ class RealtimeAPI:
                         scope,
                     )
                 return payload, True
-        return {"memories": [], "memory_cards": [], "memory_cards_text": ""}, True
+        return {
+            "memories": [],
+            "memory_cards": [],
+            "memory_cards_text": "",
+            "hit": False,
+            "returned_count": 0,
+            "empty_reason": last_empty_reason,
+        }, True
 
     def _is_preference_recall_intent(self, text: str) -> tuple[bool, list[str]]:
         normalized = " ".join((text or "").lower().split())
@@ -3316,6 +3341,20 @@ class RealtimeAPI:
             return text
         normalized_lines = lines[:suffix_start] + [_MEMORY_RECALL_CONCISE_FOLLOWUP]
         return "\n".join(normalized_lines)
+
+    def _append_assistant_reply_text(self, text: str) -> None:
+        """Append assistant text with a minimal boundary separator when needed."""
+
+        segment = str(text or "")
+        if not segment:
+            return
+        prior = str(getattr(self, "_assistant_reply_accum", "") or "")
+        needs_separator = bool(prior) and not prior.endswith((" ", "\n", "\t")) and not segment.startswith((" ", "\n", "\t", ".", ",", "!", "?", ":", ";"))
+        if needs_separator:
+            self.assistant_reply += " "
+            self._assistant_reply_accum += " "
+        self.assistant_reply += segment
+        self._assistant_reply_accum += segment
 
     def _memory_pin_followup_needed(
         self,
@@ -8178,8 +8217,7 @@ class RealtimeAPI:
             self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
             delta = event.get("delta", "")
             self._mark_first_assistant_utterance_observed_if_needed(delta)
-            self.assistant_reply += delta
-            self._assistant_reply_accum += delta
+            self._append_assistant_reply_text(delta)
             self.state_manager.update_state(InteractionState.SPEAKING, "text output")
         elif event_type == "response.output_text.delta":
             if self._is_active_response_guarded():
@@ -8192,8 +8230,7 @@ class RealtimeAPI:
                 len(delta),
             )
             self._mark_first_assistant_utterance_observed_if_needed(delta)
-            self.assistant_reply += delta
-            self._assistant_reply_accum += delta
+            self._append_assistant_reply_text(delta)
             self.state_manager.update_state(InteractionState.SPEAKING, "text output")
         elif event_type in {"response.output_text.done", "response.text.done"}:
             if self._is_active_response_guarded():
@@ -8209,8 +8246,7 @@ class RealtimeAPI:
             self._mark_utterance_info_summary(deliverable_seen=True)
             delta = event.get("delta", "")
             self._mark_first_assistant_utterance_observed_if_needed(delta)
-            self.assistant_reply += delta
-            self._assistant_reply_accum += delta
+            self._append_assistant_reply_text(delta)
         elif event_type == "response.output_audio_transcript.done":
             await self.handle_transcribe_response_done()
             self.state_manager.update_state(
@@ -8235,8 +8271,7 @@ class RealtimeAPI:
                 return
             self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
             self._mark_first_assistant_utterance_observed_if_needed(extracted_text)
-            self.assistant_reply += extracted_text
-            self._assistant_reply_accum += extracted_text
+            self._append_assistant_reply_text(extracted_text)
             self.state_manager.update_state(InteractionState.SPEAKING, "text output")
             current_turn_id = self._current_turn_id_or_unknown()
             current_input_event_key = str(getattr(self, "_current_input_event_key", "") or "").strip()

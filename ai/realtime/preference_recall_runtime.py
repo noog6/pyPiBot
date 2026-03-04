@@ -204,7 +204,22 @@ async def _maybe_handle_preference_recall_intent(controller, text: str, websocke
         memory_cards_text = controller._sanitize_memory_cards_text_for_user(
             str(result_payload.get("memory_cards_text", "")).strip()
         )
-        hit = bool(memory_cards_text) or bool(cards) or bool(memories)
+        derived_returned_count = len(memories) + len(cards)
+        payload_returned_count = result_payload.get("returned_count")
+        returned_count = payload_returned_count if isinstance(payload_returned_count, int) and payload_returned_count >= 0 else derived_returned_count
+        hit = bool(returned_count > 0 or derived_returned_count > 0)
+        if hit and not memory_cards_text:
+            best_memory = ""
+            if cards and isinstance(cards[0], dict):
+                best_memory = str(cards[0].get("memory", "")).strip()
+            if not best_memory and memories and isinstance(memories[0], dict):
+                best_memory = str(memories[0].get("content", "")).strip()
+            if best_memory:
+                memory_cards_text = f'Relevant memory:\n- "{best_memory}"'
+        result_payload["memory_cards_text"] = memory_cards_text
+        result_payload["hit"] = hit
+        result_payload["returned_count"] = returned_count
+        result_payload["empty_reason"] = "none" if hit else str(result_payload.get("empty_reason", "no_ranked_matches") or "no_ranked_matches")
         turn_timestamps["preference_recall_end"] = time.monotonic()
         controller._clear_preference_recall_candidate()
         logger.info(
