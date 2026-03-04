@@ -9088,7 +9088,7 @@ class RealtimeAPI:
             category="rejection",
             action=action,
             staging=staging,
-            include_response_create=True,
+            include_response_create=not include_assistant_message,
         )
         self._presented_actions.discard(action.id)
         self.function_call = None

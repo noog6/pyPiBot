@@ -4,6 +4,7 @@ import asyncio
 import json
 from collections import deque
 
+from ai.governance import ActionPacket
 from ai.realtime.response_create_runtime import ResponseCreateRuntime
 from ai.realtime_api import InteractionState, RealtimeAPI
 from core.logging import logger
@@ -672,3 +673,38 @@ def test_non_tool_response_create_path_still_single_flight_guarded() -> None:
 
     response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
     assert len(response_create_events) == 1
+
+
+def test_reject_tool_call_with_assistant_message_avoids_duplicate_response_create() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_response_turn_id = "turn_reject_1"
+    api._current_input_event_key = "item_user_reject"
+    api._has_active_confirmation_token = lambda: False
+    api._is_awaiting_confirmation_phase = lambda: False
+    api._presented_actions = set()
+
+    action = ActionPacket(
+        id="call_reject_1",
+        tool_name="perform_research",
+        tool_args={"query": "status"},
+        tier=1,
+        what="Research service status",
+        why="Need status for user response",
+        impact="No side effects",
+        rollback="Not applicable",
+        alternatives=["Ask user to retry later"],
+        confidence=0.9,
+        cost="low",
+        risk_flags=[],
+        requires_confirmation=False,
+    )
+
+    asyncio.run(api._reject_tool_call(action, "invalid_arguments", ws, status="invalid_arguments"))
+
+    response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert len(response_create_events) == 1
+    metadata = ((response_create_events[0].get("response") or {}).get("metadata") or {})
+    assert metadata.get("origin") == "assistant_message"
