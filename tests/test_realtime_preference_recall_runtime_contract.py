@@ -500,18 +500,70 @@ def test_preference_recall_query_lineage_tracks_variants_and_empty_reason() -> N
     assert "query_lineage=0:editor|domain_only" in rendered
     assert "query_lineage=0:editor|domain_only;1:preferred editor vim|canonical" in rendered
 
-def test_preference_recall_does_not_block_response_when_audio_started() -> None:
+def test_preference_recall_sends_grounded_followup_when_hit() -> None:
     api = _base_api()
+    api._current_input_event_key = "evt_1"
     api._is_preference_recall_intent = Mock(return_value=(True, ["editor"]))
     api._build_preference_recall_query = Mock(return_value="editor")
     api._mark_preference_recall_candidate = Mock()
     api._clear_preference_recall_candidate = Mock()
-    api._run_preference_recall_with_fallbacks = AsyncMock(return_value=({"memories": [], "memory_cards": [], "memory_cards_text": ""}, True))
+    api._run_preference_recall_with_fallbacks = AsyncMock(
+        return_value=(
+            {
+                "memories": [{"content": "User's favorite editor is Vim."}],
+                "memory_cards": [],
+                "memory_cards_text": "Relevant memory:\n- \"User's favorite editor is Vim.\"",
+            },
+            True,
+        )
+    )
+    api._suppress_preference_recall_server_auto_response = AsyncMock()
+    api._canonical_utterance_key = lambda *, turn_id, input_event_key: f"run-test:{turn_id}:{input_event_key}"
+    api._preference_recall_locked_input_event_keys = set()
+    sent_messages: list[tuple[str, dict[str, str]]] = []
+
+    async def _fake_send(message: str, _ws, **kwargs):
+        sent_messages.append((message, kwargs.get("response_metadata", {})))
+
+    api.send_assistant_message = _fake_send
 
     with patch("ai.realtime.preference_recall_runtime.function_map", {"recall_memories": AsyncMock()}):
         handled = asyncio.run(api._maybe_handle_preference_recall_intent("remember my editor", object(), source="input_audio_transcription"))
 
-    assert handled is False
+    assert handled is True
+    assert api._suppress_preference_recall_server_auto_response.await_count == 1
+    assert sent_messages
+    assert "Vim" in sent_messages[0][0]
+    assert sent_messages[0][1]["trigger"] == "preference_recall"
+    assert sent_messages[0][1]["input_event_key"] == "pref_recall:evt_1"
+    assert "evt_1" not in api._preference_recall_locked_input_event_keys
+
+
+def test_preference_recall_empty_followup_does_not_hallucinate() -> None:
+    api = _base_api()
+    api._current_input_event_key = "evt_2"
+    api._is_preference_recall_intent = Mock(return_value=(True, ["pants"]))
+    api._build_preference_recall_query = Mock(return_value="pants color")
+    api._mark_preference_recall_candidate = Mock()
+    api._clear_preference_recall_candidate = Mock()
+    api._run_preference_recall_with_fallbacks = AsyncMock(return_value=({"memories": [], "memory_cards": [], "memory_cards_text": ""}, True))
+    api._suppress_preference_recall_server_auto_response = AsyncMock()
+    api._canonical_utterance_key = lambda *, turn_id, input_event_key: f"run-test:{turn_id}:{input_event_key}"
+    api._preference_recall_locked_input_event_keys = set()
+    sent_messages: list[str] = []
+
+    async def _fake_send(message: str, _ws, **_kwargs):
+        sent_messages.append(message)
+
+    api.send_assistant_message = _fake_send
+
+    with patch("ai.realtime.preference_recall_runtime.function_map", {"recall_memories": AsyncMock()}):
+        handled = asyncio.run(api._maybe_handle_preference_recall_intent("what color are my pants", object(), source="input_audio_transcription"))
+
+    assert handled is True
+    assert sent_messages
+    assert "don't have" in sent_messages[0].lower()
+    assert "gray" not in sent_messages[0].lower()
 
 
 def test_deliverable_seen_true_for_tool_output_turn() -> None:
