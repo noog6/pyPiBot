@@ -4614,24 +4614,25 @@ class RealtimeAPI:
             len(prompt_note),
             str(bool(payload.get("hit", False))).lower(),
         )
+        logger.debug(
+            "pref_recall_context_attached_debug run_id=%s turn_id=%s stored_under=%s store_scope=%s text_len=%s hit=%s returned_count=%s",
+            self._current_run_id() or "",
+            normalized_turn_id,
+            canonical_key,
+            "turn+key",
+            len(prompt_note),
+            str(bool(payload.get("hit", False))).lower(),
+            int(payload.get("returned_count") or 0),
+        )
 
-    def _has_pending_preference_memory_context(self, *, turn_id: str, input_event_key: str) -> bool:
-        canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
-        store = getattr(self, "_pending_preference_memory_context_by_canonical_key", None)
-        if isinstance(store, dict) and isinstance(store.get(canonical_key), dict):
-            return True
-        turn_store = getattr(self, "_pending_preference_memory_context_by_turn_id", None)
-        normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
-        return isinstance(turn_store, dict) and isinstance(turn_store.get(normalized_turn_id), dict)
-
-    def _consume_pending_preference_memory_context_note(
+    def _resolve_pending_preference_memory_context_payload(
         self,
         *,
         turn_id: str,
         input_event_key: str,
-    ) -> str | None:
+        consume: bool,
+    ) -> tuple[dict[str, Any] | None, str]:
         normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
-        canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
         store = getattr(self, "_pending_preference_memory_context_by_canonical_key", None)
         if not isinstance(store, dict):
             store = {}
@@ -4640,11 +4641,65 @@ class RealtimeAPI:
         if not isinstance(turn_store, dict):
             turn_store = {}
             self._pending_preference_memory_context_by_turn_id = turn_store
-        payload = store.pop(canonical_key, None)
-        if not isinstance(payload, dict):
-            payload = turn_store.pop(normalized_turn_id, None)
-        else:
+
+        candidate_keys: list[str] = []
+
+        def _add_candidate(key: str | None) -> None:
+            canonical = self._canonical_utterance_key(turn_id=normalized_turn_id, input_event_key=key)
+            if canonical not in candidate_keys:
+                candidate_keys.append(canonical)
+
+        _add_candidate(input_event_key)
+        _add_candidate(self._active_input_event_key_for_turn(normalized_turn_id))
+        _add_candidate(str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip())
+        _add_candidate(str(getattr(self, "_current_input_event_key", "") or "").strip())
+
+        payload_candidates: list[tuple[str, dict[str, Any], str]] = []
+        for candidate_key in candidate_keys:
+            payload = store.get(candidate_key)
+            if isinstance(payload, dict):
+                payload_candidates.append((candidate_key, payload, "key"))
+        turn_payload = turn_store.get(normalized_turn_id)
+        if isinstance(turn_payload, dict):
+            payload_candidates.append((normalized_turn_id, turn_payload, "turn"))
+
+        if not payload_candidates:
+            return None, ""
+
+        def _rank(item: tuple[str, dict[str, Any], str]) -> tuple[int, int, int]:
+            payload = item[1]
+            return (
+                int(bool(payload.get("hit", False))),
+                int(payload.get("returned_count") or 0),
+                len(str(payload.get("prompt_note") or "")),
+            )
+
+        chosen_key, chosen_payload, chosen_scope = max(payload_candidates, key=_rank)
+        if consume:
+            for candidate_key in candidate_keys:
+                store.pop(candidate_key, None)
             turn_store.pop(normalized_turn_id, None)
+        return dict(chosen_payload), f"{chosen_scope}:{chosen_key}"
+
+    def _has_pending_preference_memory_context(self, *, turn_id: str, input_event_key: str) -> bool:
+        payload, _ = self._resolve_pending_preference_memory_context_payload(
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            consume=False,
+        )
+        return isinstance(payload, dict)
+
+    def _consume_pending_preference_memory_context_note(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str,
+    ) -> str | None:
+        payload, _ = self._resolve_pending_preference_memory_context_payload(
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            consume=True,
+        )
         if not isinstance(payload, dict):
             return None
         prompt_note = str(payload.get("prompt_note") or "").strip()

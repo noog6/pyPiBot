@@ -443,6 +443,27 @@ class ResponseCreateRuntime:
             canonical_key = resolved_context.canonical_key
 
         pref_len = len(str(preference_note or ""))
+        compile_keys_considered = [
+            api._canonical_utterance_key(turn_id=turn_id, input_event_key=current_input_event_key),
+            api._canonical_utterance_key(turn_id=turn_id, input_event_key=api._active_input_event_key_for_turn(turn_id)),
+            api._canonical_utterance_key(turn_id=turn_id, input_event_key=str(getattr(api, "_active_server_auto_input_event_key", "") or "").strip()),
+        ]
+        deduped_compile_keys: list[str] = []
+        for key in compile_keys_considered:
+            if key not in deduped_compile_keys:
+                deduped_compile_keys.append(key)
+        logger.debug(
+            "response_prompt_compile_trace response_id=%s run_id=%s turn_id=%s origin=%s input_event_key=%s compile_keys_considered=%s pref_recall_found=%s pref_key_used=%s pref_len=%s",
+            str(getattr(api, "_active_response_id", "") or ""),
+            api._current_run_id() or "",
+            turn_id,
+            origin,
+            current_input_event_key or "unknown",
+            deduped_compile_keys,
+            str(pref_len > 0).lower(),
+            canonical_key if pref_len > 0 else "",
+            pref_len,
+        )
         logger.debug(
             "response_prompt_compiled canonical_key=%s includes_pref_recall=%s pref_len=%s",
             canonical_key,
@@ -450,6 +471,14 @@ class ResponseCreateRuntime:
             pref_len,
         )
         if pref_len == 0 and had_pending_preference_context:
+            logger.debug(
+                "response_prompt_compile_missing_pref_recall response_id=%s run_id=%s turn_id=%s origin=%s input_event_key=%s reason=no_alias",
+                str(getattr(api, "_active_response_id", "") or ""),
+                api._current_run_id() or "",
+                turn_id,
+                origin,
+                current_input_event_key or "unknown",
+            )
             logger.debug(
                 "pref_recall_excluded canonical_key=%s reason=missing_prompt_note",
                 canonical_key,
