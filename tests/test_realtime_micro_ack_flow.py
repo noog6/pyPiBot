@@ -167,6 +167,17 @@ def test_append_assistant_reply_text_inserts_separator_between_ack_and_answer() 
     api.loop.close()
 
 
+def test_append_assistant_reply_text_can_preserve_streaming_subword_chunks() -> None:
+    api = _api_stub()
+
+    api._append_assistant_reply_text("Hel", allow_separator=False)
+    api._append_assistant_reply_text("lo", allow_separator=False)
+
+    assert api.assistant_reply == "Hello"
+    assert api._assistant_reply_accum == "Hello"
+    api.loop.close()
+
+
 def test_send_response_create_does_not_schedule_micro_ack_while_deferred() -> None:
     api = _api_stub()
     api._audio_playback_busy = True

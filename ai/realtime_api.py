@@ -3342,14 +3342,19 @@ class RealtimeAPI:
         normalized_lines = lines[:suffix_start] + [_MEMORY_RECALL_CONCISE_FOLLOWUP]
         return "\n".join(normalized_lines)
 
-    def _append_assistant_reply_text(self, text: str) -> None:
-        """Append assistant text with a minimal boundary separator when needed."""
+    def _append_assistant_reply_text(self, text: str, *, allow_separator: bool = True) -> None:
+        """Append assistant text while optionally inserting a boundary separator."""
 
         segment = str(text or "")
         if not segment:
             return
         prior = str(getattr(self, "_assistant_reply_accum", "") or "")
-        needs_separator = bool(prior) and not prior.endswith((" ", "\n", "\t")) and not segment.startswith((" ", "\n", "\t", ".", ",", "!", "?", ":", ";"))
+        needs_separator = (
+            allow_separator
+            and bool(prior)
+            and not prior.endswith((" ", "\n", "\t"))
+            and not segment.startswith((" ", "\n", "\t", ".", ",", "!", "?", ":", ";"))
+        )
         if needs_separator:
             self.assistant_reply += " "
             self._assistant_reply_accum += " "
@@ -8217,7 +8222,7 @@ class RealtimeAPI:
             self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
             delta = event.get("delta", "")
             self._mark_first_assistant_utterance_observed_if_needed(delta)
-            self._append_assistant_reply_text(delta)
+            self._append_assistant_reply_text(delta, allow_separator=False)
             self.state_manager.update_state(InteractionState.SPEAKING, "text output")
         elif event_type == "response.output_text.delta":
             if self._is_active_response_guarded():
@@ -8230,7 +8235,7 @@ class RealtimeAPI:
                 len(delta),
             )
             self._mark_first_assistant_utterance_observed_if_needed(delta)
-            self._append_assistant_reply_text(delta)
+            self._append_assistant_reply_text(delta, allow_separator=False)
             self.state_manager.update_state(InteractionState.SPEAKING, "text output")
         elif event_type in {"response.output_text.done", "response.text.done"}:
             if self._is_active_response_guarded():
@@ -8246,7 +8251,7 @@ class RealtimeAPI:
             self._mark_utterance_info_summary(deliverable_seen=True)
             delta = event.get("delta", "")
             self._mark_first_assistant_utterance_observed_if_needed(delta)
-            self._append_assistant_reply_text(delta)
+            self._append_assistant_reply_text(delta, allow_separator=False)
         elif event_type == "response.output_audio_transcript.done":
             await self.handle_transcribe_response_done()
             self.state_manager.update_state(
