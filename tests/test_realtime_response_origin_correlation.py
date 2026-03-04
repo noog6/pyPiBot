@@ -12,7 +12,7 @@ if "audioop" not in sys.modules:
     sys.modules["audioop"] = types.ModuleType("audioop")
 
 from ai.orchestration import OrchestrationPhase
-from ai.realtime_api import RealtimeAPI
+from ai.realtime_api import RealtimeAPI, parse_rate_limits
 
 
 class _OrchestrationState:
@@ -48,6 +48,15 @@ class _MemoryManager:
 
 def _build_api() -> RealtimeAPI:
     api = RealtimeAPI.__new__(RealtimeAPI)
+
+    class _ConfirmationRuntime:
+        async def maybe_handle_confirmation_decision_timeout(self, *_args, **_kwargs) -> bool:
+            return False
+
+        def mark_confirmation_activity(self, *_args, **_kwargs) -> None:
+            return None
+
+    api._confirmation_runtime = _ConfirmationRuntime()
     api._pending_response_create_origins = deque(maxlen=64)
     api._last_outgoing_event_type = None
     api._active_response_id = None
@@ -78,6 +87,52 @@ def _build_api() -> RealtimeAPI:
     )()
     return api
 
+
+
+
+def test_parse_rate_limits_parses_expected_buckets() -> None:
+    rl_map, meta = parse_rate_limits(
+        {
+            "rate_limits": [
+                {"name": "requests", "remaining": 9},
+                {"name": "tokens", "remaining": 99},
+            ]
+        }
+    )
+
+    assert set(rl_map.keys()) == {"requests", "tokens"}
+    assert meta["present_names"] == ["requests", "tokens"]
+    assert meta["unknown_names"] == []
+    assert meta["entry_count"] == 2
+    assert meta["malformed_entry_count"] == 0
+
+
+def test_parse_rate_limits_normalizes_name_variants() -> None:
+    rl_map, meta = parse_rate_limits(
+        {"rate_limits": [{"name": " Requests ", "remaining": 9}, {"name": "TOKENS"}]}
+    )
+
+    assert set(rl_map.keys()) == {"requests", "tokens"}
+    assert meta["present_names"] == ["requests", "tokens"]
+
+
+def test_parse_rate_limits_handles_non_list_and_missing_names() -> None:
+    rl_map, meta = parse_rate_limits({"rate_limits": None})
+
+    assert rl_map == {}
+    assert meta["rate_limits_is_list"] is False
+
+    rl_map, meta = parse_rate_limits({"rate_limits": [{"remaining": 1}, "oops", {}]})
+    assert rl_map == {}
+    assert meta["entry_count"] == 3
+    assert meta["malformed_entry_count"] == 3
+
+
+def test_parse_rate_limits_tracks_unknown_bucket_names() -> None:
+    rl_map, meta = parse_rate_limits({"rate_limits": [{"name": "compute"}, {"name": "tokens"}]})
+
+    assert set(rl_map.keys()) == {"tokens"}
+    assert meta["unknown_names"] == ["compute"]
 
 def test_response_created_origin_correlation_distinguishes_tool_and_server_auto(monkeypatch) -> None:
     api = _build_api()
@@ -226,7 +281,7 @@ def test_response_created_from_pending_action_with_server_auto_keeps_awaiting_ph
     assert "response.created consumed by confirmation flow; origin=server_auto" in logs
 
 
-def test_rate_limits_updated_tokens_only_steady_payload_logs_info_and_throttled_warning(
+def test_rate_limits_updated_tokens_only_steady_payload_logs_info_without_early_warning(
     monkeypatch,
 ) -> None:
     api = _build_api()
@@ -258,14 +313,11 @@ def test_rate_limits_updated_tokens_only_steady_payload_logs_info_and_throttled_
     asyncio.run(api.handle_event(event, websocket=None))
     asyncio.run(api.handle_event(event, websocket=None))
 
-    assert warning_logs[-1] == (
-        "Realtime API requests bucket missing for 3 consecutive rate_limits.updated events "
-        "(session_id=sess-test)"
-    )
+    assert warning_logs == []
     assert (
         info_logs[-1]
         == "Rate limits: requests_bucket=missing | requests n/a/n/a reset=n/a | "
-        "tokens 995/1000 reset=n/a"
+        "tokens 995/1000 reset=n/a | present_names=['tokens'] unknown_names=[]"
     )
 
 
@@ -297,7 +349,7 @@ def test_rate_limits_updated_missing_requests_does_not_suffix_na_reset(monkeypat
     assert "n/as" not in info_logs[-1]
 
 
-def test_rate_limits_updated_empty_payload_warns_once_for_stable_omission(monkeypatch) -> None:
+def test_rate_limits_updated_empty_payload_warns_for_malformed_signal(monkeypatch) -> None:
     api = _build_api()
     warning_logs: list[str] = []
 
@@ -312,8 +364,36 @@ def test_rate_limits_updated_empty_payload_warns_once_for_stable_omission(monkey
     asyncio.run(api.handle_event(event, websocket=None))
 
     assert warning_logs == [
-        "Realtime API rate_limits.updated missing expected bucket(s): requests, tokens"
+        "Realtime API rate_limits.updated missing expected bucket(s): requests, tokens",
+        "Realtime API requests bucket missing for 1 consecutive rate_limits.updated events (session_id=sess-test)",
     ]
+
+
+def test_rate_limits_updated_missing_requests_diagnostic_respects_cooldown(monkeypatch) -> None:
+    api = _build_api()
+    info_logs: list[str] = []
+
+    monkeypatch.setattr(
+        "ai.realtime_api.logger.info",
+        lambda message, *args: info_logs.append(message % args),
+    )
+
+    event = {
+        "type": "rate_limits.updated",
+        "event_id": "evt_1",
+        "rate_limits": [{"name": "tokens", "remaining": 7, "limit": 10, "reset_seconds": 1}],
+    }
+
+    asyncio.run(api.handle_event(event, websocket=None))
+    asyncio.run(api.handle_event(event, websocket=None))
+    asyncio.run(api.handle_event(event, websocket=None))
+
+    diagnostic_logs = [
+        line for line in info_logs if line.startswith("Rate limits diagnostics (requests missing):")
+    ]
+    assert len(diagnostic_logs) == 1
+    assert "event_id=evt_1" in diagnostic_logs[0]
+    assert "present_names=['tokens']" in diagnostic_logs[0]
 
 
 def test_rate_limits_updated_warns_when_bucket_disappears_mid_session(monkeypatch) -> None:
@@ -344,7 +424,8 @@ def test_rate_limits_updated_warns_when_bucket_disappears_mid_session(monkeypatc
     asyncio.run(api.handle_event(tokens_only_event, websocket=None))
 
     assert warning_logs == [
-        "Realtime API rate_limits.updated missing expected bucket(s): requests"
+        "Realtime API rate_limits.updated missing expected bucket(s): requests",
+        "Realtime API requests bucket missing for 1 consecutive rate_limits.updated events (session_id=sess-test)",
     ]
 
 
