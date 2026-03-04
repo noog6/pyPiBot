@@ -75,6 +75,15 @@ def _build_api() -> RealtimeAPI:
     api.state_manager = _StateManager()
     api.mic = _Mic()
     api._memory_manager = _MemoryManager()
+    api.rate_limits = None
+    api.rate_limits_supports_tokens = False
+    api.rate_limits_supports_requests = False
+    api.rate_limits_last_present_names = set()
+    api.rate_limits_last_event_id = ""
+    api._rate_limits_regression_missing_counts = {"tokens": 0, "requests": 0}
+    api._rate_limits_strict = False
+    api._rate_limits_regression_warning_threshold = 3
+    api._rate_limits_debug_samples = False
     api._input_audio_events = type(
         "_InputAudioEvents",
         (),
@@ -104,7 +113,7 @@ def test_parse_rate_limits_parses_expected_buckets() -> None:
     assert meta["present_names"] == ["requests", "tokens"]
     assert meta["unknown_names"] == []
     assert meta["entry_count"] == 2
-    assert meta["malformed_entry_count"] == 0
+    assert meta["malformed_count"] == 0
 
 
 def test_parse_rate_limits_normalizes_name_variants() -> None:
@@ -125,7 +134,7 @@ def test_parse_rate_limits_handles_non_list_and_missing_names() -> None:
     rl_map, meta = parse_rate_limits({"rate_limits": [{"remaining": 1}, "oops", {}]})
     assert rl_map == {}
     assert meta["entry_count"] == 3
-    assert meta["malformed_entry_count"] == 3
+    assert meta["malformed_count"] == 3
 
 
 def test_parse_rate_limits_tracks_unknown_bucket_names() -> None:
@@ -310,46 +319,74 @@ def test_rate_limits_updated_tokens_only_steady_payload_logs_info_without_early_
     }
 
     asyncio.run(api.handle_event(event, websocket=None))
-    asyncio.run(api.handle_event(event, websocket=None))
-    asyncio.run(api.handle_event(event, websocket=None))
 
     assert warning_logs == []
-    assert (
-        info_logs[-1]
-        == "Rate limits: requests_bucket=missing | requests n/a/n/a reset=n/a | "
-        "tokens 995/1000 reset=n/a | present_names=['tokens'] unknown_names=[]"
-    )
+    assert "present_names=['tokens']" in info_logs[-1]
+    assert "tokens 995/1000 reset=n/a" in info_logs[-1]
+    assert api.rate_limits_supports_tokens is True
+    assert api.rate_limits_supports_requests is False
 
 
-def test_rate_limits_updated_missing_requests_does_not_suffix_na_reset(monkeypatch) -> None:
+def test_rate_limits_updated_requests_only_logs_info_without_warning(monkeypatch) -> None:
     api = _build_api()
     info_logs: list[str] = []
+    warning_logs: list[str] = []
 
     monkeypatch.setattr(
         "ai.realtime_api.logger.info",
         lambda message, *args: info_logs.append(message % args),
     )
+    monkeypatch.setattr(
+        "ai.realtime_api.logger.warning",
+        lambda message, *args: warning_logs.append(message % args),
+    )
+
+    event = {
+        "type": "rate_limits.updated",
+        "rate_limits": [{"name": "requests", "remaining": 9, "limit": 10, "reset_seconds": 1}],
+    }
+
+    asyncio.run(api.handle_event(event, websocket=None))
+
+    assert warning_logs == []
+    assert "present_names=['requests']" in info_logs[-1]
+    assert "requests 9/10 reset=1s" in info_logs[-1]
+    assert api.rate_limits_supports_requests is True
+
+
+def test_rate_limits_updated_both_buckets_logs_info_without_warning(monkeypatch) -> None:
+    api = _build_api()
+    info_logs: list[str] = []
+    warning_logs: list[str] = []
+
+    monkeypatch.setattr(
+        "ai.realtime_api.logger.info",
+        lambda message, *args: info_logs.append(message % args),
+    )
+    monkeypatch.setattr(
+        "ai.realtime_api.logger.warning",
+        lambda message, *args: warning_logs.append(message % args),
+    )
 
     event = {
         "type": "rate_limits.updated",
         "rate_limits": [
-            {
-                "name": "tokens",
-                "remaining": 995,
-                "limit": 1000,
-                "reset_seconds": None,
-            }
+            {"name": "requests", "remaining": 9, "limit": 10, "reset_seconds": 1},
+            {"name": "tokens", "remaining": 995, "limit": 1000, "reset_seconds": 1},
         ],
     }
 
     asyncio.run(api.handle_event(event, websocket=None))
 
-    assert "requests_bucket=missing" in info_logs[-1]
-    assert "reset=n/a" in info_logs[-1]
-    assert "n/as" not in info_logs[-1]
+    assert warning_logs == []
+    assert "present_names=['requests', 'tokens']" in info_logs[-1]
+    assert "requests 9/10 reset=1s" in info_logs[-1]
+    assert "tokens 995/1000 reset=1s" in info_logs[-1]
+    assert api.rate_limits_supports_requests is True
+    assert api.rate_limits_supports_tokens is True
 
 
-def test_rate_limits_updated_empty_payload_warns_for_malformed_signal(monkeypatch) -> None:
+def test_rate_limits_updated_empty_payload_warns_for_suspicious_signal(monkeypatch) -> None:
     api = _build_api()
     warning_logs: list[str] = []
 
@@ -361,44 +398,34 @@ def test_rate_limits_updated_empty_payload_warns_for_malformed_signal(monkeypatc
     event = {"type": "rate_limits.updated", "rate_limits": []}
 
     asyncio.run(api.handle_event(event, websocket=None))
-    asyncio.run(api.handle_event(event, websocket=None))
 
     assert warning_logs == [
-        "Realtime API rate_limits.updated missing expected bucket(s): requests, tokens",
-        "Realtime API requests bucket missing for 1 consecutive rate_limits.updated events (session_id=sess-test)",
+        "Realtime API rate_limits.updated has no buckets: event_id=unknown entry_count=0 "
+        "malformed_count=0 unknown_names=[]"
     ]
 
 
-def test_rate_limits_updated_missing_requests_diagnostic_respects_cooldown(monkeypatch) -> None:
-    api = _build_api()
-    info_logs: list[str] = []
-
-    monkeypatch.setattr(
-        "ai.realtime_api.logger.info",
-        lambda message, *args: info_logs.append(message % args),
-    )
-
-    event = {
-        "type": "rate_limits.updated",
-        "event_id": "evt_1",
-        "rate_limits": [{"name": "tokens", "remaining": 7, "limit": 10, "reset_seconds": 1}],
-    }
-
-    asyncio.run(api.handle_event(event, websocket=None))
-    asyncio.run(api.handle_event(event, websocket=None))
-    asyncio.run(api.handle_event(event, websocket=None))
-
-    diagnostic_logs = [
-        line for line in info_logs if line.startswith("Rate limits diagnostics (requests missing):")
-    ]
-    assert len(diagnostic_logs) == 1
-    assert "event_id=evt_1" in diagnostic_logs[0]
-    assert "present_names=['tokens']" in diagnostic_logs[0]
-
-
-def test_rate_limits_updated_warns_when_bucket_disappears_mid_session(monkeypatch) -> None:
+def test_rate_limits_updated_missing_rate_limits_field_warns(monkeypatch) -> None:
     api = _build_api()
     warning_logs: list[str] = []
+
+    monkeypatch.setattr(
+        "ai.realtime_api.logger.warning",
+        lambda message, *args: warning_logs.append(message % args),
+    )
+
+    asyncio.run(api.handle_event({"type": "rate_limits.updated"}, websocket=None))
+
+    assert warning_logs == [
+        "Realtime API rate_limits.updated has no buckets: event_id=unknown entry_count=0 "
+        "malformed_count=0 unknown_names=[]"
+    ]
+
+
+def test_rate_limits_updated_missing_requests_three_updates_strict_false_no_warning(monkeypatch) -> None:
+    api = _build_api()
+    warning_logs: list[str] = []
+    api._rate_limits_regression_warning_threshold = 3
 
     monkeypatch.setattr(
         "ai.realtime_api.logger.warning",
@@ -408,25 +435,52 @@ def test_rate_limits_updated_warns_when_bucket_disappears_mid_session(monkeypatc
     baseline_event = {
         "type": "rate_limits.updated",
         "rate_limits": [
-            {"name": "requests", "remaining": 99, "limit": 100, "reset_seconds": 1},
+            {"name": "requests", "remaining": 9, "limit": 10, "reset_seconds": 1},
             {"name": "tokens", "remaining": 995, "limit": 1000, "reset_seconds": 1},
         ],
     }
     tokens_only_event = {
         "type": "rate_limits.updated",
-        "rate_limits": [
-            {"name": "tokens", "remaining": 990, "limit": 1000, "reset_seconds": 1}
-        ],
+        "rate_limits": [{"name": "tokens", "remaining": 990, "limit": 1000, "reset_seconds": 1}],
     }
 
     asyncio.run(api.handle_event(baseline_event, websocket=None))
     asyncio.run(api.handle_event(tokens_only_event, websocket=None))
     asyncio.run(api.handle_event(tokens_only_event, websocket=None))
 
-    assert warning_logs == [
-        "Realtime API rate_limits.updated missing expected bucket(s): requests",
-        "Realtime API requests bucket missing for 1 consecutive rate_limits.updated events (session_id=sess-test)",
-    ]
+    assert warning_logs == []
+
+
+def test_rate_limits_updated_missing_requests_three_updates_strict_true_warns(monkeypatch) -> None:
+    api = _build_api()
+    warning_logs: list[str] = []
+    api._rate_limits_strict = True
+
+    monkeypatch.setattr(
+        "ai.realtime_api.logger.warning",
+        lambda message, *args: warning_logs.append(message % args),
+    )
+
+    baseline_event = {
+        "type": "rate_limits.updated",
+        "rate_limits": [
+            {"name": "requests", "remaining": 9, "limit": 10, "reset_seconds": 1},
+            {"name": "tokens", "remaining": 995, "limit": 1000, "reset_seconds": 1},
+        ],
+    }
+    tokens_only_event = {
+        "type": "rate_limits.updated",
+        "rate_limits": [{"name": "tokens", "remaining": 990, "limit": 1000, "reset_seconds": 1}],
+    }
+
+    asyncio.run(api.handle_event(baseline_event, websocket=None))
+    asyncio.run(api.handle_event(tokens_only_event, websocket=None))
+    asyncio.run(api.handle_event(tokens_only_event, websocket=None))
+    asyncio.run(api.handle_event(tokens_only_event, websocket=None))
+
+    regression_warnings = [line for line in warning_logs if "regression: bucket=requests" in line]
+    assert len(regression_warnings) == 1
+    assert "missing_count=1" in regression_warnings[0]
 
 
 def test_resolve_response_create_turn_id_keeps_micro_ack_turn_id() -> None:

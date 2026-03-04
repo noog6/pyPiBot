@@ -437,20 +437,38 @@ def _format_rate_limit_duration(value: Any, *, none_token: str = "n/a") -> str:
 
 
 def parse_rate_limits(event: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
-    """Parse and normalize realtime API rate_limit buckets from an event payload."""
+    """Parse and normalize realtime API rate_limit buckets from an event payload.
 
-    raw_rate_limits = event.get("rate_limits", [])
+    Buckets are optional; absence is treated as normal unless payloads are malformed
+    or regressions persist based on session policy.
+    """
+
+    raw_rate_limits = event.get("rate_limits")
+
+    def _redact_sample_entry(entry: Any) -> Any:
+        if not isinstance(entry, dict):
+            return {"type": type(entry).__name__}
+        return {
+            "name": entry.get("name"),
+            "remaining": entry.get("remaining"),
+            "limit": entry.get("limit"),
+            "reset_seconds": entry.get("reset_seconds"),
+        }
+
     meta: dict[str, Any] = {
+        "event_id": event.get("event_id"),
         "present_names": [],
         "unknown_names": [],
         "entry_count": 0,
-        "malformed_entry_count": 0,
+        "malformed_count": 0,
         "rate_limits_is_list": isinstance(raw_rate_limits, list),
+        "sample_entries": [],
     }
     if not isinstance(raw_rate_limits, list):
         return {}, meta
 
     meta["entry_count"] = len(raw_rate_limits)
+    meta["sample_entries"] = [_redact_sample_entry(entry) for entry in raw_rate_limits[:2]]
     rl_map: dict[str, dict[str, Any]] = {}
     present_names: set[str] = set()
     unknown_names: set[str] = set()
@@ -458,11 +476,12 @@ def parse_rate_limits(event: dict[str, Any]) -> tuple[dict[str, dict[str, Any]],
 
     for entry in raw_rate_limits:
         if not isinstance(entry, dict):
-            meta["malformed_entry_count"] += 1
+            meta["malformed_count"] += 1
             continue
         name = str(entry.get("name", "")).strip().lower()
         if not name:
-            meta["malformed_entry_count"] += 1
+            meta["malformed_count"] += 1
+            unknown_names.add("<missing>")
             continue
         present_names.add(name)
         if name in allowed_names:
@@ -594,8 +613,14 @@ class RealtimeAPI:
         # Tracks whether to start mic receiving on the first audio delta for the current response.
         self._mic_receive_on_first_audio = False
         self.rate_limits: dict[str, Any] | None = None
-        self._warned_missing_rate_limit_buckets: set[str] = set()
-        self._last_rate_limit_present_buckets: set[str] = set()
+        self.rate_limits_supports_tokens = False
+        self.rate_limits_supports_requests = False
+        self.rate_limits_last_present_names: set[str] = set()
+        self.rate_limits_last_event_id = ""
+        self._rate_limits_regression_missing_counts: dict[str, int] = {
+            "tokens": 0,
+            "requests": 0,
+        }
         self.response_start_time: float | None = None
         self.websocket = None
         self.profile_manager = ProfileManager.get_instance()
@@ -694,6 +719,13 @@ class RealtimeAPI:
         self._awaiting_confirmation_completion = False
         self._approval_timeout_s = float(config.get("approval_timeout_s", 30.0))
         realtime_cfg = config.get("realtime") or {}
+        rate_limits_cfg = realtime_cfg.get("rate_limits") or {}
+        self._rate_limits_strict = bool(rate_limits_cfg.get("strict", False))
+        self._rate_limits_regression_warning_threshold = max(
+            1,
+            int(rate_limits_cfg.get("regression_warning_threshold", 3)),
+        )
+        self._rate_limits_debug_samples = bool(rate_limits_cfg.get("debug_samples", False))
         self._confirmation_awaiting_decision_timeout_s = float(
             realtime_cfg.get("confirmation_awaiting_decision_timeout_s", 20.0)
         )
@@ -823,12 +855,6 @@ class RealtimeAPI:
         self._session_reconnects = 0
         self._session_failures = 0
         self._session_connected = False
-        self._missing_requests_bucket_warning_interval = 3
-        self._missing_requests_bucket_warning_threshold = 10
-        self._missing_requests_bucket_consecutive_updates = 0
-        self._missing_requests_bucket_diagnostic_cooldown_s = 30.0
-        self._last_missing_requests_bucket_diagnostic_at = 0.0
-        self._has_seen_requests_bucket_in_session = False
         self._last_connect_time: float | None = None
         self._last_disconnect_reason: str | None = None
         self._last_failure_reason: str | None = None
@@ -2410,6 +2436,12 @@ class RealtimeAPI:
             "last_disconnect_reason": self._last_disconnect_reason or "",
             "last_failure_reason": self._last_failure_reason or "",
             "memory_retrieval": retrieval_metrics,
+            "rate_limits": {
+                "supports_tokens": int(self.rate_limits_supports_tokens),
+                "supports_requests": int(self.rate_limits_supports_requests),
+                "last_present_names": sorted(self.rate_limits_last_present_names),
+                "last_event_id": self.rate_limits_last_event_id,
+            },
             "sensor_event_aggregation": dict(self._sensor_event_aggregation_metrics),
             "silent_turn_incidents": int(getattr(self, "_silent_turn_incident_count", 0)),
         }
@@ -8151,121 +8183,115 @@ class RealtimeAPI:
             rl, rl_meta = parse_rate_limits(event)
             self.rate_limits = rl
 
-            present_buckets = expected_buckets.intersection(rl.keys())
-            warned_missing_buckets = getattr(self, "_warned_missing_rate_limit_buckets", set())
-            missing_buckets = expected_buckets.difference(present_buckets)
-            previous_present_buckets = getattr(self, "_last_rate_limit_present_buckets", set())
-            disappeared_buckets = expected_buckets.intersection(previous_present_buckets.difference(present_buckets))
+            present_names = set(rl_meta.get("present_names", []))
+            session_id = "unknown"
+            memory_manager = getattr(self, "_memory_manager", None)
+            if memory_manager is not None:
+                session_id_value = memory_manager.get_active_session_id()
+                if session_id_value:
+                    session_id = str(session_id_value)
+
+            self.rate_limits_last_present_names = set(present_names)
+            self.rate_limits_last_event_id = str(rl_meta.get("event_id") or "")
+            self.rate_limits_supports_tokens = self.rate_limits_supports_tokens or ("tokens" in present_names)
+            self.rate_limits_supports_requests = self.rate_limits_supports_requests or (
+                "requests" in present_names
+            )
+
+            if "tokens" in present_names:
+                self._rate_limits_regression_missing_counts["tokens"] = 0
+            elif self.rate_limits_supports_tokens:
+                self._rate_limits_regression_missing_counts["tokens"] += 1
+
+            if "requests" in present_names:
+                self._rate_limits_regression_missing_counts["requests"] = 0
+            elif self.rate_limits_supports_requests:
+                self._rate_limits_regression_missing_counts["requests"] += 1
+
             malformed_rate_limits = (
                 (not rl_meta.get("rate_limits_is_list", True))
-                or bool(rl_meta.get("malformed_entry_count", 0))
-                or int(rl_meta.get("entry_count", 0)) == 0
+                or bool(rl_meta.get("malformed_count", 0))
             )
-            should_warn_missing_buckets = bool(disappeared_buckets) or malformed_rate_limits
-
-            if should_warn_missing_buckets and missing_buckets and missing_buckets != warned_missing_buckets:
+            if not present_names:
                 logger.warning(
-                    "Realtime API rate_limits.updated missing expected bucket(s): %s",
-                    ", ".join(sorted(missing_buckets)),
-                )
-                self._warned_missing_rate_limit_buckets = set(missing_buckets)
-            elif not should_warn_missing_buckets and missing_buckets != warned_missing_buckets:
-                self._warned_missing_rate_limit_buckets = set()
-
-            self._last_rate_limit_present_buckets = set(present_buckets)
-
-            has_requests_bucket = "requests" in rl
-            if has_requests_bucket:
-                self._missing_requests_bucket_consecutive_updates = 0
-                self._has_seen_requests_bucket_in_session = True
-            else:
-                self._missing_requests_bucket_consecutive_updates = (
-                    getattr(self, "_missing_requests_bucket_consecutive_updates", 0) + 1
-                )
-                now = time.monotonic()
-                cooldown_s = max(
-                    1.0,
-                    float(getattr(self, "_missing_requests_bucket_diagnostic_cooldown_s", 30.0)),
-                )
-                last_diagnostic_at = float(
-                    getattr(self, "_last_missing_requests_bucket_diagnostic_at", 0.0)
-                )
-                if now - last_diagnostic_at >= cooldown_s:
-                    raw_rate_limits = event.get("rate_limits")
-                    preview_entries: list[Any] = []
-                    if isinstance(raw_rate_limits, list):
-                        preview_entries = raw_rate_limits[:2]
-                    preview_payload = json.dumps(preview_entries, default=str)
-                    if len(preview_payload) > 2048:
-                        preview_payload = f"{preview_payload[:2045]}..."
-                    logger.info(
-                        "Rate limits diagnostics (requests missing): event_id=%s present_names=%s "
-                        "unknown_names=%s entry_count=%s malformed_entry_count=%s sample_entries=%s",
-                        event.get("event_id", "unknown"),
-                        rl_meta.get("present_names", []),
-                        rl_meta.get("unknown_names", []),
-                        rl_meta.get("entry_count", 0),
-                        rl_meta.get("malformed_entry_count", 0),
-                        preview_payload,
-                    )
-                    self._last_missing_requests_bucket_diagnostic_at = now
-                warning_interval = max(
-                    1,
-                    int(getattr(self, "_missing_requests_bucket_warning_interval", 3)),
-                )
-                warning_threshold = max(
-                    warning_interval,
-                    int(getattr(self, "_missing_requests_bucket_warning_threshold", 10)),
-                )
-                has_seen_requests = bool(getattr(self, "_has_seen_requests_bucket_in_session", False))
-                should_warn_missing_requests = (
-                    bool(disappeared_buckets)
-                    or (
-                        malformed_rate_limits
-                        and (
-                            self._missing_requests_bucket_consecutive_updates == 1
-                            or self._missing_requests_bucket_consecutive_updates % warning_interval == 0
-                        )
-                    )
-                    or self._missing_requests_bucket_consecutive_updates >= warning_threshold
-                    or (
-                        has_seen_requests
-                        and self._missing_requests_bucket_consecutive_updates % warning_interval == 0
-                    )
-                )
-                if should_warn_missing_requests:
-                    session_id = "unknown"
-                    memory_manager = getattr(self, "_memory_manager", None)
-                    if memory_manager is not None:
-                        session_id_value = memory_manager.get_active_session_id()
-                        if session_id_value:
-                            session_id = str(session_id_value)
-                    logger.warning(
-                        "Realtime API requests bucket missing for %s consecutive rate_limits.updated events "
-                        "(session_id=%s)",
-                        self._missing_requests_bucket_consecutive_updates,
-                        session_id,
-                    )
-
-            req = rl.get("requests", {})
-            tok = rl.get("tokens", {})
-            info_message = "Rate limits: requests_bucket=%s | requests %s/%s reset=%s | tokens %s/%s reset=%s"
-            info_args: list[Any] = [
-                "present" if has_requests_bucket else "missing",
-                _format_rate_limit_field(req.get("remaining")),
-                _format_rate_limit_field(req.get("limit")),
-                _format_rate_limit_duration(req.get("reset_seconds")),
-                _format_rate_limit_field(tok.get("remaining")),
-                _format_rate_limit_field(tok.get("limit")),
-                _format_rate_limit_duration(tok.get("reset_seconds")),
-            ]
-            if not has_requests_bucket:
-                info_message += " | present_names=%s unknown_names=%s"
-                info_args.extend([
-                    rl_meta.get("present_names", []),
+                    "Realtime API rate_limits.updated has no buckets: event_id=%s entry_count=%s "
+                    "malformed_count=%s unknown_names=%s",
+                    self.rate_limits_last_event_id or "unknown",
+                    rl_meta.get("entry_count", 0),
+                    rl_meta.get("malformed_count", 0),
                     rl_meta.get("unknown_names", []),
-                ])
-            logger.info(info_message, *info_args)
+                )
+            elif malformed_rate_limits:
+                logger.warning(
+                    "Realtime API rate_limits.updated malformed entries detected: event_id=%s present_names=%s "
+                    "entry_count=%s malformed_count=%s unknown_names=%s",
+                    self.rate_limits_last_event_id or "unknown",
+                    sorted(present_names),
+                    rl_meta.get("entry_count", 0),
+                    rl_meta.get("malformed_count", 0),
+                    rl_meta.get("unknown_names", []),
+                )
+
+            for bucket in sorted(expected_buckets):
+                seen_in_session = bool(getattr(self, f"rate_limits_supports_{bucket}", False))
+                missing_count = self._rate_limits_regression_missing_counts[bucket]
+                if bucket in present_names or not seen_in_session or missing_count <= 0:
+                    continue
+                if self._rate_limits_strict and missing_count == 1:
+                    logger.warning(
+                        "Realtime API rate_limits.updated regression: bucket=%s missing_count=%s "
+                        "session_id=%s strict=%s",
+                        bucket,
+                        missing_count,
+                        session_id,
+                        self._rate_limits_strict,
+                    )
+                elif (not self._rate_limits_strict) and (
+                    missing_count == self._rate_limits_regression_warning_threshold
+                ):
+                    logger.warning(
+                        "Realtime API rate_limits.updated regression: bucket=%s missing_count=%s "
+                        "threshold=%s session_id=%s strict=%s",
+                        bucket,
+                        missing_count,
+                        self._rate_limits_regression_warning_threshold,
+                        session_id,
+                        self._rate_limits_strict,
+                    )
+
+            parts = [f"present_names={sorted(present_names)}"]
+            requests_bucket = rl.get("requests", {})
+            if "requests" in rl:
+                parts.append(
+                    "requests %s/%s reset=%s"
+                    % (
+                        _format_rate_limit_field(requests_bucket.get("remaining")),
+                        _format_rate_limit_field(requests_bucket.get("limit")),
+                        _format_rate_limit_duration(requests_bucket.get("reset_seconds")),
+                    )
+                )
+            tokens_bucket = rl.get("tokens", {})
+            if "tokens" in rl:
+                parts.append(
+                    "tokens %s/%s reset=%s"
+                    % (
+                        _format_rate_limit_field(tokens_bucket.get("remaining")),
+                        _format_rate_limit_field(tokens_bucket.get("limit")),
+                        _format_rate_limit_duration(tokens_bucket.get("reset_seconds")),
+                    )
+                )
+            logger.info("Rate limits: %s", " | ".join(parts))
+
+            if self._rate_limits_debug_samples and logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "Rate limits debug: event_id=%s entry_count=%s malformed_count=%s "
+                    "unknown_names=%s sample_entries=%s",
+                    self.rate_limits_last_event_id or "unknown",
+                    rl_meta.get("entry_count", 0),
+                    rl_meta.get("malformed_count", 0),
+                    rl_meta.get("unknown_names", []),
+                    rl_meta.get("sample_entries", []),
+                )
         elif event_type == "session.updated":
             log_session_updated(event, full_payload=True)
             if not self.ready_event.is_set():

@@ -169,6 +169,11 @@ realtime:
   awaiting_confirmation_allowed_sources:
     - "battery:critical"
     - "imu:critical"
+  rate_limits:
+    # Buckets are optional; only warn on persistent regressions or malformed payloads.
+    strict: false
+    regression_warning_threshold: 3
+    debug_samples: false
   vad_profiles:
     default:
       threshold: 0.20
