@@ -405,14 +405,26 @@ class ResponseCreateRuntime:
             if context_hint.input_event_key:
                 metadata.setdefault("input_event_key", context_hint.input_event_key)
         turn_id = api._resolve_response_create_turn_id(origin=origin, response_create_event=response_create_event)
-        prebound_active_input_event_key = api._active_input_event_key_for_turn(turn_id)
         current_input_event_key = api._ensure_response_create_correlation(
             response_create_event=response_create_event,
             origin=origin,
             turn_id=turn_id,
         )
 
-        correlation_input_event_key = current_input_event_key
+        preference_note = None
+        if hasattr(api, "_consume_pending_preference_memory_context_note"):
+            preference_note = api._consume_pending_preference_memory_context_note(
+                turn_id=turn_id,
+                input_event_key=current_input_event_key,
+            )
+        effective_memory_note = memory_brief_note or preference_note
+
+        # Migration (phase 1): delegated policy decisions keep signature stable.
+        if effective_memory_note:
+            try:
+                await api._send_memory_brief_note(websocket, effective_memory_note)
+            except Exception as exc:  # pragma: no cover - defensive fail-open
+                logger.warning("Memory brief injection skipped due to error: %s", exc)
         api._bind_active_input_event_key_for_turn(
             turn_id=turn_id,
             input_event_key=current_input_event_key,
@@ -421,47 +433,6 @@ class ResponseCreateRuntime:
             turn_id = resolved_context.turn_id
             current_input_event_key = resolved_context.input_event_key
             canonical_key = resolved_context.canonical_key
-
-        preference_note = None
-        if hasattr(api, "_consume_pending_preference_memory_context_note_for_input_event_keys"):
-            active_input_event_key = api._active_input_event_key_for_turn(turn_id)
-            preference_note = api._consume_pending_preference_memory_context_note_for_input_event_keys(
-                turn_id=turn_id,
-                input_event_keys=[
-                    current_input_event_key,
-                    correlation_input_event_key,
-                    prebound_active_input_event_key,
-                    active_input_event_key,
-                ],
-            )
-            if not preference_note:
-                logger.debug(
-                    "pref_recall_excluded run_id=%s canonical_key=%s reason=missing_pending_context",
-                    api._current_run_id() or "",
-                    canonical_key,
-                )
-        elif hasattr(api, "_consume_pending_preference_memory_context_note"):
-            preference_note = api._consume_pending_preference_memory_context_note(
-                turn_id=turn_id,
-                input_event_key=current_input_event_key,
-            )
-
-        effective_memory_note = memory_brief_note or preference_note
-        includes_pref_recall = bool(preference_note and preference_note.strip())
-        logger.debug(
-            "response_prompt_compiled run_id=%s canonical_key=%s includes_pref_recall=%s pref_len=%s",
-            api._current_run_id() or "",
-            canonical_key,
-            str(includes_pref_recall).lower(),
-            len(preference_note or ""),
-        )
-
-        # Migration (phase 1): delegated policy decisions keep signature stable.
-        if effective_memory_note:
-            try:
-                await api._send_memory_brief_note(websocket, effective_memory_note)
-            except Exception as exc:  # pragma: no cover - defensive fail-open
-                logger.warning("Memory brief injection skipped due to error: %s", exc)
 
         response_metadata = api._extract_response_create_metadata(response_create_event)
         normalized_origin = str(origin or "").strip().lower()
