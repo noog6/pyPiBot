@@ -266,6 +266,16 @@ class SensorAggregationWindow:
     latest_metadata: dict[str, Any] | None = None
 
 
+@dataclass
+class PendingServerAutoResponse:
+    turn_id: str
+    response_id: str
+    canonical_key: str
+    created_at_ms: int
+    active: bool = True
+    cancelled_for_upgrade: bool = False
+
+
 @dataclass(frozen=True)
 class NormalizedConfirmationDecision:
     status: str
@@ -939,6 +949,8 @@ class RealtimeAPI:
         self._pending_preference_memory_context_by_canonical_key: dict[str, dict[str, Any]] = {}
         self._pending_preference_memory_context_by_turn_id: dict[str, dict[str, Any]] = {}
         self._pending_server_auto_input_event_keys: deque[str] = deque(maxlen=64)
+        self._pending_server_auto_response_by_turn_id: dict[str, PendingServerAutoResponse] = {}
+        self._cancelled_response_ids: set[str] = set()
         self._active_server_auto_input_event_key: str | None = None
         self._current_input_event_key: str | None = None
         self._active_input_event_key_by_turn_id: dict[str, str] = {}
@@ -3527,6 +3539,79 @@ class RealtimeAPI:
             input_event_key=normalized_active_key,
             reason=reason,
         )
+
+    def _record_pending_server_auto_response(
+        self,
+        *,
+        turn_id: str,
+        response_id: str | None,
+        canonical_key: str,
+    ) -> None:
+        normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            return
+        store = getattr(self, "_pending_server_auto_response_by_turn_id", None)
+        if not isinstance(store, dict):
+            store = {}
+            self._pending_server_auto_response_by_turn_id = store
+        store[normalized_turn_id] = PendingServerAutoResponse(
+            turn_id=normalized_turn_id,
+            response_id=normalized_response_id,
+            canonical_key=str(canonical_key or "").strip(),
+            created_at_ms=int(time.time() * 1000),
+            active=True,
+        )
+
+    def _pending_server_auto_response_for_turn(self, *, turn_id: str) -> PendingServerAutoResponse | None:
+        store = getattr(self, "_pending_server_auto_response_by_turn_id", None)
+        if not isinstance(store, dict):
+            store = {}
+            self._pending_server_auto_response_by_turn_id = store
+        pending = store.get(str(turn_id or "").strip() or "turn-unknown")
+        if not isinstance(pending, PendingServerAutoResponse):
+            return None
+        return pending
+
+    def _mark_pending_server_auto_response_cancelled(
+        self,
+        *,
+        turn_id: str,
+        reason: str,
+    ) -> PendingServerAutoResponse | None:
+        pending = self._pending_server_auto_response_for_turn(turn_id=turn_id)
+        if pending is None:
+            return None
+        pending.active = False
+        pending.cancelled_for_upgrade = True
+        cancelled_ids = getattr(self, "_cancelled_response_ids", None)
+        if not isinstance(cancelled_ids, set):
+            cancelled_ids = set()
+            self._cancelled_response_ids = cancelled_ids
+        cancelled_ids.add(pending.response_id)
+        logger.info(
+            "server_auto_cancelled_for_upgrade run_id=%s turn_id=%s response_id=%s reason=%s",
+            self._current_run_id() or "",
+            str(turn_id or "").strip() or "turn-unknown",
+            pending.response_id,
+            reason,
+        )
+        return pending
+
+    def _mark_pending_server_auto_response_replaced(self, *, turn_id: str) -> None:
+        pending = self._pending_server_auto_response_for_turn(turn_id=turn_id)
+        if pending is None:
+            return
+        pending.active = False
+
+    def _is_cancelled_response_event(self, event: dict[str, Any]) -> bool:
+        cancelled_ids = getattr(self, "_cancelled_response_ids", None)
+        if not isinstance(cancelled_ids, set) or not cancelled_ids:
+            return False
+        response_id = str(event.get("response_id") or "").strip()
+        if not response_id and isinstance(event.get("response"), dict):
+            response_id = str((event.get("response") or {}).get("id") or "").strip()
+        return bool(response_id and response_id in cancelled_ids)
 
     def _canonical_utterance_key(self, *, turn_id: str, input_event_key: str | None) -> str:
         return self._lifecycle_state_coordinator().canonical_utterance_key(
@@ -7923,6 +8008,12 @@ class RealtimeAPI:
                 transport = self._get_or_create_transport()
                 await transport.send_json(websocket, cancel_event)
             return
+        if lifecycle_created_decision.action is LifecycleDecisionAction.DEFER:
+            self._record_pending_server_auto_response(
+                turn_id=turn_id,
+                response_id=self._active_response_id,
+                canonical_key=lifecycle_canonical_key,
+            )
         self._active_response_input_event_key = str(resolved_input_event_key or "").strip() or None
         self._bind_active_input_event_key_for_turn(
             turn_id=turn_id,
@@ -8170,7 +8261,94 @@ class RealtimeAPI:
 
     async def _handle_response_done_event(self, event: dict[str, Any], websocket: Any) -> None:
         _ = websocket
+        if self._is_cancelled_response_event(event):
+            response_id = str(event.get("response_id") or "").strip()
+            if not response_id and isinstance(event.get("response"), dict):
+                response_id = str((event.get("response") or {}).get("id") or "").strip()
+            logger.info(
+                "deliverable_selected response_id=%s selected=false reason=cancelled",
+                response_id or "unknown",
+            )
+            return
         await self.handle_response_done(event)
+
+    async def _cancel_and_replace_pending_server_auto_on_transcript_final(
+        self,
+        *,
+        websocket: Any,
+        turn_id: str,
+        input_event_key: str,
+        origin_label: str = "upgraded_response",
+    ) -> bool:
+        pending = self._pending_server_auto_response_for_turn(turn_id=turn_id)
+        pending_active = bool(isinstance(pending, PendingServerAutoResponse) and pending.active)
+        old_response_id = pending.response_id if pending_active and pending is not None else ""
+        action = "no_pending"
+        if pending_active and old_response_id:
+            action = "cancel_and_replace"
+        elif pending is not None:
+            action = "replace_only"
+        logger.info(
+            "upgrade_flow_snapshot run_id=%s turn_id=%s old_response_id=%s pending_server_auto_active=%s action=%s",
+            self._current_run_id() or "",
+            turn_id,
+            old_response_id or "none",
+            str(pending_active).lower(),
+            action,
+        )
+        if pending is None:
+            return False
+        if pending_active and old_response_id:
+            cancel_event = {"type": "response.cancel", "response_id": old_response_id}
+            log_ws_event("Outgoing", cancel_event)
+            self._track_outgoing_event(cancel_event, origin="server_auto_upgrade")
+            self._mark_pending_server_auto_response_cancelled(
+                turn_id=turn_id,
+                reason="transcript_final_upgrade",
+            )
+            transport = self._get_or_create_transport()
+            await transport.send_json(websocket, cancel_event)
+            if str(getattr(self, "_active_response_id", "") or "").strip() == old_response_id:
+                self._response_in_flight = False
+                self.response_in_progress = False
+
+        replacement_event = {"type": "response.create", "response": {"metadata": {}}}
+        metadata = replacement_event["response"]["metadata"]
+        metadata["turn_id"] = str(turn_id or "").strip() or "turn-unknown"
+        metadata["input_event_key"] = str(input_event_key or "").strip()
+        metadata["safety_override"] = "true"
+        metadata["transcript_upgrade_replacement"] = "true"
+        replacement_canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+        pref_payload = self._peek_pending_preference_memory_context_payload(
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+        )
+        pref_prompt_note = str(pref_payload.get("prompt_note") or "").strip() if isinstance(pref_payload, dict) else ""
+        pref_hit = bool(isinstance(pref_payload, dict) and pref_payload.get("hit", False))
+        logger.info(
+            "replacement_response_scheduled run_id=%s turn_id=%s canonical_key=%s input_event_key=%s pref_ctx_len=%s pref_hit=%s",
+            self._current_run_id() or "",
+            turn_id,
+            replacement_canonical_key,
+            input_event_key,
+            len(pref_prompt_note),
+            str(pref_hit).lower(),
+        )
+        await self._send_response_create(
+            websocket,
+            replacement_event,
+            origin=origin_label,
+            utterance_context=UtteranceContext(
+                turn_id=turn_id,
+                input_event_key=input_event_key,
+                canonical_key=replacement_canonical_key,
+                utterance_seq=self._current_utterance_seq(),
+            ),
+            record_ai_call=True,
+            memory_brief_note=pref_prompt_note or None,
+        )
+        self._mark_pending_server_auto_response_replaced(turn_id=turn_id)
+        return True
 
     async def _handle_input_audio_transcription_completed_event(
         self,
@@ -8272,6 +8450,7 @@ class RealtimeAPI:
             if suppressed:
                 return
         if transcript:
+            decision_path = "canonical_transcript"
             if memory_intent:
                 decision_path = "upgraded_response" if str(getattr(self, "_active_response_origin", "")).strip().lower() == "server_auto" else "canonical_transcript"
                 logger.info(
@@ -8302,6 +8481,14 @@ class RealtimeAPI:
                 source="input_audio_transcription",
             ):
                 return
+            if decision_path == "upgraded_response":
+                if await self._cancel_and_replace_pending_server_auto_on_transcript_final(
+                    websocket=websocket,
+                    turn_id=resolved_turn_id,
+                    input_event_key=input_event_key,
+                    origin_label="upgraded_response",
+                ):
+                    return
             if await self._maybe_process_research_intent(
                 transcript,
                 websocket,
@@ -8343,6 +8530,15 @@ class RealtimeAPI:
 
     async def _handle_event_legacy(self, event: dict[str, Any], websocket: Any) -> None:
         event_type = event.get("type")
+        if self._is_cancelled_response_event(event):
+            response_id = str(event.get("response_id") or "").strip()
+            if not response_id and isinstance(event.get("response"), dict):
+                response_id = str((event.get("response") or {}).get("id") or "").strip()
+            logger.info(
+                "deliverable_selected response_id=%s selected=false reason=cancelled",
+                response_id or "unknown",
+            )
+            return
         if event_type == "response.output_item.added":
             await self._handle_output_item_added_event(event, websocket)
         elif event_type == "response.function_call_arguments.delta":
