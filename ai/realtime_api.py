@@ -235,6 +235,11 @@ _PREFERENCE_QUERY_NOISE_TOKENS = {
     "anything",
     "related",
 }
+_PREFERENCE_RECALL_VARIANT_NOISE_TOKENS = _PREFERENCE_QUERY_NOISE_TOKENS | {
+    "user",
+    "you",
+    "your",
+}
 
 
 @dataclass
@@ -2984,30 +2989,56 @@ class RealtimeAPI:
             return "user preference"
         return " ".join(ordered_parts[:8])
 
-    def _build_preference_recall_query_variants(self, query: str) -> list[str]:
-        normalized_tokens = self._extract_preference_keywords(query)
+    def _build_preference_recall_query_variants(self, query: str) -> list[tuple[str, str]]:
+        normalized_tokens = [
+            token
+            for token in self._extract_preference_keywords(query)
+            if token not in _PREFERENCE_RECALL_VARIANT_NOISE_TOKENS
+        ]
         if not normalized_tokens:
-            return [query]
+            candidate = " ".join((query or "").strip().lower().split())
+            return [(candidate or "user preference", "canonical")]
         domain_tokens = [token for token in normalized_tokens if token in _PREFERENCE_RECALL_DOMAINS]
         marker_tokens = [token for token in normalized_tokens if token in {"favorite", "preferred", "preference", "prefer"}]
         value_tokens = [token for token in normalized_tokens if token not in domain_tokens and token not in marker_tokens]
 
-        variants: list[str] = []
+        variants: list[tuple[str, str]] = []
 
-        def _append_variant(parts: list[str]) -> None:
+        def _append_variant(parts: list[str], variant_class: str) -> None:
             candidate = " ".join(part.strip().lower() for part in parts if part).strip()
-            if candidate and candidate not in variants:
-                variants.append(candidate)
+            if candidate and all(existing != candidate for existing, _ in variants):
+                variants.append((candidate, variant_class))
 
-        _append_variant(normalized_tokens[:8])
         if domain_tokens:
-            _append_variant(domain_tokens + marker_tokens + value_tokens)
-            _append_variant(["preferred"] + domain_tokens + value_tokens)
-            _append_variant(["favorite"] + domain_tokens + value_tokens)
+            _append_variant(domain_tokens[:2], "domain_only")
+            _append_variant(["preferred"] + domain_tokens + value_tokens, "canonical")
+            _append_variant(["favorite"] + domain_tokens + value_tokens, "canonical")
+            for domain in domain_tokens:
+                for canonical in _PREFERENCE_QUERY_CANONICAL_BY_DOMAIN.get(domain, ()):
+                    canonical_tokens = [
+                        token.strip().lower()
+                        for token in canonical.split()
+                        if token.strip().lower() not in _PREFERENCE_RECALL_VARIANT_NOISE_TOKENS
+                    ]
+                    _append_variant(canonical_tokens, "canonical")
+        _append_variant(normalized_tokens[:8], "canonical")
+        if domain_tokens:
+            _append_variant(domain_tokens + marker_tokens + value_tokens, "expanded")
         if value_tokens:
-            _append_variant(value_tokens + domain_tokens)
-        _append_variant(domain_tokens + ["user", "preference"])
+            _append_variant(value_tokens + domain_tokens, "expanded")
+        _append_variant(domain_tokens + ["preference"], "canonical")
         return variants
+
+    def _strict_preference_domain_query(self, query: str) -> str | None:
+        query_tokens = [
+            token
+            for token in self._extract_preference_keywords(query)
+            if token not in _PREFERENCE_RECALL_VARIANT_NOISE_TOKENS
+        ]
+        domain_tokens = [token for token in query_tokens if token in _PREFERENCE_RECALL_DOMAINS]
+        if not domain_tokens:
+            return None
+        return " ".join(domain_tokens[:2]).strip().lower() or None
 
     def _preference_recall_memories_from_payload(self, payload: dict[str, Any] | None) -> list[dict[str, Any]]:
         if not isinstance(payload, dict):
@@ -3099,13 +3130,36 @@ class RealtimeAPI:
         query: str,
     ) -> tuple[dict[str, Any], bool]:
         scope = str(getattr(self, "_memory_retrieval_scope", MemoryScope.USER_GLOBAL.value))
-        recall_queries = self._build_preference_recall_query_variants(query)
+        recall_query_variants = self._build_preference_recall_query_variants(query)
         fallback_query = self._preference_recall_fallback_query(query)
+        strict_domain_query = self._strict_preference_domain_query(query)
         max_attempts = int(getattr(self, "_preference_recall_max_attempts", 1))
-        if fallback_query and max_attempts > 1 and fallback_query not in recall_queries:
-            recall_queries.append(fallback_query)
+        if fallback_query and max_attempts > 1:
+            fallback_variant = (fallback_query, "canonical")
+            if all(existing != fallback_query for existing, _ in recall_query_variants):
+                recall_query_variants.append(fallback_variant)
 
-        for attempt_index, candidate_query in enumerate(recall_queries[:max_attempts]):
+        planned_attempts = recall_query_variants[:max_attempts]
+        if (
+            strict_domain_query
+            and max_attempts > 0
+            and all(existing_query != strict_domain_query for existing_query, _ in planned_attempts)
+        ):
+            strict_variant = (strict_domain_query, "domain_only")
+            if len(planned_attempts) >= max_attempts:
+                planned_attempts = planned_attempts[: max_attempts - 1]
+            planned_attempts.append(strict_variant)
+
+        for attempt_index, (candidate_query, variant_class) in enumerate(planned_attempts):
+            logger.debug(
+                "preference_recall_query_variant run_id=%s resolved_turn_id=%s query_variant_index=%s variant_class=%s query=%s max_attempts=%s",
+                self._current_run_id() or "",
+                resolved_turn_id,
+                attempt_index,
+                variant_class,
+                candidate_query,
+                max_attempts,
+            )
             payload = await recall_fn(query=candidate_query, limit=3, scope=scope)
             payload = self._filter_preference_recall_payload_for_user(
                 payload if isinstance(payload, dict) else {},
@@ -3157,6 +3211,14 @@ class RealtimeAPI:
                 candidate_counts.get("combined_candidates", candidate_counts.get("lexical_candidates", 0)),
                 len(memories),
                 empty_reason,
+            )
+            logger.debug(
+                "preference_recall_attempt_result run_id=%s resolved_turn_id=%s query_variant_index=%s variant_class=%s hit=%s",
+                self._current_run_id() or "",
+                resolved_turn_id,
+                attempt_index,
+                variant_class,
+                hit,
             )
             self._preference_recall_cache[candidate_query] = {"timestamp": time.monotonic(), "payload": payload}
             cards_list = cards if isinstance(cards, list) else []

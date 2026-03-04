@@ -277,7 +277,9 @@ def test_preference_query_variants_keep_domain_and_value_tokens() -> None:
 
     variants = RealtimeAPI._build_preference_recall_query_variants(api, "editor favorite vim user preference")
 
-    assert any("editor" in variant and "vim" in variant for variant in variants)
+    assert variants[0] == ("editor", "domain_only")
+    assert any("editor" in variant and "vim" in variant for variant, _ in variants)
+    assert all(" user " not in f" {variant} " for variant, _ in variants)
 
 
 def test_preference_recall_uses_variant_retry_for_run441_style_miss() -> None:
@@ -326,6 +328,8 @@ def test_preference_recall_uses_variant_retry_for_run441_style_miss() -> None:
     )
 
     assert len(calls) == 2
+    assert calls[0] == "editor"
+    assert any("preferred editor vim" in call or "favorite editor vim" in call for call in calls)
     assert any("Vim" in memory["content"] for memory in payload["memories"])
 
 def test_preference_recall_does_not_block_response_when_audio_started() -> None:
