@@ -6,6 +6,15 @@ import asyncio
 import json
 from collections import deque
 
+import os
+import sys
+import types
+
+if "audioop" not in sys.modules:
+    sys.modules["audioop"] = types.ModuleType("audioop")
+os.environ.setdefault("OPENAI_API_KEY", "test-key")
+
+from ai.realtime.response_create_runtime import ResponseCreateRuntime
 from ai.realtime.transport import RealtimeTransport
 from ai.realtime_api import RealtimeAPI
 
@@ -37,6 +46,7 @@ def _make_api_stub() -> RealtimeAPI:
     api._response_done_serial = 0
     api._record_ai_call = lambda: None
     api._track_outgoing_event = lambda *args, **kwargs: None
+    api._response_create_runtime = ResponseCreateRuntime(api)
     return api
 
 
@@ -57,6 +67,31 @@ def test_send_response_create_injects_memory_brief_before_response() -> None:
         "conversation.item.create",
         "response.create",
     ]
+
+
+
+
+def test_send_response_create_injects_preference_memory_context_before_response() -> None:
+    api = _make_api_stub()
+    ws = _Ws()
+
+    api._consume_pending_preference_memory_context_note = lambda *, turn_id, input_event_key: (
+        "Preference recall context for this SAME response: matched stored preference(s). Top recalled value: Vim"
+    )
+
+    asyncio.run(
+        api._send_response_create(
+            ws,
+            {"type": "response.create"},
+            origin="assistant_message",
+        )
+    )
+
+    assert [event["type"] for event in ws.events] == [
+        "conversation.item.create",
+        "response.create",
+    ]
+    assert "Vim" in ws.events[0]["item"]["content"][0]["text"]
 
 
 def test_send_response_create_preserves_brief_when_deferred() -> None:

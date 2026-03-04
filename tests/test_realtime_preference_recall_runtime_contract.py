@@ -500,7 +500,7 @@ def test_preference_recall_query_lineage_tracks_variants_and_empty_reason() -> N
     assert "query_lineage=0:editor|domain_only" in rendered
     assert "query_lineage=0:editor|domain_only;1:preferred editor vim|canonical" in rendered
 
-def test_preference_recall_sends_grounded_followup_when_hit() -> None:
+def test_preference_recall_hit_attaches_memory_context_for_primary_response() -> None:
     api = _base_api()
     api._current_input_event_key = "evt_1"
     api._is_preference_recall_intent = Mock(return_value=(True, ["editor"]))
@@ -517,29 +517,28 @@ def test_preference_recall_sends_grounded_followup_when_hit() -> None:
             True,
         )
     )
-    api._suppress_preference_recall_server_auto_response = AsyncMock()
-    api._canonical_utterance_key = lambda *, turn_id, input_event_key: f"run-test:{turn_id}:{input_event_key}"
     api._preference_recall_locked_input_event_keys = set()
-    sent_messages: list[tuple[str, dict[str, str]]] = []
+    captured_contexts: list[dict[str, object]] = []
 
-    async def _fake_send(message: str, _ws, **kwargs):
-        sent_messages.append((message, kwargs.get("response_metadata", {})))
+    def _capture_context(**kwargs):
+        captured_contexts.append(kwargs)
 
-    api.send_assistant_message = _fake_send
+    api._set_pending_preference_memory_context = _capture_context
+    api.send_assistant_message = AsyncMock()
 
     with patch("ai.realtime.preference_recall_runtime.function_map", {"recall_memories": AsyncMock()}):
         handled = asyncio.run(api._maybe_handle_preference_recall_intent("remember my editor", object(), source="input_audio_transcription"))
 
-    assert handled is True
-    assert api._suppress_preference_recall_server_auto_response.await_count == 1
-    assert sent_messages
-    assert "Vim" in sent_messages[0][0]
-    assert sent_messages[0][1]["trigger"] == "preference_recall"
-    assert sent_messages[0][1]["input_event_key"] == "pref_recall:evt_1"
+    assert handled is False
+    assert captured_contexts
+    memory_context = captured_contexts[0]["memory_context"]
+    assert memory_context["hit"] is True
+    assert "Vim" in str(memory_context["prompt_note"])
+    api.send_assistant_message.assert_not_awaited()
     assert "evt_1" not in api._preference_recall_locked_input_event_keys
 
 
-def test_preference_recall_empty_followup_does_not_hallucinate() -> None:
+def test_preference_recall_miss_context_has_no_memory_claim_language() -> None:
     api = _base_api()
     api._current_input_event_key = "evt_2"
     api._is_preference_recall_intent = Mock(return_value=(True, ["pants"]))
@@ -547,23 +546,25 @@ def test_preference_recall_empty_followup_does_not_hallucinate() -> None:
     api._mark_preference_recall_candidate = Mock()
     api._clear_preference_recall_candidate = Mock()
     api._run_preference_recall_with_fallbacks = AsyncMock(return_value=({"memories": [], "memory_cards": [], "memory_cards_text": ""}, True))
-    api._suppress_preference_recall_server_auto_response = AsyncMock()
-    api._canonical_utterance_key = lambda *, turn_id, input_event_key: f"run-test:{turn_id}:{input_event_key}"
     api._preference_recall_locked_input_event_keys = set()
-    sent_messages: list[str] = []
+    captured_contexts: list[dict[str, object]] = []
 
-    async def _fake_send(message: str, _ws, **_kwargs):
-        sent_messages.append(message)
+    def _capture_context(**kwargs):
+        captured_contexts.append(kwargs)
 
-    api.send_assistant_message = _fake_send
+    api._set_pending_preference_memory_context = _capture_context
+    api.send_assistant_message = AsyncMock()
 
     with patch("ai.realtime.preference_recall_runtime.function_map", {"recall_memories": AsyncMock()}):
         handled = asyncio.run(api._maybe_handle_preference_recall_intent("what color are my pants", object(), source="input_audio_transcription"))
 
-    assert handled is True
-    assert sent_messages
-    assert "don't have" in sent_messages[0].lower()
-    assert "gray" not in sent_messages[0].lower()
+    assert handled is False
+    assert captured_contexts
+    prompt_note = str(captured_contexts[0]["memory_context"]["prompt_note"]).lower()
+    assert "i remember" not in prompt_note
+    assert "you mentioned" not in prompt_note
+    assert "do not claim memory" in prompt_note
+    api.send_assistant_message.assert_not_awaited()
 
 
 def test_deliverable_seen_true_for_tool_output_turn() -> None:

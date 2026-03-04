@@ -935,6 +935,8 @@ class RealtimeAPI:
         self._preference_recall_suppressed_turns: set[str] = set()
         self._preference_recall_suppressed_input_event_keys: set[str] = set()
         self._preference_recall_locked_input_event_keys: set[str] = set()
+        self._preference_recall_followup_enabled = bool(preference_recall_cfg.get("followup_enabled", False))
+        self._pending_preference_memory_context_by_canonical_key: dict[str, dict[str, Any]] = {}
         self._pending_server_auto_input_event_keys: deque[str] = deque(maxlen=64)
         self._active_server_auto_input_event_key: str | None = None
         self._current_input_event_key: str | None = None
@@ -4583,6 +4585,36 @@ class RealtimeAPI:
 
     def _find_stop_word(self, text: str) -> str | None:
         return preference_recall_runtime._find_stop_word(self, text)
+
+    def _set_pending_preference_memory_context(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str,
+        memory_context: dict[str, Any],
+    ) -> None:
+        canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+        store = getattr(self, "_pending_preference_memory_context_by_canonical_key", None)
+        if not isinstance(store, dict):
+            store = {}
+            self._pending_preference_memory_context_by_canonical_key = store
+        store[canonical_key] = dict(memory_context)
+
+    def _consume_pending_preference_memory_context_note(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str,
+    ) -> str | None:
+        canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+        store = getattr(self, "_pending_preference_memory_context_by_canonical_key", None)
+        if not isinstance(store, dict):
+            return None
+        payload = store.pop(canonical_key, None)
+        if not isinstance(payload, dict):
+            return None
+        prompt_note = str(payload.get("prompt_note") or "").strip()
+        return prompt_note or None
 
     def _tool_execution_cooldown_remaining(self) -> float:
         remaining = self._tool_execution_disabled_until - time.monotonic()

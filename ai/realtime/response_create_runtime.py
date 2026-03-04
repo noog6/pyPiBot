@@ -398,12 +398,6 @@ class ResponseCreateRuntime:
                 f"{delta_ms:.1f}" if delta_ms is not None else "n/a",
             )
 
-        # Migration (phase 1): delegated policy decisions keep signature stable.
-        if memory_brief_note:
-            try:
-                await api._send_memory_brief_note(websocket, memory_brief_note)
-            except Exception as exc:  # pragma: no cover - defensive fail-open
-                logger.warning("Memory brief injection skipped due to error: %s", exc)
         context_hint = utterance_context or getattr(api, "_utterance_context", None)
         if context_hint is not None:
             metadata = api._extract_response_create_metadata(response_create_event)
@@ -416,6 +410,21 @@ class ResponseCreateRuntime:
             origin=origin,
             turn_id=turn_id,
         )
+
+        preference_note = None
+        if hasattr(api, "_consume_pending_preference_memory_context_note"):
+            preference_note = api._consume_pending_preference_memory_context_note(
+                turn_id=turn_id,
+                input_event_key=current_input_event_key,
+            )
+        effective_memory_note = memory_brief_note or preference_note
+
+        # Migration (phase 1): delegated policy decisions keep signature stable.
+        if effective_memory_note:
+            try:
+                await api._send_memory_brief_note(websocket, effective_memory_note)
+            except Exception as exc:  # pragma: no cover - defensive fail-open
+                logger.warning("Memory brief injection skipped due to error: %s", exc)
         api._bind_active_input_event_key_for_turn(
             turn_id=turn_id,
             input_event_key=current_input_event_key,
