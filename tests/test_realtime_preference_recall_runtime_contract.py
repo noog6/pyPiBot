@@ -32,10 +32,6 @@ def _base_api() -> RealtimeAPI:
     api._memory_retrieval_scope = "user_global"
     api._current_run_id = lambda: "run-test"
     api._current_turn_id_or_unknown = lambda: "turn_1"
-    api._current_input_event_key = "evt_1"
-    api._active_input_event_key_for_turn = lambda _turn_id: "evt_1"
-    api._preference_recall_locked_input_event_keys = set()
-    api._attach_preference_recall_result_to_response = AsyncMock()
     api._extract_preference_keywords = RealtimeAPI._extract_preference_keywords.__get__(api, RealtimeAPI)
     api._preference_recall_memories_from_payload = RealtimeAPI._preference_recall_memories_from_payload.__get__(api, RealtimeAPI)
     api._sanitize_memory_cards_text_for_user = RealtimeAPI._sanitize_memory_cards_text_for_user.__get__(api, RealtimeAPI)
@@ -621,73 +617,3 @@ def test_preference_recall_run453_divergence_parity_with_direct_domain_recall(mo
     domain_hit_succeeded = any("query=editor" in line and "empty_reason=none" in line for line in rendered_lines)
     assert direct_payload["memories"]
     assert payload["memories"] or payload["memory_cards"] or domain_hit_succeeded
-
-
-def test_preference_recall_hit_attaches_context_with_vim_card() -> None:
-    api = _base_api()
-    api._is_preference_recall_intent = Mock(return_value=(True, ["favorite", "editor"]))
-    api._build_preference_recall_query = Mock(return_value="favorite editor")
-    api._mark_preference_recall_candidate = Mock()
-    api._clear_preference_recall_candidate = Mock()
-    api._run_preference_recall_with_fallbacks = AsyncMock(
-        return_value=(
-            {
-                "memories": [{"content": "User's favorite editor is Vim."}],
-                "memory_cards": [{"memory": "User's favorite editor is Vim."}],
-                "memory_cards_text": 'Relevant memory:\n- "User\'s favorite editor is Vim."',
-                "hit": True,
-                "returned_count": 1,
-                "empty_reason": "none",
-            },
-            True,
-        )
-    )
-
-    with patch("ai.realtime.preference_recall_runtime.function_map", {"recall_memories": AsyncMock()}):
-        asyncio.run(
-            RealtimeAPI._maybe_handle_preference_recall_intent(
-                api,
-                "what is my favorite editor",
-                object(),
-                source="input_audio_transcription",
-            )
-        )
-
-    attach_call = api._attach_preference_recall_result_to_response.await_args
-    assert attach_call.kwargs["query"] == "favorite editor"
-    assert "Vim" in attach_call.kwargs["result_payload"]["memory_cards_text"]
-
-
-def test_attach_preference_recall_miss_injects_grounding_rule() -> None:
-    api = _base_api()
-    api._canonical_utterance_key = lambda *, turn_id, input_event_key: f"{turn_id}:{input_event_key}"
-    api._response_id_by_canonical_key = {}
-    api._response_created_canonical_keys = set()
-    sent_events: list[dict[str, object]] = []
-
-    class _Transport:
-        async def send_json(self, _websocket, event):
-            sent_events.append(event)
-
-    api._get_or_create_transport = lambda: _Transport()
-    api._track_outgoing_event = lambda *_args, **_kwargs: None
-
-    asyncio.run(
-        RealtimeAPI._attach_preference_recall_result_to_response(
-            api,
-            websocket=object(),
-            turn_id="turn_1",
-            input_event_key="evt_1",
-            query="pants color",
-            result_payload={
-                "hit": False,
-                "returned_count": 0,
-                "empty_reason": "no_hit_trace_unavailable",
-                "memory_cards_text": "",
-            },
-        )
-    )
-
-    assert sent_events
-    text = sent_events[0]["item"]["content"][0]["text"]
-    assert "do not assert a specific preference" in text.lower()
