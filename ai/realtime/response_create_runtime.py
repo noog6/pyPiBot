@@ -412,6 +412,14 @@ class ResponseCreateRuntime:
         )
 
         preference_note = None
+        had_pending_preference_context = False
+        if hasattr(api, "_has_pending_preference_memory_context"):
+            had_pending_preference_context = bool(
+                api._has_pending_preference_memory_context(
+                    turn_id=turn_id,
+                    input_event_key=current_input_event_key,
+                )
+            )
         if hasattr(api, "_consume_pending_preference_memory_context_note"):
             preference_note = api._consume_pending_preference_memory_context_note(
                 turn_id=turn_id,
@@ -433,6 +441,19 @@ class ResponseCreateRuntime:
             turn_id = resolved_context.turn_id
             current_input_event_key = resolved_context.input_event_key
             canonical_key = resolved_context.canonical_key
+
+        pref_len = len(str(preference_note or ""))
+        logger.debug(
+            "response_prompt_compiled canonical_key=%s includes_pref_recall=%s pref_len=%s",
+            canonical_key,
+            str(pref_len > 0).lower(),
+            pref_len,
+        )
+        if pref_len == 0 and had_pending_preference_context:
+            logger.debug(
+                "pref_recall_excluded canonical_key=%s reason=missing_prompt_note",
+                canonical_key,
+            )
 
         response_metadata = api._extract_response_create_metadata(response_create_event)
         normalized_origin = str(origin or "").strip().lower()

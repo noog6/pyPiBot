@@ -131,3 +131,39 @@ def test_initialize_session_injects_startup_memory_digest_note() -> None:
 
     assert ws.events[0]["type"] == "session.update"
     assert ws.events[1]["type"] == "conversation.item.create"
+
+
+def test_server_auto_response_create_consumes_preference_context_from_turn_scope() -> None:
+    api = _make_api_stub()
+    ws = _Ws()
+
+    canonical_key = api._canonical_utterance_key(turn_id="turn_4", input_event_key="item_editor")
+    payload = {
+        "prompt_note": "Preference recall context for this SAME response: matched stored preference(s). Top recalled value: Vim",
+        "hit": True,
+    }
+    api._pending_preference_memory_context_by_canonical_key = {canonical_key: dict(payload)}
+    api._pending_preference_memory_context_by_turn_id = {"turn_4": dict(payload)}
+
+    asyncio.run(
+        api._send_response_create(
+            ws,
+            {
+                "type": "response.create",
+                "response": {
+                    "metadata": {
+                        "turn_id": "turn_4",
+                        "input_event_key": "synthetic_server_auto_1",
+                    }
+                },
+            },
+            origin="server_auto",
+        )
+    )
+
+    assert [event["type"] for event in ws.events] == [
+        "conversation.item.create",
+        "response.create",
+    ]
+    assert "Vim" in ws.events[0]["item"]["content"][0]["text"]
+    assert len([event for event in ws.events if event["type"] == "response.create"]) == 1
