@@ -79,6 +79,8 @@ memory_retrieval:
     min_semantic_score: 0.15
     min_lexical_score: 0.10
     allow_low_score_debug: false
+    # Keep disabled so recall context is consumed by the primary response, not a separate follow-up.
+    followup_enabled: false
 
 # Semantic memory retrieval and embedding sidecar behavior
 memory_semantic:

@@ -30,6 +30,34 @@ def _build_preference_recall_reply(*, hit: bool, memory_cards_text: str, memorie
             return "I found a saved preference, but I need you to confirm the exact value."
         return "I don't have that preference stored yet—tell me and I can remember it."
 
+
+def _build_preference_memory_context(*, hit: bool, returned_count: int, memory_cards_text: str, memories: list[dict[str, Any]], cards: list[dict[str, Any]]) -> dict[str, Any]:
+        recalled_value = _build_preference_recall_reply(
+            hit=hit,
+            memory_cards_text=memory_cards_text,
+            memories=memories,
+            cards=cards,
+        )
+        if hit:
+            prompt_note = (
+                "Preference recall context for this SAME response: matched stored preference(s). "
+                f"Top recalled value: {recalled_value}\n"
+                "Use the recalled value directly in your answer to the user question."
+            )
+        else:
+            prompt_note = (
+                "Preference recall context for this SAME response: no stored preference matched this query. "
+                "Do not claim memory or prior storage. "
+                "If needed, ask the user to provide the preference."
+            )
+        return {
+            "source": "preference_recall",
+            "hit": hit,
+            "returned_count": returned_count,
+            "recalled_value": recalled_value if hit else "",
+            "prompt_note": prompt_note,
+        }
+
 async def _suppress_preference_recall_server_auto_response(controller, websocket: Any) -> None:
         turn_id = controller._current_turn_id_or_unknown()
         input_event_key = str(getattr(controller, "_current_input_event_key", "") or "").strip()
@@ -259,42 +287,45 @@ async def _maybe_handle_preference_recall_intent(controller, text: str, websocke
             locked_input_event_keys.add(input_event_key)
 
         try:
-            if hasattr(controller, "_suppress_preference_recall_server_auto_response"):
-                await controller._suppress_preference_recall_server_auto_response(websocket)
-
-            followup_input_event_key = f"pref_recall:{input_event_key or 'unknown'}"
-            canonical_key = controller._canonical_utterance_key(
-                turn_id=resolved_turn_id,
-                input_event_key=followup_input_event_key,
-            )
-            response_text = _build_preference_recall_reply(
+            memory_context = _build_preference_memory_context(
                 hit=hit,
+                returned_count=returned_count,
                 memory_cards_text=memory_cards_text,
                 memories=memories,
                 cards=cards,
             )
+            if hasattr(controller, "_set_pending_preference_memory_context"):
+                controller._set_pending_preference_memory_context(
+                    turn_id=resolved_turn_id,
+                    input_event_key=input_event_key,
+                    memory_context=memory_context,
+                )
             logger.info(
-                "pref_recall_followup_scheduled canonical_key=%s response_id=%s",
-                canonical_key,
-                "pending",
+                "pref_recall_context_attached run_id=%s turn_id=%s input_event_key=%s hit=%s returned_count=%s",
+                controller._current_run_id() or "",
+                resolved_turn_id,
+                input_event_key or "unknown",
+                str(hit).lower(),
+                returned_count,
             )
-            await controller.send_assistant_message(
-                response_text,
-                websocket,
-                response_metadata={
-                    "trigger": "preference_recall",
-                    "turn_id": resolved_turn_id,
-                    "input_event_key": followup_input_event_key,
-                    "preference_recall_hit": str(hit).lower(),
-                    "preference_recall_returned_count": str(returned_count),
-                },
-            )
-            logger.info(
-                "pref_recall_attached_to_response response_id=%s canonical_key=%s bytes=%s",
-                "pending",
-                canonical_key,
-                len(response_text.encode("utf-8")),
-            )
+            if bool(getattr(controller, "_preference_recall_followup_enabled", False)):
+                response_text = _build_preference_recall_reply(
+                    hit=hit,
+                    memory_cards_text=memory_cards_text,
+                    memories=memories,
+                    cards=cards,
+                )
+                await controller.send_assistant_message(
+                    response_text,
+                    websocket,
+                    response_metadata={
+                        "trigger": "preference_recall",
+                        "turn_id": resolved_turn_id,
+                        "input_event_key": f"pref_recall:{input_event_key or 'unknown'}",
+                        "preference_recall_hit": str(hit).lower(),
+                        "preference_recall_returned_count": str(returned_count),
+                    },
+                )
         finally:
             if input_event_key:
                 locked_input_event_keys.discard(input_event_key)
@@ -310,7 +341,7 @@ async def _maybe_handle_preference_recall_intent(controller, text: str, websocke
             str(hit).lower(),
             str(recall_invoked).lower(),
         )
-        return True
+        return False
 
 def _find_stop_word(controller, text: str) -> str | None:
         if not text or not controller._stop_words:
