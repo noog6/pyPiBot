@@ -233,6 +233,29 @@ def test_preference_recall_empty_logs_empty_reason() -> None:
 
     rendered = "\n".join(str(call.args[0]) % call.args[1:] for call in mocked_info.call_args_list if call.args)
     assert "empty_reason=no_candidates" in rendered
+    assert "query_lineage=0:editor|domain_only" in rendered
+
+
+def test_preference_recall_empty_without_trace_logs_trace_unavailable_reason() -> None:
+    api = _base_api()
+    api._preference_recall_fallback_query = RealtimeAPI._preference_recall_fallback_query.__get__(api, RealtimeAPI)
+    api._filter_preference_recall_payload_for_user = RealtimeAPI._filter_preference_recall_payload_for_user.__get__(api, RealtimeAPI)
+    recall_fn = AsyncMock(return_value={"memories": [], "memory_cards": [], "memory_cards_text": ""})
+
+    with patch("ai.realtime_api.logger.info") as mocked_info:
+        asyncio.run(
+            RealtimeAPI._run_preference_recall_with_fallbacks(
+                api,
+                recall_fn=recall_fn,
+                source="input_audio_transcription",
+                resolved_turn_id="turn_2",
+                query="favorite editor",
+            )
+        )
+
+    rendered = "\n".join(str(call.args[0]) % call.args[1:] for call in mocked_info.call_args_list if call.args)
+    assert "empty_reason=no_hit_trace_unavailable" in rendered
+    assert "query_lineage=0:editor|domain_only" in rendered
 
 
 def test_preference_recall_scope_forwarded_to_recall_tool() -> None:
@@ -331,6 +354,46 @@ def test_preference_recall_uses_variant_retry_for_run441_style_miss() -> None:
     assert calls[0] == "editor"
     assert any("preferred editor vim" in call or "favorite editor vim" in call for call in calls)
     assert any("Vim" in memory["content"] for memory in payload["memories"])
+
+
+def test_preference_recall_query_lineage_tracks_variants_and_empty_reason() -> None:
+    api = _base_api()
+    api._preference_recall_max_attempts = 2
+    api._build_preference_recall_query_variants = RealtimeAPI._build_preference_recall_query_variants.__get__(api, RealtimeAPI)
+    api._preference_recall_fallback_query = RealtimeAPI._preference_recall_fallback_query.__get__(api, RealtimeAPI)
+    api._filter_preference_recall_payload_for_user = RealtimeAPI._filter_preference_recall_payload_for_user.__get__(api, RealtimeAPI)
+
+    async def _fake_recall(*, query: str, limit: int, scope: str):
+        _ = (query, limit, scope)
+        return {
+            "memories": [],
+            "memory_cards": [],
+            "memory_cards_text": "",
+            "trace": {
+                "retrieval_mode": "hybrid",
+                "candidate_counts": {
+                    "lexical_candidates": 0,
+                    "semantic_candidates": 0,
+                    "combined_candidates": 0,
+                },
+            },
+        }
+
+    with patch("ai.realtime_api.logger.info") as mocked_info:
+        asyncio.run(
+            RealtimeAPI._run_preference_recall_with_fallbacks(
+                api,
+                recall_fn=_fake_recall,
+                source="input_audio_transcription",
+                resolved_turn_id="turn_2",
+                query="editor favorite vim user preference",
+            )
+        )
+
+    rendered = "\n".join(str(call.args[0]) % call.args[1:] for call in mocked_info.call_args_list if call.args)
+    assert "empty_reason=no_candidates" in rendered
+    assert "query_lineage=0:editor|domain_only" in rendered
+    assert "query_lineage=0:editor|domain_only;1:preferred editor vim|canonical" in rendered
 
 def test_preference_recall_does_not_block_response_when_audio_started() -> None:
     api = _base_api()

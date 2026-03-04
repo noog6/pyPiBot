@@ -3151,6 +3151,11 @@ class RealtimeAPI:
             planned_attempts.append(strict_variant)
 
         for attempt_index, (candidate_query, variant_class) in enumerate(planned_attempts):
+            attempted_variants = planned_attempts[: attempt_index + 1]
+            query_lineage = ";".join(
+                f"{index}:{attempted_query}|{attempted_variant_class}"
+                for index, (attempted_query, attempted_variant_class) in enumerate(attempted_variants)
+            )
             logger.debug(
                 "preference_recall_query_variant run_id=%s resolved_turn_id=%s query_variant_index=%s variant_class=%s query=%s max_attempts=%s",
                 self._current_run_id() or "",
@@ -3169,7 +3174,8 @@ class RealtimeAPI:
             memories = self._preference_recall_memories_from_payload(payload)
             cards = payload.get("memory_cards") if isinstance(payload, dict) else None
             cards_count = len(cards) if isinstance(cards, list) else 0
-            trace = payload.get("trace") if isinstance(payload.get("trace"), dict) else {}
+            trace_present = isinstance(payload.get("trace"), dict) if isinstance(payload, dict) else False
+            trace = payload.get("trace") if trace_present else {}
             candidate_counts = trace.get("candidate_counts") if isinstance(trace.get("candidate_counts"), dict) else {}
             retrieval_backend = str(trace.get("retrieval_mode", "unknown"))
             filters_applied = [
@@ -3185,6 +3191,8 @@ class RealtimeAPI:
             if not hit:
                 if not payload_keys:
                     empty_reason = "invalid_payload"
+                elif not trace_present:
+                    empty_reason = "no_hit_trace_unavailable"
                 elif candidate_counts.get("lexical_candidates", 0) == 0 and candidate_counts.get("semantic_candidates", 0) == 0:
                     empty_reason = "no_candidates"
                 elif not cards_count and memories:
@@ -3195,7 +3203,7 @@ class RealtimeAPI:
             logger.info(
                 "preference_recall_tool_result run_id=%s resolved_turn_id=%s query=%s payload_keys=%s "
                 "memories_count=%s cards_count=%s memory_cards_text_len=%s scope=%s attempt=%s source=%s "
-                "retrieval_backend=%s filters_applied=%s candidate_count=%s returned_count=%s empty_reason=%s",
+                "retrieval_backend=%s filters_applied=%s candidate_count=%s returned_count=%s empty_reason=%s query_lineage=%s",
                 self._current_run_id() or "",
                 resolved_turn_id,
                 candidate_query,
@@ -3211,6 +3219,7 @@ class RealtimeAPI:
                 candidate_counts.get("combined_candidates", candidate_counts.get("lexical_candidates", 0)),
                 len(memories),
                 empty_reason,
+                query_lineage,
             )
             logger.debug(
                 "preference_recall_attempt_result run_id=%s resolved_turn_id=%s query_variant_index=%s variant_class=%s hit=%s",
