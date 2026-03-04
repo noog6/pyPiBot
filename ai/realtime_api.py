@@ -4599,42 +4599,6 @@ class RealtimeAPI:
             store = {}
             self._pending_preference_memory_context_by_canonical_key = store
         store[canonical_key] = dict(memory_context)
-        prompt_note = str(memory_context.get("prompt_note") or "").strip()
-        logger.debug(
-            "pref_recall_context_attached run_id=%s turn_id=%s input_event_key=%s canonical_key=%s len=%s hit=%s",
-            self._current_run_id() or "",
-            turn_id,
-            input_event_key or "unknown",
-            canonical_key,
-            len(prompt_note),
-            str(bool(memory_context.get("hit"))).lower(),
-        )
-
-    def _consume_pending_preference_memory_context_note_for_input_event_keys(
-        self,
-        *,
-        turn_id: str,
-        input_event_keys: list[str | None],
-    ) -> str | None:
-        store = getattr(self, "_pending_preference_memory_context_by_canonical_key", None)
-        if not isinstance(store, dict):
-            return None
-        canonical_keys: list[str] = []
-        for raw_input_event_key in input_event_keys:
-            canonical_key = self._canonical_utterance_key(
-                turn_id=turn_id,
-                input_event_key=raw_input_event_key,
-            )
-            if canonical_key not in canonical_keys:
-                canonical_keys.append(canonical_key)
-        for canonical_key in canonical_keys:
-            payload = store.pop(canonical_key, None)
-            if not isinstance(payload, dict):
-                continue
-            prompt_note = str(payload.get("prompt_note") or "").strip()
-            if prompt_note:
-                return prompt_note
-        return None
 
     def _consume_pending_preference_memory_context_note(
         self,
@@ -4642,10 +4606,15 @@ class RealtimeAPI:
         turn_id: str,
         input_event_key: str,
     ) -> str | None:
-        return self._consume_pending_preference_memory_context_note_for_input_event_keys(
-            turn_id=turn_id,
-            input_event_keys=[input_event_key],
-        )
+        canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+        store = getattr(self, "_pending_preference_memory_context_by_canonical_key", None)
+        if not isinstance(store, dict):
+            return None
+        payload = store.pop(canonical_key, None)
+        if not isinstance(payload, dict):
+            return None
+        prompt_note = str(payload.get("prompt_note") or "").strip()
+        return prompt_note or None
 
     def _tool_execution_cooldown_remaining(self) -> float:
         remaining = self._tool_execution_disabled_until - time.monotonic()

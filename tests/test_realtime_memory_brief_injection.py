@@ -75,8 +75,8 @@ def test_send_response_create_injects_preference_memory_context_before_response(
     api = _make_api_stub()
     ws = _Ws()
 
-    api._consume_pending_preference_memory_context_note_for_input_event_keys = (
-        lambda *, turn_id, input_event_keys: "Preference recall context for this SAME response: matched stored preference(s). Top recalled value: Vim"
+    api._consume_pending_preference_memory_context_note = lambda *, turn_id, input_event_key: (
+        "Preference recall context for this SAME response: matched stored preference(s). Top recalled value: Vim"
     )
 
     asyncio.run(
@@ -93,40 +93,6 @@ def test_send_response_create_injects_preference_memory_context_before_response(
     ]
     assert "Vim" in ws.events[0]["item"]["content"][0]["text"]
 
-
-
-
-def test_send_response_create_server_auto_uses_pref_context_from_transcript_key() -> None:
-    api = _make_api_stub()
-    ws = _Ws()
-
-    api._current_response_turn_id = "turn_4"
-    api._current_input_event_key = "synthetic_server_auto_1"
-    api._active_input_event_key_by_turn_id = {"turn_4": "evt_4"}
-    api._set_pending_preference_memory_context(
-        turn_id="turn_4",
-        input_event_key="evt_4",
-        memory_context={
-            "prompt_note": "Preference recall context for this SAME response: matched stored preference(s). Top recalled value: Vim",
-            "hit": True,
-        },
-    )
-
-    sent = asyncio.run(
-        api._send_response_create(
-            ws,
-            {"type": "response.create", "response": {"metadata": {"turn_id": "turn_4"}}},
-            origin="server_auto",
-        )
-    )
-
-    assert sent is True
-    assert [event["type"] for event in ws.events] == [
-        "conversation.item.create",
-        "response.create",
-    ]
-    assert "Vim" in ws.events[0]["item"]["content"][0]["text"]
-    assert len([event for event in ws.events if event["type"] == "response.create"]) == 1
 
 def test_send_response_create_preserves_brief_when_deferred() -> None:
     api = _make_api_stub()
