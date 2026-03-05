@@ -308,6 +308,11 @@ class OpsOrchestrator:
                 else:
                     status = overall_status
                     summary = self._summarize_health(status, probe_results)
+                    if summary == "System health pending" and status in (
+                        HealthStatus.DEGRADED,
+                        HealthStatus.FAILING,
+                    ):
+                        status = HealthStatus.OK
                 health_snapshot = HealthSnapshot(
                     timestamp=timestamp,
                     status=status,
@@ -631,7 +636,7 @@ class OpsOrchestrator:
     def _derive_overall_status(self) -> HealthStatus:
         states = [state.status for state in self._health_states.values()]
         if not states:
-            return HealthStatus.DEGRADED
+            return HealthStatus.OK
         if any(status == HealthStatus.FAILING for status in states):
             return HealthStatus.FAILING
         if any(status == HealthStatus.DEGRADED for status in states):
@@ -659,8 +664,10 @@ class OpsOrchestrator:
         realtime_connected = bool(realtime and realtime.details.get("connected"))
         realtime_ready = bool(realtime and realtime.details.get("ready"))
         all_required_ready = self._warmup_required_components_ready(results)
-        criteria_met = realtime_connected and realtime_ready and all_required_ready
+        probes_settled = self._warmup_probes_settled(results)
+        criteria_met = realtime_connected and realtime_ready and all_required_ready and probes_settled
         timed_out = elapsed_s >= self._warmup_grace_period_s
+        details["warmup_probes_settled"] = int(probes_settled)
         if criteria_met or timed_out:
             self._warmup_active = False
             reason = "criteria_met" if criteria_met else "timeout"
@@ -683,6 +690,18 @@ class OpsOrchestrator:
             if tolerated_states and result.status in tolerated_states:
                 continue
             if result.status in (HealthStatus.DEGRADED, HealthStatus.FAILING):
+                return False
+        return True
+
+    def _warmup_probes_settled(self, results: list[HealthProbeResult]) -> bool:
+        if not results:
+            return False
+        for result in results:
+            stable = self._health_states.get(result.name)
+            pending = self._health_pending.get(result.name)
+            if stable is None or pending is not None:
+                return False
+            if stable.status != result.status:
                 return False
         return True
 
@@ -776,6 +795,8 @@ class OpsOrchestrator:
 
     def _emit_health_alert(self, snapshot: HealthSnapshot) -> None:
         if snapshot.status in (HealthStatus.OK, HealthStatus.WARMUP):
+            return
+        if snapshot.summary == "System health pending":
             return
         severity = "critical" if snapshot.status == HealthStatus.FAILING else "warning"
         self._emit_alert(

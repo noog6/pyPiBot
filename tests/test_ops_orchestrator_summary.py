@@ -9,6 +9,12 @@ import sys
 if "audioop" not in sys.modules:
     sys.modules["audioop"] = types.ModuleType("audioop")
 
+
+if "ai.realtime_api" not in sys.modules:
+    realtime_api_stub = types.ModuleType("ai.realtime_api")
+    realtime_api_stub.RealtimeAPI = object
+    sys.modules["ai.realtime_api"] = realtime_api_stub
+
 from core.ops_models import HealthStatus
 from services.health_probes import HealthProbeResult
 from services.ops_orchestrator import OpsOrchestrator
@@ -196,7 +202,7 @@ def test_tick_reports_warmup_for_transient_startup_degradations(monkeypatch) -> 
     assert captured[-1].summary.startswith("Warming up:")
 
 
-def test_tick_exits_warmup_to_ok_when_startup_criteria_met(monkeypatch, caplog) -> None:
+def test_tick_exits_warmup_to_ok_when_startup_criteria_met(monkeypatch) -> None:
     orchestrator = _new_orchestrator()
     orchestrator._health_debounce_s = 0.0
     captured = []
@@ -219,12 +225,54 @@ def test_tick_exits_warmup_to_ok_when_startup_criteria_met(monkeypatch, caplog) 
     monkeypatch.setattr(orchestrator, "_maybe_run_memory_maintenance", lambda now: None)
     monkeypatch.setattr(orchestrator, "_emit_health_snapshot", lambda snapshot: captured.append(snapshot))
 
-    with caplog.at_level("INFO"):
-        orchestrator._tick()
+    orchestrator._tick()
 
     assert captured[-1].status == HealthStatus.OK
     assert captured[-1].summary == "All systems nominal"
-    assert "Warmup transition: warmup -> active" in caplog.text
+    assert orchestrator._warmup_active is False
+
+
+def test_tick_does_not_exit_warmup_until_probe_results_settle(monkeypatch) -> None:
+    orchestrator = _new_orchestrator()
+    orchestrator._health_debounce_s = 5.0
+    captured = []
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_run_health_probes",
+        lambda: [
+            HealthProbeResult("audio", HealthStatus.OK, "Audio input/output ready"),
+            HealthProbeResult(
+                "realtime",
+                HealthStatus.OK,
+                "Realtime session connected",
+                details={"connected": 1, "ready": 1},
+            ),
+            HealthProbeResult("battery", HealthStatus.OK, "Battery nominal"),
+        ],
+    )
+    monkeypatch.setattr(orchestrator, "_maybe_run_micro_presence", lambda now: None)
+    monkeypatch.setattr(orchestrator, "_maybe_run_memory_maintenance", lambda now: None)
+    monkeypatch.setattr(orchestrator, "_emit_health_snapshot", lambda snapshot: captured.append(snapshot))
+
+    orchestrator._health_states = {
+        "audio": types.SimpleNamespace(status=HealthStatus.DEGRADED, since=0.0, last_update=0.0),
+        "realtime": types.SimpleNamespace(status=HealthStatus.DEGRADED, since=0.0, last_update=0.0),
+        "battery": types.SimpleNamespace(status=HealthStatus.OK, since=0.0, last_update=0.0),
+    }
+
+    orchestrator._tick()
+
+    assert captured[-1].status == HealthStatus.WARMUP
+    assert orchestrator._warmup_active is True
+
+
+def test_pending_summary_is_never_treated_as_degraded_status() -> None:
+    orchestrator = _new_orchestrator()
+
+    summary = orchestrator._summarize_health(HealthStatus.DEGRADED, [])
+
+    assert summary == "System health pending"
 
 
 def test_tick_reports_degraded_after_warmup_timeout_when_issue_persists(monkeypatch) -> None:
@@ -256,3 +304,21 @@ def test_tick_reports_degraded_after_warmup_timeout_when_issue_persists(monkeypa
 
     assert captured[-1].status == HealthStatus.DEGRADED
     assert captured[-1].summary.startswith("Degraded:")
+
+
+def test_emit_health_alert_ignores_pending_summary_and_alerts_real_degraded(monkeypatch) -> None:
+    orchestrator = _new_orchestrator()
+    emitted = []
+
+    monkeypatch.setattr(orchestrator, "_emit_alert", lambda alert: emitted.append(alert))
+
+    orchestrator._emit_health_alert(
+        types.SimpleNamespace(status=HealthStatus.DEGRADED, summary="System health pending")
+    )
+    orchestrator._emit_health_alert(
+        types.SimpleNamespace(status=HealthStatus.DEGRADED, summary="Degraded: realtime (offline)")
+    )
+
+    assert len(emitted) == 1
+    assert emitted[0].severity == "warning"
+    assert emitted[0].key == "health_degraded"
