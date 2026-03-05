@@ -3606,11 +3606,18 @@ class RealtimeAPI:
         pending.active = False
 
     def _is_cancelled_response_event(self, event: dict[str, Any]) -> bool:
-        cancelled_ids = getattr(self, "_cancelled_response_ids", None)
-        if not isinstance(cancelled_ids, set) or not cancelled_ids:
-            return False
         response_id = self._response_id_from_event(event)
-        return bool(response_id and response_id in cancelled_ids)
+        return self._is_cancelled_or_superseded_response_id(response_id)
+
+    def _is_cancelled_or_superseded_response_id(self, response_id: str | None) -> bool:
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            return False
+        cancelled_ids = getattr(self, "_cancelled_response_ids", None)
+        if isinstance(cancelled_ids, set) and normalized_response_id in cancelled_ids:
+            return True
+        superseded_ids = getattr(self, "_superseded_response_ids", None)
+        return isinstance(superseded_ids, set) and normalized_response_id in superseded_ids
 
     def _response_id_from_event(self, event: dict[str, Any] | None) -> str:
         if not isinstance(event, dict):
@@ -8233,6 +8240,14 @@ class RealtimeAPI:
 
     async def _handle_response_output_audio_delta_event(self, event: dict[str, Any], websocket: Any) -> None:
         _ = websocket
+        response_id = self._response_id_from_event(event)
+        if self._is_cancelled_or_superseded_response_id(response_id):
+            logger.debug(
+                "audio_delta_suppressed run_id=%s response_id=%s event_type=response.output_audio.delta",
+                self._current_run_id() or "",
+                response_id or "unknown",
+            )
+            return
         if self._is_active_response_guarded():
             return
         self._mark_utterance_info_summary(deliverable_seen=True)
