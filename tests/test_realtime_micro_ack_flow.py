@@ -206,6 +206,139 @@ def test_response_created_cancels_prescheduled_micro_ack_for_turn_channel() -> N
     api.loop.close()
 
 
+def test_response_text_delta_cancels_pending_micro_ack_marker(monkeypatch) -> None:
+    api = _api_stub()
+    turn_id = "turn-text-delta"
+    api._current_turn_id_or_unknown = lambda: turn_id
+    api._active_response_id = "resp-text-delta"
+    api._response_status_by_id = {"resp-text-delta": "active"}
+    api.state_manager.state = InteractionState.LISTENING
+    api._active_input_event_key_by_turn_id = {turn_id: "input-text-delta"}
+
+    api._maybe_schedule_micro_ack(
+        turn_id=turn_id,
+        category="start_of_work",
+        channel="voice",
+        reason="speech_stopped",
+        expected_delay_ms=700,
+    )
+    assert (turn_id, "voice") in api._pending_micro_ack_by_turn_channel
+
+    cancel_calls: list[tuple[str, str]] = []
+    original_cancel = api._cancel_micro_ack
+
+    def _capture_cancel(*, turn_id: str, reason: str) -> None:
+        cancel_calls.append((turn_id, reason))
+        original_cancel(turn_id=turn_id, reason=reason)
+
+    monkeypatch.setattr(api, "_cancel_micro_ack", _capture_cancel)
+
+    asyncio.run(
+        api.handle_event(
+            {
+                "type": "response.text.delta",
+                "response_id": "resp-text-delta",
+                "delta": "Hello",
+            },
+            api.websocket,
+        )
+    )
+
+    assert cancel_calls == [(turn_id, "response_started")]
+    assert (turn_id, "voice") not in api._pending_micro_ack_by_turn_channel
+    api.loop.close()
+
+
+def test_response_output_text_delta_cancels_pending_micro_ack_marker(monkeypatch) -> None:
+    api = _api_stub()
+    turn_id = "turn-output-text-delta"
+    api._current_turn_id_or_unknown = lambda: turn_id
+    api._active_response_id = "resp-output-text-delta"
+    api._response_status_by_id = {"resp-output-text-delta": "active"}
+    api.state_manager.state = InteractionState.LISTENING
+    api._active_input_event_key_by_turn_id = {turn_id: "input-output-text-delta"}
+
+    api._maybe_schedule_micro_ack(
+        turn_id=turn_id,
+        category="start_of_work",
+        channel="voice",
+        reason="speech_stopped",
+        expected_delay_ms=700,
+    )
+    assert (turn_id, "voice") in api._pending_micro_ack_by_turn_channel
+
+    cancel_calls: list[tuple[str, str]] = []
+    original_cancel = api._cancel_micro_ack
+
+    def _capture_cancel(*, turn_id: str, reason: str) -> None:
+        cancel_calls.append((turn_id, reason))
+        original_cancel(turn_id=turn_id, reason=reason)
+
+    monkeypatch.setattr(api, "_cancel_micro_ack", _capture_cancel)
+
+    asyncio.run(
+        api.handle_event(
+            {
+                "type": "response.output_text.delta",
+                "response_id": "resp-output-text-delta",
+                "delta": "Hello",
+            },
+            api.websocket,
+        )
+    )
+
+    assert cancel_calls == [(turn_id, "response_started")]
+    assert (turn_id, "voice") not in api._pending_micro_ack_by_turn_channel
+    api.loop.close()
+
+
+def test_conversation_item_added_cancels_pending_micro_ack_marker(monkeypatch) -> None:
+    api = _api_stub()
+    turn_id = "turn-conversation-item"
+    api._current_turn_id_or_unknown = lambda: turn_id
+    api._active_response_id = "resp-conversation-item"
+    api._response_status_by_id = {"resp-conversation-item": "active"}
+    api.state_manager.state = InteractionState.LISTENING
+    api._active_input_event_key_by_turn_id = {turn_id: "input-conversation-item"}
+
+    api._maybe_schedule_micro_ack(
+        turn_id=turn_id,
+        category="start_of_work",
+        channel="voice",
+        reason="speech_stopped",
+        expected_delay_ms=700,
+    )
+    assert (turn_id, "voice") in api._pending_micro_ack_by_turn_channel
+
+    cancel_calls: list[tuple[str, str]] = []
+    original_cancel = api._cancel_micro_ack
+
+    def _capture_cancel(*, turn_id: str, reason: str) -> None:
+        cancel_calls.append((turn_id, reason))
+        original_cancel(turn_id=turn_id, reason=reason)
+
+    monkeypatch.setattr(api, "_cancel_micro_ack", _capture_cancel)
+
+    asyncio.run(
+        api.handle_event(
+            {
+                "type": "conversation.item.added",
+                "response_id": "resp-conversation-item",
+                "item": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Hello"}],
+                },
+            },
+            api.websocket,
+        )
+    )
+
+    assert cancel_calls == [(turn_id, "response_started")]
+    assert (turn_id, "voice") not in api._pending_micro_ack_by_turn_channel
+    api.loop.close()
+
+
 def test_append_assistant_reply_text_inserts_separator_between_ack_and_answer() -> None:
     api = _api_stub()
 
