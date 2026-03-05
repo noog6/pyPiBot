@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from threading import Event
+
 from ai.realtime_api import RealtimeAPI
 
 
@@ -41,6 +43,8 @@ def _make_api_stub() -> RealtimeAPI:
     api._memory_retrieval_scope = "session_local"
     api._session_connected = True
     api.is_ready_for_injections = lambda: True
+    api.ready_event = Event()
+    api.ready_event.set()
     api._session_connection_attempts = 4
     api._session_connections = 2
     api._session_reconnects = 1
@@ -50,6 +54,10 @@ def _make_api_stub() -> RealtimeAPI:
     api._last_failure_reason = None
     api._silent_turn_incident_count = 2
     api._sensor_event_aggregation_metrics = {}
+    api.rate_limits_supports_tokens = False
+    api.rate_limits_supports_requests = False
+    api.rate_limits_last_present_names = set()
+    api.rate_limits_last_event_id = ""
     return api
 
 
@@ -80,3 +88,5 @@ def test_get_session_health_ready_uses_injection_readiness_semantics() -> None:
     health = api.get_session_health()
 
     assert health["ready"] is False
+    assert health["injection_ready"] is False
+    assert health["session_ready"] is True
