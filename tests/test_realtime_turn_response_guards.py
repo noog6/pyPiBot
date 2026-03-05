@@ -13,6 +13,7 @@ from collections import deque
 
 from ai.realtime_api import PendingResponseCreate, RealtimeAPI
 from core.logging import logger
+from interaction import InteractionState
 
 
 class _FakeStateManager:
@@ -516,3 +517,64 @@ def test_empty_response_done_retry_terminal_guard_drops_when_retry_canonical_ter
     assert outcomes
     assert outcomes[0]["reason"] == "canonical_delivery_terminal_state"
     assert "origin_canonical_key=run-395:turn_1:input_evt_1" in outcomes[0]["details"]
+
+
+def test_watchdog_micro_ack_not_scheduled_when_terminal_and_idle() -> None:
+    api = _make_api()
+    scheduled: list[dict[str, object]] = []
+
+    class _Manager:
+        def maybe_schedule(self, **kwargs):
+            scheduled.append(kwargs)
+
+        def cancel(self, **_kwargs):
+            return None
+
+    api._micro_ack_manager = _Manager()
+    api.loop = object()
+    api._pending_micro_ack_by_turn_channel = {}
+    api._micro_ack_near_ready_suppress_ms = 0
+    api._micro_ack_correlation_metadata = lambda: {}
+    api._active_input_event_key_by_turn = {"turn_1": "input_evt_terminal"}
+    api.state_manager.state = InteractionState.IDLE
+    api._set_response_delivery_state(turn_id="turn_1", input_event_key="input_evt_terminal", state="done")
+
+    api._maybe_schedule_micro_ack(
+        turn_id="turn_1",
+        category=api._micro_ack_category_for_reason("watchdog_audio_playback_busy"),
+        channel="voice",
+        reason="watchdog_audio_playback_busy",
+    )
+
+    assert scheduled == []
+
+
+def test_response_text_delta_without_bound_response_does_not_enter_speaking() -> None:
+    api = _make_api()
+    transitions: list[tuple[InteractionState, str]] = []
+
+    class _StateManager:
+        def __init__(self) -> None:
+            self.state = InteractionState.IDLE
+
+        def update_state(self, state, reason):
+            transitions.append((state, reason))
+            self.state = state
+
+    api.state_manager = _StateManager()
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._cancel_micro_ack = lambda **_kwargs: None
+    api._mark_first_assistant_utterance_observed_if_needed = lambda _text: None
+    api._append_assistant_reply_text = lambda *args, **kwargs: None
+    api._response_status_by_id = {}
+    api._active_response_id = None
+
+    asyncio.run(
+        api._handle_event_legacy(
+            {"type": "response.text.delta", "response_id": "resp_terminal", "delta": "late delta"},
+            websocket=None,
+        )
+    )
+
+    assert transitions == []
+    assert api.state_manager.state == InteractionState.IDLE
