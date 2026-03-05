@@ -187,6 +187,11 @@ class ResponseTerminalHandlers:
                 active_response_id,
                 source_event="response.done.handler",
             )
+        elif str(active_response_origin_before_clear or "").strip().lower() == "micro_ack":
+            logger.info(
+                "deliverable_selected response_id=%s selected=false reason=micro_ack_non_deliverable",
+                active_response_id or "unknown",
+            )
         else:
             logger.info(
                 "deliverable_selected response_id=%s selected=true reason=normal",
