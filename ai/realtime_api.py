@@ -5368,9 +5368,6 @@ class RealtimeAPI:
             camera_available=bool(vision_state.get("available", False) or vision_state.get("can_capture", False)),
             camera_recent=bool(vision_state.get("available", False)),
         )
-        if reason == "visual_unavailable" and bool(vision_state.get("can_capture", False)):
-            should_confirm = False
-            reason = "none"
         if not should_confirm:
             self._set_response_gating_verdict(
                 turn_id=turn_id,
@@ -9056,12 +9053,6 @@ class RealtimeAPI:
             ):
                 return
             if decision_path == "upgraded_response":
-                self._set_response_gating_verdict(
-                    turn_id=resolved_turn_id,
-                    input_event_key=input_event_key,
-                    action="UPGRADE",
-                    reason="transcript_upgrade",
-                )
                 pending = self._pending_server_auto_response_for_turn(turn_id=resolved_turn_id)
                 replacement_canonical_key = self._canonical_utterance_key(
                     turn_id=resolved_turn_id,
@@ -9090,6 +9081,12 @@ class RealtimeAPI:
                         input_event_key,
                     )
                     return
+                self._set_response_gating_verdict(
+                    turn_id=resolved_turn_id,
+                    input_event_key=input_event_key,
+                    action="UPGRADE",
+                    reason="transcript_upgrade",
+                )
                 if await self._cancel_and_replace_pending_server_auto_on_transcript_final(
                     websocket=websocket,
                     turn_id=resolved_turn_id,
