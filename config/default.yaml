@@ -138,6 +138,7 @@ realtime:
   transcript_response_watchdog_timeout_s: 3.0
   server_auto_audio_deferral_timeout_ms: 225
   stale_response_map_ttl_s: 15.0
+  lifecycle_trace_item_added_unknown_debug: false
   confirmation_awaiting_decision_timeout_s: 60.0
   confirmation_late_decision_grace_s: 15.0
   confirmation_unclear_max_reprompts: 1

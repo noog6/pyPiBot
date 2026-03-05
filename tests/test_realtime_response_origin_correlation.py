@@ -590,6 +590,7 @@ def test_response_output_audio_transcript_delta_trace_is_debug_with_sampling(mon
     api._lifecycle_trace_item_added_unknown_window_s = 10.0
     api._lifecycle_trace_item_added_unknown_cooldown_s = 30.0
     api._lifecycle_trace_item_added_unknown_last_escalation_ts = 0.0
+    api._lifecycle_trace_item_added_unknown_debug = True
 
     debug_logs: list[str] = []
     info_logs: list[str] = []
@@ -635,6 +636,7 @@ def test_conversation_item_added_trace_debug_with_unknown_escalation_cooldown(mo
     api._lifecycle_trace_item_added_unknown_window_s = 10.0
     api._lifecycle_trace_item_added_unknown_cooldown_s = 30.0
     api._lifecycle_trace_item_added_unknown_last_escalation_ts = 0.0
+    api._lifecycle_trace_item_added_unknown_debug = True
 
     debug_logs: list[str] = []
     info_logs: list[str] = []
@@ -667,3 +669,7 @@ def test_conversation_item_added_trace_debug_with_unknown_escalation_cooldown(mo
         line for line in info_logs if "response_lifecycle_trace_unknown_item_added_spike" in line
     ]
     assert len(escalation_logs) == 1
+    assert any(
+        "response_lifecycle_trace_unknown_item_added_spike_items" in line
+        for line in debug_logs
+    )

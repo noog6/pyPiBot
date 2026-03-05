@@ -1067,9 +1067,13 @@ class RealtimeAPI:
             1.0,
             float(realtime_cfg.get("lifecycle_trace_item_added_unknown_cooldown_s", 30.0)),
         )
+        self._lifecycle_trace_item_added_unknown_debug = bool(
+            realtime_cfg.get("lifecycle_trace_item_added_unknown_debug", False)
+        )
         self._lifecycle_trace_transcript_delta_state: dict[str, dict[str, float | int]] = {}
-        self._lifecycle_trace_item_added_unknown_events: deque[float] = deque()
+        self._lifecycle_trace_item_added_unknown_events: deque[dict[str, Any]] = deque()
         self._lifecycle_trace_item_added_unknown_last_escalation_ts = 0.0
+        self._response_id_by_output_item_id: dict[str, str] = {}
         self._minimum_non_confirmation_duration_ms = int(
             realtime_cfg.get("minimum_non_confirmation_duration_ms", 120)
         )
@@ -1206,6 +1210,44 @@ class RealtimeAPI:
                 current[key] = normalized_value
         return current
 
+    def _response_item_id_map(self) -> dict[str, str]:
+        mapping = getattr(self, "_response_id_by_output_item_id", None)
+        if isinstance(mapping, dict):
+            return mapping
+        mapping = {}
+        self._response_id_by_output_item_id = mapping
+        return mapping
+
+    def _remember_output_item_response_id(self, *, item_id: str, response_id: str) -> None:
+        normalized_item_id = str(item_id or "").strip()
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_item_id or not normalized_response_id:
+            return
+        mapping = self._response_item_id_map()
+        mapping[normalized_item_id] = normalized_response_id
+        if len(mapping) <= 2048:
+            return
+        stale_item_ids = list(mapping.keys())[: len(mapping) - 2048]
+        for stale_item_id in stale_item_ids:
+            mapping.pop(stale_item_id, None)
+
+    def _response_id_for_output_item(self, item_id: str) -> str:
+        normalized_item_id = str(item_id or "").strip()
+        if not normalized_item_id:
+            return ""
+        return str(self._response_item_id_map().get(normalized_item_id) or "").strip()
+
+    def _classify_conversation_item_added_category(self, *, item_type: str, item_role: str) -> str:
+        normalized_type = str(item_type or "").strip().lower()
+        normalized_role = str(item_role or "").strip().lower()
+        if normalized_type == "message" and normalized_role == "user":
+            return "user_message"
+        if normalized_type in {"function_call_output", "tool_result"}:
+            return "tool_result"
+        if normalized_type == "message" and normalized_role == "system":
+            return "system_injection"
+        return "unknown"
+
     def _emit_response_lifecycle_trace(
         self,
         *,
@@ -1218,6 +1260,9 @@ class RealtimeAPI:
         active_input_event_key: str,
         active_canonical_key: str,
         payload_summary: str = "",
+        item_id: str = "",
+        item_type: str = "",
+        item_role: str = "",
     ) -> None:
         now = time.monotonic()
         response_key = str(response_id or "").strip() or "unknown"
@@ -1258,9 +1303,12 @@ class RealtimeAPI:
                     trace_flags[-1],
                 )
         elif normalized_event_type == "conversation.item.added":
+            resolved_item_id = str(item_id or "").strip() or "unknown"
+            resolved_item_type = str(item_type or "").strip() or "unknown"
+            resolved_item_role = str(item_role or "").strip() or "unknown"
             logger.debug(
                 "response_lifecycle_trace response_id=%s event_type=%s turn_id=%s input_event_key=%s canonical_key=%s "
-                "origin=%s active_input_event_key=%s active_canonical_key=%s",
+                "origin=%s active_input_event_key=%s active_canonical_key=%s item_id=%s item_type=%s item_role=%s",
                 response_key,
                 normalized_event_type,
                 resolved_turn_id,
@@ -1269,9 +1317,30 @@ class RealtimeAPI:
                 resolved_origin,
                 active_input_key,
                 active_key,
+                resolved_item_id,
+                resolved_item_type,
+                resolved_item_role,
             )
             if response_key == "unknown":
-                self._maybe_escalate_unknown_item_added(now=now)
+                category = self._classify_conversation_item_added_category(
+                    item_type=resolved_item_type,
+                    item_role=resolved_item_role,
+                )
+                if category != "unknown":
+                    logger.debug(
+                        "response_lifecycle_trace_item_added_non_response category=%s item_id=%s item_type=%s item_role=%s",
+                        category,
+                        resolved_item_id,
+                        resolved_item_type,
+                        resolved_item_role,
+                    )
+                else:
+                    self._maybe_escalate_unknown_item_added(
+                        now=now,
+                        item_id=resolved_item_id,
+                        item_type=resolved_item_type,
+                        item_role=resolved_item_role,
+                    )
         else:
             logger.info(
                 "response_lifecycle_trace response_id=%s event_type=%s turn_id=%s input_event_key=%s canonical_key=%s "
@@ -1321,12 +1390,19 @@ class RealtimeAPI:
         for response_id, _ in oldest[: len(state) - 256]:
             state.pop(response_id, None)
 
-    def _maybe_escalate_unknown_item_added(self, *, now: float) -> None:
+    def _maybe_escalate_unknown_item_added(self, *, now: float, item_id: str, item_type: str, item_role: str) -> None:
         events = self._lifecycle_trace_item_added_unknown_events
         window_s = self._lifecycle_trace_item_added_unknown_window_s
-        while events and now - events[0] > window_s:
+        while events and now - float((events[0] or {}).get("ts", now)) > window_s:
             events.popleft()
-        events.append(now)
+        events.append(
+            {
+                "ts": now,
+                "item_id": str(item_id or "").strip() or "unknown",
+                "item_type": str(item_type or "").strip() or "unknown",
+                "item_role": str(item_role or "").strip() or "unknown",
+            }
+        )
         if len(events) < self._lifecycle_trace_item_added_unknown_threshold:
             return
         last_escalation = self._lifecycle_trace_item_added_unknown_last_escalation_ts
@@ -1340,6 +1416,20 @@ class RealtimeAPI:
             self._lifecycle_trace_item_added_unknown_window_s,
             self._lifecycle_trace_item_added_unknown_cooldown_s,
         )
+        if bool(getattr(self, "_lifecycle_trace_item_added_unknown_debug", False)):
+            details = [
+                "%s:%s:%s" % (
+                    str(entry.get("item_id") or "unknown"),
+                    str(entry.get("item_type") or "unknown"),
+                    str(entry.get("item_role") or "unknown"),
+                )
+                for entry in list(events)
+            ]
+            logger.debug(
+                "response_lifecycle_trace_unknown_item_added_spike_items count=%s items=%s",
+                len(events),
+                ",".join(details),
+            )
 
     async def _handle_response_lifecycle_event(self, event: dict[str, Any], websocket: Any) -> None:
         event_type = str(event.get("type") or "unknown")
@@ -1377,8 +1467,18 @@ class RealtimeAPI:
         ).strip() or "unknown"
         item = event.get("item")
         item_type = str(item.get("type") or "") if isinstance(item, dict) else ""
+        item_role = str(item.get("role") or "") if isinstance(item, dict) else ""
+        item_id = str(item.get("id") or "") if isinstance(item, dict) else ""
+        if event_type == "response.output_item.added" and response_id and item_id:
+            self._remember_output_item_response_id(item_id=item_id, response_id=response_id)
+        if event_type == "conversation.item.added" and not response_id and item_id:
+            mapped_response_id = self._response_id_for_output_item(item_id)
+            if mapped_response_id:
+                response_id = mapped_response_id
+                trace_context = self._response_trace_by_id().get(response_id, {})
+                stale_context = self._stale_response_context(response_id)
         payload_summary = (
-            f"has_item={isinstance(item, dict)} item_type={item_type or 'unknown'} "
+            f"has_item={isinstance(item, dict)} item_type={item_type or 'unknown'} item_role={item_role or 'unknown'} "
             f"has_delta={bool('delta' in event)} has_transcript={bool('transcript' in event)}"
         )
         if response_id:
@@ -1407,6 +1507,9 @@ class RealtimeAPI:
             active_input_event_key=active_input_event_key,
             active_canonical_key=active_canonical_key,
             payload_summary=payload_summary,
+            item_id=item_id,
+            item_type=item_type,
+            item_role=item_role,
         )
         logger.debug(
             "realtime_lifecycle_event_received event_type=%s has_item=%s has_delta=%s",
