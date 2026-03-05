@@ -989,6 +989,7 @@ class RealtimeAPI:
         self._response_obligations: dict[str, dict[str, Any]] = {}
         self._canonical_invariant_logged: set[str] = set()
         self._already_scheduled_for_input_event_key: set[str] = set()
+        self._tool_followup_state_by_canonical_key: dict[str, str] = {}
         self._active_response_input_event_key: str | None = None
         self._active_response_canonical_key: str | None = None
         self._response_gating_verdict_by_input_event_key: dict[str, ResponseGatingVerdict] = {}
@@ -4793,6 +4794,44 @@ class RealtimeAPI:
 
     def _tool_followup_input_event_key(self, *, call_id: str) -> str:
         return f"tool:{str(call_id or '').strip() or 'unknown'}"
+
+    def _tool_followup_state(self, *, canonical_key: str) -> str:
+        normalized_canonical_key = str(canonical_key or "").strip()
+        if not normalized_canonical_key:
+            return "new"
+        state_store = getattr(self, "_tool_followup_state_by_canonical_key", None)
+        if not isinstance(state_store, dict):
+            state_store = {}
+            self._tool_followup_state_by_canonical_key = state_store
+        state = str(state_store.get(normalized_canonical_key) or "").strip().lower()
+        return state or "new"
+
+    def _set_tool_followup_state(self, *, canonical_key: str, state: str, reason: str) -> None:
+        normalized_canonical_key = str(canonical_key or "").strip()
+        normalized_state = str(state or "").strip().lower() or "new"
+        if not normalized_canonical_key:
+            return
+        state_store = getattr(self, "_tool_followup_state_by_canonical_key", None)
+        if not isinstance(state_store, dict):
+            state_store = {}
+            self._tool_followup_state_by_canonical_key = state_store
+        prior_state = str(state_store.get(normalized_canonical_key) or "new").strip().lower() or "new"
+        if prior_state == normalized_state:
+            logger.info(
+                "tool_followup_state canonical_key=%s state=%s reason=%s",
+                normalized_canonical_key,
+                normalized_state,
+                reason,
+            )
+            return
+        state_store[normalized_canonical_key] = normalized_state
+        logger.info(
+            "tool_followup_state canonical_key=%s state=%s reason=%s prior_state=%s",
+            normalized_canonical_key,
+            normalized_state,
+            reason,
+            prior_state,
+        )
 
     def _build_tool_followup_response_create_event(
         self,
@@ -8874,6 +8913,12 @@ class RealtimeAPI:
             turn_id = utterance_context.turn_id
             resolved_input_event_key = utterance_context.input_event_key
             canonical_key = utterance_context.canonical_key
+        if str((response_metadata or {}).get("tool_followup", "")).strip().lower() in {"true", "1", "yes"}:
+            self._set_tool_followup_state(
+                canonical_key=canonical_key,
+                state="created",
+                reason="response_created",
+            )
         if origin != "server_auto":
             current_input_event_key = resolved_input_event_key
         arbitration_outcome, arbitration_reason_code = self._arbitrate_server_auto_response_created(

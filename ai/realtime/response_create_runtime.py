@@ -77,6 +77,29 @@ class ResponseCreateRuntime:
         normalized_origin = str(origin or "").strip().lower()
         tool_followup = str(response_metadata.get("tool_followup", "")).strip().lower() in {"true", "1", "yes"}
         tool_call_id = str(response_metadata.get("tool_call_id") or "").strip()
+        if tool_followup:
+            current_state = api._tool_followup_state(canonical_key=canonical_key)
+            if current_state in {"creating", "created", "done", "dropped"}:
+                logger.info(
+                    "tool_followup_arbitration outcome=deny reason=already_%s call_id=%s canonical_key=%s",
+                    current_state,
+                    tool_call_id or "unknown",
+                    canonical_key,
+                )
+                logger.info(
+                    "tool_followup_create_suppressed canonical_key=%s reason=already_%s prior_state=%s",
+                    canonical_key,
+                    current_state,
+                    current_state,
+                )
+                return False
+            if current_state == "scheduled":
+                logger.info(
+                    "tool_followup_create_suppressed canonical_key=%s reason=already_scheduled prior_state=%s",
+                    canonical_key,
+                    current_state,
+                )
+                return False
         consumes_canonical_slot = api._response_consumes_canonical_slot(response_metadata)
         explicit_multipart = api._response_is_explicit_multipart(response_metadata)
         transcript_upgrade_replacement = str(response_metadata.get("transcript_upgrade_replacement", "")).strip().lower() in {"true", "1", "yes"}
@@ -251,6 +274,13 @@ class ResponseCreateRuntime:
             queued_reminder_key=reminder_key,
             enqueued_done_serial=api._response_done_serial,
         )
+        if tool_followup:
+            response_metadata["tool_followup_release"] = "true"
+            api._set_tool_followup_state(
+                canonical_key=canonical_key,
+                state="scheduled",
+                reason=f"{reason or 'queued'}",
+            )
         previous = api._pending_response_create
         if previous is None:
             api._pending_response_create = candidate
@@ -504,6 +534,31 @@ class ResponseCreateRuntime:
         normalized_origin = str(origin or "").strip().lower()
         tool_followup = str(response_metadata.get("tool_followup", "")).strip().lower() in {"true", "1", "yes"}
         tool_call_id = str(response_metadata.get("tool_call_id") or "").strip()
+        tool_followup_release = str(response_metadata.get("tool_followup_release", "")).strip().lower() in {"true", "1", "yes"}
+        tool_followup_state = "new"
+        if tool_followup:
+            tool_followup_state = api._tool_followup_state(canonical_key=canonical_key)
+            if tool_followup_release and tool_followup_state == "scheduled":
+                api._set_tool_followup_state(
+                    canonical_key=canonical_key,
+                    state="creating",
+                    reason="scheduled_release",
+                )
+            elif tool_followup_state != "new":
+                deny_reason = f"already_{tool_followup_state}"
+                logger.info(
+                    "tool_followup_arbitration outcome=deny reason=%s call_id=%s canonical_key=%s",
+                    deny_reason,
+                    tool_call_id or "unknown",
+                    canonical_key,
+                )
+                logger.info(
+                    "tool_followup_create_suppressed canonical_key=%s reason=%s prior_state=%s",
+                    canonical_key,
+                    deny_reason,
+                    tool_followup_state,
+                )
+                return False
         consumes_canonical_slot = api._response_consumes_canonical_slot(response_metadata)
         explicit_multipart = api._response_is_explicit_multipart(response_metadata)
         transcript_upgrade_replacement = str(response_metadata.get("transcript_upgrade_replacement", "")).strip().lower() in {"true", "1", "yes"}
@@ -530,8 +585,17 @@ class ResponseCreateRuntime:
             origin=origin,
             response_metadata=response_metadata,
         ):
+            if tool_followup:
+                api._set_tool_followup_state(
+                    canonical_key=canonical_key,
+                    state="dropped",
+                    reason="canonical_terminal_state",
+                )
             return False
-        decision = api._lifecycle_policy().decide_response_create(
+        if tool_followup and tool_followup_release:
+            decision = None
+        else:
+            decision = api._lifecycle_policy().decide_response_create(
             response_in_flight=api._is_active_response_blocking(),
             audio_playback_busy=bool(api._audio_playback_busy),
             consumes_canonical_slot=consumes_canonical_slot,
@@ -545,17 +609,17 @@ class ResponseCreateRuntime:
             suppression_active=suppression_active,
             normalized_origin=normalized_origin,
         )
-        if tool_followup:
+        if tool_followup and decision is not None:
             arbitration_outcome = "deny" if decision.action is ResponseCreateDecisionAction.BLOCK else "allow"
             logger.info(
                 "tool_followup_arbitration outcome=%s reason=%s call_id=%s canonical_key=%s",
                 arbitration_outcome,
-                decision.reason_code,
+                (decision.reason_code if decision is not None else "scheduled_release"),
                 tool_call_id or "unknown",
                 canonical_key,
             )
 
-        if decision.action is ResponseCreateDecisionAction.SCHEDULE:
+        if decision is not None and decision.action is ResponseCreateDecisionAction.SCHEDULE:
             return api._schedule_pending_response_create(
                 websocket=websocket,
                 response_create_event=response_create_event,
@@ -565,7 +629,7 @@ class ResponseCreateRuntime:
                 debug_context=debug_context,
                 memory_brief_note=effective_memory_note,
             )
-        if decision.action is ResponseCreateDecisionAction.BLOCK:
+        if decision is not None and decision.action is ResponseCreateDecisionAction.BLOCK:
             if decision.reason_code == "already_delivered":
                 api._record_duplicate_create_attempt(
                     turn_id=turn_id,
@@ -632,7 +696,7 @@ class ResponseCreateRuntime:
                 api._current_run_id() or "",
                 turn_id,
                 normalized_origin,
-                decision.reason_code,
+                (decision.reason_code if decision is not None else "scheduled_release"),
                 canonical_key,
             )
             return False
@@ -661,7 +725,7 @@ class ResponseCreateRuntime:
             api._current_run_id() or "",
             turn_id,
             normalized_origin,
-            decision.reason_code,
+            (decision.reason_code if decision is not None else "scheduled_release"),
             current_input_event_key or "unknown",
             canonical_key,
             len(getattr(api, "_response_create_queue", deque()) or ()),
@@ -701,6 +765,12 @@ class ResponseCreateRuntime:
                 turn_timestamps.get("preference_recall_end"),
                 turn_timestamps.get("response_schedule"),
             )
+        if tool_followup and not tool_followup_release:
+            api._set_tool_followup_state(
+                canonical_key=canonical_key,
+                state="creating",
+                reason="direct_send",
+            )
         log_ws_event("Outgoing", response_create_event)
         api._track_outgoing_event(response_create_event, origin=origin)
         transport = api._get_or_create_transport()
@@ -723,7 +793,7 @@ class ResponseCreateRuntime:
             api._current_run_id() or "",
             turn_id,
             normalized_origin,
-            decision.reason_code,
+            (decision.reason_code if decision is not None else "scheduled_release"),
             current_input_event_key or "unknown",
             canonical_key,
             len(getattr(api, "_response_create_queue", deque()) or ()),

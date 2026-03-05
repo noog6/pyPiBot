@@ -215,6 +215,12 @@ class ResponseTerminalHandlers:
                     input_event_key=done_input_event_key,
                     state="done",
                 )
+        if active_canonical_key and api._tool_followup_state(canonical_key=active_canonical_key) in {"creating", "created"}:
+            api._set_tool_followup_state(
+                canonical_key=active_canonical_key,
+                state="done",
+                reason="response_done",
+            )
         if delivery_state_before_done == "cancelled":
             api._log_cancelled_deliverable_once(
                 active_response_id,
