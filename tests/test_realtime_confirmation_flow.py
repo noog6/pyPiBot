@@ -3630,7 +3630,7 @@ def test_research_permission_no_cancels_pending_request() -> None:
     assert api._pending_confirmation_token is None
 
 
-def test_confirmation_empty_transcript_reprompts_once_and_keeps_token_active() -> None:
+def test_confirmation_empty_transcript_keeps_token_active_without_speaking() -> None:
     api = _make_api_stub()
     request = type("Req", (), {"prompt": "status"})()
     token = _build_confirmation_token(kind="research_permission", request=request)
@@ -3656,7 +3656,7 @@ def test_confirmation_empty_transcript_reprompts_once_and_keeps_token_active() -
         )
     )
 
-    assert messages == ["Sorry—was that a yes or no?"]
+    assert messages == []
     assert api._pending_confirmation_token is not None
     assert api._pending_confirmation_token.metadata.get("empty_transcript_reprompted") is True
 
