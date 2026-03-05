@@ -965,6 +965,8 @@ class RealtimeAPI:
         self._cancelled_response_timing_by_id: dict[str, dict[str, Any]] = {}
         self._stale_response_drop_window_by_id: dict[str, dict[str, Any]] = {}
         self._stale_response_drop_window_s = 3.0
+        self._stale_response_map: dict[str, dict[str, Any]] = {}
+        self._stale_response_map_ttl_s = 15.0
         self._active_server_auto_input_event_key: str | None = None
         self._current_input_event_key: str | None = None
         self._active_input_event_key_by_turn_id: dict[str, str] = {}
@@ -1012,6 +1014,10 @@ class RealtimeAPI:
         )
 
         realtime_cfg = config.get("realtime") or {}
+        self._stale_response_map_ttl_s = max(
+            1.0,
+            float(realtime_cfg.get("stale_response_map_ttl_s", self._stale_response_map_ttl_s)),
+        )
         self._debug_vad = bool(realtime_cfg.get("debug_vad", False))
         self._awaiting_confirmation_allowed_sources = (
             self._load_awaiting_confirmation_source_policy(realtime_cfg)
@@ -1335,27 +1341,37 @@ class RealtimeAPI:
 
     async def _handle_response_lifecycle_event(self, event: dict[str, Any], websocket: Any) -> None:
         event_type = str(event.get("type") or "unknown")
-        response = event.get("response")
-        response_id = ""
-        if isinstance(response, dict):
-            response_id = str(response.get("id") or "").strip()
+        response_id = self._response_id_from_event(event)
         if not response_id:
             response_id = str(getattr(self, "_active_response_id", "") or "").strip()
         trace_context = self._response_trace_by_id().get(response_id, {}) if response_id else {}
+        stale_context = self._stale_response_context(response_id) if response_id else {}
         active_turn_id = str(self._current_turn_id_or_unknown() or "").strip() or "unknown"
         active_input_event_key = str(getattr(self, "_active_response_input_event_key", "") or "").strip()
         active_canonical_key = str(getattr(self, "_active_response_canonical_key", "") or "").strip()
-        turn_id = str(trace_context.get("turn_id") or active_turn_id or "unknown").strip() or "unknown"
+        turn_id = str(
+            trace_context.get("turn_id")
+            or stale_context.get("turn_id")
+            or active_turn_id
+            or "unknown"
+        ).strip() or "unknown"
         input_event_key = str(
-            trace_context.get("input_event_key") or active_input_event_key or "unknown"
+            trace_context.get("input_event_key")
+            or stale_context.get("input_event_key")
+            or active_input_event_key
+            or "unknown"
         ).strip() or "unknown"
         canonical_key = str(
             trace_context.get("canonical_key")
+            or stale_context.get("canonical_key")
             or active_canonical_key
             or self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
         ).strip() or "unknown"
         origin = str(
-            trace_context.get("origin") or getattr(self, "_active_response_origin", "unknown") or "unknown"
+            trace_context.get("origin")
+            or stale_context.get("origin")
+            or getattr(self, "_active_response_origin", "unknown")
+            or "unknown"
         ).strip() or "unknown"
         item = event.get("item")
         item_type = str(item.get("type") or "") if isinstance(item, dict) else ""
@@ -1371,6 +1387,14 @@ class RealtimeAPI:
                 canonical_key=canonical_key,
                 origin=origin,
             )
+            if self._is_cancelled_or_superseded_response_id(response_id):
+                self._remember_stale_response_context(
+                    response_id=response_id,
+                    canonical_key=canonical_key,
+                    origin=origin,
+                    turn_id=turn_id,
+                    input_event_key=input_event_key,
+                )
         self._emit_response_lifecycle_trace(
             event_type=event_type,
             response_id=response_id,
@@ -3621,6 +3645,14 @@ class RealtimeAPI:
             cancelled_ids = set()
             self._cancelled_response_ids = cancelled_ids
         cancelled_ids.add(pending.response_id)
+        trace_context = self._response_trace_by_id().get(pending.response_id, {})
+        self._remember_stale_response_context(
+            response_id=pending.response_id,
+            canonical_key=str(pending.canonical_key or trace_context.get("canonical_key") or "").strip(),
+            origin=str(trace_context.get("origin") or "server_auto").strip() or "server_auto",
+            turn_id=str(turn_id or trace_context.get("turn_id") or "unknown").strip() or "unknown",
+            input_event_key=self._active_input_event_key_for_turn(turn_id),
+        )
         self._clear_cancelled_response_blocking_state(
             response_id=pending.response_id,
             reason=reason,
@@ -3733,6 +3765,75 @@ class RealtimeAPI:
             self._stale_response_ids_set = stale_ids
         return stale_ids
 
+    def _prune_stale_response_map(self, *, now: float | None = None) -> None:
+        store = getattr(self, "_stale_response_map", None)
+        if not isinstance(store, dict) or not store:
+            return
+        ts = time.monotonic() if now is None else float(now)
+        stale_ids = [
+            response_id
+            for response_id, entry in store.items()
+            if ts > float(entry.get("expires_at_monotonic", 0.0))
+        ]
+        for response_id in stale_ids:
+            store.pop(response_id, None)
+
+    def _remember_stale_response_context(
+        self,
+        *,
+        response_id: str,
+        canonical_key: str,
+        origin: str,
+        turn_id: str,
+        input_event_key: str,
+    ) -> None:
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            return
+        now = time.monotonic()
+        self._prune_stale_response_map(now=now)
+        store = getattr(self, "_stale_response_map", None)
+        if not isinstance(store, dict):
+            store = {}
+            self._stale_response_map = store
+        ttl_s = max(1.0, float(getattr(self, "_stale_response_map_ttl_s", 15.0) or 15.0))
+        existing = store.get(normalized_response_id)
+        state = dict(existing) if isinstance(existing, dict) else {}
+        state["canonical_key"] = str(canonical_key or state.get("canonical_key") or "").strip()
+        state["origin"] = str(origin or state.get("origin") or "unknown").strip() or "unknown"
+        state["turn_id"] = str(turn_id or state.get("turn_id") or "unknown").strip() or "unknown"
+        state["input_event_key"] = str(
+            input_event_key or state.get("input_event_key") or "unknown"
+        ).strip() or "unknown"
+        state["expires_at_monotonic"] = now + ttl_s
+        store[normalized_response_id] = state
+
+    def _stale_response_context(self, response_id: str) -> dict[str, str]:
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            return {}
+        self._prune_stale_response_map()
+        store = getattr(self, "_stale_response_map", None)
+        if not isinstance(store, dict):
+            return {}
+        state = store.get(normalized_response_id)
+        if not isinstance(state, dict):
+            return {}
+        return {
+            "canonical_key": str(state.get("canonical_key") or "").strip(),
+            "origin": str(state.get("origin") or "").strip(),
+            "turn_id": str(state.get("turn_id") or "").strip(),
+            "input_event_key": str(state.get("input_event_key") or "").strip(),
+        }
+
+    def _clear_stale_response_context(self, response_id: str) -> None:
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            return
+        store = getattr(self, "_stale_response_map", None)
+        if isinstance(store, dict):
+            store.pop(normalized_response_id, None)
+
     def _is_stale_response_event(self, event: dict[str, Any]) -> bool:
         response_id = self._response_id_from_event(event)
         return bool(response_id) and response_id in self._stale_response_ids()
@@ -3753,8 +3854,11 @@ class RealtimeAPI:
             return False
         if not self._is_stale_response_event(event):
             return False
+        response_id = self._response_id_from_event(event)
+        if event_type in {"response.done", "response.completed"}:
+            self._clear_stale_response_context(response_id)
         self._record_stale_response_drop(
-            response_id=self._response_id_from_event(event),
+            response_id=response_id,
             event_type=event_type,
         )
         return True
@@ -3909,6 +4013,7 @@ class RealtimeAPI:
         suppressed_audio_ids = getattr(self, "_suppressed_audio_response_ids", None)
         if isinstance(suppressed_audio_ids, set):
             suppressed_audio_ids.discard(normalized_response_id)
+        self._clear_stale_response_context(normalized_response_id)
 
     def _canonical_utterance_key(self, *, turn_id: str, input_event_key: str | None) -> str:
         return self._lifecycle_state_coordinator().canonical_utterance_key(
