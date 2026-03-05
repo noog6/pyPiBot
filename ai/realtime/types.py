@@ -27,6 +27,7 @@ class CanonicalResponseState:
     input_event_key: str = ""
     turn_id: str = ""
     obligation: dict[str, Any] | None = None
+    blocked_reason: str = ""
 
 
 @dataclass

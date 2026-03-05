@@ -4591,6 +4591,9 @@ class RealtimeAPI:
         key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
         state = self._canonical_response_state(key)
         if isinstance(state, CanonicalResponseState):
+            blocked_reason = str(getattr(state, "blocked_reason", "") or "").strip().lower()
+            if blocked_reason:
+                return blocked_reason
             if state.done:
                 return "done"
             if state.cancel_sent:
@@ -4632,12 +4635,42 @@ class RealtimeAPI:
                 record.done = True
             elif normalized_state == "cancelled":
                 record.cancel_sent = True
+            elif normalized_state == "blocked_empty_transcript":
+                record.blocked_reason = "blocked_empty_transcript"
+                record.done = True
+                record.cancel_sent = True
+                record.created = False
+                record.audio_started = False
+                record.deliverable_observed = False
 
         self._canonical_response_state_mutate(
             canonical_key=key,
             turn_id=turn_id,
             input_event_key=input_event_key,
             mutator=_mutate,
+        )
+
+    def _mark_empty_transcript_blocked(self, *, turn_id: str, input_event_key: str, reason: str) -> None:
+        normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
+        normalized_input_event_key = str(input_event_key or "").strip()
+        if not normalized_input_event_key:
+            return
+        self._set_response_delivery_state(
+            turn_id=normalized_turn_id,
+            input_event_key=normalized_input_event_key,
+            state="blocked_empty_transcript",
+        )
+        self._clear_pending_response_contenders(
+            turn_id=normalized_turn_id,
+            input_event_key=normalized_input_event_key,
+            reason="empty_transcript_blocked",
+        )
+        logger.info(
+            "transcript_empty_blocked run_id=%s turn_id=%s input_event_key=%s reason=%s",
+            self._current_run_id() or "",
+            normalized_turn_id,
+            normalized_input_event_key,
+            reason,
         )
 
     def _is_response_already_delivered(self, *, turn_id: str, input_event_key: str | None) -> bool:
@@ -7357,6 +7390,33 @@ class RealtimeAPI:
                 input_event_key=normalized_input_event_key,
             )
 
+        delivery_state = self._response_delivery_state(
+            turn_id=turn_id,
+            input_event_key=normalized_input_event_key,
+        )
+        if delivery_state == "blocked_empty_transcript":
+            logger.info(
+                "response_dropped_terminal_state run_id=%s turn_id=%s canonical_key=%s prior_state=%s",
+                self._current_run_id() or "",
+                turn_id,
+                terminal_state_canonical_key,
+                delivery_state,
+            )
+            self._mark_transcript_response_outcome(
+                input_event_key=normalized_input_event_key,
+                turn_id=turn_id,
+                outcome="response_not_scheduled",
+                reason="empty_transcript_blocked",
+                details=(
+                    "canonical delivery terminal state "
+                    f"origin={str(origin or '').strip().lower() or 'unknown'} "
+                    f"prior_state={delivery_state} "
+                    f"canonical_key={terminal_state_canonical_key} "
+                    f"origin_canonical_key={origin_canonical_key}"
+                ),
+            )
+            return True
+
         prior_state = self._lifecycle_controller().state_for(terminal_state_canonical_key)
         if prior_state not in {
             InteractionLifecycleState.DONE,
@@ -9844,6 +9904,11 @@ class RealtimeAPI:
                 self._suppress_cancelled_response_audio(pending.response_id)
                 transport = self._get_or_create_transport()
                 await transport.send_json(websocket, cancel_event)
+            self._mark_empty_transcript_blocked(
+                turn_id=resolved_turn_id,
+                input_event_key=input_event_key,
+                reason="transcript_missing_or_zero_words",
+            )
             self._clear_response_obligation(
                 turn_id=resolved_turn_id,
                 input_event_key=input_event_key,
@@ -9854,25 +9919,17 @@ class RealtimeAPI:
                 turn_id=resolved_turn_id,
                 input_event_key=input_event_key,
                 action="CLARIFY",
-                reason="empty_transcript",
+                reason="empty_transcript_blocked",
             )
             self._mark_transcript_response_outcome(
                 input_event_key=input_event_key,
                 turn_id=resolved_turn_id,
                 outcome="response_not_scheduled",
-                reason="empty_transcript",
+                reason="empty_transcript_blocked",
                 details="transcript_missing_or_zero_words",
             )
-            if not confirmation_active:
-                await self.send_assistant_message(
-                    "I didn't catch that—could you repeat?",
-                    websocket,
-                    response_metadata={
-                        "trigger": "empty_transcript_guard",
-                        "input_event_key": input_event_key,
-                        "turn_id": resolved_turn_id,
-                    },
-                )
+            if hasattr(self, "state_manager") and self.state_manager is not None:
+                self.state_manager.update_state(InteractionState.LISTENING, "empty transcript blocked")
             return
         if transcript and not confirmation_active and await self._maybe_verify_on_risk_clarify(
             transcript=transcript,
@@ -9983,20 +10040,9 @@ class RealtimeAPI:
         elif confirmation_active and self._has_active_confirmation_token():
             token = self._pending_confirmation_token
             metadata = token.metadata if token is not None and isinstance(token.metadata, dict) else {}
-            empty_reprompted = bool(metadata.get("empty_transcript_reprompted", False))
-            if not empty_reprompted:
-                metadata["empty_transcript_reprompted"] = True
-                if token is not None:
-                    token.metadata = metadata
-                await self.send_assistant_message(
-                    "Sorry—was that a yes or no?",
-                    websocket,
-                    response_metadata={
-                        "trigger": "confirmation_reminder",
-                        "approval_flow": "true",
-                        "confirmation_token": token.id if token is not None else "",
-                    },
-                )
+            metadata["empty_transcript_reprompted"] = True
+            if token is not None:
+                token.metadata = metadata
 
     async def _handle_input_audio_transcription_failed_event(
         self,

@@ -578,3 +578,52 @@ def test_response_text_delta_without_bound_response_does_not_enter_speaking() ->
 
     assert transitions == []
     assert api.state_manager.state == InteractionState.IDLE
+
+
+def test_empty_transcript_blocked_state_rejects_followup_response_scheduling() -> None:
+    api = _make_api()
+    outcomes: list[dict[str, str]] = []
+    api._mark_transcript_response_outcome = lambda **kwargs: outcomes.append(kwargs)
+
+    api._set_response_delivery_state(
+        turn_id="turn_1",
+        input_event_key="input_evt_empty",
+        state="blocked_empty_transcript",
+    )
+
+    dropped = api._drop_response_create_for_terminal_state(
+        turn_id="turn_1",
+        input_event_key="input_evt_empty",
+        origin="upgraded_response",
+        response_metadata={"input_event_key": "input_evt_empty"},
+    )
+
+    assert dropped is True
+    assert outcomes
+    assert outcomes[0]["reason"] == "empty_transcript_blocked"
+
+
+def test_empty_transcript_blocked_state_rejects_injection_response_attempts() -> None:
+    api = _make_api()
+    outcomes: list[dict[str, str]] = []
+    api._mark_transcript_response_outcome = lambda **kwargs: outcomes.append(kwargs)
+    api._set_response_delivery_state(
+        turn_id="turn_1",
+        input_event_key="input_evt_empty",
+        state="blocked_empty_transcript",
+    )
+
+    for origin in ("imu_injection", "battery_injection", "system_context"):
+        dropped = api._drop_response_create_for_terminal_state(
+            turn_id="turn_1",
+            input_event_key="input_evt_empty",
+            origin=origin,
+            response_metadata={
+                "input_event_key": "input_evt_empty",
+                "create_response": "true",
+            },
+        )
+        assert dropped is True
+
+    assert len(outcomes) == 3
+    assert all(entry["reason"] == "empty_transcript_blocked" for entry in outcomes)

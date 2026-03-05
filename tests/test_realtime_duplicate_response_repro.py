@@ -441,7 +441,7 @@ def test_server_auto_synthetic_key_rebound_blocks_stale_assistant_message_releas
     assert assistant_creates == []
 
 
-def test_empty_transcript_guard_cancels_server_auto_and_skips_substantive_answer(monkeypatch) -> None:
+def test_realtime_empty_transcript_blocks_speech(monkeypatch) -> None:
     api = _make_api_stub()
     _wire_runtime(api)
     ws = _RecordingWs()
@@ -497,8 +497,7 @@ def test_empty_transcript_guard_cancels_server_auto_and_skips_substantive_answer
 
     cancels = [event for event in ws.sent if event.get("type") == "response.cancel"]
     assert cancels
-    assert prompts == ["I didn't catch that—could you repeat?"]
-    assert all("pants" not in msg.lower() and "color" not in msg.lower() for msg in prompts)
+    assert prompts == []
 
     obligation_key = api._response_obligation_key(turn_id="turn_1", input_event_key="item_empty")
     assert obligation_key not in api._response_obligations
@@ -507,6 +506,8 @@ def test_empty_transcript_guard_cancels_server_auto_and_skips_substantive_answer
     assert pending is not None
     assert pending.active is False
     assert pending.cancelled_for_upgrade is True
+
+    assert api._response_delivery_state(turn_id="turn_1", input_event_key="item_empty") == "blocked_empty_transcript"
 
     watchdog_tasks = getattr(api, "_transcript_response_watchdog_tasks", {})
     task = watchdog_tasks.get("item_empty")
