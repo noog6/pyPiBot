@@ -66,6 +66,7 @@ from ai.realtime.research_runtime import ResearchRuntime
 from ai.realtime.response_create_runtime import ResponseCreateRuntime
 from ai.realtime.response_lifecycle import ResponseLifecycleTracker
 from ai.realtime.response_terminal_handlers import ResponseTerminalHandlers
+from ai.realtime.asr_trust import build_utterance_trust_snapshot, should_clarify
 from ai.realtime.runtime_tasks import RuntimeTaskRegistry
 from ai.realtime.shutdown import ShutdownCoordinator
 from ai.realtime.transport import RealtimeTransport
@@ -1047,6 +1048,15 @@ class RealtimeAPI:
         self._minimum_non_confirmation_duration_ms = int(
             realtime_cfg.get("minimum_non_confirmation_duration_ms", 120)
         )
+        asr_cfg = config.get("asr") or {}
+        verify_cfg = asr_cfg.get("verify_on_risk") or {}
+        self._asr_verify_on_risk_enabled = bool(verify_cfg.get("enabled", True))
+        self._asr_verify_min_confidence = float(verify_cfg.get("min_confidence", 0.65))
+        self._asr_verify_short_utterance_ms = int(verify_cfg.get("short_utterance_ms", 450))
+        self._asr_verify_max_clarify_per_turn = max(1, int(verify_cfg.get("max_clarify_per_turn", 1)))
+        self._asr_clarify_count_by_turn: dict[str, int] = {}
+        self._asr_clarify_asked_input_event_keys: set[str] = set()
+        self._utterance_trust_snapshot_by_input_event_key: dict[str, dict[str, Any]] = {}
         self._micro_ack_channel_mode = str(realtime_cfg.get("micro_ack_channel_mode", "text_and_audio")).strip().lower()
         if self._micro_ack_channel_mode not in {"text_only", "text_and_audio"}:
             self._micro_ack_channel_mode = "text_and_audio"
@@ -5190,6 +5200,131 @@ class RealtimeAPI:
             json.dumps(meta, sort_keys=True),
         )
 
+    def _asr_meta_from_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        item = event.get("item") if isinstance(event.get("item"), dict) else {}
+        content = item.get("content") if isinstance(item.get("content"), list) else []
+        for block in content:
+            if isinstance(block, dict) and isinstance(block.get("metadata"), dict):
+                return dict(block.get("metadata") or {})
+        metadata = event.get("metadata")
+        if isinstance(metadata, dict):
+            return dict(metadata)
+        return {}
+
+    def _log_utterance_trust_snapshot(
+        self,
+        *,
+        transcript: str,
+        event: dict[str, Any],
+        turn_id: str,
+        input_event_key: str,
+    ) -> dict[str, Any]:
+        duration_ms = None
+        if isinstance(getattr(self, "_active_utterance", None), dict):
+            duration_ms = self._active_utterance.get("duration_ms")
+        snapshot_obj = build_utterance_trust_snapshot(
+            run_id=self._current_run_id() or "",
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            transcript_text=transcript,
+            utterance_duration_ms=duration_ms,
+            asr_meta=self._asr_meta_from_event(event),
+            short_utterance_ms=self._asr_verify_short_utterance_ms,
+        )
+        snapshot = {
+            "run_id": snapshot_obj.run_id,
+            "turn_id": snapshot_obj.turn_id,
+            "input_event_key": snapshot_obj.input_event_key,
+            "transcript_text": snapshot_obj.transcript_text,
+            "utterance_duration_ms": snapshot_obj.utterance_duration_ms,
+            "word_count": snapshot_obj.word_count,
+            "asr_confidence": snapshot_obj.asr_confidence,
+            "asr_avg_logprob": snapshot_obj.asr_avg_logprob,
+            "asr_no_speech_prob": snapshot_obj.asr_no_speech_prob,
+            "short_utterance": snapshot_obj.short_utterance,
+            "very_short_text": snapshot_obj.very_short_text,
+            "contains_rare_terms": snapshot_obj.contains_rare_terms,
+            "likely_proper_noun": snapshot_obj.likely_proper_noun,
+            "topic_anchors": snapshot_obj.topic_anchors,
+            "visual_question": snapshot_obj.visual_question,
+            "vad_profile": str(self._vad_turn_detection.get("profile") or "unknown"),
+            "vad_threshold": self._vad_turn_detection.get("threshold"),
+            "vad_prefix_padding_ms": self._vad_turn_detection.get("prefix_padding_ms"),
+            "vad_silence_duration_ms": self._vad_turn_detection.get("silence_duration_ms"),
+        }
+        self._utterance_trust_snapshot_by_input_event_key[input_event_key] = snapshot
+        flags = [
+            key for key in (
+                "short_utterance",
+                "very_short_text",
+                "contains_rare_terms",
+                "visual_question",
+            ) if snapshot.get(key)
+        ]
+        logger.info(
+            "UTTERANCE_TRUST run_id=%s turn_id=%s input_event_key=%s dur_ms=%s words=%s asr_conf=%s flags=%s anchors=%s",
+            snapshot["run_id"],
+            snapshot["turn_id"],
+            snapshot["input_event_key"],
+            snapshot["utterance_duration_ms"],
+            snapshot["word_count"],
+            snapshot["asr_confidence"],
+            ",".join(flags) if flags else "none",
+            ",".join(snapshot["topic_anchors"]),
+        )
+        return snapshot
+
+    async def _maybe_verify_on_risk_clarify(
+        self,
+        *,
+        transcript: str,
+        websocket: Any,
+        turn_id: str,
+        input_event_key: str,
+        snapshot: dict[str, Any],
+    ) -> bool:
+        if not self._asr_verify_on_risk_enabled:
+            return False
+        if input_event_key in self._asr_clarify_asked_input_event_keys:
+            return False
+        if self._asr_clarify_count_by_turn.get(turn_id, 0) >= self._asr_verify_max_clarify_per_turn:
+            return False
+        should_confirm, reason = should_clarify(
+            transcript_text=transcript,
+            snapshot=build_utterance_trust_snapshot(
+                run_id=snapshot.get("run_id", ""),
+                turn_id=turn_id,
+                input_event_key=input_event_key,
+                transcript_text=transcript,
+                utterance_duration_ms=snapshot.get("utterance_duration_ms"),
+                asr_meta={
+                    "confidence": snapshot.get("asr_confidence"),
+                    "avg_logprob": snapshot.get("asr_avg_logprob"),
+                    "no_speech_prob": snapshot.get("asr_no_speech_prob"),
+                },
+                short_utterance_ms=self._asr_verify_short_utterance_ms,
+            ),
+            min_confidence=self._asr_verify_min_confidence,
+            camera_available=bool(getattr(self, "camera_controller", None)),
+            camera_recent=False,
+        )
+        if not should_confirm:
+            return False
+        self._asr_clarify_asked_input_event_keys.add(input_event_key)
+        self._asr_clarify_count_by_turn[turn_id] = self._asr_clarify_count_by_turn.get(turn_id, 0) + 1
+        await self.send_assistant_message(
+            f"Quick check: did you ask \"{snapshot.get('transcript_text') or transcript.strip()}\"?",
+            websocket,
+            response_metadata={"trigger": "asr_verify_on_risk", "reason": reason, "input_event_key": input_event_key},
+        )
+        logger.info(
+            "asr_verify_on_risk_clarify run_id=%s turn_id=%s input_event_key=%s reason=%s",
+            self._current_run_id() or "",
+            turn_id,
+            input_event_key,
+            reason,
+        )
+        return True
 
     def _maybe_enqueue_reflection(self, trigger: str) -> None:
         if self._reflection_enqueued:
@@ -8746,6 +8881,20 @@ class RealtimeAPI:
             self._log_utterance_envelope(event_type)
             if suppressed:
                 return
+        trust_snapshot = self._log_utterance_trust_snapshot(
+            transcript=transcript or "",
+            event=event,
+            turn_id=resolved_turn_id,
+            input_event_key=input_event_key,
+        )
+        if transcript and not confirmation_active and await self._maybe_verify_on_risk_clarify(
+            transcript=transcript,
+            websocket=websocket,
+            turn_id=resolved_turn_id,
+            input_event_key=input_event_key,
+            snapshot=trust_snapshot,
+        ):
+            return
         if transcript:
             decision_path = "canonical_transcript"
             if memory_intent:
