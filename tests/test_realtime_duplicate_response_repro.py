@@ -791,6 +791,7 @@ def test_tool_followup_scheduled_while_active_drains_once_without_active_error(m
     api.websocket = ws
     api._response_in_flight = True
     api.response_in_progress = True
+    api._active_response_id = "resp-active-tool"
     api._current_response_turn_id = "turn_tool_active"
     response_create_event, canonical_key = api._build_tool_followup_response_create_event(
         call_id="call_active_1",
@@ -811,6 +812,8 @@ def test_tool_followup_scheduled_while_active_drains_once_without_active_error(m
 
     async def _run() -> None:
         await api._send_response_create(ws, response_create_event, origin="tool_output")
+        assert len([event for event in ws.sent if event.get("type") == "response.create"]) == 0
+        assert api._tool_followup_state(canonical_key=canonical_key) == "blocked_active_response"
         api._response_in_flight = False
         api.response_in_progress = False
         await api._drain_response_create_queue(source_trigger="response_done")
@@ -821,6 +824,14 @@ def test_tool_followup_scheduled_while_active_drains_once_without_active_error(m
     assert len(response_create_events) == 1
     assert api._tool_followup_state(canonical_key=canonical_key) in {"creating", "created"}
     assert not any("Conversation already has an active response in progress" in entry for entry in captured_logs)
+    assert any(
+        "tool_followup_state" in entry
+        and "state=blocked_active_response" in entry
+        and "response_id=resp-active-tool" in entry
+        for entry in captured_logs
+    )
+    assert any("tool_followup_state" in entry and "state=released_on_response_done" in entry for entry in captured_logs)
+    assert any("tool_followup_state" in entry and "state=creating" in entry for entry in captured_logs)
 
 
 def test_duplicate_tool_followup_delivery_events_only_create_once_after_drain(monkeypatch) -> None:
@@ -830,6 +841,7 @@ def test_duplicate_tool_followup_delivery_events_only_create_once_after_drain(mo
     api.websocket = ws
     api._response_in_flight = True
     api.response_in_progress = True
+    api._active_response_id = "resp-active-tool"
     api._current_response_turn_id = "turn_tool_dup"
     response_create_event, canonical_key = api._build_tool_followup_response_create_event(
         call_id="call_dup_1",
@@ -859,6 +871,7 @@ def test_duplicate_tool_followup_delivery_events_only_create_once_after_drain(mo
 
     response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
     assert len(response_create_events) == 1
+    assert api._tool_followup_state(canonical_key=canonical_key) in {"creating", "created"}
     assert any(
         "tool_followup_create_suppressed" in entry and f"canonical_key={canonical_key}" in entry
         for entry in captured_logs
