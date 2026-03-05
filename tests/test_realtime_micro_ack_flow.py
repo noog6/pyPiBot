@@ -15,7 +15,7 @@ from ai.orchestration import OrchestrationPhase
 from ai.realtime.event_router import EventRouter
 from ai.realtime.input_audio_events import InputAudioEventHandlers
 from ai.micro_ack_manager import MicroAckCategory, MicroAckConfig, MicroAckManager
-from ai.realtime_api import PendingResponseCreate, RealtimeAPI
+from ai.realtime_api import PendingResponseCreate, PendingServerAutoResponse, RealtimeAPI
 from interaction import InteractionState
 
 
@@ -1054,6 +1054,94 @@ def test_transcript_completed_empty_cancels_pending_micro_ack_and_skips_response
     assert ("turn-empty", "voice") not in api._pending_micro_ack_by_turn_channel
     assert api._pending_response_create is None
     assert api.websocket.sent == []
+    api.loop.close()
+
+
+def test_empty_transcript_server_auto_ghost_deliverable_is_blocked(monkeypatch) -> None:
+    api = _api_stub()
+    turn_id = "turn-empty"
+    input_event_key = "item-empty"
+    pending_response_id = "resp-server-auto"
+
+    api._current_turn_id_or_unknown = lambda: turn_id
+    api._resolve_input_event_key = lambda _event: input_event_key
+    api._active_input_event_key_by_turn_id = {}
+    api._utterance_trust_snapshot_by_input_event_key = {}
+    api._vad_turn_detection = {}
+    api._log_user_transcripts_enabled = False
+    api._log_utterance_trust_snapshot = lambda **_kwargs: {"word_count": 0}
+    api._pending_server_auto_response_by_turn_id = {
+        turn_id: PendingServerAutoResponse(
+            turn_id=turn_id,
+            response_id=pending_response_id,
+            canonical_key="run-test:turn-empty:synthetic_server_auto_1",
+            created_at_ms=1,
+            active=True,
+        )
+    }
+
+    class _Transport:
+        def __init__(self) -> None:
+            self.sent: list[dict[str, str]] = []
+
+        async def send_json(self, _websocket, event: dict[str, str]) -> None:
+            self.sent.append(event)
+
+    transport = _Transport()
+    api._get_or_create_transport = lambda: transport
+
+    cancel_calls: list[tuple[str, str]] = []
+    original_cancel_micro_ack = RealtimeAPI._cancel_micro_ack.__get__(api, RealtimeAPI)
+
+    def _capture_cancel_micro_ack(*, turn_id: str, reason: str) -> None:
+        cancel_calls.append((turn_id, reason))
+        original_cancel_micro_ack(turn_id=turn_id, reason=reason)
+
+    api._cancel_micro_ack = _capture_cancel_micro_ack
+    api._reset_utterance_info_summary()
+    api._mark_utterance_info_summary(response_created_seen=True)
+
+    captured_logs: list[str] = []
+
+    def _capture_info(message, *args):
+        captured_logs.append(message % args)
+
+    monkeypatch.setattr("ai.realtime_api.logger.info", _capture_info)
+
+    asyncio.run(
+        api._handle_input_audio_transcription_completed_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": input_event_key,
+                "transcript": "",
+            },
+            api.websocket,
+        )
+    )
+
+    asyncio.run(
+        api._handle_event_legacy(
+            {
+                "type": "response.output_audio_transcript.delta",
+                "response_id": pending_response_id,
+                "delta": " stale transcript",
+            },
+            websocket=None,
+        )
+    )
+
+    assert cancel_calls == [(turn_id, "transcript_completed_empty")]
+    assert transport.sent == [{"type": "response.cancel", "response_id": pending_response_id}]
+    assert api.assistant_reply == ""
+    assert api._assistant_reply_accum == ""
+    assert api.websocket.sent == []
+    summary_lines = [line for line in captured_logs if "UTTERANCE_INFO_SUMMARY" in line]
+    assert len(summary_lines) == 1
+    assert "anchor=transcript_completed_empty" in summary_lines[0]
+    assert "response_created_seen=False" in summary_lines[0]
+    assert "response_done_seen=False" in summary_lines[0]
+    assert "deliverable_seen=False" in summary_lines[0]
+    assert pending_response_id in api._stale_response_ids()
     api.loop.close()
 
 

@@ -3963,8 +3963,14 @@ class RealtimeAPI:
             response_id=pending.response_id,
             reason=reason,
         )
+        log_label = (
+            "server_auto_cancelled_for_empty_transcript"
+            if str(reason or "").strip() == "empty_transcript"
+            else "server_auto_cancelled_for_upgrade"
+        )
         logger.info(
-            "server_auto_cancelled_for_upgrade run_id=%s turn_id=%s response_id=%s reason=%s",
+            "%s run_id=%s turn_id=%s response_id=%s reason=%s",
+            log_label,
             self._current_run_id() or "",
             str(turn_id or "").strip() or "turn-unknown",
             pending.response_id,
@@ -8335,6 +8341,25 @@ class RealtimeAPI:
             summary.get("deliverable_seen", False),
         )
 
+    def _summary_response_created_seen_for_canonical(
+        self,
+        *,
+        turn_id: str,
+        canonical_key: str,
+    ) -> bool:
+        normalized_canonical_key = str(canonical_key or "").strip()
+        if not normalized_canonical_key:
+            return False
+        active_canonical_key = str(getattr(self, "_active_response_canonical_key", "") or "").strip()
+        if active_canonical_key and active_canonical_key == normalized_canonical_key:
+            return True
+        pending = self._pending_server_auto_response_for_turn(turn_id=turn_id)
+        if isinstance(pending, PendingServerAutoResponse):
+            pending_canonical_key = str(pending.canonical_key or "").strip()
+            if pending_canonical_key and pending_canonical_key == normalized_canonical_key:
+                return True
+        return False
+
     def _is_noise_like_transcript(self, transcript: str) -> bool:
         normalized = " ".join(re.sub(r"[^\w\s]", " ", transcript.lower()).split())
         if not normalized:
@@ -9893,8 +9918,6 @@ class RealtimeAPI:
         transcript = self._extract_transcript(event)
         self._mark_utterance_info_summary(transcript_present=bool(transcript))
         self._log_user_transcript(transcript or "", final=True, event_type=event_type)
-        if not transcript:
-            self._emit_utterance_info_summary(anchor="transcript_completed_empty")
         input_event_key = self._resolve_input_event_key(event)
         resolved_turn_id = self._current_turn_id_or_unknown()
         with self._utterance_context_scope(
@@ -9988,6 +10011,19 @@ class RealtimeAPI:
         transcript_word_count = int(trust_snapshot.get("word_count") or 0)
         if not transcript or transcript_word_count <= 0:
             self._cancel_micro_ack(turn_id=resolved_turn_id, reason="transcript_completed_empty")
+            summary_canonical_key = self._canonical_utterance_key(
+                turn_id=resolved_turn_id,
+                input_event_key=input_event_key,
+            )
+            self._mark_utterance_info_summary(
+                response_created_seen=self._summary_response_created_seen_for_canonical(
+                    turn_id=resolved_turn_id,
+                    canonical_key=summary_canonical_key,
+                ),
+                response_done_seen=False,
+                deliverable_seen=False,
+            )
+            self._emit_utterance_info_summary(anchor="transcript_completed_empty")
             pending = self._pending_server_auto_response_for_turn(turn_id=resolved_turn_id)
             if isinstance(pending, PendingServerAutoResponse) and pending.active and pending.response_id:
                 cancel_event = {"type": "response.cancel", "response_id": pending.response_id}
