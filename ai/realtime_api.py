@@ -610,6 +610,7 @@ class RealtimeAPI:
         self.assistant_reply = ""
         self._assistant_reply_accum = ""
         self._audio_accum = bytearray()
+        self._audio_accum_response_id: str | None = None
         self._audio_accum_bytes_target = 9600
         self.response_in_progress = False
         self._response_in_flight = False
@@ -951,6 +952,7 @@ class RealtimeAPI:
         self._pending_server_auto_input_event_keys: deque[str] = deque(maxlen=64)
         self._pending_server_auto_response_by_turn_id: dict[str, PendingServerAutoResponse] = {}
         self._cancelled_response_ids: set[str] = set()
+        self._suppressed_audio_response_ids: set[str] = set()
         self._cancelled_deliverable_logged_ids: set[str] = set()
         self._cancelled_response_timing_by_id: dict[str, dict[str, Any]] = {}
         self._active_server_auto_input_event_key: str | None = None
@@ -3617,8 +3619,36 @@ class RealtimeAPI:
         cancelled_ids = getattr(self, "_cancelled_response_ids", None)
         if isinstance(cancelled_ids, set) and normalized_response_id in cancelled_ids:
             return True
+        suppressed_audio_ids = getattr(self, "_suppressed_audio_response_ids", None)
+        if isinstance(suppressed_audio_ids, set) and normalized_response_id in suppressed_audio_ids:
+            return True
         superseded_ids = getattr(self, "_superseded_response_ids", None)
         return isinstance(superseded_ids, set) and normalized_response_id in superseded_ids
+
+    def _suppress_cancelled_response_audio(self, response_id: str | None) -> None:
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            return
+        suppressed_audio_ids = getattr(self, "_suppressed_audio_response_ids", None)
+        if not isinstance(suppressed_audio_ids, set):
+            suppressed_audio_ids = set()
+            self._suppressed_audio_response_ids = suppressed_audio_ids
+        suppressed_audio_ids.add(normalized_response_id)
+
+        accum_response_id = str(getattr(self, "_audio_accum_response_id", "") or "").strip()
+        if accum_response_id == normalized_response_id:
+            self._audio_accum.clear()
+            self._audio_accum_response_id = None
+
+        player = getattr(self, "audio_player", None)
+        if player is not None:
+            cancel_current = getattr(player, "cancel_current_response", None)
+            if callable(cancel_current):
+                cancel_current()
+            else:
+                flush = getattr(player, "flush", None)
+                if callable(flush):
+                    flush()
 
     def _response_id_from_event(self, event: dict[str, Any] | None) -> str:
         if not isinstance(event, dict):
@@ -3719,6 +3749,9 @@ class RealtimeAPI:
         timing_store = getattr(self, "_cancelled_response_timing_by_id", None)
         if isinstance(timing_store, dict):
             timing_store.pop(normalized_response_id, None)
+        suppressed_audio_ids = getattr(self, "_suppressed_audio_response_ids", None)
+        if isinstance(suppressed_audio_ids, set):
+            suppressed_audio_ids.discard(normalized_response_id)
 
     def _canonical_utterance_key(self, *, turn_id: str, input_event_key: str | None) -> str:
         return self._lifecycle_state_coordinator().canonical_utterance_key(
@@ -8280,6 +8313,7 @@ class RealtimeAPI:
         if self.audio_player:
             self.audio_player.start_response()
         self._audio_accum.clear()
+        self._audio_accum_response_id = None
         self._mic_receive_on_first_audio = True
         self.response_in_progress = True
         self._response_in_flight = True
@@ -8362,6 +8396,8 @@ class RealtimeAPI:
             )
         self._audio_playback_busy = True
         audio_data = base64.b64decode(event["delta"])
+        if not str(getattr(self, "_audio_accum_response_id", "") or "").strip():
+            self._audio_accum_response_id = str(response_id or "").strip() or None
         self._audio_accum.extend(audio_data)
 
         if self._mic_receive_on_first_audio and not self.mic.is_receiving:
@@ -8377,6 +8413,7 @@ class RealtimeAPI:
             if self.audio_player:
                 self.audio_player.play_audio(bytes(self._audio_accum))
             self._audio_accum.clear()
+            self._audio_accum_response_id = None
 
     async def _handle_response_done_event(self, event: dict[str, Any], websocket: Any) -> None:
         _ = websocket
@@ -8423,6 +8460,7 @@ class RealtimeAPI:
                 turn_id=turn_id,
                 reason="transcript_final_upgrade",
             )
+            self._suppress_cancelled_response_audio(old_response_id)
             transport = self._get_or_create_transport()
             await transport.send_json(websocket, cancel_event)
             if str(getattr(self, "_active_response_id", "") or "").strip() == old_response_id:
