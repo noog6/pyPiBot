@@ -3602,6 +3602,36 @@ class RealtimeAPI:
         )
         return pending
 
+    def _stale_response_ids(self) -> set[str]:
+        stale_ids = getattr(self, "_stale_response_ids_set", None)
+        if not isinstance(stale_ids, set):
+            stale_ids = set()
+            self._stale_response_ids_set = stale_ids
+        return stale_ids
+
+    def _is_stale_response_event(self, event: dict[str, Any]) -> bool:
+        response_id = self._response_id_from_event(event)
+        return bool(response_id) and response_id in self._stale_response_ids()
+
+    def _should_drop_stale_response_event(self, event: dict[str, Any]) -> bool:
+        event_type = str(event.get("type") or "").strip()
+        if event_type not in {
+            "response.output_audio.delta",
+            "response.output_audio.done",
+            "response.output_audio_transcript.delta",
+            "response.output_audio_transcript.done",
+            "response.done",
+        }:
+            return False
+        if not self._is_stale_response_event(event):
+            return False
+        logger.info(
+            "dropped_stale_response_event response_id=%s event_type=%s",
+            self._response_id_from_event(event) or "unknown",
+            event_type or "unknown",
+        )
+        return True
+
     def _mark_pending_server_auto_response_replaced(self, *, turn_id: str) -> None:
         pending = self._pending_server_auto_response_for_turn(turn_id=turn_id)
         if pending is None:
@@ -8417,6 +8447,8 @@ class RealtimeAPI:
 
     async def _handle_response_done_event(self, event: dict[str, Any], websocket: Any) -> None:
         _ = websocket
+        if self._should_drop_stale_response_event(event):
+            return
         if self._is_cancelled_response_event(event):
             self._log_cancelled_deliverable_once(
                 self._response_id_from_event(event),
@@ -8454,6 +8486,7 @@ class RealtimeAPI:
         if pending_active and old_response_id:
             cancel_event = {"type": "response.cancel", "response_id": old_response_id}
             self._record_cancel_issued_timing(old_response_id)
+            self._stale_response_ids().add(old_response_id)
             log_ws_event("Outgoing", cancel_event)
             self._track_outgoing_event(cancel_event, origin="server_auto_upgrade")
             self._mark_pending_server_auto_response_cancelled(
@@ -8685,6 +8718,8 @@ class RealtimeAPI:
 
     async def _handle_event_legacy(self, event: dict[str, Any], websocket: Any) -> None:
         event_type = event.get("type")
+        if self._should_drop_stale_response_event(event):
+            return
         response_id = self._response_id_from_event(event)
         if self._is_cancelled_response_event(event):
             if event_type == "response.output_audio.done":
