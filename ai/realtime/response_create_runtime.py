@@ -532,7 +532,7 @@ class ResponseCreateRuntime:
         ):
             return False
         decision = api._lifecycle_policy().decide_response_create(
-            response_in_flight=bool(api._response_in_flight),
+            response_in_flight=api._is_active_response_blocking(),
             audio_playback_busy=bool(api._audio_playback_busy),
             consumes_canonical_slot=consumes_canonical_slot,
             canonical_audio_started=(api._canonical_first_audio_started(canonical_key) and not allow_audio_started_upgrade),
@@ -804,7 +804,7 @@ class ResponseCreateRuntime:
             queue_len_after_value=queue_len_before,
         )
         if (
-            api._response_in_flight
+            api._is_active_response_blocking()
             or api._audio_playback_busy
             or current_state == InteractionState.LISTENING
         ):
