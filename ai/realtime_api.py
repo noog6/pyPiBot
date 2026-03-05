@@ -5572,6 +5572,36 @@ class RealtimeAPI:
         )
         return True
 
+    def _has_camera_tool_result_for_turn(self, turn_id: str) -> bool:
+        records = getattr(self, "_tool_call_records", None)
+        if not isinstance(records, list) or not turn_id:
+            return False
+        normalized_turn_id = str(turn_id)
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("turn_id") or "") != normalized_turn_id:
+                continue
+            tool_name = str(record.get("name") or "").strip().lower()
+            if "camera" in tool_name:
+                return True
+        return False
+
+    def _normalize_verify_clarify_message(
+        self,
+        *,
+        message: str,
+        metadata: dict[str, Any],
+    ) -> str:
+        trigger = str(metadata.get("trigger") or "").strip().lower()
+        reason = str(metadata.get("reason") or "").strip().lower()
+        if trigger != "asr_verify_on_risk" or reason != "visual_unavailable":
+            return message
+        turn_id = str(metadata.get("turn_id") or self._current_turn_id_or_unknown())
+        if self._has_camera_tool_result_for_turn(turn_id):
+            return message
+        return "I can’t see right now. Want me to take a quick look with the camera?"
+
     def _maybe_enqueue_reflection(self, trigger: str) -> None:
         if self._reflection_enqueued:
             logger.debug(
@@ -10505,6 +10535,14 @@ class RealtimeAPI:
         response_metadata: dict[str, Any] | None = None,
         utterance_context: UtteranceContext | None = None,
     ) -> None:
+        metadata = {"origin": "assistant_message"}
+        if response_metadata:
+            metadata.update(response_metadata)
+        context_hint = utterance_context or getattr(self, "_utterance_context", None) or self._build_utterance_context()
+        metadata.setdefault("turn_id", context_hint.turn_id)
+        if context_hint.input_event_key:
+            metadata.setdefault("input_event_key", context_hint.input_event_key)
+        message = self._normalize_verify_clarify_message(message=message, metadata=metadata)
         assistant_item = {
             "type": "conversation.item.create",
             "item": {
@@ -10518,14 +10556,6 @@ class RealtimeAPI:
         await transport.send_json(websocket, assistant_item)
         if not speak:
             return
-
-        metadata = {"origin": "assistant_message"}
-        if response_metadata:
-            metadata.update(response_metadata)
-        context_hint = utterance_context or getattr(self, "_utterance_context", None) or self._build_utterance_context()
-        metadata.setdefault("turn_id", context_hint.turn_id)
-        if context_hint.input_event_key:
-            metadata.setdefault("input_event_key", context_hint.input_event_key)
         trigger_reason = str(metadata.get("trigger") or "").strip().lower()
         explicit_parent_key = str(metadata.get("input_event_key") or "").strip()
         background_behavior_allowed = str(metadata.get("background_behavior_allowed", "")).strip().lower() in {
