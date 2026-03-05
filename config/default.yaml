@@ -136,6 +136,7 @@ realtime:
   vad_profile: "short_confirmations"
   minimum_non_confirmation_duration_ms: 120
   transcript_response_watchdog_timeout_s: 3.0
+  server_auto_audio_deferral_timeout_ms: 225
   confirmation_awaiting_decision_timeout_s: 60.0
   confirmation_late_decision_grace_s: 15.0
   confirmation_unclear_max_reprompts: 1
