@@ -4286,8 +4286,18 @@ class RealtimeAPI:
         # create attempts must queue until response.done clears flight state.
         if not bool(getattr(self, "_response_in_flight", False)):
             return False
+        if str(getattr(self, "_active_response_origin", "") or "").strip().lower() == "micro_ack":
+            return False
         active_response_id = str(getattr(self, "_active_response_id", "") or "").strip()
         if not active_response_id:
+            pending_origins = getattr(self, "_pending_response_create_origins", None)
+            if isinstance(pending_origins, deque) and pending_origins:
+                if all(
+                    isinstance(pending, dict)
+                    and str(pending.get("micro_ack", "")).strip().lower() == "true"
+                    for pending in pending_origins
+                ):
+                    return False
             return True
         cancelled_ids = getattr(self, "_cancelled_response_ids", None)
         if isinstance(cancelled_ids, set) and active_response_id in cancelled_ids:
@@ -4937,13 +4947,43 @@ class RealtimeAPI:
             response_payload["metadata"] = metadata
         tool_call_id = str(call_id or "").strip() or "unknown"
         turn_id = self._current_turn_id_or_unknown()
+        parent_input_event_key = self._active_input_event_key_for_turn(turn_id)
         tool_input_event_key = self._tool_followup_input_event_key(call_id=tool_call_id)
         metadata["turn_id"] = turn_id
         metadata["input_event_key"] = tool_input_event_key
+        metadata["parent_turn_id"] = turn_id
+        if parent_input_event_key:
+            metadata["parent_input_event_key"] = parent_input_event_key
         metadata["tool_followup"] = "true"
         metadata["tool_call_id"] = tool_call_id
         canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_input_event_key)
         return event, canonical_key
+
+    def _should_suppress_tool_followup_after_turn_deliverable(
+        self,
+        *,
+        turn_id: str,
+        parent_input_event_key: str | None = None,
+    ) -> bool:
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return False
+        normalized_parent_key = str(parent_input_event_key or "").strip()
+        for state in self._canonical_response_state_store().values():
+            if not isinstance(state, CanonicalResponseState):
+                continue
+            if str(state.turn_id or "").strip() != normalized_turn_id:
+                continue
+            input_event_key = str(state.input_event_key or "").strip()
+            if normalized_parent_key and input_event_key != normalized_parent_key:
+                continue
+            if input_event_key.startswith("tool:"):
+                continue
+            if str(state.origin or "").strip().lower() == "micro_ack":
+                continue
+            if state.created or state.audio_started or state.deliverable_observed or state.done:
+                return True
+        return False
 
     def _release_blocked_tool_followups_for_response_done(self, *, response_id: str) -> None:
         normalized_response_id = str(response_id or "").strip()
