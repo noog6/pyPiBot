@@ -119,7 +119,15 @@ async def _suppress_preference_recall_server_auto_response(controller, websocket
             return
         if not bool(getattr(controller, "_response_in_flight", False)):
             return
-        cancel_event = {"type": "response.cancel"}
+        active_response_id = str(getattr(controller, "_active_response_id", "") or "").strip()
+        if not active_response_id:
+            logger.debug(
+                "response_cancel_skipped run_id=%s turn_id=%s reason=no_active_response_id",
+                controller._current_run_id() or "",
+                turn_id,
+            )
+            return
+        cancel_event = {"type": "response.cancel", "response_id": active_response_id}
         log_ws_event("Outgoing", cancel_event)
         controller._track_outgoing_event(cancel_event, origin="preference_recall_guard")
         try:
@@ -128,7 +136,7 @@ async def _suppress_preference_recall_server_auto_response(controller, websocket
         except Exception as exc:
             message = str(exc)
             if "no active response found" in message.lower():
-                logger.info(
+                logger.debug(
                     "response_cancel_noop run_id=%s turn_id=%s reason=no_active_response",
                     controller._current_run_id() or "",
                     turn_id,

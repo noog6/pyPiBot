@@ -42,3 +42,4 @@ class PendingResponseCreate:
     memory_brief_note: str | None = None
     queued_reminder_key: str | None = None
     enqueued_done_serial: int = 0
+    enqueue_seq: int = 0
