@@ -61,6 +61,7 @@ class InteractionLifecyclePolicy:
         has_safety_override: bool,
         suppression_active: bool,
         normalized_origin: str,
+        awaiting_transcript_final: bool,
     ) -> ResponseCreateDecision:
         if response_in_flight:
             return ResponseCreateDecision(
@@ -103,6 +104,12 @@ class InteractionLifecyclePolicy:
             return ResponseCreateDecision(
                 action=ResponseCreateDecisionAction.BLOCK,
                 reason_code="preference_recall_suppressed",
+            )
+        if awaiting_transcript_final and normalized_origin == "server_auto":
+            return ResponseCreateDecision(
+                action=ResponseCreateDecisionAction.SCHEDULE,
+                reason_code="awaiting_transcript_final",
+                queue_reason="awaiting_transcript_final",
             )
         return ResponseCreateDecision(
             action=ResponseCreateDecisionAction.SEND,
@@ -214,4 +221,3 @@ class InteractionLifecyclePolicy:
             details="response.created missing before timeout",
             should_schedule_micro_ack=True,
         )
-

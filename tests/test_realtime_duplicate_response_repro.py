@@ -1240,3 +1240,42 @@ def test_server_auto_short_utterance_defers_audio_until_transcript_final(monkeyp
     assert deferred_calls == [("turn-delay", "item_delay", "resp-server-auto-delay")]
     assert started_audio == []
     assert cancelled_audio_races == []
+
+
+def test_server_auto_response_create_queued_until_transcript_final_then_drained() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+
+    awaiting_transcript_final = {"value": True}
+    api._transcript_final_missing_for_turn = lambda **_kwargs: awaiting_transcript_final["value"]
+
+    event = {
+        "type": "response.create",
+        "response": {
+            "metadata": {
+                "turn_id": "turn-await",
+                "input_event_key": "item-await",
+                "origin": "server_auto",
+            }
+        },
+    }
+
+    async def _run() -> None:
+        await api._send_response_create(ws, event, origin="server_auto")
+        assert len(api._response_create_queue) == 1
+        assert api._pending_response_create is not None
+        assert api._pending_response_create.reason == "awaiting_transcript_final"
+
+        awaiting_transcript_final["value"] = False
+        await api._drain_response_create_queue(source_trigger="response_done")
+
+    asyncio.run(_run())
+
+    response_creates = [payload for payload in ws.sent if payload.get("type") == "response.create"]
+    response_cancels = [payload for payload in ws.sent if payload.get("type") == "response.cancel"]
+
+    assert len(response_creates) == 1
+    assert response_cancels == []
+    assert len(api._response_create_queue) == 0
