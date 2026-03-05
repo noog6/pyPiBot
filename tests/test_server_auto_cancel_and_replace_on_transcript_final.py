@@ -256,3 +256,52 @@ def test_terminal_state_is_per_canonical_key_not_turn_id() -> None:
         origin="upgraded_response",
         response_metadata={"transcript_upgrade_replacement": "true"},
     ) is False
+
+
+
+
+def test_server_auto_answer_verdict_does_not_emit_cancel() -> None:
+    api = _build_api_stub()
+    api._active_response_origin = "server_auto"
+    api._active_response_input_event_key = "item_1"
+    api._current_turn_id_or_unknown = lambda: "turn_1"
+    api._response_gating_verdict_by_input_event_key = {
+        "run-464:turn_1:item_1": type("V", (), {"action": "ANSWER"})(),
+    }
+    api._audio_playback_busy = False
+    api._is_active_response_guarded = lambda: False
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._canonical_lifecycle_state = lambda _key: {"cancel_requested_pre_audio": True}
+    api._active_response_canonical_key = "run-464:turn_1:item_1"
+    api._active_response_id = "resp-server-auto"
+    sent = []
+    api._get_or_create_transport = lambda: type("T", (), {"send_json": staticmethod(lambda _ws, event: sent.append(event) or __import__("asyncio").sleep(0))})()
+
+    asyncio.run(api._handle_response_output_audio_delta_event({"response_id": "resp-server-auto", "delta": ""}, object()))
+
+    assert sent == []
+
+def test_server_auto_audio_does_not_start_before_gating() -> None:
+    api = _build_api_stub()
+    api._active_response_origin = "server_auto"
+    api._active_response_input_event_key = "item_1"
+    api._current_turn_id_or_unknown = lambda: "turn_1"
+    api._response_gating_verdict_by_input_event_key = {
+        "run-464:turn_1:item_1": type("V", (), {"action": "CLARIFY"})(),
+    }
+    api._audio_playback_busy = False
+    api._is_active_response_guarded = lambda: False
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._canonical_lifecycle_state = lambda _key: {}
+    api._active_response_canonical_key = "run-464:turn_1:item_1"
+    api._lifecycle_controller = lambda: type("LC", (), {"on_audio_delta": staticmethod(lambda *_a, **_k: type("D", (), {"action": __import__("ai.interaction_lifecycle_controller", fromlist=["LifecycleDecisionAction"]).LifecycleDecisionAction.ALLOW, "reason": "ok"})())})()
+    api._log_lifecycle_event = lambda **_kwargs: None
+    api._cancel_micro_ack = lambda **_kwargs: None
+    api._canonical_response_state_mutate = lambda **_kwargs: None
+    sent = []
+    api._get_or_create_transport = lambda: type("T", (), {"send_json": staticmethod(lambda _ws, event: sent.append(event) or __import__("asyncio").sleep(0))})()
+
+    asyncio.run(api._handle_response_output_audio_delta_event({"response_id": "resp-server-auto", "delta": ""}, object()))
+
+    assert sent == [{"type": "response.cancel", "response_id": "resp-server-auto"}]
+    assert api._audio_playback_busy is False

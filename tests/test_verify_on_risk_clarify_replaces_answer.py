@@ -1,0 +1,73 @@
+from __future__ import annotations
+
+import asyncio
+import sys
+import types
+
+if "audioop" not in sys.modules:
+    sys.modules["audioop"] = types.ModuleType("audioop")
+
+from ai.realtime_api import PendingServerAutoResponse, RealtimeAPI
+
+
+class _Transport:
+    def __init__(self) -> None:
+        self.sent: list[dict[str, object]] = []
+
+    async def send_json(self, _ws, event: dict[str, object]) -> None:
+        self.sent.append(event)
+
+
+def test_clarify_replaces_answer_no_mixed_output() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._asr_verify_on_risk_enabled = True
+    api._asr_clarify_asked_input_event_keys = set()
+    api._asr_clarify_count_by_turn = {}
+    api._asr_verify_max_clarify_per_turn = 2
+    api._asr_verify_short_utterance_ms = 300
+    api._asr_verify_min_confidence = 0.6
+    api.camera_controller = None
+    api._response_gating_verdict_by_input_event_key = {}
+    api._pending_server_auto_response_by_turn_id = {
+        "turn-1": PendingServerAutoResponse(
+            turn_id="turn-1",
+            response_id="resp-old",
+            canonical_key="run-1:turn-1:evt-1",
+            created_at_ms=1,
+            active=True,
+        )
+    }
+    api._canonical_utterance_key = lambda *, turn_id, input_event_key: f"run-1:{turn_id}:{input_event_key}"
+    api._record_cancel_issued_timing = lambda *_args, **_kwargs: None
+    api._stale_response_ids_set = set()
+    api._mark_pending_server_auto_response_cancelled = lambda **_kwargs: None
+    api._suppress_cancelled_response_audio = lambda *_args, **_kwargs: None
+    transport = _Transport()
+    api._get_or_create_transport = lambda: transport
+    sent_messages: list[tuple[str, dict[str, str]]] = []
+
+    async def _send_assistant_message(msg: str, _ws, *, response_metadata=None, **_kwargs):
+        sent_messages.append((msg, response_metadata or {}))
+
+    api.send_assistant_message = _send_assistant_message
+    api._current_run_id = lambda: "run-1"
+    api.assistant_reply = "I see blue pants"
+    api._assistant_reply_accum = "I see blue pants"
+
+    clarified = asyncio.run(
+        api._maybe_verify_on_risk_clarify(
+            transcript="what color pants am i wearing",
+            websocket=object(),
+            turn_id="turn-1",
+            input_event_key="evt-1",
+            snapshot={"run_id": "run-1", "asr_confidence": 0.9},
+        )
+    )
+
+    assert clarified is True
+    assert transport.sent == [{"type": "response.cancel", "response_id": "resp-old"}]
+    assert sent_messages
+    msg, metadata = sent_messages[0]
+    assert "Quick check" not in msg
+    assert "I can’t see right now" in msg
+    assert metadata["input_event_key"] == "evt-1:clarify"
