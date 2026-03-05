@@ -194,21 +194,40 @@ def probe_realtime_session(realtime_api: Any | None) -> HealthProbeResult:
 
     session_health = getattr(realtime_api, "get_session_health", lambda: {})()
 
+    connected_source = "default_false"
     connected = session_health.get("connected")
-    if connected is None:
-        connected = getattr(realtime_api, "_session_connected", False)
+    if connected is not None:
+        connected_source = "session_health.connected"
+    else:
+        for attr_name in ("_session_connected",):
+            attr_value = getattr(realtime_api, attr_name, None)
+            if attr_value is not None:
+                connected = attr_value
+                connected_source = f"attr:{attr_name}"
+                break
     connected = bool(connected)
 
-    ready = session_health.get("ready")
+    ready_source = "default_false"
+    ready: bool | None = None
+    is_ready_for_injections = getattr(realtime_api, "is_ready_for_injections", None)
+    if callable(is_ready_for_injections):
+        ready = bool(is_ready_for_injections())
+        ready_source = "is_ready_for_injections()"
+    elif isinstance(is_ready_for_injections, bool):
+        ready = is_ready_for_injections
+        ready_source = "is_ready_for_injections_property"
+    if ready is None:
+        health_ready = session_health.get("ready")
+        if health_ready is not None:
+            ready = bool(health_ready)
+            ready_source = "session_health.ready"
     if ready is None:
         ready_event = getattr(realtime_api, "ready_event", None)
         if ready_event is not None and hasattr(ready_event, "is_set"):
-            ready = ready_event.is_set()
+            ready = bool(ready_event.is_set())
+            ready_source = "ready_event.is_set"
     if ready is None:
-        is_ready_for_injections = getattr(realtime_api, "is_ready_for_injections", None)
-        if callable(is_ready_for_injections):
-            ready = is_ready_for_injections()
-    ready = bool(ready)
+        ready = False
     failures = int(session_health.get("failures", 0))
     reconnects = int(session_health.get("reconnects", 0))
 
@@ -228,6 +247,8 @@ def probe_realtime_session(realtime_api: Any | None) -> HealthProbeResult:
     details: dict[str, str | float | int | bool] = {
         "connected": connected,
         "ready": ready,
+        "ready_source": ready_source,
+        "connected_source": connected_source,
         "failures": failures,
         "reconnects": reconnects,
     }

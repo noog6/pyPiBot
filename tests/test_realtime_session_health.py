@@ -5,14 +5,6 @@ from __future__ import annotations
 from ai.realtime_api import RealtimeAPI
 
 
-class _FakeReadyEvent:
-    def __init__(self, ready: bool) -> None:
-        self._ready = ready
-
-    def is_set(self) -> bool:
-        return self._ready
-
-
 class _FakeMemoryManager:
     def __init__(self) -> None:
         self.calls: list[tuple[str | None, str | None]] = []
@@ -48,7 +40,7 @@ def _make_api_stub() -> RealtimeAPI:
     api._memory_manager = _FakeMemoryManager()
     api._memory_retrieval_scope = "session_local"
     api._session_connected = True
-    api.ready_event = _FakeReadyEvent(True)
+    api.is_ready_for_injections = lambda: True
     api._session_connection_attempts = 4
     api._session_connections = 2
     api._session_reconnects = 1
@@ -79,3 +71,12 @@ def test_get_session_health_includes_silent_turn_incident_counter() -> None:
     health = api.get_session_health()
 
     assert health["silent_turn_incidents"] == 2
+
+
+def test_get_session_health_ready_uses_injection_readiness_semantics() -> None:
+    api = _make_api_stub()
+    api.is_ready_for_injections = lambda: False
+
+    health = api.get_session_health()
+
+    assert health["ready"] is False
