@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from contextlib import contextmanager
 import types
 from types import SimpleNamespace
 from typing import Any
@@ -452,3 +453,52 @@ def test_dropped_stale_response_event_is_rate_limited() -> None:
         '{"response.done": 2}',
         3,
     )
+
+
+def test_transcript_final_skips_verify_on_risk_when_confirmation_active() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    verify_gate = AsyncMock(return_value=True)
+
+    @contextmanager
+    def _scope(*, turn_id: str, input_event_key: str):
+        yield SimpleNamespace(turn_id=turn_id, input_event_key=input_event_key)
+
+    api._extract_transcript = lambda _event: "yes"
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._log_user_transcript = lambda *_args, **_kwargs: None
+    api._resolve_input_event_key = lambda _event: "evt-1"
+    api._current_turn_id_or_unknown = lambda: "turn-1"
+    api._utterance_context_scope = _scope
+    api._lifecycle_controller = lambda: SimpleNamespace(on_transcript_final=lambda _key: None)
+    api._canonical_utterance_key = lambda **_kwargs: "turn-1:evt-1"
+    api._rebind_active_response_correlation_key = lambda **_kwargs: None
+    api._clear_stale_pending_server_auto_for_turn = lambda **_kwargs: None
+    api._is_memory_intent = lambda _text: False
+    api._current_run_id = lambda: "run-1"
+    api._start_transcript_response_watchdog = lambda **_kwargs: None
+    api._has_active_confirmation_token = lambda: True
+    api._is_awaiting_confirmation_phase = lambda: False
+    api._mark_confirmation_activity = lambda **_kwargs: None
+    api._active_utterance = None
+    api._log_utterance_trust_snapshot = lambda **_kwargs: {
+        "run_id": "run-1",
+        "turn_id": "turn-1",
+        "input_event_key": "evt-1",
+        "transcript_text": "yes",
+    }
+    api._maybe_verify_on_risk_clarify = verify_gate
+    api._maybe_schedule_micro_ack = lambda **_kwargs: None
+    api._micro_ack_category_for_reason = lambda _reason: "latency_mask"
+    api._record_user_input = lambda *_args, **_kwargs: None
+    api._maybe_handle_approval_response = AsyncMock(return_value=True)
+    api._active_response_origin = ""
+
+    asyncio.run(
+        api._handle_input_audio_transcription_completed_event(
+            {"type": "conversation.item.input_audio_transcription.completed", "transcript": "yes"},
+            websocket=None,
+        )
+    )
+
+    verify_gate.assert_not_awaited()
+    api._maybe_handle_approval_response.assert_awaited_once_with("yes", None)

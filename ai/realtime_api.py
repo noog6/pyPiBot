@@ -8887,7 +8887,7 @@ class RealtimeAPI:
             turn_id=resolved_turn_id,
             input_event_key=input_event_key,
         )
-        if transcript and await self._maybe_verify_on_risk_clarify(
+        if transcript and not confirmation_active and await self._maybe_verify_on_risk_clarify(
             transcript=transcript,
             websocket=websocket,
             turn_id=resolved_turn_id,
