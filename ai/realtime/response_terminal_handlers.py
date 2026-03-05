@@ -184,9 +184,30 @@ class ResponseTerminalHandlers:
     async def handle_response_done(self, event: dict[str, Any] | None = None) -> None:
         api = self._api
         api._mark_utterance_info_summary(response_done_seen=True)
-        turn_id = api._current_turn_id_or_unknown()
-        done_input_event_key = str(getattr(api, "_active_response_input_event_key", "") or "").strip()
-        active_done_canonical_key = str(getattr(api, "_active_response_canonical_key", "") or "").strip()
+        response_id = api._response_id_from_event(event)
+        trace_context = api._response_trace_by_id().get(response_id, {}) if response_id else {}
+        stale_context = api._stale_response_context(response_id) if response_id else {}
+        active_turn_id = api._current_turn_id_or_unknown()
+        turn_id = str(
+            trace_context.get("turn_id")
+            or stale_context.get("turn_id")
+            or active_turn_id
+        ).strip() or "turn-unknown"
+        active_input_event_key_for_turn = str(api._active_input_event_key_for_turn(turn_id) or "").strip()
+        done_input_event_key = str(
+            trace_context.get("input_event_key")
+            or stale_context.get("input_event_key")
+            or getattr(api, "_active_response_input_event_key", "")
+            or active_input_event_key_for_turn
+            or getattr(api, "_current_input_event_key", "")
+            or ""
+        ).strip()
+        active_done_canonical_key = str(
+            trace_context.get("canonical_key")
+            or stale_context.get("canonical_key")
+            or getattr(api, "_active_response_canonical_key", "")
+            or ""
+        ).strip()
         done_canonical_key = active_done_canonical_key or api._canonical_utterance_key(
             turn_id=turn_id,
             input_event_key=done_input_event_key,

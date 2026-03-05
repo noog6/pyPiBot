@@ -721,3 +721,89 @@ def test_transcript_completed_empty_cancels_pending_micro_ack_and_skips_response
     assert api._pending_response_create is None
     assert api.websocket.sent == []
     api.loop.close()
+
+def test_response_done_cancels_prescheduled_micro_ack_using_response_mapping() -> None:
+    api = _api_stub()
+    target_turn_id = "turn-target"
+    target_input_event_key = "input-target"
+    response_id = "resp-target"
+
+    api._current_turn_id_or_unknown = lambda: "turn-other"
+    api._active_input_event_key_by_turn_id = {target_turn_id: target_input_event_key}
+    api._active_response_id = response_id
+    api._active_response_origin = "assistant_message"
+    api._active_response_input_event_key = ""
+    api._active_response_canonical_key = ""
+    api._response_trace_context_by_id = {
+        response_id: {
+            "turn_id": target_turn_id,
+            "input_event_key": target_input_event_key,
+            "canonical_key": api._canonical_utterance_key(turn_id=target_turn_id, input_event_key=target_input_event_key),
+            "origin": "assistant_message",
+        }
+    }
+    api._stale_response_map = {}
+    api._stale_response_map_ttl_s = 15.0
+    api._response_status_by_id = {}
+    api._preference_recall_suppressed_turns = set()
+    api._preference_recall_suppressed_input_event_keys = set()
+    api._response_obligations = {}
+    api._active_response_consumes_canonical_slot = False
+    api._pending_micro_ack_by_turn_channel = {
+        (target_turn_id, "voice"): type("Marker", (), {"category": "start_of_work", "priority": 1, "reason": "speech_stopped"})()
+    }
+    api._micro_ack_manager.scheduled = [(target_turn_id, "start_of_work", "speech_stopped", 700)]
+
+    cancel_calls: list[tuple[str, str]] = []
+    original_cancel_micro_ack = RealtimeAPI._cancel_micro_ack.__get__(api, RealtimeAPI)
+
+    def _capture_cancel_micro_ack(*, turn_id: str, reason: str) -> None:
+        cancel_calls.append((turn_id, reason))
+        original_cancel_micro_ack(turn_id=turn_id, reason=reason)
+
+    api._cancel_micro_ack = _capture_cancel_micro_ack
+
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._response_delivery_state = lambda **_kwargs: None
+    api._response_obligation_key = lambda **_kwargs: "obligation"
+    api._lifecycle_controller = lambda: type("Lifecycle", (), {"on_response_done": lambda *_args, **_kwargs: None})()
+    api._log_lifecycle_event = lambda **_kwargs: None
+    api._debug_dump_canonical_key_timeline = lambda **_kwargs: None
+    api._set_response_delivery_state = lambda **_kwargs: None
+    api._tool_followup_state = lambda **_kwargs: "idle"
+    api._set_tool_followup_state = lambda **_kwargs: None
+    api._release_blocked_tool_followups_for_response_done = lambda **_kwargs: None
+    api._log_cancelled_deliverable_once = lambda *_args, **_kwargs: None
+    api._record_response_trace_context = lambda *_args, **_kwargs: None
+    api._emit_response_lifecycle_trace = lambda **_kwargs: None
+    api._emit_utterance_info_summary = lambda **_kwargs: None
+    api._is_empty_response_done = lambda **_kwargs: False
+    api._record_silent_turn_incident = lambda **_kwargs: None
+    api._maybe_schedule_empty_response_retry = lambda **_kwargs: asyncio.sleep(0)
+    api._emit_preference_recall_skip_trace_if_needed = lambda **_kwargs: None
+    api._log_turn_conversation_efficiency = lambda **_kwargs: None
+    api._build_confirmation_transition_decision = lambda **_kwargs: type(
+        "Transition", (), {"allow_response_transition": False, "close_reason": "", "emit_reminder": False, "recover_mic": False}
+    )()
+    api._confirmation_hold_components = lambda: (False, False, None, False)
+    api._enqueue_response_done_reflection = lambda *_args, **_kwargs: None
+    api._should_send_response_done_fallback_reminder = lambda: False
+    api._is_guarded_server_auto_reminder_allowed = lambda **_kwargs: False
+    api._maybe_emit_confirmation_reminder = lambda *_args, **_kwargs: asyncio.sleep(0)
+    api._recover_confirmation_guard_microphone = lambda *_args, **_kwargs: None
+    api._clear_cancelled_response_tracking = lambda *_args, **_kwargs: None
+    api.rate_limits = {}
+
+    asyncio.run(
+        api.handle_event(
+            {
+                "type": "response.done",
+                "response": {"id": response_id},
+            },
+            api.websocket,
+        )
+    )
+
+    assert (target_turn_id, "response_done") in cancel_calls
+    assert (target_turn_id, "voice") not in api._pending_micro_ack_by_turn_channel
+    api.loop.close()
