@@ -63,6 +63,7 @@ def _make_api_stub() -> RealtimeAPI:
     api._response_id_by_canonical_key = {}
     api._canonical_response_lifecycle_state = {}
     api._already_scheduled_for_input_event_key = set()
+    api._tool_followup_state_by_canonical_key = {}
     api._active_response_id = None
     api._active_response_origin = "unknown"
     api._active_response_consumes_canonical_slot = True
@@ -714,7 +715,7 @@ def test_duplicate_tool_result_is_deduped_by_tool_followup_canonical_key(monkeyp
     assert len(response_create_events) == 1
     canonical_key = api._canonical_utterance_key(turn_id="turn_tool_2", input_event_key="tool:call_research_2")
     assert any(
-        "tool_followup_arbitration outcome=deny reason=already_created" in entry
+        "tool_followup_arbitration outcome=deny reason=already_" in entry
         and f"canonical_key={canonical_key}" in entry
         for entry in captured_logs
     )
@@ -781,3 +782,122 @@ def test_reject_tool_call_with_assistant_message_avoids_duplicate_response_creat
     assert len(response_create_events) == 1
     metadata = ((response_create_events[0].get("response") or {}).get("metadata") or {})
     assert metadata.get("origin") == "assistant_message"
+
+
+def test_tool_followup_scheduled_while_active_drains_once_without_active_error(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._response_in_flight = True
+    api.response_in_progress = True
+    api._current_response_turn_id = "turn_tool_active"
+    response_create_event, canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_active_1",
+        response_create_event={"type": "response.create"},
+    )
+
+    captured_logs: list[str] = []
+    original_info = logger.info
+
+    def _capture_info(message: str, *args, **kwargs):
+        rendered = str(message)
+        if args:
+            rendered = rendered % args
+        captured_logs.append(rendered)
+        return original_info(message, *args, **kwargs)
+
+    monkeypatch.setattr(logger, "info", _capture_info)
+
+    async def _run() -> None:
+        await api._send_response_create(ws, response_create_event, origin="tool_output")
+        api._response_in_flight = False
+        api.response_in_progress = False
+        await api._drain_response_create_queue(source_trigger="response_done")
+
+    asyncio.run(_run())
+
+    response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert len(response_create_events) == 1
+    assert api._tool_followup_state(canonical_key=canonical_key) in {"creating", "created"}
+    assert not any("Conversation already has an active response in progress" in entry for entry in captured_logs)
+
+
+def test_duplicate_tool_followup_delivery_events_only_create_once_after_drain(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._response_in_flight = True
+    api.response_in_progress = True
+    api._current_response_turn_id = "turn_tool_dup"
+    response_create_event, canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_dup_1",
+        response_create_event={"type": "response.create"},
+    )
+
+    captured_logs: list[str] = []
+    original_info = logger.info
+
+    def _capture_info(message: str, *args, **kwargs):
+        rendered = str(message)
+        if args:
+            rendered = rendered % args
+        captured_logs.append(rendered)
+        return original_info(message, *args, **kwargs)
+
+    monkeypatch.setattr(logger, "info", _capture_info)
+
+    async def _run() -> None:
+        await api._send_response_create(ws, response_create_event, origin="tool_output")
+        await api._send_response_create(ws, response_create_event, origin="tool_output")
+        api._response_in_flight = False
+        api.response_in_progress = False
+        await api._drain_response_create_queue(source_trigger="response_done")
+
+    asyncio.run(_run())
+
+    response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert len(response_create_events) == 1
+    assert any(
+        "tool_followup_create_suppressed" in entry and f"canonical_key={canonical_key}" in entry
+        for entry in captured_logs
+    )
+
+
+def test_tool_followup_second_arbitration_denied_for_same_canonical_key(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_response_turn_id = "turn_tool_arb"
+    response_create_event, canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_arb_1",
+        response_create_event={"type": "response.create"},
+    )
+
+    captured_logs: list[str] = []
+    original_info = logger.info
+
+    def _capture_info(message: str, *args, **kwargs):
+        rendered = str(message)
+        if args:
+            rendered = rendered % args
+        captured_logs.append(rendered)
+        return original_info(message, *args, **kwargs)
+
+    monkeypatch.setattr(logger, "info", _capture_info)
+
+    async def _run() -> None:
+        await api._send_response_create(ws, response_create_event, origin="tool_output")
+        await api._send_response_create(ws, response_create_event, origin="tool_output")
+
+    asyncio.run(_run())
+
+    response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert len(response_create_events) == 1
+    assert any(
+        "tool_followup_arbitration outcome=deny reason=already_creating" in entry
+        and f"canonical_key={canonical_key}" in entry
+        for entry in captured_logs
+    )
