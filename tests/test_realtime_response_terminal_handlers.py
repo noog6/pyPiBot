@@ -6,7 +6,7 @@ import asyncio
 import sys
 import types
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 if "audioop" not in sys.modules:
     sys.modules["audioop"] = types.ModuleType("audioop")
@@ -124,3 +124,25 @@ def test_handle_response_done_still_runs_confirmation_transition_logic() -> None
         (OrchestrationPhase.REFLECT, "response done"),
         (OrchestrationPhase.IDLE, "response done reflection"),
     ]
+
+
+def test_handle_response_done_logs_normal_deliverable_selection() -> None:
+    api = _make_api()
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+
+    with patch("ai.realtime.response_terminal_handlers.logger.info") as info_log:
+        asyncio.run(api.handle_response_done({"type": "response.done"}))
+
+    info_log.assert_any_call(
+        "deliverable_selected response_id=%s selected=true reason=normal",
+        "resp_1",
+    )
+

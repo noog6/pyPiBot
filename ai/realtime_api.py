@@ -951,6 +951,7 @@ class RealtimeAPI:
         self._pending_server_auto_input_event_keys: deque[str] = deque(maxlen=64)
         self._pending_server_auto_response_by_turn_id: dict[str, PendingServerAutoResponse] = {}
         self._cancelled_response_ids: set[str] = set()
+        self._cancelled_deliverable_logged_ids: set[str] = set()
         self._active_server_auto_input_event_key: str | None = None
         self._current_input_event_key: str | None = None
         self._active_input_event_key_by_turn_id: dict[str, str] = {}
@@ -3608,10 +3609,48 @@ class RealtimeAPI:
         cancelled_ids = getattr(self, "_cancelled_response_ids", None)
         if not isinstance(cancelled_ids, set) or not cancelled_ids:
             return False
+        response_id = self._response_id_from_event(event)
+        return bool(response_id and response_id in cancelled_ids)
+
+    def _response_id_from_event(self, event: dict[str, Any] | None) -> str:
+        if not isinstance(event, dict):
+            return ""
         response_id = str(event.get("response_id") or "").strip()
         if not response_id and isinstance(event.get("response"), dict):
             response_id = str((event.get("response") or {}).get("id") or "").strip()
-        return bool(response_id and response_id in cancelled_ids)
+        return response_id
+
+    def _log_cancelled_deliverable_once(self, response_id: str, source_event: str) -> None:
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            return
+        logged_ids = getattr(self, "_cancelled_deliverable_logged_ids", None)
+        if not isinstance(logged_ids, set):
+            logged_ids = set()
+            self._cancelled_deliverable_logged_ids = logged_ids
+        if normalized_response_id in logged_ids:
+            logger.debug(
+                "cancelled_deliverable_log_suppressed response_id=%s source_event=%s",
+                normalized_response_id,
+                source_event,
+            )
+            return
+        logger.info(
+            "deliverable_selected response_id=%s selected=false reason=cancelled",
+            normalized_response_id,
+        )
+        logged_ids.add(normalized_response_id)
+
+    def _clear_cancelled_response_tracking(self, response_id: str) -> None:
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            return
+        cancelled_ids = getattr(self, "_cancelled_response_ids", None)
+        if isinstance(cancelled_ids, set):
+            cancelled_ids.discard(normalized_response_id)
+        logged_ids = getattr(self, "_cancelled_deliverable_logged_ids", None)
+        if isinstance(logged_ids, set):
+            logged_ids.discard(normalized_response_id)
 
     def _canonical_utterance_key(self, *, turn_id: str, input_event_key: str | None) -> str:
         return self._lifecycle_state_coordinator().canonical_utterance_key(
@@ -8262,12 +8301,9 @@ class RealtimeAPI:
     async def _handle_response_done_event(self, event: dict[str, Any], websocket: Any) -> None:
         _ = websocket
         if self._is_cancelled_response_event(event):
-            response_id = str(event.get("response_id") or "").strip()
-            if not response_id and isinstance(event.get("response"), dict):
-                response_id = str((event.get("response") or {}).get("id") or "").strip()
-            logger.info(
-                "deliverable_selected response_id=%s selected=false reason=cancelled",
-                response_id or "unknown",
+            self._log_cancelled_deliverable_once(
+                self._response_id_from_event(event),
+                source_event="response.done",
             )
             return
         await self.handle_response_done(event)
@@ -8531,13 +8567,17 @@ class RealtimeAPI:
     async def _handle_event_legacy(self, event: dict[str, Any], websocket: Any) -> None:
         event_type = event.get("type")
         if self._is_cancelled_response_event(event):
-            response_id = str(event.get("response_id") or "").strip()
-            if not response_id and isinstance(event.get("response"), dict):
-                response_id = str((event.get("response") or {}).get("id") or "").strip()
-            logger.info(
-                "deliverable_selected response_id=%s selected=false reason=cancelled",
-                response_id or "unknown",
-            )
+            response_id = self._response_id_from_event(event)
+            if event_type in {"response.done", "response.completed"}:
+                self._log_cancelled_deliverable_once(response_id, source_event=str(event_type or "unknown"))
+                if event_type == "response.completed":
+                    self._clear_cancelled_response_tracking(response_id)
+            else:
+                logger.debug(
+                    "cancelled_response_event_suppressed response_id=%s event_type=%s",
+                    response_id or "unknown",
+                    event_type or "unknown",
+                )
             return
         if event_type == "response.output_item.added":
             await self._handle_output_item_added_event(event, websocket)
