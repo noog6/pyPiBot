@@ -4,6 +4,11 @@ import asyncio
 import base64
 from collections import deque
 import time
+import sys
+import types
+
+if "audioop" not in sys.modules:
+    sys.modules["audioop"] = types.ModuleType("audioop")
 
 from ai.orchestration import OrchestrationPhase
 from ai.realtime_api import PendingResponseCreate, RealtimeAPI
@@ -532,4 +537,96 @@ def test_near_ready_does_not_suppress_safety_gate() -> None:
         ("turn-1", "safety_gate", "watchdog_confirmation_pending", 700)
     ]
     assert api._micro_ack_manager.cancelled == []
+    api.loop.close()
+
+
+def test_maybe_schedule_micro_ack_suppressed_when_tool_followup_imminent() -> None:
+    api = _api_stub()
+    api.state_manager.state = InteractionState.LISTENING
+    api._active_input_event_key_by_turn_id = {"turn-1": "item-1"}
+    api._extract_response_create_metadata = RealtimeAPI._extract_response_create_metadata.__get__(api, RealtimeAPI)
+    api._tool_followup_state_by_canonical_key = {}
+
+    tool_event = {
+        "type": "response.create",
+        "response": {
+            "metadata": {
+                "tool_followup": "true",
+                "tool_call_id": "call-1",
+                "turn_id": "turn-1",
+                "parent_turn_id": "turn-1",
+                "input_event_key": "tool:call-1",
+                "parent_input_event_key": "item-1",
+            }
+        },
+    }
+    api._pending_response_create = PendingResponseCreate(
+        websocket=api.websocket,
+        event=tool_event,
+        origin="tool_output",
+        turn_id="turn-1",
+        created_at=time.monotonic(),
+        reason="tool_followup",
+    )
+    api._tool_followup_state_by_canonical_key[
+        api._canonical_utterance_key(turn_id="turn-1", input_event_key="tool:call-1")
+    ] = "scheduled"
+
+    api._maybe_schedule_micro_ack(
+        turn_id="turn-1",
+        category=api._micro_ack_category_for_reason("speech_stopped"),
+        channel="voice",
+        reason="speech_stopped",
+        expected_delay_ms=700,
+    )
+
+    assert api._micro_ack_manager.scheduled == []
+    api.loop.close()
+
+
+def test_maybe_schedule_micro_ack_not_suppressed_when_tool_followup_blocked_by_active_response() -> None:
+    api = _api_stub()
+    api.state_manager.state = InteractionState.LISTENING
+    api._active_input_event_key_by_turn_id = {"turn-1": "item-1"}
+    api._extract_response_create_metadata = RealtimeAPI._extract_response_create_metadata.__get__(api, RealtimeAPI)
+    api._tool_followup_state_by_canonical_key = {}
+    api._active_response_id = "resp-active"
+
+    tool_event = {
+        "type": "response.create",
+        "response": {
+            "metadata": {
+                "tool_followup": "true",
+                "tool_call_id": "call-2",
+                "turn_id": "turn-1",
+                "parent_turn_id": "turn-1",
+                "input_event_key": "tool:call-2",
+                "parent_input_event_key": "item-1",
+                "blocked_by_response_id": "resp-active",
+            }
+        },
+    }
+    api._pending_response_create = PendingResponseCreate(
+        websocket=api.websocket,
+        event=tool_event,
+        origin="tool_output",
+        turn_id="turn-1",
+        created_at=time.monotonic(),
+        reason="active_response",
+    )
+    api._tool_followup_state_by_canonical_key[
+        api._canonical_utterance_key(turn_id="turn-1", input_event_key="tool:call-2")
+    ] = "blocked_active_response"
+
+    api._maybe_schedule_micro_ack(
+        turn_id="turn-1",
+        category=api._micro_ack_category_for_reason("speech_stopped"),
+        channel="voice",
+        reason="speech_stopped",
+        expected_delay_ms=700,
+    )
+
+    assert api._micro_ack_manager.scheduled == [
+        ("turn-1", "start_of_work", "speech_stopped", 700)
+    ]
     api.loop.close()

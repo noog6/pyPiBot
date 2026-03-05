@@ -1936,6 +1936,18 @@ class RealtimeAPI:
             InteractionLifecycleState.REPLACED,
         }:
             return
+        suppress_for_tool_followup, tool_followup_call_id = self._should_suppress_micro_ack_for_tool_followup(
+            turn_id=turn_id,
+            input_event_key=active_input_event_key,
+        )
+        if suppress_for_tool_followup:
+            logger.debug(
+                "micro_ack_suppressed run_id=%s turn_id=%s reason=tool_followup_imminent tool_call_id=%s",
+                self._current_run_id() or "",
+                turn_id,
+                tool_followup_call_id or "",
+            )
+            return
         near_ready_reason = self._micro_ack_near_ready_suppression_reason(
             turn_id=turn_id,
             category=category,
@@ -1991,6 +2003,52 @@ class RealtimeAPI:
             )
         finally:
             self._pending_micro_ack_reason = None
+
+    def _should_suppress_micro_ack_for_tool_followup(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str,
+    ) -> tuple[bool, str | None]:
+        normalized_turn_id = str(turn_id or "").strip()
+        normalized_input_event_key = str(input_event_key or "").strip()
+        if not normalized_turn_id:
+            return False, None
+
+        def _iter_candidates() -> Iterator[dict[str, Any]]:
+            pending = getattr(self, "_pending_response_create", None)
+            if pending is not None and isinstance(getattr(pending, "event", None), dict):
+                yield pending.event
+            for queued in list(getattr(self, "_response_create_queue", deque()) or ()):
+                if isinstance(queued, dict) and isinstance(queued.get("event"), dict):
+                    yield queued["event"]
+
+        active_response_id = str(getattr(self, "_active_response_id", "") or "").strip()
+        for response_create_event in _iter_candidates():
+            response_metadata = self._extract_response_create_metadata(response_create_event)
+            if str(response_metadata.get("tool_followup", "")).strip().lower() not in {"true", "1", "yes"}:
+                continue
+            candidate_turn_id = str(response_metadata.get("turn_id") or "").strip()
+            parent_turn_id = str(response_metadata.get("parent_turn_id") or "").strip()
+            if candidate_turn_id != normalized_turn_id and parent_turn_id != normalized_turn_id:
+                continue
+            parent_input_event_key = str(response_metadata.get("parent_input_event_key") or "").strip()
+            if parent_input_event_key and normalized_input_event_key and parent_input_event_key != normalized_input_event_key:
+                continue
+            blocked_by_response_id = str(response_metadata.get("blocked_by_response_id") or "").strip()
+            blocked_by_active_response = bool(
+                blocked_by_response_id and active_response_id and blocked_by_response_id == active_response_id
+            )
+            canonical_key = self._canonical_utterance_key(
+                turn_id=candidate_turn_id or normalized_turn_id,
+                input_event_key=str(response_metadata.get("input_event_key") or "").strip(),
+            )
+            followup_state = self._tool_followup_state(canonical_key=canonical_key)
+            if followup_state in {"scheduled", "scheduled_release", "creating", "created", "released_on_response_done"}:
+                return True, str(response_metadata.get("tool_call_id") or "").strip() or None
+            if not blocked_by_active_response and followup_state != "blocked_active_response":
+                return True, str(response_metadata.get("tool_call_id") or "").strip() or None
+        return False, None
 
     def _allow_text_output_state_transition(self, *, response_id: str | None, event_type: str) -> bool:
         normalized_response_id = str(response_id or "").strip()
@@ -9895,6 +9953,7 @@ class RealtimeAPI:
         )
         transcript_word_count = int(trust_snapshot.get("word_count") or 0)
         if not transcript or transcript_word_count <= 0:
+            self._cancel_micro_ack(turn_id=resolved_turn_id, reason="transcript_completed_empty")
             pending = self._pending_server_auto_response_for_turn(turn_id=resolved_turn_id)
             if isinstance(pending, PendingServerAutoResponse) and pending.active and pending.response_id:
                 cancel_event = {"type": "response.cancel", "response_id": pending.response_id}
