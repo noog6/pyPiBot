@@ -277,6 +277,13 @@ class PendingServerAutoResponse:
     cancelled_for_upgrade: bool = False
 
 
+@dataclass
+class ResponseGatingVerdict:
+    action: str
+    reason: str
+    decided_at: float
+
+
 @dataclass(frozen=True)
 class NormalizedConfirmationDecision:
     status: str
@@ -980,6 +987,8 @@ class RealtimeAPI:
         self._already_scheduled_for_input_event_key: set[str] = set()
         self._active_response_input_event_key: str | None = None
         self._active_response_canonical_key: str | None = None
+        self._response_gating_verdict_by_input_event_key: dict[str, ResponseGatingVerdict] = {}
+        self._last_vision_frame_sent_at_monotonic: float | None = None
         self._suppressed_topics: set[str] = set()
         self._battery_redline_percent = float(battery_response_cfg.get("redline_percent", 10.0))
         self._load_topic_suppression_preferences()
@@ -3723,6 +3732,10 @@ class RealtimeAPI:
             "response.output_audio.done",
             "response.output_audio_transcript.delta",
             "response.output_audio_transcript.done",
+            "response.output_text.delta",
+            "response.output_text.done",
+            "response.text.delta",
+            "response.text.done",
             "response.done",
         }:
             return False
@@ -5274,6 +5287,52 @@ class RealtimeAPI:
         )
         return snapshot
 
+    def _gating_verdict_key(self, *, turn_id: str, input_event_key: str) -> str:
+        return self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+
+    def _get_response_gating_verdict(self, *, turn_id: str, input_event_key: str) -> ResponseGatingVerdict | None:
+        store = getattr(self, "_response_gating_verdict_by_input_event_key", None)
+        if not isinstance(store, dict):
+            return None
+        return store.get(self._gating_verdict_key(turn_id=turn_id, input_event_key=input_event_key))
+
+    def _set_response_gating_verdict(self, *, turn_id: str, input_event_key: str, action: str, reason: str) -> ResponseGatingVerdict:
+        store = getattr(self, "_response_gating_verdict_by_input_event_key", None)
+        if not isinstance(store, dict):
+            store = {}
+            self._response_gating_verdict_by_input_event_key = store
+        key = self._gating_verdict_key(turn_id=turn_id, input_event_key=input_event_key)
+        existing = store.get(key)
+        if isinstance(existing, ResponseGatingVerdict) and existing.action == "CLARIFY":
+            return existing
+        verdict = ResponseGatingVerdict(action=action, reason=reason, decided_at=time.monotonic())
+        store[key] = verdict
+        return verdict
+
+    def get_vision_state(self, now: float | None = None) -> dict[str, Any]:
+        ts = time.monotonic() if now is None else float(now)
+        camera = getattr(self, "camera_controller", None)
+        can_capture = bool(camera)
+        queued_frame_count = 0
+        if camera is not None:
+            pending = getattr(camera, "_pending_images", None)
+            if pending is not None:
+                try:
+                    queued_frame_count = len(pending)
+                except Exception:
+                    queued_frame_count = 0
+        last_sent = getattr(self, "_last_vision_frame_sent_at_monotonic", None)
+        last_frame_age_ms = None
+        if isinstance(last_sent, (int, float)):
+            last_frame_age_ms = max(0, int((ts - float(last_sent)) * 1000))
+        available = queued_frame_count > 0 or (last_frame_age_ms is not None and last_frame_age_ms <= 5000)
+        return {
+            "available": bool(available),
+            "last_frame_age_ms": last_frame_age_ms,
+            "queued_frame_count": queued_frame_count,
+            "can_capture": can_capture,
+        }
+
     async def _maybe_verify_on_risk_clarify(
         self,
         *,
@@ -5289,6 +5348,7 @@ class RealtimeAPI:
             return False
         if self._asr_clarify_count_by_turn.get(turn_id, 0) >= self._asr_verify_max_clarify_per_turn:
             return False
+        vision_state = self.get_vision_state()
         should_confirm, reason = should_clarify(
             transcript_text=transcript,
             snapshot=build_utterance_trust_snapshot(
@@ -5305,17 +5365,49 @@ class RealtimeAPI:
                 short_utterance_ms=self._asr_verify_short_utterance_ms,
             ),
             min_confidence=self._asr_verify_min_confidence,
-            camera_available=bool(getattr(self, "camera_controller", None)),
-            camera_recent=False,
+            camera_available=bool(vision_state.get("available", False) or vision_state.get("can_capture", False)),
+            camera_recent=bool(vision_state.get("available", False)),
         )
+        if reason == "visual_unavailable" and bool(vision_state.get("can_capture", False)):
+            should_confirm = False
+            reason = "none"
         if not should_confirm:
+            self._set_response_gating_verdict(
+                turn_id=turn_id,
+                input_event_key=input_event_key,
+                action="ANSWER",
+                reason="verify_clear",
+            )
             return False
+        self._set_response_gating_verdict(
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            action="CLARIFY",
+            reason=reason,
+        )
         self._asr_clarify_asked_input_event_keys.add(input_event_key)
         self._asr_clarify_count_by_turn[turn_id] = self._asr_clarify_count_by_turn.get(turn_id, 0) + 1
+        pending = self._pending_server_auto_response_for_turn(turn_id=turn_id)
+        if isinstance(pending, PendingServerAutoResponse) and pending.active and pending.response_id:
+            cancel_event = {"type": "response.cancel", "response_id": pending.response_id}
+            self._record_cancel_issued_timing(pending.response_id)
+            self._stale_response_ids().add(pending.response_id)
+            self._mark_pending_server_auto_response_cancelled(turn_id=turn_id, reason="verify_clarify")
+            self._suppress_cancelled_response_audio(pending.response_id)
+            transport = self._get_or_create_transport()
+            await transport.send_json(websocket, cancel_event)
+        self.assistant_reply = ""
+        self._assistant_reply_accum = ""
+        clarify_key = f"{input_event_key}:clarify"
+        clarify_text = (
+            "I can’t see right now. Want me to take a quick look with the camera?"
+            if reason == "visual_unavailable"
+            else f"Quick check: did you ask \"{snapshot.get('transcript_text') or transcript.strip()}\"?"
+        )
         await self.send_assistant_message(
-            f"Quick check: did you ask \"{snapshot.get('transcript_text') or transcript.strip()}\"?",
+            clarify_text,
             websocket,
-            response_metadata={"trigger": "asr_verify_on_risk", "reason": reason, "input_event_key": input_event_key},
+            response_metadata={"trigger": "asr_verify_on_risk", "reason": reason, "input_event_key": clarify_key},
         )
         logger.info(
             "asr_verify_on_risk_clarify run_id=%s turn_id=%s input_event_key=%s reason=%s",
@@ -8268,6 +8360,12 @@ class RealtimeAPI:
                     origin,
                 )
             self._active_server_auto_input_event_key = input_event_key
+            self._set_response_gating_verdict(
+                turn_id=turn_id,
+                input_event_key=input_event_key,
+                action="NOOP",
+                reason="awaiting_transcript_final",
+            )
             self._log_response_binding_event(
                 response_key=input_event_key,
                 turn_id=turn_id,
@@ -8613,6 +8711,18 @@ class RealtimeAPI:
             return
         if self._is_active_response_guarded():
             return
+        active_input_event_key = str(getattr(self, "_active_response_input_event_key", "") or "").strip()
+        active_turn_id = self._current_turn_id_or_unknown()
+        if str(getattr(self, "_active_response_origin", "") or "").strip().lower() == "server_auto" and active_input_event_key:
+            verdict = self._get_response_gating_verdict(turn_id=active_turn_id, input_event_key=active_input_event_key)
+            if verdict is None or verdict.action == "NOOP":
+                return
+            if verdict.action in {"CLARIFY", "UPGRADE"}:
+                if response_id:
+                    cancel_event = {"type": "response.cancel", "response_id": response_id}
+                    transport = self._get_or_create_transport()
+                    await transport.send_json(websocket, cancel_event)
+                return
         self._mark_utterance_info_summary(deliverable_seen=True)
         active_canonical_key = str(getattr(self, "_active_response_canonical_key", "") or "").strip()
         if active_canonical_key:
@@ -8895,6 +9005,13 @@ class RealtimeAPI:
             snapshot=trust_snapshot,
         ):
             return
+        if transcript and not confirmation_active:
+            self._set_response_gating_verdict(
+                turn_id=resolved_turn_id,
+                input_event_key=input_event_key,
+                action="ANSWER",
+                reason="transcript_final",
+            )
         if transcript:
             decision_path = "canonical_transcript"
             if memory_intent:
@@ -8939,6 +9056,12 @@ class RealtimeAPI:
             ):
                 return
             if decision_path == "upgraded_response":
+                self._set_response_gating_verdict(
+                    turn_id=resolved_turn_id,
+                    input_event_key=input_event_key,
+                    action="UPGRADE",
+                    reason="transcript_upgrade",
+                )
                 pending = self._pending_server_auto_response_for_turn(turn_id=resolved_turn_id)
                 replacement_canonical_key = self._canonical_utterance_key(
                     turn_id=resolved_turn_id,
@@ -10182,6 +10305,7 @@ class RealtimeAPI:
             log_ws_event("Image", image_item)
             transport = self._get_or_create_transport()
             await transport.send_json(self.websocket, image_item)
+            self._last_vision_frame_sent_at_monotonic = time.monotonic()
             if self._image_response_enabled:
                 await self._stimuli_coordinator.enqueue(
                     trigger="image_message",
