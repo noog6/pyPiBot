@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from collections import deque
+from contextlib import contextmanager
 import time
 import sys
 import types
@@ -923,6 +924,119 @@ def test_transcript_completed_empty_cancels_pending_micro_ack_and_skips_response
     assert ("turn-empty", "voice") not in api._pending_micro_ack_by_turn_channel
     assert api._pending_response_create is None
     assert api.websocket.sent == []
+    api.loop.close()
+
+
+def test_server_auto_audio_deferral_timeout_schedules_before_transcript_final_upgrade_cancel(monkeypatch) -> None:
+    api = _api_stub()
+    turn_id = "turn-server-auto"
+    input_event_key = "input-server-auto"
+    response_id = "resp-server-auto"
+    call_order: list[tuple[str, str]] = []
+    scheduled_calls: list[dict[str, str]] = []
+    cancel_calls: list[tuple[str, str]] = []
+
+    api._current_turn_id_or_unknown = lambda: turn_id
+    api._resolve_input_event_key = lambda _event: input_event_key
+    api._extract_transcript = lambda event: str(event.get("transcript") or "")
+    api._active_response_id = response_id
+    api._active_response_origin = "server_auto"
+    api.audio_player = None
+    api._server_auto_audio_deferral_timeout_ms = 1
+    api._server_auto_audio_waiters_by_turn_id = {}
+    api._server_auto_audio_defer_tasks_by_turn_id = {}
+    api._server_auto_pre_audio_hold_by_turn_id = {}
+    api._is_cancelled_or_superseded_response_id = lambda _response_id: False
+    api._get_response_gating_verdict = lambda **_kwargs: None
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._log_user_transcript = lambda *_args, **_kwargs: None
+    api._rebind_active_response_correlation_key = lambda **_kwargs: None
+    api._clear_stale_pending_server_auto_for_turn = lambda **_kwargs: None
+    api._start_transcript_response_watchdog = lambda **_kwargs: None
+    api._has_active_confirmation_token = lambda: False
+    api._is_awaiting_confirmation_phase = lambda: False
+    api._log_utterance_trust_snapshot = lambda **_kwargs: {"word_count": 3}
+    api._maybe_verify_on_risk_clarify = lambda **_kwargs: asyncio.sleep(0, result=False)
+    api._set_response_gating_verdict = lambda **_kwargs: None
+    api._record_user_input = lambda *_args, **_kwargs: None
+    api._maybe_handle_approval_response = lambda *_args, **_kwargs: asyncio.sleep(0, result=False)
+    api._handle_stop_word = lambda *_args, **_kwargs: asyncio.sleep(0, result=False)
+    api._maybe_handle_research_permission_response = lambda *_args, **_kwargs: asyncio.sleep(0, result=False)
+    api._maybe_handle_research_budget_response = lambda *_args, **_kwargs: asyncio.sleep(0, result=False)
+    api._maybe_apply_late_confirmation_decision = lambda *_args, **_kwargs: asyncio.sleep(0, result=False)
+    api._maybe_handle_preference_recall_intent = lambda *_args, **_kwargs: asyncio.sleep(0, result=False)
+    api.should_cancel_and_replace = lambda **_kwargs: True
+    api._cancel_and_replace_pending_server_auto_on_transcript_final = lambda **_kwargs: asyncio.sleep(0, result=False)
+    api._maybe_process_research_intent = lambda *_args, **_kwargs: asyncio.sleep(0, result=False)
+    api._is_memory_intent = lambda _text: True
+
+    @contextmanager
+    def _fixed_context_scope(*, turn_id: str, input_event_key: str):
+        yield type("Ctx", (), {"turn_id": turn_id, "input_event_key": input_event_key})()
+
+    api._utterance_context_scope = _fixed_context_scope
+    api._lifecycle_controller = lambda: type("Lifecycle", (), {"on_transcript_final": lambda *_args, **_kwargs: None})()
+
+    def _capture_schedule(**kwargs) -> None:
+        call_order.append(("schedule", str(kwargs.get("reason") or "")))
+        scheduled_calls.append({"turn_id": kwargs["turn_id"], "reason": kwargs["reason"]})
+
+    original_signal = RealtimeAPI._signal_server_auto_transcript_final.__get__(api, RealtimeAPI)
+
+    def _capture_signal(*, turn_id: str) -> None:
+        call_order.append(("signal", turn_id))
+        original_signal(turn_id=turn_id)
+
+    def _capture_cancel(*, turn_id: str, reason: str) -> None:
+        call_order.append(("cancel", reason))
+        cancel_calls.append((turn_id, reason))
+
+    wait_for_calls = {"count": 0}
+    original_wait_for = asyncio.wait_for
+
+    async def _deterministic_wait_for(awaitable, timeout):
+        wait_for_calls["count"] += 1
+        if wait_for_calls["count"] == 1:
+            return await original_wait_for(awaitable, 0)
+        return await original_wait_for(awaitable, timeout)
+
+    monkeypatch.setattr(api, "_maybe_schedule_micro_ack", _capture_schedule)
+    monkeypatch.setattr(api, "_signal_server_auto_transcript_final", _capture_signal)
+    monkeypatch.setattr(api, "_cancel_micro_ack", _capture_cancel)
+    monkeypatch.setattr("ai.realtime_api.asyncio.wait_for", _deterministic_wait_for)
+
+    async def _run() -> None:
+        api._set_server_auto_pre_audio_hold(turn_id=turn_id, enabled=True, reason="test_pre_audio_hold")
+        api._schedule_server_auto_audio_deferral(
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            response_id=response_id,
+        )
+        defer_task = api._server_auto_audio_defer_tasks_by_turn_id[turn_id]
+
+        for _ in range(5):
+            if scheduled_calls:
+                break
+            await asyncio.sleep(0)
+        assert scheduled_calls == [{"turn_id": turn_id, "reason": "transcript_finalized"}]
+
+        await api._handle_input_audio_transcription_completed_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": input_event_key,
+                "transcript": "remember this preference",
+            },
+            api.websocket,
+        )
+
+        await defer_task
+
+    asyncio.run(_run())
+
+    assert wait_for_calls["count"] >= 2
+    assert cancel_calls == [(turn_id, "upgrade_selected")]
+    assert call_order.index(("schedule", "transcript_finalized")) < call_order.index(("signal", turn_id))
+    assert call_order.index(("schedule", "transcript_finalized")) < call_order.index(("cancel", "upgrade_selected"))
     api.loop.close()
 
 def test_response_done_cancels_prescheduled_micro_ack_using_response_mapping() -> None:
