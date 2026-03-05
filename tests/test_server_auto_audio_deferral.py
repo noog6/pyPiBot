@@ -5,6 +5,8 @@ import sys
 import types
 from types import SimpleNamespace
 
+import pytest
+
 if "audioop" not in sys.modules:
     sys.modules["audioop"] = types.ModuleType("audioop")
 
@@ -103,3 +105,47 @@ def test_short_utterance_transcript_final_arrives_quickly_without_micro_ack_spam
 
     assert api._started is True
     assert micro_acks == []
+
+
+def test_pre_audio_hold_timeout_schedules_single_transcript_finalized_micro_ack_before_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _api_stub()
+    api.audio_player = SimpleNamespace(start_response=lambda: setattr(api, "_started", True))
+    api._started = False
+    api._server_auto_audio_deferral_timeout_ms = 1
+    scheduled_micro_acks: list[dict[str, object]] = []
+    api._maybe_schedule_micro_ack = lambda **kwargs: scheduled_micro_acks.append(kwargs)
+    api._record_pending_server_auto_response(turn_id="turn-1", response_id="resp-1", canonical_key="run-476:turn-1:item-1")
+    api._set_server_auto_pre_audio_hold(turn_id="turn-1", enabled=True, reason="awaiting_transcript_final")
+
+    original_wait_for = asyncio.wait_for
+    wait_for_calls = {"count": 0}
+
+    async def _controlled_wait_for(awaitable: object, timeout: float) -> object:
+        wait_for_calls["count"] += 1
+        if wait_for_calls["count"] == 1:
+            close_awaitable = getattr(awaitable, "close", None)
+            if callable(close_awaitable):
+                close_awaitable()
+            raise asyncio.TimeoutError
+        return await original_wait_for(awaitable, timeout=timeout)
+
+    monkeypatch.setattr("ai.realtime_api.asyncio.wait_for", _controlled_wait_for)
+
+    async def _run() -> None:
+        api._schedule_server_auto_audio_deferral(turn_id="turn-1", input_event_key="item-1", response_id="resp-1")
+        await asyncio.sleep(0)
+
+        assert len(scheduled_micro_acks) == 1
+        assert scheduled_micro_acks[0]["reason"] == "transcript_finalized"
+        assert scheduled_micro_acks[0]["expected_delay_ms"] == 700
+        assert api._started is False
+
+        api._signal_server_auto_transcript_final(turn_id="turn-1")
+        await asyncio.sleep(0.01)
+
+    asyncio.run(_run())
+
+    assert api._started is True
+    assert len(scheduled_micro_acks) == 1
