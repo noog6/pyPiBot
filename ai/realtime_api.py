@@ -4862,6 +4862,53 @@ class RealtimeAPI:
         canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_input_event_key)
         return event, canonical_key
 
+    def _release_blocked_tool_followups_for_response_done(self, *, response_id: str) -> None:
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            return
+
+        def _iter_candidates() -> list[tuple[str, dict[str, Any], str, str]]:
+            candidates: list[tuple[str, dict[str, Any], str, str]] = []
+            pending = getattr(self, "_pending_response_create", None)
+            if pending is not None and isinstance(getattr(pending, "event", None), dict):
+                candidates.append(("pending", pending.event, str(getattr(pending, "origin", "") or "unknown"), str(getattr(pending, "turn_id", "") or "turn-unknown")))
+            for queued in list(getattr(self, "_response_create_queue", deque()) or ()):
+                if not isinstance(queued, dict):
+                    continue
+                event = queued.get("event")
+                if not isinstance(event, dict):
+                    continue
+                candidates.append(("queue", event, str(queued.get("origin") or "unknown"), str(queued.get("turn_id") or "turn-unknown")))
+            return candidates
+
+        released_canonical_keys: set[str] = set()
+        for source, response_create_event, origin, turn_id in _iter_candidates():
+            response_metadata = self._extract_response_create_metadata(response_create_event)
+            is_tool_followup = str(response_metadata.get("tool_followup", "")).strip().lower() in {"true", "1", "yes"}
+            if not is_tool_followup:
+                continue
+            blocked_by_response_id = str(response_metadata.get("blocked_by_response_id") or "").strip()
+            if blocked_by_response_id and blocked_by_response_id != normalized_response_id:
+                continue
+            input_event_key = str(response_metadata.get("input_event_key") or "").strip()
+            canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+            if canonical_key in released_canonical_keys:
+                continue
+            if self._tool_followup_state(canonical_key=canonical_key) != "blocked_active_response":
+                continue
+            response_metadata["tool_followup_release"] = "true"
+            self._set_tool_followup_state(
+                canonical_key=canonical_key,
+                state="scheduled_release",
+                reason=f"response_done response_id={normalized_response_id}",
+            )
+            logger.info(
+                "response_create_scheduled turn_id=%s origin=%s reason=release_after_response_done",
+                turn_id,
+                origin,
+            )
+            released_canonical_keys.add(canonical_key)
+
     def _response_has_safety_override(self, response_create_event: dict[str, Any]) -> bool:
         metadata = self._extract_response_create_metadata(response_create_event)
         return str(metadata.get("safety_override", "")).strip().lower() in {"true", "1", "yes"}

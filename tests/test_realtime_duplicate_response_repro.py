@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
+import types
 from collections import deque
+
+if "audioop" not in sys.modules:
+    sys.modules["audioop"] = types.ModuleType("audioop")
 
 from ai.governance import ActionPacket
 from ai.realtime.response_create_runtime import ResponseCreateRuntime
@@ -80,6 +85,7 @@ def _make_api_stub() -> RealtimeAPI:
     api._mic_receive_on_first_audio = False
     api._last_response_metadata = {}
     api._turn_diagnostic_timestamps = {}
+    api._conversation_efficiency_logged_turns = set()
     api._transcript_response_watchdog_timeout_s = 5.0
     api._transcript_response_watchdog_tasks = {}
     api._transcript_response_outcome_logged_keys = set()
@@ -878,6 +884,74 @@ def test_duplicate_tool_followup_delivery_events_only_create_once_after_drain(mo
     )
 
 
+
+
+def test_tool_followup_blocked_by_active_response_released_on_response_done(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._response_in_flight = True
+    api.response_in_progress = True
+    api._active_response_id = "resp-active-release"
+    api._active_response_origin = "assistant_message"
+    api._current_response_turn_id = "turn_tool_release"
+    api._active_response_input_event_key = "item_active_release"
+    api._active_input_event_key_by_turn_id["turn_tool_release"] = "item_active_release"
+    api._build_confirmation_transition_decision = lambda **_kwargs: type(
+        "_Transition",
+        (),
+        {
+            "allow_response_transition": True,
+            "emit_reminder": False,
+            "recover_mic": False,
+            "close_reason": "",
+        },
+    )()
+    api._confirmation_hold_components = lambda: (False, False, False, False)
+
+    response_create_event, canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_release_1",
+        response_create_event={"type": "response.create"},
+    )
+
+    captured_logs: list[str] = []
+    original_info = logger.info
+
+    def _capture_info(message: str, *args, **kwargs):
+        rendered = str(message)
+        if args:
+            rendered = rendered % args
+        captured_logs.append(rendered)
+        return original_info(message, *args, **kwargs)
+
+    monkeypatch.setattr(logger, "info", _capture_info)
+
+    async def _run() -> None:
+        await api._send_response_create(ws, response_create_event, origin="tool_output")
+        assert len([event for event in ws.sent if event.get("type") == "response.create"]) == 0
+        assert api._tool_followup_state(canonical_key=canonical_key) == "blocked_active_response"
+
+        await api.handle_response_done({"type": "response.done", "response_id": "resp-active-release"})
+
+    asyncio.run(_run())
+
+    response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert len(response_create_events) == 1
+    assert api._tool_followup_state(canonical_key=canonical_key) in {"creating", "created", "done"}
+    assert any(
+        "tool_followup_state" in entry
+        and f"canonical_key={canonical_key}" in entry
+        and "state=scheduled_release" in entry
+        and "reason=response_done response_id=resp-active-release" in entry
+        for entry in captured_logs
+    )
+    assert any(
+        "response_create_scheduled" in entry
+        and "origin=tool_output" in entry
+        and "reason=release_after_response_done" in entry
+        for entry in captured_logs
+    )
 def test_tool_followup_second_arbitration_denied_for_same_canonical_key(monkeypatch) -> None:
     api = _make_api_stub()
     _wire_runtime(api)

@@ -221,6 +221,9 @@ class ResponseTerminalHandlers:
                 state="done",
                 reason="response_done",
             )
+        api._release_blocked_tool_followups_for_response_done(
+            response_id=str(active_response_id_before_clear or ""),
+        )
         if delivery_state_before_done == "cancelled":
             api._log_cancelled_deliverable_once(
                 active_response_id,

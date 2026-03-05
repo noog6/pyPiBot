@@ -289,6 +289,7 @@ class ResponseCreateRuntime:
             if str(reason or "").strip().lower() == "active_response":
                 active_response_id = str(getattr(api, "_active_response_id", "") or "").strip() or "unknown"
                 active_origin = str(getattr(api, "_active_response_origin", "unknown") or "unknown").strip() or "unknown"
+                response_metadata["blocked_by_response_id"] = active_response_id
                 scheduled_state = "blocked_active_response"
                 scheduled_reason = f"active_response response_id={active_response_id} origin={active_origin}"
             api._set_tool_followup_state(
@@ -553,7 +554,7 @@ class ResponseCreateRuntime:
         tool_followup_state = "new"
         if tool_followup:
             tool_followup_state = api._tool_followup_state(canonical_key=canonical_key)
-            if tool_followup_release and tool_followup_state in {"scheduled", "blocked_active_response", "released_on_response_done"}:
+            if tool_followup_release and tool_followup_state in {"scheduled", "scheduled_release", "blocked_active_response", "released_on_response_done"}:
                 pass
             elif tool_followup_state != "new":
                 deny_reason = f"already_{tool_followup_state}"
@@ -780,7 +781,7 @@ class ResponseCreateRuntime:
                 reason="direct_send",
             )
         elif tool_followup and tool_followup_release:
-            if tool_followup_state in {"scheduled", "blocked_active_response", "released_on_response_done"}:
+            if tool_followup_state in {"scheduled", "scheduled_release", "blocked_active_response", "released_on_response_done"}:
                 api._set_tool_followup_state(
                     canonical_key=canonical_key,
                     state="released_on_response_done",
