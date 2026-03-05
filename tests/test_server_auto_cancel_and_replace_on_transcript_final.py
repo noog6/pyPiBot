@@ -546,3 +546,24 @@ def test_cancelled_response_late_audio_and_transcript_deltas_are_sunk() -> None:
     assert api._assistant_reply_accum == ""
     assert api.state_manager.state == "thinking"
     assert api.state_manager.transitions == []
+
+
+def test_mark_pending_server_auto_response_cancelled_logs_empty_transcript_label(monkeypatch) -> None:
+    api = _build_api_stub()
+    api._pending_server_auto_response_by_turn_id["turn_9"] = PendingServerAutoResponse(
+        turn_id="turn_9",
+        response_id="resp-server-auto",
+        canonical_key="run-464:turn_9:item_9",
+        created_at_ms=1,
+        active=True,
+    )
+    captured: list[str] = []
+
+    def _capture(message, *args):
+        captured.append(message % args)
+
+    monkeypatch.setattr("ai.realtime_api.logger.info", _capture)
+
+    api._mark_pending_server_auto_response_cancelled(turn_id="turn_9", reason="empty_transcript")
+
+    assert any("server_auto_cancelled_for_empty_transcript" in line for line in captured)
