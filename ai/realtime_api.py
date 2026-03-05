@@ -1000,6 +1000,7 @@ class RealtimeAPI:
         self._latest_partial_transcript_by_turn_id: dict[str, str] = {}
         self._server_auto_audio_waiters_by_turn_id: dict[str, asyncio.Event] = {}
         self._server_auto_audio_defer_tasks_by_turn_id: dict[str, asyncio.Task[Any]] = {}
+        self._server_auto_pre_audio_hold_by_turn_id: dict[str, bool] = {}
         self._audio_response_started_ids: set[str] = set()
         self._server_auto_audio_deferral_timeout_ms = max(
             0,
@@ -5791,14 +5792,55 @@ class RealtimeAPI:
         started_ids.add(normalized_response_id)
 
     def _signal_server_auto_transcript_final(self, *, turn_id: str) -> None:
+        self._clear_server_auto_pre_audio_hold(turn_id=turn_id, reason="transcript_final_linked")
         waiter = getattr(self, "_server_auto_audio_waiters_by_turn_id", {}).get(turn_id)
         if isinstance(waiter, asyncio.Event):
             waiter.set()
+
+    def _set_server_auto_pre_audio_hold(self, *, turn_id: str, reason: str) -> None:
+        holds = getattr(self, "_server_auto_pre_audio_hold_by_turn_id", None)
+        if not isinstance(holds, dict):
+            holds = {}
+            self._server_auto_pre_audio_hold_by_turn_id = holds
+        holds[turn_id] = True
+        logger.debug(
+            "server_auto_pre_audio_hold_set run_id=%s turn_id=%s reason=%s",
+            self._current_run_id() or "",
+            turn_id,
+            reason,
+        )
+
+    def _clear_server_auto_pre_audio_hold(self, *, turn_id: str, reason: str) -> None:
+        holds = getattr(self, "_server_auto_pre_audio_hold_by_turn_id", None)
+        if not isinstance(holds, dict):
+            return
+        if holds.pop(turn_id, None):
+            logger.debug(
+                "server_auto_pre_audio_hold_cleared run_id=%s turn_id=%s reason=%s",
+                self._current_run_id() or "",
+                turn_id,
+                reason,
+            )
+
+    def _is_server_auto_pre_audio_hold_active(self, *, turn_id: str, input_event_key: str) -> bool:
+        holds = getattr(self, "_server_auto_pre_audio_hold_by_turn_id", None)
+        if not isinstance(holds, dict) or not holds.get(turn_id):
+            return False
+        verdict = self._get_response_gating_verdict(turn_id=turn_id, input_event_key=input_event_key)
+        awaiting_transcript_final = isinstance(verdict, ResponseGatingVerdict) and str(
+            verdict.reason or ""
+        ).strip().lower() == "awaiting_transcript_final"
+        if not awaiting_transcript_final:
+            self._clear_server_auto_pre_audio_hold(turn_id=turn_id, reason="proceed_without_transcript_final")
+            return False
+        return True
 
     def _should_start_deferred_server_auto_audio(self, *, turn_id: str, input_event_key: str, response_id: str) -> bool:
         if self._is_cancelled_or_superseded_response_id(response_id):
             return False
         if str(getattr(self, "_active_response_id", "") or "").strip() != response_id:
+            return False
+        if self._is_server_auto_pre_audio_hold_active(turn_id=turn_id, input_event_key=input_event_key):
             return False
         verdict = self._get_response_gating_verdict(turn_id=turn_id, input_event_key=input_event_key)
         if verdict is None or verdict.action in {"NOOP", "ANSWER"}:
@@ -5823,14 +5865,25 @@ class RealtimeAPI:
         existing = tasks.pop(turn_id, None)
         if existing is not None:
             existing.cancel()
+        self._set_server_auto_pre_audio_hold(turn_id=turn_id, reason="awaiting_transcript_final")
         waiter = asyncio.Event()
         waiters[turn_id] = waiter
 
         async def _wait_for_upgrade_decision() -> None:
             try:
-                await asyncio.wait_for(waiter.wait(), timeout=self._server_auto_audio_deferral_timeout_ms / 1000.0)
-            except asyncio.TimeoutError:
-                pass
+                while True:
+                    try:
+                        await asyncio.wait_for(waiter.wait(), timeout=self._server_auto_audio_deferral_timeout_ms / 1000.0)
+                    except asyncio.TimeoutError:
+                        if self._is_server_auto_pre_audio_hold_active(turn_id=turn_id, input_event_key=input_event_key):
+                            self._maybe_schedule_micro_ack(
+                                turn_id=turn_id,
+                                category=MicroAckCategory.LATENCY_MASK,
+                                channel="audio",
+                                reason="awaiting_transcript_final",
+                            )
+                            continue
+                    break
             finally:
                 if self._should_start_deferred_server_auto_audio(
                     turn_id=turn_id,
@@ -5838,6 +5891,8 @@ class RealtimeAPI:
                     response_id=response_id,
                 ):
                     self._start_audio_response_if_needed(response_id=response_id)
+                else:
+                    self._clear_server_auto_pre_audio_hold(turn_id=turn_id, reason="deferred_audio_not_started")
                 waiters.pop(turn_id, None)
                 tasks.pop(turn_id, None)
 
@@ -9371,6 +9426,17 @@ class RealtimeAPI:
         active_input_event_key = str(getattr(self, "_active_response_input_event_key", "") or "").strip()
         active_turn_id = self._current_turn_id_or_unknown()
         if str(getattr(self, "_active_response_origin", "") or "").strip().lower() == "server_auto" and active_input_event_key:
+            if self._is_server_auto_pre_audio_hold_active(
+                turn_id=active_turn_id,
+                input_event_key=active_input_event_key,
+            ):
+                logger.debug(
+                    "server_auto_pre_audio_delta_suppressed run_id=%s turn_id=%s response_id=%s",
+                    self._current_run_id() or "",
+                    active_turn_id,
+                    response_id or "unknown",
+                )
+                return
             verdict = self._get_response_gating_verdict(turn_id=active_turn_id, input_event_key=active_input_event_key)
             if verdict is None or verdict.action == "NOOP":
                 return
