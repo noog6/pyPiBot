@@ -48,6 +48,7 @@ class ResponseTerminalHandlers:
         ):
             api.assistant_reply = ""
             api._assistant_reply_accum = ""
+            api._assistant_reply_response_id = None
             if api.websocket is not None:
                 token = getattr(api, "_pending_confirmation_token", None)
                 if token is not None:
@@ -102,11 +103,13 @@ class ResponseTerminalHandlers:
                     )
                     api.assistant_reply = ""
                     api._assistant_reply_accum = ""
+                    api._assistant_reply_response_id = None
                     api.response_in_progress = False
                     return
             api.assistant_reply = api._normalize_memory_recall_answer(api.assistant_reply)
             log_info(f"Assistant Response: {api.assistant_reply}", style="bold blue")
             api.assistant_reply = ""
+            api._assistant_reply_response_id = None
 
         api.response_in_progress = False
         api._maybe_enqueue_reflection("response transcript done")
