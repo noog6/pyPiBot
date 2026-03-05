@@ -305,3 +305,46 @@ def test_server_auto_audio_does_not_start_before_gating() -> None:
 
     assert sent == [{"type": "response.cancel", "response_id": "resp-server-auto"}]
     assert api._audio_playback_busy is False
+
+
+def test_late_cancelled_output_audio_done_uses_stale_response_correlation() -> None:
+    api = _build_api_stub()
+    api._active_response_id = None
+    api._active_response_origin = "unknown"
+    api._active_response_input_event_key = None
+    api._active_response_canonical_key = None
+    api._response_trace_context_by_id = {}
+    api._stale_response_map = {}
+    api._stale_response_map_ttl_s = 15.0
+    api._stale_response_ids_set = set()
+    api._stale_response_drop_window_by_id = {}
+    api._stale_response_drop_window_s = 3.0
+
+    api._pending_server_auto_response_by_turn_id["turn_2"] = PendingServerAutoResponse(
+        turn_id="turn_2",
+        response_id="resp-server-auto",
+        canonical_key="run-464:turn_2:synthetic_server_auto_1",
+        created_at_ms=1,
+        active=True,
+    )
+    api._active_input_event_key_by_turn_id = {"turn_2": "item_abc"}
+
+    api._mark_pending_server_auto_response_cancelled(turn_id="turn_2", reason="transcript_final_upgrade")
+
+    observed: list[dict[str, str]] = []
+
+    def _capture_trace(**kwargs):
+        observed.append({k: str(v) for k, v in kwargs.items()})
+
+    api._emit_response_lifecycle_trace = _capture_trace
+
+    asyncio.run(
+        api._handle_response_lifecycle_event(
+            {"type": "response.output_audio.done", "response_id": "resp-server-auto"},
+            websocket=object(),
+        )
+    )
+
+    assert observed
+    assert observed[0]["response_id"] == "resp-server-auto"
+    assert observed[0]["canonical_key"] == "run-464:turn_2:synthetic_server_auto_1"
