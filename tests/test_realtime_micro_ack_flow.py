@@ -630,3 +630,49 @@ def test_maybe_schedule_micro_ack_not_suppressed_when_tool_followup_blocked_by_a
         ("turn-1", "start_of_work", "speech_stopped", 700)
     ]
     api.loop.close()
+
+
+def test_transcript_completed_empty_cancels_pending_micro_ack_and_skips_response_create() -> None:
+    api = _api_stub()
+    api._current_turn_id_or_unknown = lambda: "turn-empty"
+    api._resolve_input_event_key = lambda _event: "item-empty"
+    api._active_input_event_key_by_turn_id = {}
+    api._utterance_trust_snapshot_by_input_event_key = {}
+    api._vad_turn_detection = {}
+    api._log_user_transcripts_enabled = False
+    api._log_utterance_trust_snapshot = lambda **_kwargs: {"word_count": 0}
+    api._pending_micro_ack_by_turn_channel = {
+        ("turn-empty", "voice"): type(
+            "Marker",
+            (),
+            {"category": "start_of_work", "priority": 1, "reason": "speech_stopped"},
+        )()
+    }
+    api._micro_ack_manager.scheduled = [("turn-empty", "start_of_work", "speech_stopped", 700)]
+
+    cancel_calls: list[tuple[str, str]] = []
+    original_cancel_micro_ack = RealtimeAPI._cancel_micro_ack.__get__(api, RealtimeAPI)
+
+    def _capture_cancel_micro_ack(*, turn_id: str, reason: str) -> None:
+        cancel_calls.append((turn_id, reason))
+        original_cancel_micro_ack(turn_id=turn_id, reason=reason)
+
+    api._cancel_micro_ack = _capture_cancel_micro_ack
+
+    async def _run() -> None:
+        await api._handle_input_audio_transcription_completed_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "item-empty",
+                "transcript": "",
+            },
+            api.websocket,
+        )
+
+    asyncio.run(_run())
+
+    assert cancel_calls == [("turn-empty", "transcript_completed_empty")]
+    assert ("turn-empty", "voice") not in api._pending_micro_ack_by_turn_channel
+    assert api._pending_response_create is None
+    assert api.websocket.sent == []
+    api.loop.close()
