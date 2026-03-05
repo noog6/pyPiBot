@@ -964,6 +964,7 @@ class RealtimeAPI:
         self._suppressed_audio_response_ids: set[str] = set()
         self._cancelled_deliverable_logged_ids: set[str] = set()
         self._cancelled_response_timing_by_id: dict[str, dict[str, Any]] = {}
+        self._response_status_by_id: dict[str, str] = {}
         self._stale_response_drop_window_by_id: dict[str, dict[str, Any]] = {}
         self._stale_response_drop_window_s = 3.0
         self._stale_response_map: dict[str, dict[str, Any]] = {}
@@ -3669,6 +3670,7 @@ class RealtimeAPI:
             cancelled_ids = set()
             self._cancelled_response_ids = cancelled_ids
         cancelled_ids.add(pending.response_id)
+        self._set_response_status(response_id=pending.response_id, status="cancelled")
         trace_context = self._response_trace_by_id().get(pending.response_id, {})
         self._remember_stale_response_context(
             response_id=pending.response_id,
@@ -3895,20 +3897,46 @@ class RealtimeAPI:
 
     def _is_cancelled_response_event(self, event: dict[str, Any]) -> bool:
         response_id = self._response_id_from_event(event)
-        return self._is_cancelled_or_superseded_response_id(response_id)
+        return self._response_status(response_id) == "cancelled"
 
-    def _is_cancelled_or_superseded_response_id(self, response_id: str | None) -> bool:
+    def _response_status(self, response_id: str | None) -> str:
         normalized_response_id = str(response_id or "").strip()
         if not normalized_response_id:
-            return False
+            return "active"
+        status_by_id = getattr(self, "_response_status_by_id", None)
+        if isinstance(status_by_id, dict):
+            status = str(status_by_id.get(normalized_response_id) or "").strip().lower()
+            if status in {"active", "cancelled", "terminal_done"}:
+                return status
         cancelled_ids = getattr(self, "_cancelled_response_ids", None)
         if isinstance(cancelled_ids, set) and normalized_response_id in cancelled_ids:
-            return True
+            return "cancelled"
         suppressed_audio_ids = getattr(self, "_suppressed_audio_response_ids", None)
         if isinstance(suppressed_audio_ids, set) and normalized_response_id in suppressed_audio_ids:
-            return True
+            return "cancelled"
         superseded_ids = getattr(self, "_superseded_response_ids", None)
-        return isinstance(superseded_ids, set) and normalized_response_id in superseded_ids
+        if isinstance(superseded_ids, set) and normalized_response_id in superseded_ids:
+            return "cancelled"
+        if str(getattr(self, "_active_response_id", "") or "").strip() == normalized_response_id:
+            return "active"
+        return "active"
+
+    def _set_response_status(self, *, response_id: str | None, status: str) -> None:
+        normalized_response_id = str(response_id or "").strip()
+        normalized_status = str(status or "").strip().lower()
+        if not normalized_response_id or normalized_status not in {"active", "cancelled", "terminal_done"}:
+            return
+        status_by_id = getattr(self, "_response_status_by_id", None)
+        if not isinstance(status_by_id, dict):
+            status_by_id = {}
+            self._response_status_by_id = status_by_id
+        prior_status = str(status_by_id.get(normalized_response_id) or "").strip().lower()
+        if prior_status == "cancelled" and normalized_status == "terminal_done":
+            return
+        status_by_id[normalized_response_id] = normalized_status
+
+    def _is_cancelled_or_superseded_response_id(self, response_id: str | None) -> bool:
+        return self._response_status(response_id) == "cancelled"
 
     def _suppress_cancelled_response_audio(self, response_id: str | None) -> None:
         normalized_response_id = str(response_id or "").strip()
@@ -3919,6 +3947,7 @@ class RealtimeAPI:
             suppressed_audio_ids = set()
             self._suppressed_audio_response_ids = suppressed_audio_ids
         suppressed_audio_ids.add(normalized_response_id)
+        self._set_response_status(response_id=normalized_response_id, status="cancelled")
 
         accum_response_id = str(getattr(self, "_audio_accum_response_id", "") or "").strip()
         if accum_response_id == normalized_response_id:
@@ -4037,6 +4066,9 @@ class RealtimeAPI:
         suppressed_audio_ids = getattr(self, "_suppressed_audio_response_ids", None)
         if isinstance(suppressed_audio_ids, set):
             suppressed_audio_ids.discard(normalized_response_id)
+        status_by_id = getattr(self, "_response_status_by_id", None)
+        if isinstance(status_by_id, dict):
+            status_by_id.pop(normalized_response_id, None)
         self._clear_stale_response_context(normalized_response_id)
 
     def _canonical_utterance_key(self, *, turn_id: str, input_event_key: str | None) -> str:
@@ -8598,6 +8630,7 @@ class RealtimeAPI:
         pending_input_event_key = str(pending_origin_context.get("input_event_key") or "").strip()
         response_id = response.get("id")
         self._active_response_id = str(response_id) if response_id else None
+        self._set_response_status(response_id=self._active_response_id, status="active")
         self._active_response_origin = str(origin)
         self._active_response_input_event_key = None
         self._active_response_canonical_key = None
@@ -9128,14 +9161,17 @@ class RealtimeAPI:
 
     async def _handle_response_done_event(self, event: dict[str, Any], websocket: Any) -> None:
         _ = websocket
+        response_id = self._response_id_from_event(event)
         if self._should_drop_stale_response_event(event):
             return
         if self._is_cancelled_response_event(event):
+            self._set_response_status(response_id=response_id, status="terminal_done")
             self._log_cancelled_deliverable_once(
-                self._response_id_from_event(event),
+                response_id,
                 source_event="response.done",
             )
             return
+        self._set_response_status(response_id=response_id, status="terminal_done")
         await self.handle_response_done(event)
 
     async def _cancel_and_replace_pending_server_auto_on_transcript_final(
@@ -9527,6 +9563,8 @@ class RealtimeAPI:
         if self._should_drop_stale_response_event(event):
             return
         response_id = self._response_id_from_event(event)
+        if event_type in {"response.done", "response.completed"} and response_id:
+            self._set_response_status(response_id=response_id, status="terminal_done")
         if self._is_cancelled_response_event(event):
             if event_type == "response.output_audio.done":
                 self._record_cancelled_audio_race_transition(
