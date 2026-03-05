@@ -100,6 +100,14 @@ class ResponseCreateRuntime:
                     current_state,
                 )
                 return False
+            if current_state in {"blocked_active_response", "released_on_response_done"}:
+                logger.info(
+                    "tool_followup_create_suppressed canonical_key=%s reason=already_%s prior_state=%s",
+                    canonical_key,
+                    current_state,
+                    current_state,
+                )
+                return False
         consumes_canonical_slot = api._response_consumes_canonical_slot(response_metadata)
         explicit_multipart = api._response_is_explicit_multipart(response_metadata)
         transcript_upgrade_replacement = str(response_metadata.get("transcript_upgrade_replacement", "")).strip().lower() in {"true", "1", "yes"}
@@ -276,10 +284,17 @@ class ResponseCreateRuntime:
         )
         if tool_followup:
             response_metadata["tool_followup_release"] = "true"
+            scheduled_state = "scheduled"
+            scheduled_reason = f"{reason or 'queued'}"
+            if str(reason or "").strip().lower() == "active_response":
+                active_response_id = str(getattr(api, "_active_response_id", "") or "").strip() or "unknown"
+                active_origin = str(getattr(api, "_active_response_origin", "unknown") or "unknown").strip() or "unknown"
+                scheduled_state = "blocked_active_response"
+                scheduled_reason = f"active_response response_id={active_response_id} origin={active_origin}"
             api._set_tool_followup_state(
                 canonical_key=canonical_key,
-                state="scheduled",
-                reason=f"{reason or 'queued'}",
+                state=scheduled_state,
+                reason=scheduled_reason,
             )
         previous = api._pending_response_create
         if previous is None:
@@ -538,12 +553,8 @@ class ResponseCreateRuntime:
         tool_followup_state = "new"
         if tool_followup:
             tool_followup_state = api._tool_followup_state(canonical_key=canonical_key)
-            if tool_followup_release and tool_followup_state == "scheduled":
-                api._set_tool_followup_state(
-                    canonical_key=canonical_key,
-                    state="creating",
-                    reason="scheduled_release",
-                )
+            if tool_followup_release and tool_followup_state in {"scheduled", "blocked_active_response", "released_on_response_done"}:
+                pass
             elif tool_followup_state != "new":
                 deny_reason = f"already_{tool_followup_state}"
                 logger.info(
@@ -592,10 +603,7 @@ class ResponseCreateRuntime:
                     reason="canonical_terminal_state",
                 )
             return False
-        if tool_followup and tool_followup_release:
-            decision = None
-        else:
-            decision = api._lifecycle_policy().decide_response_create(
+        decision = api._lifecycle_policy().decide_response_create(
             response_in_flight=api._is_active_response_blocking(),
             audio_playback_busy=bool(api._audio_playback_busy),
             consumes_canonical_slot=consumes_canonical_slot,
@@ -771,6 +779,18 @@ class ResponseCreateRuntime:
                 state="creating",
                 reason="direct_send",
             )
+        elif tool_followup and tool_followup_release:
+            if tool_followup_state in {"scheduled", "blocked_active_response", "released_on_response_done"}:
+                api._set_tool_followup_state(
+                    canonical_key=canonical_key,
+                    state="released_on_response_done",
+                    reason=f"queue_release trigger={(decision.reason_code if decision is not None else 'scheduled_release')}",
+                )
+                api._set_tool_followup_state(
+                    canonical_key=canonical_key,
+                    state="creating",
+                    reason="released_on_response_done",
+                )
         log_ws_event("Outgoing", response_create_event)
         api._track_outgoing_event(response_create_event, origin=origin)
         transport = api._get_or_create_transport()
