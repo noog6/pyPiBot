@@ -24,6 +24,9 @@ class _FakeRealtime:
             },
         }
 
+    def is_ready_for_injections(self):
+        return True
+
 
 def test_probe_realtime_session_includes_memory_retrieval_details() -> None:
     result = probe_realtime_session(_FakeRealtime())
@@ -38,3 +41,35 @@ def test_probe_realtime_session_includes_memory_retrieval_details() -> None:
     assert result.details["memory_query_embedding_latency_bucket_gt_1000ms"] == 2
     assert result.details["memory_canary_refresh_latency_p50_ms"] == 40
     assert result.details["memory_canary_refresh_latency_bucket_le_100ms"] == 4
+    assert result.details["ready_source"] == "is_ready_for_injections()"
+    assert result.details["connected_source"] == "session_health.connected"
+
+
+class _CallableReadyEmptyHealth:
+    def get_session_health(self):
+        return {}
+
+    def is_ready_for_injections(self):
+        return True
+
+
+def test_probe_realtime_session_uses_callable_injection_readiness_first() -> None:
+    result = probe_realtime_session(_CallableReadyEmptyHealth())
+
+    assert result.details["ready"] is True
+    assert result.details["ready_source"] == "is_ready_for_injections()"
+
+
+class _PropertyReadyRealtime:
+    is_ready_for_injections = True
+
+    def get_session_health(self):
+        return {"connected": True, "ready": False}
+
+
+def test_probe_realtime_session_supports_boolean_readiness_property() -> None:
+    result = probe_realtime_session(_PropertyReadyRealtime())
+
+    assert result.details["ready"] is True
+    assert result.details["ready_source"] == "is_ready_for_injections_property"
+    assert result.details["connected_source"] == "session_health.connected"

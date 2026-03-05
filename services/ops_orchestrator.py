@@ -664,15 +664,12 @@ class OpsOrchestrator:
 
         by_name = {result.name: result for result in results}
         realtime = by_name.get("realtime")
-        realtime_connected = self._coerce_probe_bool(realtime, "connected")
         realtime_ready = self._coerce_probe_bool(realtime, "ready")
-        if realtime and "connected" not in realtime.details:
-            realtime_connected = realtime_connected or realtime.status in (HealthStatus.OK, HealthStatus.DEGRADED)
         if realtime and "ready" not in realtime.details:
             realtime_ready = realtime_ready or realtime.status == HealthStatus.OK
         all_required_ready = self._warmup_required_components_ready(results)
         probes_settled = self._warmup_probes_settled(results)
-        criteria_met = realtime_connected and realtime_ready and all_required_ready and probes_settled
+        criteria_met = realtime_ready and all_required_ready and probes_settled
         timed_out = elapsed_s >= self._warmup_grace_period_s
         details["warmup_probes_settled"] = int(probes_settled)
         if criteria_met or timed_out:

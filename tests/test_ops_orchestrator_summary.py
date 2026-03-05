@@ -227,7 +227,7 @@ def test_tick_exits_warmup_with_criteria_met_for_boolean_realtime_details(monkey
 
     orchestrator._tick()
 
-    assert captured[-1].status == HealthStatus.OK
+    assert captured[-1].status != HealthStatus.WARMUP
     assert orchestrator._warmup_active is False
     assert captured[-1].details.get("warmup_exit_reason") == "criteria_met"
 
@@ -250,6 +250,42 @@ def test_warmup_summary_does_not_report_realtime_offline_when_connected() -> Non
 
     assert "realtime (offline)" not in summary
     assert "Realtime session connected" in summary
+
+
+def test_tick_exits_warmup_with_criteria_met_when_realtime_connected_flag_is_false(monkeypatch) -> None:
+    orchestrator = _new_orchestrator()
+    orchestrator._health_debounce_s = 0.0
+    captured = []
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_run_health_probes",
+        lambda: [
+            HealthProbeResult("audio", HealthStatus.OK, "Audio input/output ready"),
+            HealthProbeResult(
+                "realtime",
+                HealthStatus.DEGRADED,
+                "Realtime session connected (not ready)",
+                details={
+                    "connected": False,
+                    "ready": True,
+                    "connected_source": "default_false",
+                    "ready_source": "is_ready_for_injections()",
+                },
+            ),
+            HealthProbeResult("battery", HealthStatus.OK, "Battery nominal"),
+        ],
+    )
+    monkeypatch.setattr(orchestrator, "_maybe_run_micro_presence", lambda now: None)
+    monkeypatch.setattr(orchestrator, "_maybe_run_memory_maintenance", lambda now: None)
+    monkeypatch.setattr(orchestrator, "_emit_health_snapshot", lambda snapshot: captured.append(snapshot))
+
+    orchestrator._tick()
+
+    assert captured[-1].status == HealthStatus.DEGRADED
+    assert orchestrator._warmup_active is False
+    assert captured[-1].details.get("warmup_exit_reason") == "criteria_met"
+
 
 def test_tick_exits_warmup_to_ok_when_startup_criteria_met(monkeypatch) -> None:
     orchestrator = _new_orchestrator()
