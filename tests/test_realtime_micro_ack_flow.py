@@ -11,6 +11,8 @@ if "audioop" not in sys.modules:
     sys.modules["audioop"] = types.ModuleType("audioop")
 
 from ai.orchestration import OrchestrationPhase
+from ai.realtime.event_router import EventRouter
+from ai.realtime.input_audio_events import InputAudioEventHandlers
 from ai.realtime_api import PendingResponseCreate, RealtimeAPI
 from interaction import InteractionState
 
@@ -119,7 +121,7 @@ def _api_stub() -> RealtimeAPI:
     api._pending_image_stimulus = None
     api._pending_image_flush_after_playback = False
     api._current_run_id = lambda: "run-test"
-    api._consume_response_origin = lambda: "server_auto"
+    api._consume_response_origin = lambda *_args, **_kwargs: "server_auto"
     api._mark_transcript_response_outcome = lambda **_kwargs: None
     api._is_user_approved_interrupt_response = lambda *_args, **_kwargs: False
     api.mic = _Mic()
@@ -144,11 +146,19 @@ def _api_stub() -> RealtimeAPI:
         "voice": {"enabled": True, "cooldown_ms": 10000, "speak": True},
         "text": {"enabled": True, "cooldown_ms": 1000, "speak": False},
     }
+    api._input_audio_events = InputAudioEventHandlers(api)
+    api._event_router = EventRouter(
+        fallback=api._handle_unknown_event,
+        on_exception=api._on_event_handler_exception,
+    )
+    api._configure_event_router()
     return api
 
 
 def test_speech_stopped_schedules_micro_ack() -> None:
     api = _api_stub()
+    api.state_manager.state = InteractionState.LISTENING
+    api._active_input_event_key_by_turn_id = {"turn-1": "input-1"}
     asyncio.run(api.handle_event({"type": "input_audio_buffer.speech_stopped"}, api.websocket))
     assert ("turn-1", "start_of_work", "speech_stopped", 700) in api._micro_ack_manager.scheduled
     api.loop.close()
@@ -159,6 +169,41 @@ def test_response_audio_delta_cancels_pending_micro_ack() -> None:
     event = {"type": "response.output_audio.delta", "delta": base64.b64encode(b"abc").decode("ascii")}
     asyncio.run(api.handle_event(event, api.websocket))
     assert ("turn-1", "response_started") in api._micro_ack_manager.cancelled
+
+
+def test_response_created_cancels_prescheduled_micro_ack_for_turn_channel() -> None:
+    api = _api_stub()
+    turn_id = "turn-fixed"
+    input_event_key = "input-fixed"
+    api._active_input_event_key_by_turn_id = {turn_id: input_event_key}
+    api.state_manager.state = InteractionState.LISTENING
+
+    api._maybe_schedule_micro_ack(
+        turn_id=turn_id,
+        category="start_of_work",
+        channel="voice",
+        reason="speech_stopped",
+        expected_delay_ms=700,
+    )
+
+    assert (turn_id, "voice") in api._pending_micro_ack_by_turn_channel
+
+    asyncio.run(
+        api.handle_event(
+            {
+                "type": "response.created",
+                "response": {
+                    "id": "resp-fixed",
+                    "metadata": {"turn_id": turn_id, "input_event_key": input_event_key},
+                },
+            },
+            api.websocket,
+        )
+    )
+
+    assert (turn_id, "response_created") in api._micro_ack_manager.cancelled
+    assert (turn_id, "voice") not in api._pending_micro_ack_by_turn_channel
+    api.loop.close()
 
 
 def test_append_assistant_reply_text_inserts_separator_between_ack_and_answer() -> None:
