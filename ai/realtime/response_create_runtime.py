@@ -238,7 +238,7 @@ class ResponseCreateRuntime:
                 canonical_key,
             )
             return False
-        suppression_active = turn_id in suppression_turns and not current_input_event_key
+        suppression_active = (turn_id in suppression_turns) and (not str(current_input_event_key or "").strip())
         if suppression_active and normalized_origin == "server_auto":
             self._note_response_create_blocked(
                 canonical_key=canonical_key,
@@ -571,7 +571,27 @@ class ResponseCreateRuntime:
             turn_id=turn_id,
             input_event_key=current_input_event_key,
         )) if consumes_canonical_slot else ""
-        suppression_active = turn_id in suppression_turns and not current_input_event_key
+        suppression_active = (turn_id in suppression_turns) and (not str(current_input_event_key or "").strip())
+
+        awaiting_transcript_final = False
+        if normalized_origin == "server_auto":
+            missing_for_turn = getattr(api, "_transcript_final_missing_for_turn", None)
+            if callable(missing_for_turn):
+                awaiting_transcript_final = bool(
+                    missing_for_turn(
+                        turn_id=turn_id,
+                        input_event_key=current_input_event_key,
+                    )
+                )
+            if not awaiting_transcript_final:
+                gating_verdict = getattr(api, "_get_response_gating_verdict", None)
+                if callable(gating_verdict):
+                    verdict = gating_verdict(turn_id=turn_id, input_event_key=current_input_event_key)
+                    awaiting_transcript_final = (
+                        str(getattr(verdict, "reason", "") or "").strip().lower() == "awaiting_transcript_final"
+                    )
+            if not awaiting_transcript_final:
+                awaiting_transcript_final = str(current_input_event_key or "").strip().startswith("synthetic_server_auto_")
         preference_recall_lock_blocked = api._is_preference_recall_lock_blocked(
             turn_id=turn_id,
             input_event_key=current_input_event_key,
@@ -604,6 +624,7 @@ class ResponseCreateRuntime:
             has_safety_override=api._response_has_safety_override(response_create_event),
             suppression_active=suppression_active,
             normalized_origin=normalized_origin,
+            awaiting_transcript_final=awaiting_transcript_final,
         )
         if tool_followup and decision is not None:
             arbitration_outcome = "deny" if decision.action is ResponseCreateDecisionAction.BLOCK else "allow"
