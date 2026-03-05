@@ -1845,12 +1845,46 @@ class RealtimeAPI:
             and pending_reason not in _MICRO_ACK_CONFIRMATION_ALLOWLIST
         ):
             return "confirmation_pending"
+        suppress_for_tool_followup, _ = self._should_suppress_pending_micro_ack_for_tool_followup()
+        if suppress_for_tool_followup:
+            return "tool_followup_imminent"
         current_state = getattr(getattr(self, "state_manager", None), "state", None)
         if current_state == InteractionState.LISTENING:
             return "listening_state"
         if bool(getattr(self, "_confirmation_speech_active", False)):
             return "speech_active"
         return None
+
+    def _should_suppress_pending_micro_ack_for_tool_followup(self) -> tuple[bool, str | None]:
+        turn_input_candidates: list[tuple[str, str]] = []
+
+        active_turn_id = str(self._current_turn_id_or_unknown() or "").strip()
+        if active_turn_id:
+            active_input_event_key = str(self._active_input_event_key_for_turn(active_turn_id) or "").strip()
+            if active_input_event_key:
+                turn_input_candidates.append((active_turn_id, active_input_event_key))
+
+        markers = getattr(self, "_pending_micro_ack_by_turn_channel", None)
+        if isinstance(markers, dict):
+            for marker_turn_id, _channel in markers:
+                normalized_turn_id = str(marker_turn_id or "").strip()
+                if not normalized_turn_id:
+                    continue
+                candidate_input_event_key = str(self._active_input_event_key_for_turn(normalized_turn_id) or "").strip()
+                if not candidate_input_event_key:
+                    continue
+                candidate_pair = (normalized_turn_id, candidate_input_event_key)
+                if candidate_pair not in turn_input_candidates:
+                    turn_input_candidates.append(candidate_pair)
+
+        for candidate_turn_id, candidate_input_event_key in turn_input_candidates:
+            suppress_for_tool_followup, tool_followup_call_id = self._should_suppress_micro_ack_for_tool_followup(
+                turn_id=candidate_turn_id,
+                input_event_key=candidate_input_event_key,
+            )
+            if suppress_for_tool_followup:
+                return True, tool_followup_call_id
+        return False, None
 
     def _micro_ack_correlation_metadata(self) -> dict[str, Any]:
         pending = getattr(self, "_pending_response_create", None)
