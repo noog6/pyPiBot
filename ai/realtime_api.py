@@ -275,6 +275,7 @@ class PendingServerAutoResponse:
     created_at_ms: int
     active: bool = True
     cancelled_for_upgrade: bool = False
+    pre_audio_hold: bool = False
 
 
 @dataclass
@@ -1000,6 +1001,7 @@ class RealtimeAPI:
         self._latest_partial_transcript_by_turn_id: dict[str, str] = {}
         self._server_auto_audio_waiters_by_turn_id: dict[str, asyncio.Event] = {}
         self._server_auto_audio_defer_tasks_by_turn_id: dict[str, asyncio.Task[Any]] = {}
+        self._server_auto_pre_audio_hold_by_turn_id: dict[str, bool] = {}
         self._audio_response_started_ids: set[str] = set()
         self._server_auto_audio_deferral_timeout_ms = max(
             0,
@@ -3754,7 +3756,35 @@ class RealtimeAPI:
             canonical_key=str(canonical_key or "").strip(),
             created_at_ms=int(time.time() * 1000),
             active=True,
+            pre_audio_hold=False,
         )
+
+    def _set_server_auto_pre_audio_hold(self, *, turn_id: str, enabled: bool, reason: str) -> None:
+        normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
+        hold_store = getattr(self, "_server_auto_pre_audio_hold_by_turn_id", None)
+        if not isinstance(hold_store, dict):
+            hold_store = {}
+            self._server_auto_pre_audio_hold_by_turn_id = hold_store
+        pending = self._pending_server_auto_response_for_turn(turn_id=normalized_turn_id)
+        if pending is not None:
+            pending.pre_audio_hold = bool(enabled)
+        if enabled:
+            hold_store[normalized_turn_id] = True
+        else:
+            hold_store.pop(normalized_turn_id, None)
+        logger.info(
+            "server_auto_pre_audio_hold run_id=%s turn_id=%s enabled=%s reason=%s",
+            self._current_run_id() or "",
+            normalized_turn_id,
+            str(bool(enabled)).lower(),
+            reason,
+        )
+
+    def _server_auto_pre_audio_hold_active(self, *, turn_id: str) -> bool:
+        hold_store = getattr(self, "_server_auto_pre_audio_hold_by_turn_id", None)
+        if not isinstance(hold_store, dict):
+            return False
+        return bool(hold_store.get(str(turn_id or "").strip() or "turn-unknown", False))
 
     def _pending_server_auto_response_for_turn(self, *, turn_id: str) -> PendingServerAutoResponse | None:
         store = getattr(self, "_pending_server_auto_response_by_turn_id", None)
@@ -3777,6 +3807,7 @@ class RealtimeAPI:
             return None
         pending.active = False
         pending.cancelled_for_upgrade = True
+        self._set_server_auto_pre_audio_hold(turn_id=turn_id, enabled=False, reason=f"pending_cancelled:{reason}")
         cancelled_ids = getattr(self, "_cancelled_response_ids", None)
         if not isinstance(cancelled_ids, set):
             cancelled_ids = set()
@@ -4006,6 +4037,7 @@ class RealtimeAPI:
         if pending is None:
             return
         pending.active = False
+        self._set_server_auto_pre_audio_hold(turn_id=turn_id, enabled=False, reason="pending_replaced")
 
     def _is_cancelled_response_event(self, event: dict[str, Any]) -> bool:
         response_id = self._response_id_from_event(event)
@@ -5791,11 +5823,18 @@ class RealtimeAPI:
         started_ids.add(normalized_response_id)
 
     def _signal_server_auto_transcript_final(self, *, turn_id: str) -> None:
+        self._set_server_auto_pre_audio_hold(
+            turn_id=turn_id,
+            enabled=False,
+            reason="transcript_final_linked",
+        )
         waiter = getattr(self, "_server_auto_audio_waiters_by_turn_id", {}).get(turn_id)
         if isinstance(waiter, asyncio.Event):
             waiter.set()
 
     def _should_start_deferred_server_auto_audio(self, *, turn_id: str, input_event_key: str, response_id: str) -> bool:
+        if self._server_auto_pre_audio_hold_active(turn_id=turn_id):
+            return False
         if self._is_cancelled_or_superseded_response_id(response_id):
             return False
         if str(getattr(self, "_active_response_id", "") or "").strip() != response_id:
@@ -5827,17 +5866,49 @@ class RealtimeAPI:
         waiters[turn_id] = waiter
 
         async def _wait_for_upgrade_decision() -> None:
+            micro_ack_sent_during_hold = False
             try:
-                await asyncio.wait_for(waiter.wait(), timeout=self._server_auto_audio_deferral_timeout_ms / 1000.0)
-            except asyncio.TimeoutError:
-                pass
+                while True:
+                    timed_out = False
+                    try:
+                        await asyncio.wait_for(waiter.wait(), timeout=self._server_auto_audio_deferral_timeout_ms / 1000.0)
+                    except asyncio.TimeoutError:
+                        timed_out = True
+                    if self._server_auto_pre_audio_hold_active(turn_id=turn_id):
+                        if self._is_cancelled_or_superseded_response_id(response_id) or str(getattr(self, "_active_response_id", "") or "").strip() != response_id:
+                            self._set_server_auto_pre_audio_hold(
+                                turn_id=turn_id,
+                                enabled=False,
+                                reason="proceed_without_transcript_final",
+                            )
+                            break
+                        if timed_out and not micro_ack_sent_during_hold:
+                            self._maybe_schedule_micro_ack(
+                                turn_id=turn_id,
+                                category=self._micro_ack_category_for_reason("transcript_finalized"),
+                                channel="voice",
+                                action=self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key),
+                                reason="transcript_finalized",
+                                expected_delay_ms=700,
+                            )
+                            micro_ack_sent_during_hold = True
+                        logger.info(
+                            "server_auto_audio_start_deferred run_id=%s turn_id=%s response_id=%s timeout_ms=%s reasons=awaiting_transcript_final_pre_audio_hold",
+                            self._current_run_id() or "",
+                            turn_id,
+                            response_id,
+                            self._server_auto_audio_deferral_timeout_ms,
+                        )
+                        waiter.clear()
+                        continue
+                    if self._should_start_deferred_server_auto_audio(
+                        turn_id=turn_id,
+                        input_event_key=input_event_key,
+                        response_id=response_id,
+                    ):
+                        self._start_audio_response_if_needed(response_id=response_id)
+                    break
             finally:
-                if self._should_start_deferred_server_auto_audio(
-                    turn_id=turn_id,
-                    input_event_key=input_event_key,
-                    response_id=response_id,
-                ):
-                    self._start_audio_response_if_needed(response_id=response_id)
                 waiters.pop(turn_id, None)
                 tasks.pop(turn_id, None)
 
@@ -9314,6 +9385,11 @@ class RealtimeAPI:
             if (upgrade_likely or should_delay_for_transcript_final) and self._active_response_id and resolved_input_event_key:
                 deferred_audio_start = True
                 defer_reason = likely_reasons if upgrade_likely else "awaiting_transcript_final_short_utterance"
+                self._set_server_auto_pre_audio_hold(
+                    turn_id=turn_id,
+                    enabled=should_delay_for_transcript_final,
+                    reason=("awaiting_transcript_final" if should_delay_for_transcript_final else "upgrade_likely"),
+                )
                 logger.info(
                     "server_auto_audio_start_deferred run_id=%s turn_id=%s response_id=%s timeout_ms=%s reasons=%s",
                     self._current_run_id() or "",
