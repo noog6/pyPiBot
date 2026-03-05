@@ -23,6 +23,19 @@ class ResponseCreateRuntimeAPI(Protocol):
 class ResponseCreateRuntime:
     api: ResponseCreateRuntimeAPI
 
+    def _note_response_create_blocked(self, *, canonical_key: str, reason: str) -> None:
+        api = self.api
+        api._response_create_queued_creates_total = int(getattr(api, "_response_create_queued_creates_total", 0) or 0) + 1
+        api._sync_pending_response_create_queue()
+        if str(reason or "").strip().lower() == "active_response":
+            logger.info(
+                "response_create_blocked_active canonical_key=%s active_response_id=%s qsize=%s reason=%s",
+                canonical_key,
+                str(getattr(api, "_active_response_id", "") or "").strip() or "pending_create_ack",
+                len(getattr(api, "_response_create_queue", deque()) or ()),
+                reason,
+            )
+
     def _build_tool_output_followup_event(
         self,
         *,
@@ -132,6 +145,10 @@ class ResponseCreateRuntime:
                 input_event_key=current_input_event_key,
             )
             if single_flight_block_reason:
+                self._note_response_create_blocked(
+                    canonical_key=canonical_key,
+                    reason=single_flight_block_reason,
+                )
                 api._log_response_create_blocked(
                     turn_id=turn_id,
                     origin=normalized_origin,
@@ -223,6 +240,10 @@ class ResponseCreateRuntime:
             return False
         suppression_active = turn_id in suppression_turns and not current_input_event_key
         if suppression_active and normalized_origin == "server_auto":
+            self._note_response_create_blocked(
+                canonical_key=canonical_key,
+                reason="preference_recall_suppressed",
+            )
             api._drop_suppressed_scheduled_response_creates(turn_id=turn_id, origin=normalized_origin)
             api._mark_transcript_response_outcome(
                 input_event_key=current_input_event_key,
@@ -343,10 +364,11 @@ class ResponseCreateRuntime:
         api._sync_pending_response_create_queue()
         if str(reason or "").strip().lower() == "active_response":
             logger.info(
-                "response_create_blocked_active canonical_key=%s active_response_id=%s queued=true qsize=%s reason=active_response",
+                "response_create_blocked_active canonical_key=%s active_response_id=%s qsize=%s reason=%s",
                 canonical_key,
                 str(getattr(api, "_active_response_id", "") or "").strip() or "pending_create_ack",
                 len(getattr(api, "_response_create_queue", deque()) or ()),
+                "active_response",
             )
         if reason == "audio_playback_busy":
             logger.debug(
@@ -621,6 +643,10 @@ class ResponseCreateRuntime:
             if decision.reason_code == "preference_recall_lock_blocked":
                 return False
             if single_flight_block_reason and decision.reason_code == single_flight_block_reason:
+                self._note_response_create_blocked(
+                    canonical_key=canonical_key,
+                    reason=decision.reason_code,
+                )
                 if normalized_origin == "tool_output" and decision.reason_code == "already_created":
                     followup_event = self._build_tool_output_followup_event(
                         response_create_event=response_create_event,
@@ -657,6 +683,10 @@ class ResponseCreateRuntime:
                     )
                 return False
             if decision.reason_code == "preference_recall_suppressed":
+                self._note_response_create_blocked(
+                    canonical_key=canonical_key,
+                    reason=decision.reason_code,
+                )
                 api._drop_suppressed_scheduled_response_creates(turn_id=turn_id, origin=normalized_origin)
                 api._mark_transcript_response_outcome(
                     input_event_key=current_input_event_key,
@@ -1032,12 +1062,12 @@ class ResponseCreateRuntime:
             memory_brief_note=pending.memory_brief_note,
         )
         api._response_create_drains_total = int(getattr(api, "_response_create_drains_total", 0) or 0) + 1
-        if normalized_source_trigger == "response_done":
-            logger.info(
-                "response_create_queue_drained canonical_key=%s triggered_by=response.done qsize_after=%s",
-                selected_pending_canonical_key,
-                len(getattr(api, "_response_create_queue", deque()) or ()),
-            )
+        logger.info(
+            "response_create_queue_drained triggered_by=%s drained_count=%s qsize_after=%s",
+            normalized_source_trigger,
+            int(getattr(api, "_response_create_drains_total", 0) or 0),
+            len(getattr(api, "_response_create_queue", deque()) or ()),
+        )
         drain_result = "sent_to_send_response_create"
         _emit_drain_trace(
             stage="post",

@@ -5759,6 +5759,23 @@ class RealtimeAPI:
         ]
         return bool(reasons), ",".join(reasons) if reasons else "none"
 
+    def _should_delay_server_auto_until_transcript_final(self, *, turn_id: str, input_event_key: str) -> bool:
+        verdict = self._get_response_gating_verdict(turn_id=turn_id, input_event_key=input_event_key)
+        if not isinstance(verdict, ResponseGatingVerdict):
+            return False
+        if str(verdict.reason or "").strip().lower() != "awaiting_transcript_final":
+            return False
+        utterance = getattr(self, "_active_utterance", None)
+        if not isinstance(utterance, dict):
+            return True
+        duration_ms = utterance.get("duration_ms")
+        if isinstance(duration_ms, (int, float)) and duration_ms <= 2200:
+            return True
+        transcript_text = str(utterance.get("transcript") or "").strip()
+        if transcript_text:
+            return len(transcript_text.split()) <= 8
+        return True
+
     def _start_audio_response_if_needed(self, *, response_id: str | None) -> None:
         normalized_response_id = str(response_id or "").strip()
         if not normalized_response_id:
@@ -9290,15 +9307,20 @@ class RealtimeAPI:
                 turn_id=turn_id,
                 input_event_key=resolved_input_event_key,
             )
-            if upgrade_likely and self._active_response_id and resolved_input_event_key:
+            should_delay_for_transcript_final = self._should_delay_server_auto_until_transcript_final(
+                turn_id=turn_id,
+                input_event_key=resolved_input_event_key,
+            )
+            if (upgrade_likely or should_delay_for_transcript_final) and self._active_response_id and resolved_input_event_key:
                 deferred_audio_start = True
+                defer_reason = likely_reasons if upgrade_likely else "awaiting_transcript_final_short_utterance"
                 logger.info(
                     "server_auto_audio_start_deferred run_id=%s turn_id=%s response_id=%s timeout_ms=%s reasons=%s",
                     self._current_run_id() or "",
                     turn_id,
                     self._active_response_id,
                     self._server_auto_audio_deferral_timeout_ms,
-                    likely_reasons,
+                    defer_reason,
                 )
                 self._schedule_server_auto_audio_deferral(
                     turn_id=turn_id,
@@ -9447,6 +9469,7 @@ class RealtimeAPI:
         input_event_key: str,
         origin_label: str = "upgraded_response",
     ) -> bool:
+        cancel_replace_started_at = time.monotonic()
         self._cancel_micro_ack(turn_id=turn_id, reason="upgrade_selected")
         pending = self._pending_server_auto_response_for_turn(turn_id=turn_id)
         pending_active = bool(isinstance(pending, PendingServerAutoResponse) and pending.active)
@@ -9539,6 +9562,12 @@ class RealtimeAPI:
         if not replacement_sent:
             self._cancel_micro_ack(turn_id=turn_id, reason="upgrade_blocked")
             return False
+        turn_timestamps_store = getattr(self, "_turn_diagnostic_timestamps", None)
+        if not isinstance(turn_timestamps_store, dict):
+            turn_timestamps_store = {}
+            self._turn_diagnostic_timestamps = turn_timestamps_store
+        turn_timestamps = turn_timestamps_store.setdefault(turn_id, {})
+        turn_timestamps["cancel_replace_ms"] = (time.monotonic() - cancel_replace_started_at) * 1000.0
         self._mark_pending_server_auto_response_replaced(turn_id=turn_id)
         return True
 
@@ -11142,6 +11171,7 @@ class RealtimeAPI:
         self.mic.stop_recording()
         logger.info("Speech ended, processing...")
         self.response_start_time = time.perf_counter()
+        self._response_start_monotonic = time.monotonic()
 
     async def send_initial_prompts(self, websocket: Any) -> None:
         logger.info("Sending %s prompts: %s", len(self.prompts), self.prompts)
