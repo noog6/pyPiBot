@@ -2205,7 +2205,7 @@ class RealtimeAPI:
             suppressed_by_turn=turn_id in getattr(self, "_preference_recall_suppressed_turns", set()),
             suppressed_by_input_event=input_event_key in getattr(self, "_preference_recall_suppressed_input_event_keys", set()),
             suppression_window_active=suppression_until > time.monotonic(),
-            response_in_flight=bool(getattr(self, "_response_in_flight", False)),
+            response_in_flight=self._is_active_response_blocking(),
             active_response_origin=str(getattr(self, "_active_response_origin", "unknown") or "unknown"),
             active_response_id=str(getattr(self, "_active_response_id", None) or "unknown"),
             delivery_state_terminal=self._response_delivery_state(turn_id=turn_id, input_event_key=input_event_key) in {"delivered", "done"},
@@ -3621,6 +3621,10 @@ class RealtimeAPI:
             cancelled_ids = set()
             self._cancelled_response_ids = cancelled_ids
         cancelled_ids.add(pending.response_id)
+        self._clear_cancelled_response_blocking_state(
+            response_id=pending.response_id,
+            reason=reason,
+        )
         logger.info(
             "server_auto_cancelled_for_upgrade run_id=%s turn_id=%s response_id=%s reason=%s",
             self._current_run_id() or "",
@@ -3926,6 +3930,39 @@ class RealtimeAPI:
             policy = InteractionLifecyclePolicy()
             self._interaction_lifecycle_policy = policy
         return policy
+
+    def _is_active_response_blocking(self) -> bool:
+        if not bool(getattr(self, "_response_in_flight", False)):
+            return False
+        active_response_id = str(getattr(self, "_active_response_id", "") or "").strip()
+        if not active_response_id:
+            return False
+        cancelled_ids = getattr(self, "_cancelled_response_ids", None)
+        if isinstance(cancelled_ids, set) and active_response_id in cancelled_ids:
+            return False
+        return True
+
+    def _clear_cancelled_response_blocking_state(self, *, response_id: str, reason: str) -> None:
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            return
+        if str(getattr(self, "_active_response_id", "") or "").strip() != normalized_response_id:
+            return
+        self._response_in_flight = False
+        self.response_in_progress = False
+        self._active_response_id = None
+        self._active_response_origin = "unknown"
+        self._active_response_input_event_key = None
+        self._active_response_canonical_key = None
+        self._active_server_auto_input_event_key = None
+        self._active_response_confirmation_guarded = False
+        self._active_response_preference_guarded = False
+        logger.info(
+            "cancelled_response_unblocked_scheduler run_id=%s response_id=%s reason=%s",
+            self._current_run_id() or "",
+            normalized_response_id,
+            reason or "unknown",
+        )
 
     def _is_synthetic_input_event_key(self, input_event_key: str | None) -> bool:
         normalized = str(input_event_key or "").strip().lower()

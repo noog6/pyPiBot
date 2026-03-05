@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import ai.tools as ai_tools
 import ai.realtime_api as realtime_api
-from ai.realtime_api import InteractionState, RealtimeAPI
+from ai.realtime_api import InteractionState, PendingServerAutoResponse, RealtimeAPI
 from core.logging import logger
 from services.memory_manager import MemoryManager, MemoryScope
 from storage.memories import MemoryStore
@@ -71,6 +71,12 @@ def _make_api_stub() -> RealtimeAPI:
     api._current_run_id = lambda: "run-test"
     api._response_create_runtime = realtime_api.ResponseCreateRuntime(api)
     api._response_terminal_handlers = realtime_api.ResponseTerminalHandlers(api)
+    api._input_audio_events = SimpleNamespace(
+        handle_input_audio_buffer_speech_started=lambda *_args, **_kwargs: None,
+        handle_input_audio_buffer_speech_stopped=lambda *_args, **_kwargs: None,
+        handle_input_audio_buffer_committed=lambda *_args, **_kwargs: None,
+        handle_input_audio_transcription_partial=lambda *_args, **_kwargs: None,
+    )
     api.state_manager = type(
         "_State",
         (),
@@ -1197,6 +1203,100 @@ def test_server_auto_obligation_pre_audio_cancel_ignores_audio_delta(monkeypatch
 
     assert api._audio_accum == bytearray()
 
+
+
+
+def test_verify_clarify_cancelled_server_auto_does_not_block_clarify_creation(monkeypatch) -> None:
+    api = _make_api_stub()
+    ws = _RecordingWs()
+    info_logs: list[str] = []
+    created_seen = asyncio.Event()
+
+    api._asr_verify_on_risk_enabled = True
+    api._asr_clarify_asked_input_event_keys = set()
+    api._asr_clarify_count_by_turn = {}
+    api._asr_verify_max_clarify_per_turn = 2
+    api._asr_verify_short_utterance_ms = 300
+    api._asr_verify_min_confidence = 0.6
+    api._transcript_response_watchdog_timeout_s = 0.25
+    api._transcript_response_watchdog_tasks = {}
+    api._transcript_response_outcome_logged_keys = set()
+    api._cancelled_response_ids = set()
+    api._cancelled_response_timing_by_id = {}
+    api._stale_response_drop_window_by_id = {}
+    api._pending_server_auto_response_by_turn_id = {
+        "turn-v": PendingServerAutoResponse(
+            turn_id="turn-v",
+            response_id="resp-server-auto",
+            canonical_key="run-test:turn-v:evt-v",
+            created_at_ms=1,
+            active=True,
+        )
+    }
+    api._response_in_flight = True
+    api._active_response_id = "resp-server-auto"
+    api._active_response_origin = "server_auto"
+    api._active_response_input_event_key = "evt-v"
+    api._active_response_canonical_key = "run-test:turn-v:evt-v"
+    api._active_server_auto_input_event_key = "evt-v"
+    api._record_cancel_issued_timing = lambda *_args, **_kwargs: None
+
+    async def _false(*_args, **_kwargs) -> bool:
+        return False
+
+    api._maybe_handle_confirmation_decision_timeout = _false
+    api._maybe_handle_approval_response = _false
+    api._handle_stop_word = _false
+    api._maybe_handle_research_permission_response = _false
+    api._maybe_handle_research_budget_response = _false
+    api._maybe_apply_late_confirmation_decision = _false
+    api._maybe_process_research_intent = _false
+    api._maybe_handle_preference_recall_intent = _false
+    api._has_active_confirmation_token = lambda: False
+    api._is_awaiting_confirmation_phase = lambda: False
+    api._is_user_approved_interrupt_response = lambda _response: False
+    api._log_user_transcript = lambda *_args, **_kwargs: None
+    api._record_user_input = lambda *_args, **_kwargs: None
+    api._track_outgoing_event = lambda *_args, **_kwargs: None
+
+    class _Transport:
+        async def send_json(self, _ws, _event):
+            return None
+
+    api._get_or_create_transport = lambda: _Transport()
+
+    async def _fake_send_assistant_message(_msg: str, _ws, *, response_metadata=None, **_kwargs):
+        assert response_metadata is not None
+        api._start_transcript_response_watchdog(turn_id="turn-v", input_event_key="evt-v:clarify")
+        api._current_response_turn_id = "turn-v"
+        api._current_input_event_key = "evt-v:clarify"
+        await api.handle_event({"type": "response.created", "response": {"id": "resp-clarify"}}, ws)
+        created_seen.set()
+
+    api.send_assistant_message = _fake_send_assistant_message
+
+    monkeypatch.setattr(logger, "info", lambda msg, *args, **kwargs: info_logs.append(msg % args if args else msg))
+
+    async def _run() -> None:
+        clarified = await api._maybe_verify_on_risk_clarify(
+            transcript="what color pants am i wearing",
+            websocket=ws,
+            turn_id="turn-v",
+            input_event_key="evt-v",
+            snapshot={"run_id": "run-test", "asr_confidence": 0.9},
+        )
+        assert clarified is True
+        await asyncio.wait_for(created_seen.wait(), timeout=0.5)
+        await asyncio.sleep(0.35)
+
+    asyncio.run(_run())
+
+    assert not any(
+        "response_not_scheduled" in entry
+        and "reason=active_response_in_flight" in entry
+        and "response_id=resp-server-auto" in entry
+        for entry in info_logs
+    )
 
 def test_transcript_watchdog_logs_when_response_not_scheduled(monkeypatch) -> None:
     api = _make_api_stub()
