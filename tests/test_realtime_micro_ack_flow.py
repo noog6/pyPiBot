@@ -789,7 +789,7 @@ def test_near_ready_does_not_suppress_safety_gate() -> None:
     api.loop.close()
 
 
-def test_maybe_schedule_micro_ack_suppressed_when_tool_followup_imminent() -> None:
+def test_maybe_schedule_micro_ack_suppressed_when_tool_followup_imminent_from_queue() -> None:
     api = _api_stub()
     api.state_manager.state = InteractionState.LISTENING
     api._active_input_event_key_by_turn_id = {"turn-1": "item-1"}
@@ -809,13 +809,16 @@ def test_maybe_schedule_micro_ack_suppressed_when_tool_followup_imminent() -> No
             }
         },
     }
-    api._pending_response_create = PendingResponseCreate(
-        websocket=api.websocket,
-        event=tool_event,
-        origin="tool_output",
-        turn_id="turn-1",
-        created_at=time.monotonic(),
-        reason="tool_followup",
+    api._pending_response_create = None
+    api._response_create_queue.append(
+        {
+            "websocket": api.websocket,
+            "event": tool_event,
+            "origin": "tool_output",
+            "turn_id": "turn-1",
+            "created_at": time.monotonic(),
+            "reason": "tool_followup",
+        }
     )
     api._tool_followup_state_by_canonical_key[
         api._canonical_utterance_key(turn_id="turn-1", input_event_key="tool:call-1")
@@ -833,7 +836,7 @@ def test_maybe_schedule_micro_ack_suppressed_when_tool_followup_imminent() -> No
     api.loop.close()
 
 
-def test_maybe_schedule_micro_ack_not_suppressed_when_tool_followup_blocked_by_active_response() -> None:
+def test_maybe_schedule_micro_ack_not_suppressed_when_tool_followup_blocked_by_active_response_in_queue() -> None:
     api = _api_stub()
     api.state_manager.state = InteractionState.LISTENING
     api._active_input_event_key_by_turn_id = {"turn-1": "item-1"}
@@ -855,13 +858,16 @@ def test_maybe_schedule_micro_ack_not_suppressed_when_tool_followup_blocked_by_a
             }
         },
     }
-    api._pending_response_create = PendingResponseCreate(
-        websocket=api.websocket,
-        event=tool_event,
-        origin="tool_output",
-        turn_id="turn-1",
-        created_at=time.monotonic(),
-        reason="active_response",
+    api._pending_response_create = None
+    api._response_create_queue.append(
+        {
+            "websocket": api.websocket,
+            "event": tool_event,
+            "origin": "tool_output",
+            "turn_id": "turn-1",
+            "created_at": time.monotonic(),
+            "reason": "active_response",
+        }
     )
     api._tool_followup_state_by_canonical_key[
         api._canonical_utterance_key(turn_id="turn-1", input_event_key="tool:call-2")
