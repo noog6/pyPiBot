@@ -2603,14 +2603,17 @@ class RealtimeAPI:
         self._injection_bus_instance().ensure_startup_injection_timeout_task()
 
     def get_session_health(self) -> dict[str, Any]:
-        ready = bool(self.is_ready_for_injections())
+        injection_ready = bool(self.is_ready_for_injections())
+        session_ready = bool(self.ready_event.is_set())
         retrieval_metrics = self._memory_manager.get_retrieval_health_metrics(
             scope=self._memory_retrieval_scope,
             session_id=self._memory_manager.get_active_session_id(),
         )
         return {
             "connected": self._session_connected,
-            "ready": ready,
+            "ready": injection_ready,
+            "injection_ready": injection_ready,
+            "session_ready": session_ready,
             "connection_attempts": self._session_connection_attempts,
             "connections": self._session_connections,
             "reconnects": self._session_reconnects,

@@ -207,36 +207,59 @@ def probe_realtime_session(realtime_api: Any | None) -> HealthProbeResult:
                 break
     connected = bool(connected)
 
-    ready_source = "default_false"
-    ready: bool | None = None
+    injection_ready_source = "default_false"
+    injection_ready: bool | None = None
     is_ready_for_injections = getattr(realtime_api, "is_ready_for_injections", None)
     if callable(is_ready_for_injections):
-        ready = bool(is_ready_for_injections())
-        ready_source = "is_ready_for_injections()"
+        injection_ready = bool(is_ready_for_injections())
+        injection_ready_source = "is_ready_for_injections()"
     elif isinstance(is_ready_for_injections, bool):
-        ready = is_ready_for_injections
-        ready_source = "is_ready_for_injections_property"
-    if ready is None:
+        injection_ready = is_ready_for_injections
+        injection_ready_source = "is_ready_for_injections_property"
+    if injection_ready is None:
+        health_ready = session_health.get("injection_ready")
+        if health_ready is not None:
+            injection_ready = bool(health_ready)
+            injection_ready_source = "session_health.injection_ready"
+    if injection_ready is None:
         health_ready = session_health.get("ready")
         if health_ready is not None:
-            ready = bool(health_ready)
-            ready_source = "session_health.ready"
-    if ready is None:
+            injection_ready = bool(health_ready)
+            injection_ready_source = "session_health.ready"
+    if injection_ready is None:
         ready_event = getattr(realtime_api, "ready_event", None)
         if ready_event is not None and hasattr(ready_event, "is_set"):
-            ready = bool(ready_event.is_set())
-            ready_source = "ready_event.is_set"
-    if ready is None:
-        ready = False
+            injection_ready = bool(ready_event.is_set())
+            injection_ready_source = "ready_event.is_set"
+    if injection_ready is None:
+        injection_ready = False
+
+    session_ready_source = "default_false"
+    session_ready: bool | None = None
+    health_session_ready = session_health.get("session_ready")
+    if health_session_ready is not None:
+        session_ready = bool(health_session_ready)
+        session_ready_source = "session_health.session_ready"
+    elif session_health.get("ready") is not None:
+        session_ready = bool(session_health.get("ready"))
+        session_ready_source = "session_health.ready"
+    else:
+        ready_event = getattr(realtime_api, "ready_event", None)
+        if ready_event is not None and hasattr(ready_event, "is_set"):
+            session_ready = bool(ready_event.is_set())
+            session_ready_source = "ready_event.is_set"
+    if session_ready is None:
+        session_ready = injection_ready
+        session_ready_source = "injection_ready_fallback"
     failures = int(session_health.get("failures", 0))
     reconnects = int(session_health.get("reconnects", 0))
 
-    if connected and ready:
+    if connected and injection_ready:
         status = HealthStatus.OK
         summary = "Realtime session connected"
     elif connected:
         status = HealthStatus.DEGRADED
-        summary = "Realtime session connected (not ready)"
+        summary = "Realtime session connected (injection not ready)"
     elif failures > 0:
         status = HealthStatus.FAILING
         summary = "Realtime session disconnected"
@@ -246,8 +269,12 @@ def probe_realtime_session(realtime_api: Any | None) -> HealthProbeResult:
 
     details: dict[str, str | float | int | bool] = {
         "connected": connected,
-        "ready": ready,
-        "ready_source": ready_source,
+        "ready": injection_ready,
+        "ready_source": injection_ready_source,
+        "injection_ready": injection_ready,
+        "injection_ready_source": injection_ready_source,
+        "session_ready": session_ready,
+        "session_ready_source": session_ready_source,
         "connected_source": connected_source,
         "failures": failures,
         "reconnects": reconnects,

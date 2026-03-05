@@ -73,3 +73,21 @@ def test_probe_realtime_session_supports_boolean_readiness_property() -> None:
     assert result.details["ready"] is True
     assert result.details["ready_source"] == "is_ready_for_injections_property"
     assert result.details["connected_source"] == "session_health.connected"
+
+
+class _ReadyMismatchRealtime:
+    def get_session_health(self):
+        return {"connected": True, "ready": False, "session_ready": False}
+
+    def is_ready_for_injections(self):
+        return True
+
+
+def test_probe_realtime_session_uses_injection_ready_for_status() -> None:
+    result = probe_realtime_session(_ReadyMismatchRealtime())
+
+    assert result.status.value == "ok"
+    assert result.summary == "Realtime session connected"
+    assert result.details["injection_ready"] is True
+    assert result.details["session_ready"] is False
+    assert result.details["session_ready_source"] == "session_health.session_ready"

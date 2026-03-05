@@ -241,7 +241,7 @@ def test_warmup_summary_does_not_report_realtime_offline_when_connected() -> Non
             HealthProbeResult(
                 "realtime",
                 HealthStatus.DEGRADED,
-                "Realtime session connected (not ready)",
+                "Realtime session connected (injection not ready)",
                 details={"connected": True, "ready": False},
             ),
             HealthProbeResult("battery", HealthStatus.OK, "Battery nominal"),
@@ -265,7 +265,7 @@ def test_tick_exits_warmup_with_criteria_met_when_realtime_connected_flag_is_fal
             HealthProbeResult(
                 "realtime",
                 HealthStatus.DEGRADED,
-                "Realtime session connected (not ready)",
+                "Realtime session connected (injection not ready)",
                 details={
                     "connected": False,
                     "ready": True,
