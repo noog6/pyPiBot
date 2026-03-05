@@ -988,6 +988,14 @@ class RealtimeAPI:
         self._active_response_input_event_key: str | None = None
         self._active_response_canonical_key: str | None = None
         self._response_gating_verdict_by_input_event_key: dict[str, ResponseGatingVerdict] = {}
+        self._latest_partial_transcript_by_turn_id: dict[str, str] = {}
+        self._server_auto_audio_waiters_by_turn_id: dict[str, asyncio.Event] = {}
+        self._server_auto_audio_defer_tasks_by_turn_id: dict[str, asyncio.Task[Any]] = {}
+        self._audio_response_started_ids: set[str] = set()
+        self._server_auto_audio_deferral_timeout_ms = max(
+            0,
+            int((config.get("realtime") or {}).get("server_auto_audio_deferral_timeout_ms", 225)),
+        )
         self._last_vision_frame_sent_at_monotonic: float | None = None
         self._suppressed_topics: set[str] = set()
         self._battery_redline_percent = float(battery_response_cfg.get("redline_percent", 10.0))
@@ -5309,6 +5317,118 @@ class RealtimeAPI:
         store[key] = verdict
         return verdict
 
+    def _pending_tool_followup_likely(self) -> bool:
+        pending_token = getattr(self, "_pending_confirmation_token", None)
+        pending_action = getattr(pending_token, "pending_action", None)
+        if pending_action is not None and getattr(pending_action, "action", None) is not None:
+            return True
+        if isinstance(getattr(self, "_deferred_research_tool_call", None), dict):
+            return True
+        return getattr(self, "_pending_research_request", None) is not None
+
+    def _upgrade_likely_for_server_auto_turn(self, *, turn_id: str, input_event_key: str) -> tuple[bool, str]:
+        partial_store = getattr(self, "_latest_partial_transcript_by_turn_id", None)
+        partial_text = ""
+        if isinstance(partial_store, dict):
+            partial_text = str(partial_store.get(turn_id) or "").strip()
+        memory_intent_likely = bool(partial_text) and self._is_memory_intent(partial_text)
+        verify_clarify_likely = False
+        if bool(getattr(self, "_asr_verify_on_risk_enabled", False)) and partial_text:
+            vision_state = self.get_vision_state()
+            verify_clarify_likely, _ = should_clarify(
+                transcript_text=partial_text,
+                snapshot=build_utterance_trust_snapshot(
+                    run_id=self._current_run_id() or "",
+                    turn_id=turn_id,
+                    input_event_key=input_event_key,
+                    transcript_text=partial_text,
+                    utterance_duration_ms=getattr(self, "_asr_verify_short_utterance_ms", 450),
+                    asr_meta={},
+                    short_utterance_ms=self._asr_verify_short_utterance_ms,
+                ),
+                min_confidence=self._asr_verify_min_confidence,
+                camera_available=bool(vision_state.get("available", False) or vision_state.get("can_capture", False)),
+                camera_recent=bool(vision_state.get("available", False)),
+            )
+        pending_tool_followup_likely = self._pending_tool_followup_likely()
+        reasons = [
+            reason
+            for reason, enabled in (
+                ("memory_intent_likely", memory_intent_likely),
+                ("verify_on_risk_clarify_likely", verify_clarify_likely),
+                ("pending_tool_followup", pending_tool_followup_likely),
+            )
+            if enabled
+        ]
+        return bool(reasons), ",".join(reasons) if reasons else "none"
+
+    def _start_audio_response_if_needed(self, *, response_id: str | None) -> None:
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            return
+        started_ids = getattr(self, "_audio_response_started_ids", None)
+        if not isinstance(started_ids, set):
+            started_ids = set()
+            self._audio_response_started_ids = started_ids
+        if normalized_response_id in started_ids:
+            return
+        if self.audio_player:
+            self.audio_player.start_response()
+        started_ids.add(normalized_response_id)
+
+    def _signal_server_auto_transcript_final(self, *, turn_id: str) -> None:
+        waiter = getattr(self, "_server_auto_audio_waiters_by_turn_id", {}).get(turn_id)
+        if isinstance(waiter, asyncio.Event):
+            waiter.set()
+
+    def _should_start_deferred_server_auto_audio(self, *, turn_id: str, input_event_key: str, response_id: str) -> bool:
+        if self._is_cancelled_or_superseded_response_id(response_id):
+            return False
+        if str(getattr(self, "_active_response_id", "") or "").strip() != response_id:
+            return False
+        verdict = self._get_response_gating_verdict(turn_id=turn_id, input_event_key=input_event_key)
+        if verdict is None or verdict.action in {"NOOP", "ANSWER"}:
+            return True
+        return False
+
+    def _schedule_server_auto_audio_deferral(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str,
+        response_id: str,
+    ) -> None:
+        waiters = getattr(self, "_server_auto_audio_waiters_by_turn_id", None)
+        if not isinstance(waiters, dict):
+            waiters = {}
+            self._server_auto_audio_waiters_by_turn_id = waiters
+        tasks = getattr(self, "_server_auto_audio_defer_tasks_by_turn_id", None)
+        if not isinstance(tasks, dict):
+            tasks = {}
+            self._server_auto_audio_defer_tasks_by_turn_id = tasks
+        existing = tasks.pop(turn_id, None)
+        if existing is not None:
+            existing.cancel()
+        waiter = asyncio.Event()
+        waiters[turn_id] = waiter
+
+        async def _wait_for_upgrade_decision() -> None:
+            try:
+                await asyncio.wait_for(waiter.wait(), timeout=self._server_auto_audio_deferral_timeout_ms / 1000.0)
+            except asyncio.TimeoutError:
+                pass
+            finally:
+                if self._should_start_deferred_server_auto_audio(
+                    turn_id=turn_id,
+                    input_event_key=input_event_key,
+                    response_id=response_id,
+                ):
+                    self._start_audio_response_if_needed(response_id=response_id)
+                waiters.pop(turn_id, None)
+                tasks.pop(turn_id, None)
+
+        tasks[turn_id] = asyncio.create_task(_wait_for_upgrade_decision())
+
     def get_vision_state(self, now: float | None = None) -> dict[str, Any]:
         ts = time.monotonic() if now is None else float(now)
         camera = getattr(self, "camera_controller", None)
@@ -8669,8 +8789,29 @@ class RealtimeAPI:
                 OrchestrationPhase.PLAN,
                 reason="response created",
             )
-        if self.audio_player:
-            self.audio_player.start_response()
+        deferred_audio_start = False
+        if origin == "server_auto":
+            upgrade_likely, likely_reasons = self._upgrade_likely_for_server_auto_turn(
+                turn_id=turn_id,
+                input_event_key=resolved_input_event_key,
+            )
+            if upgrade_likely and self._active_response_id and resolved_input_event_key:
+                deferred_audio_start = True
+                logger.info(
+                    "server_auto_audio_start_deferred run_id=%s turn_id=%s response_id=%s timeout_ms=%s reasons=%s",
+                    self._current_run_id() or "",
+                    turn_id,
+                    self._active_response_id,
+                    self._server_auto_audio_deferral_timeout_ms,
+                    likely_reasons,
+                )
+                self._schedule_server_auto_audio_deferral(
+                    turn_id=turn_id,
+                    input_event_key=resolved_input_event_key,
+                    response_id=self._active_response_id,
+                )
+        if not deferred_audio_start:
+            self._start_audio_response_if_needed(response_id=self._active_response_id)
         self._audio_accum.clear()
         self._audio_accum_response_id = None
         self._mic_receive_on_first_audio = True
@@ -8970,6 +9111,10 @@ class RealtimeAPI:
             self._turn_diagnostic_timestamps = turn_timestamps_store
         turn_timestamps = turn_timestamps_store.setdefault(resolved_turn_id, {})
         turn_timestamps["transcript_final"] = time.monotonic()
+        self._signal_server_auto_transcript_final(turn_id=resolved_turn_id)
+        partial_store = getattr(self, "_latest_partial_transcript_by_turn_id", None)
+        if isinstance(partial_store, dict):
+            partial_store.pop(resolved_turn_id, None)
         confirmation_active = self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase()
         if confirmation_active:
             self._confirmation_asr_pending = False

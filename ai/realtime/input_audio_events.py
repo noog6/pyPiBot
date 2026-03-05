@@ -28,7 +28,12 @@ class InputAudioEventHandlers:
         with self._api._utterance_context_scope(
             turn_id=self._api._current_turn_id_or_unknown(),
             input_event_key=transcript_input_event_key,
-        ):
+        ) as context:
+            partial_store = getattr(self._api, "_latest_partial_transcript_by_turn_id", None)
+            if not isinstance(partial_store, dict):
+                partial_store = {}
+                self._api._latest_partial_transcript_by_turn_id = partial_store
+            partial_store[str(context.turn_id or "").strip() or self._api._current_turn_id_or_unknown()] = partial_text
             self._api._log_user_transcript(partial_text, final=False, event_type=event_type)
 
     async def handle_input_audio_buffer_speech_started(
