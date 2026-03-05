@@ -193,8 +193,22 @@ def probe_realtime_session(realtime_api: Any | None) -> HealthProbeResult:
         )
 
     session_health = getattr(realtime_api, "get_session_health", lambda: {})()
-    connected = bool(session_health.get("connected"))
-    ready = bool(session_health.get("ready"))
+
+    connected = session_health.get("connected")
+    if connected is None:
+        connected = getattr(realtime_api, "_session_connected", False)
+    connected = bool(connected)
+
+    ready = session_health.get("ready")
+    if ready is None:
+        ready_event = getattr(realtime_api, "ready_event", None)
+        if ready_event is not None and hasattr(ready_event, "is_set"):
+            ready = ready_event.is_set()
+    if ready is None:
+        is_ready_for_injections = getattr(realtime_api, "is_ready_for_injections", None)
+        if callable(is_ready_for_injections):
+            ready = is_ready_for_injections()
+    ready = bool(ready)
     failures = int(session_health.get("failures", 0))
     reconnects = int(session_health.get("reconnects", 0))
 
@@ -211,9 +225,9 @@ def probe_realtime_session(realtime_api: Any | None) -> HealthProbeResult:
         status = HealthStatus.DEGRADED
         summary = "Realtime session offline"
 
-    details: dict[str, str | float | int] = {
-        "connected": int(connected),
-        "ready": int(ready),
+    details: dict[str, str | float | int | bool] = {
+        "connected": connected,
+        "ready": ready,
         "failures": failures,
         "reconnects": reconnects,
     }

@@ -661,8 +661,12 @@ class OpsOrchestrator:
 
         by_name = {result.name: result for result in results}
         realtime = by_name.get("realtime")
-        realtime_connected = bool(realtime and realtime.details.get("connected"))
-        realtime_ready = bool(realtime and realtime.details.get("ready"))
+        realtime_connected = self._coerce_probe_bool(realtime, "connected")
+        realtime_ready = self._coerce_probe_bool(realtime, "ready")
+        if realtime and "connected" not in realtime.details:
+            realtime_connected = realtime_connected or realtime.status in (HealthStatus.OK, HealthStatus.DEGRADED)
+        if realtime and "ready" not in realtime.details:
+            realtime_ready = realtime_ready or realtime.status == HealthStatus.OK
         all_required_ready = self._warmup_required_components_ready(results)
         probes_settled = self._warmup_probes_settled(results)
         criteria_met = realtime_connected and realtime_ready and all_required_ready and probes_settled
@@ -683,6 +687,18 @@ class OpsOrchestrator:
 
         details["warmup_exit_reason"] = "pending"
         return HealthStatus.WARMUP, self._summarize_warmup(results), details
+
+    def _coerce_probe_bool(self, result: HealthProbeResult | None, key: str) -> bool:
+        if result is None:
+            return False
+        value = result.details.get(key)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on", "connected", "ready"}
+        return False
 
     def _warmup_required_components_ready(self, results: list[HealthProbeResult]) -> bool:
         for result in results:
