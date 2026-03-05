@@ -128,7 +128,8 @@ class ResponseTerminalHandlers:
         api._mark_utterance_info_summary(response_done_seen=True)
         turn_id = api._current_turn_id_or_unknown()
         done_input_event_key = str(getattr(api, "_active_response_input_event_key", "") or "").strip()
-        done_canonical_key = api._canonical_utterance_key(
+        active_done_canonical_key = str(getattr(api, "_active_response_canonical_key", "") or "").strip()
+        done_canonical_key = active_done_canonical_key or api._canonical_utterance_key(
             turn_id=turn_id,
             input_event_key=done_input_event_key,
         )
@@ -162,7 +163,7 @@ class ResponseTerminalHandlers:
         api._response_done_serial += 1
         api.response_in_progress = False
         api._response_in_flight = False
-        if done_input_event_key and bool(getattr(api, "_active_response_consumes_canonical_slot", True)):
+        if done_canonical_key and bool(getattr(api, "_active_response_consumes_canonical_slot", True)):
             api._lifecycle_controller().on_response_done(done_canonical_key)
             api._log_lifecycle_event(
                 turn_id=turn_id,
@@ -176,7 +177,7 @@ class ResponseTerminalHandlers:
                 canonical_key=done_canonical_key,
                 trigger="response_done",
             )
-            if delivery_state_before_done != "cancelled":
+            if delivery_state_before_done != "cancelled" and done_input_event_key:
                 api._set_response_delivery_state(
                     turn_id=turn_id,
                     input_event_key=done_input_event_key,
