@@ -186,6 +186,13 @@ realtime:
       prefix_padding_ms: 700
       silence_duration_ms: 900
 
+asr:
+  verify_on_risk:
+    enabled: true
+    min_confidence: 0.65
+    short_utterance_ms: 450
+    max_clarify_per_turn: 1
+
 # Startup dependency behavior
 startup:
   # Keep strict startup by default; when true, Theo can run without a live microphone.

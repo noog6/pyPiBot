@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from core.logging import log_info, logger
 from interaction import InteractionState
 from ai.orchestration import OrchestrationPhase
+from ai.realtime.asr_trust import topic_mismatch_detected
 from ai.utils import RUN_TIME_TABLE_LOG_JSON
 
 if TYPE_CHECKING:
@@ -75,6 +76,34 @@ class ResponseTerminalHandlers:
             return
 
         if api.assistant_reply:
+            active_input_event_key = str(getattr(api, "_active_response_input_event_key", "") or "").strip()
+            snapshot = getattr(api, "_utterance_trust_snapshot_by_input_event_key", {}).get(active_input_event_key, {})
+            transcript_text = str(snapshot.get("transcript_text") or "")
+            if (
+                transcript_text
+                and topic_mismatch_detected(transcript_text, api.assistant_reply)
+                and bool(getattr(api, "_asr_verify_on_risk_enabled", False))
+            ):
+                websocket = getattr(api, "websocket", None)
+                if websocket is not None:
+                    await api.send_assistant_message(
+                        "Did you mean the color of your pants right now, or your favorite color?",
+                        websocket,
+                        response_metadata={
+                            "trigger": "topic_mismatch_detector",
+                            "input_event_key": active_input_event_key,
+                        },
+                    )
+                    logger.info(
+                        "topic_mismatch_clarify run_id=%s input_event_key=%s transcript_anchors=%s",
+                        api._current_run_id() or "",
+                        active_input_event_key,
+                        ",".join(snapshot.get("topic_anchors") or []),
+                    )
+                    api.assistant_reply = ""
+                    api._assistant_reply_accum = ""
+                    api.response_in_progress = False
+                    return
             api.assistant_reply = api._normalize_memory_recall_answer(api.assistant_reply)
             log_info(f"Assistant Response: {api.assistant_reply}", style="bold blue")
             api.assistant_reply = ""
