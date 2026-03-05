@@ -4201,11 +4201,13 @@ class RealtimeAPI:
         return policy
 
     def _is_active_response_blocking(self) -> bool:
+        # Invariant: only one response.create is allowed in flight; additional
+        # create attempts must queue until response.done clears flight state.
         if not bool(getattr(self, "_response_in_flight", False)):
             return False
         active_response_id = str(getattr(self, "_active_response_id", "") or "").strip()
         if not active_response_id:
-            return False
+            return True
         cancelled_ids = getattr(self, "_cancelled_response_ids", None)
         if isinstance(cancelled_ids, set) and active_response_id in cancelled_ids:
             return False

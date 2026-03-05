@@ -298,9 +298,26 @@ class ResponseCreateRuntime:
                 reason=scheduled_reason,
             )
         previous = api._pending_response_create
+        if previous is not None:
+            previous_metadata = api._extract_response_create_metadata(previous.event)
+            previous_input_event_key = str(previous_metadata.get("input_event_key") or "").strip()
+            previous_turn_id = str(previous_metadata.get("turn_id") or previous.turn_id or "").strip() or previous.turn_id
+            previous_canonical_key = api._canonical_utterance_key(
+                turn_id=previous_turn_id,
+                input_event_key=previous_input_event_key,
+            )
+            if canonical_key == previous_canonical_key:
+                logger.info("response_create_queue_deduped canonical_key=%s", canonical_key)
+                return False
         if previous is None:
             api._pending_response_create = candidate
             api._sync_pending_response_create_queue()
+            if str(reason or "").strip().lower() == "active_response":
+                logger.info(
+                    "response_create_blocked_active canonical_key=%s active_response_id=%s queued=true reason=active_response",
+                    canonical_key,
+                    str(getattr(api, "_active_response_id", "") or "").strip() or "pending_create_ack",
+                )
             if reason == "audio_playback_busy":
                 logger.debug(
                     "playback_busy_retry_enqueued run_id=%s input_event_key=%s reason=audio_playback_busy",
@@ -358,6 +375,12 @@ class ResponseCreateRuntime:
         if should_replace:
             api._pending_response_create = candidate
             api._sync_pending_response_create_queue()
+            if str(reason or "").strip().lower() == "active_response":
+                logger.info(
+                    "response_create_blocked_active canonical_key=%s active_response_id=%s queued=true reason=active_response",
+                    canonical_key,
+                    str(getattr(api, "_active_response_id", "") or "").strip() or "pending_create_ack",
+                )
             if reason == "audio_playback_busy":
                 logger.debug(
                     "playback_busy_retry_enqueued run_id=%s input_event_key=%s reason=audio_playback_busy",
@@ -1023,6 +1046,11 @@ class ResponseCreateRuntime:
             debug_context=pending.debug_context,
             memory_brief_note=pending.memory_brief_note,
         )
+        if normalized_source_trigger == "response_done":
+            logger.info(
+                "response_create_queue_drained canonical_key=%s triggered_by=response_done",
+                selected_pending_canonical_key,
+            )
         drain_result = "sent_to_send_response_create"
         _emit_drain_trace(
             stage="post",
