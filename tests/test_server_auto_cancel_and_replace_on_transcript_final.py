@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import asyncio
 import sys
 import types
@@ -25,6 +26,7 @@ def _build_api_stub() -> RealtimeAPI:
     api._cancelled_response_ids = set()
     api._suppressed_audio_response_ids = set()
     api._cancelled_response_timing_by_id = {}
+    api._response_status_by_id = {}
     api._audio_accum = bytearray()
     api._audio_accum_response_id = None
     api.audio_player = None
@@ -404,3 +406,81 @@ def test_late_cancelled_output_audio_done_uses_stale_response_correlation() -> N
     assert observed
     assert observed[0]["response_id"] == "resp-server-auto"
     assert observed[0]["canonical_key"] == "run-464:turn_2:synthetic_server_auto_1"
+
+
+class _StateManagerStub:
+
+    def __init__(self) -> None:
+        self.state = "thinking"
+        self.transitions: list[tuple[str, str]] = []
+
+    def update_state(self, next_state, reason: str) -> None:
+        value = getattr(next_state, "value", str(next_state))
+        self.state = value
+        self.transitions.append((value, reason))
+
+
+def test_cancelled_response_late_audio_and_transcript_deltas_are_sunk() -> None:
+    api = _build_api_stub()
+    transport = _Transport()
+
+    api.state_manager = _StateManagerStub()
+    api._is_active_response_guarded = lambda: False
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._record_cancelled_audio_race_transition = lambda **_kwargs: None
+    api._active_response_origin = "assistant_message"
+    api._active_response_input_event_key = "item_new"
+    api._active_response_canonical_key = "run-464:turn_2:item_new"
+    api._current_turn_id_or_unknown = lambda: "turn_2"
+    api._get_response_gating_verdict = lambda **_kwargs: None
+
+    api.assistant_reply = ""
+    api._assistant_reply_accum = ""
+    api._assistant_reply_response_id = None
+
+    api._pending_server_auto_response_by_turn_id["turn_2"] = PendingServerAutoResponse(
+        turn_id="turn_2",
+        response_id="resp-server-auto",
+        canonical_key="run-464:turn_2:synthetic_server_auto_1",
+        created_at_ms=1,
+        active=True,
+    )
+    api._get_or_create_transport = lambda: transport
+    api._peek_pending_preference_memory_context_payload = lambda **_kwargs: None
+
+    async def _fake_send_response_create(_websocket, _event, **_kwargs):
+        return True
+
+    api._send_response_create = _fake_send_response_create
+
+    replaced = asyncio.run(
+        api._cancel_and_replace_pending_server_auto_on_transcript_final(
+            websocket=object(),
+            turn_id="turn_2",
+            input_event_key="item_new",
+            origin_label="upgraded_response",
+        )
+    )
+
+    assert replaced is True
+    assert api._response_status("resp-server-auto") == "cancelled"
+
+    audio_delta_event = {
+        "type": "response.output_audio.delta",
+        "response_id": "resp-server-auto",
+        "delta": base64.b64encode(b"stale-audio").decode("utf-8"),
+    }
+    asyncio.run(api._handle_response_output_audio_delta_event(audio_delta_event, websocket=None))
+
+    stale_transcript_event = {
+        "type": "response.output_audio_transcript.delta",
+        "response_id": "resp-server-auto",
+        "delta": " stale transcript",
+    }
+    asyncio.run(api._handle_event_legacy(stale_transcript_event, websocket=None))
+
+    assert api._audio_accum == bytearray()
+    assert api.assistant_reply == ""
+    assert api._assistant_reply_accum == ""
+    assert api.state_manager.state == "thinking"
+    assert api.state_manager.transitions == []
