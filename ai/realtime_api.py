@@ -625,6 +625,10 @@ class RealtimeAPI:
         self._response_in_flight = False
         self._response_create_queue: deque[dict[str, Any]] = deque()
         self._pending_response_create: PendingResponseCreate | None = None
+        self._response_create_enqueue_seq = 0
+        self._response_create_queued_creates_total = 0
+        self._response_create_drains_total = 0
+        self._response_create_max_qdepth = 0
         self._response_create_turn_counter = 0
         self._current_response_turn_id: str | None = None
         self._utterance_context: UtteranceContext | None = None
@@ -6874,17 +6878,42 @@ class RealtimeAPI:
 
     def _response_create_priority(self, origin: str) -> int:
         normalized_origin = str(origin or "").strip().lower()
-        if normalized_origin == "tool_output":
-            return 3
-        if normalized_origin == "assistant_message":
+        if normalized_origin == "upgraded_response":
             return 2
+        if normalized_origin in {"assistant_message", "clarify", "server_auto", "tool_output"}:
+            return 1
         return 1
 
+    def _response_create_queue_priority(
+        self,
+        *,
+        origin: str,
+        canonical_key: str,
+    ) -> int:
+        if ":tool:" in str(canonical_key or ""):
+            return 3
+        return self._response_create_priority(origin)
+
+    def _next_response_create_enqueue_seq(self) -> int:
+        self._response_create_enqueue_seq = int(getattr(self, "_response_create_enqueue_seq", 0) or 0) + 1
+        return self._response_create_enqueue_seq
+
     def _sync_pending_response_create_queue(self) -> None:
-        self._response_create_queue.clear()
+        queue = getattr(self, "_response_create_queue", None)
+        if not isinstance(queue, deque):
+            queue = deque()
+            self._response_create_queue = queue
         pending = self._pending_response_create
+        self._queued_confirmation_reminder_keys.clear()
         if pending is None:
-            self._queued_confirmation_reminder_keys.clear()
+            for queued in queue:
+                queued_key = self._queued_response_reminder_key(queued)
+                if queued_key:
+                    self._queued_confirmation_reminder_keys.add(queued_key)
+            self._response_create_max_qdepth = max(
+                int(getattr(self, "_response_create_max_qdepth", 0) or 0),
+                len(queue),
+            )
             return
         queued_item: dict[str, Any] = {
             "websocket": pending.websocket,
@@ -6895,13 +6924,37 @@ class RealtimeAPI:
             "debug_context": pending.debug_context,
             "memory_brief_note": pending.memory_brief_note,
             "enqueued_done_serial": pending.enqueued_done_serial,
+            "enqueue_seq": pending.enqueue_seq,
         }
         if pending.queued_reminder_key is not None:
             queued_item["queued_reminder_key"] = pending.queued_reminder_key
-            self._queued_confirmation_reminder_keys = {pending.queued_reminder_key}
-        else:
-            self._queued_confirmation_reminder_keys.clear()
-        self._response_create_queue.append(queued_item)
+
+        pending_metadata = self._extract_response_create_metadata(pending.event)
+        pending_canonical_key = self._canonical_utterance_key(
+            turn_id=pending.turn_id,
+            input_event_key=str(pending_metadata.get("input_event_key") or "").strip(),
+        )
+        kept: deque[dict[str, Any]] = deque()
+        for queued in queue:
+            metadata = self._extract_response_create_metadata(queued.get("event") or {})
+            queued_canonical = self._canonical_utterance_key(
+                turn_id=str(queued.get("turn_id") or "").strip(),
+                input_event_key=str(metadata.get("input_event_key") or "").strip(),
+            )
+            if queued_canonical == pending_canonical_key:
+                continue
+            kept.append(queued)
+        queue.clear()
+        queue.appendleft(queued_item)
+        queue.extend(kept)
+        for queued in queue:
+            queued_key = self._queued_response_reminder_key(queued)
+            if queued_key:
+                self._queued_confirmation_reminder_keys.add(queued_key)
+        self._response_create_max_qdepth = max(
+            int(getattr(self, "_response_create_max_qdepth", 0) or 0),
+            len(queue),
+        )
 
     def _schedule_pending_response_create(
         self,
@@ -8607,6 +8660,12 @@ class RealtimeAPI:
                     elif self._session_connected:
                         self._note_disconnect("clean shutdown")
         finally:
+            logger.info(
+                "response_create_queue_stats queued_creates_total=%s drains_total=%s max_qdepth=%s",
+                int(getattr(self, "_response_create_queued_creates_total", 0) or 0),
+                int(getattr(self, "_response_create_drains_total", 0) or 0),
+                int(getattr(self, "_response_create_max_qdepth", 0) or 0),
+            )
             self._runtime_task_registry().cancel_all("run_finally")
             await self._runtime_task_registry().await_all(timeout_s=1.0)
             self._event_injector.stop()
@@ -8697,6 +8756,11 @@ class RealtimeAPI:
             except ConnectionClosed:
                 log_warning("⚠️ WebSocket connection lost.")
                 self._note_disconnect("websocket connection closed")
+                self._response_in_flight = False
+                self.response_in_progress = False
+                self._active_response_id = None
+                self._response_create_queue_drain_source = "websocket_close"
+                await self._drain_response_create_queue(source_trigger="websocket_close")
                 break
 
     async def _recover_from_event_handler_error(self, event_type: str, websocket: Any) -> None:
@@ -11056,7 +11120,7 @@ class RealtimeAPI:
     async def handle_error(self, event: dict[str, Any], websocket: Any) -> None:
         error_message = event.get("error", {}).get("message", "")
         if "no active response found" in error_message.lower():
-            logger.info(
+            logger.debug(
                 "response_cancel_noop run_id=%s turn_id=%s reason=no_active_response",
                 self._current_run_id() or "",
                 self._current_turn_id_or_unknown(),

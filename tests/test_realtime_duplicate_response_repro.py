@@ -46,6 +46,10 @@ def _make_api_stub() -> RealtimeAPI:
     api._response_create_queue = deque()
     api._queued_confirmation_reminder_keys = set()
     api._response_done_serial = 0
+    api._response_create_enqueue_seq = 0
+    api._response_create_queued_creates_total = 0
+    api._response_create_drains_total = 0
+    api._response_create_max_qdepth = 0
     api._response_create_debug_trace = False
     api._current_response_turn_id = "turn_1"
     api._last_response_create_ts = None
@@ -128,6 +132,17 @@ def _make_api_stub() -> RealtimeAPI:
     api._enqueue_response_done_reflection = lambda *_args, **_kwargs: None
     api._emit_preference_recall_skip_trace_if_needed = lambda *_args, **_kwargs: None
     api._clear_stale_pending_server_auto_for_turn = lambda **_kwargs: None
+    api._build_confirmation_transition_decision = lambda **_kwargs: type(
+        "_Transition",
+        (),
+        {
+            "allow_response_transition": True,
+            "emit_reminder": False,
+            "recover_mic": False,
+            "close_reason": "",
+        },
+    )()
+    api._confirmation_hold_components = lambda: (False, False, False, False)
     api._mark_transcript_response_outcome = lambda **_kwargs: None
     api._is_user_approved_interrupt_response = lambda _response: False
     api._log_user_transcript = lambda *_args, **_kwargs: None
@@ -1041,3 +1056,98 @@ def test_tool_followup_second_arbitration_denied_for_same_canonical_key(monkeypa
         and f"canonical_key={canonical_key}" in entry
         for entry in captured_logs
     )
+
+
+def test_response_create_queue_priority_and_fifo_under_contention() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._response_in_flight = True
+    api.response_in_progress = True
+    api._active_response_id = "resp-active"
+    api._active_response_origin = "assistant_message"
+    api._current_response_turn_id = "turn-priority"
+    api._active_response_input_event_key = "item-active"
+
+    tool_event = {
+        "type": "response.create",
+        "response": {"metadata": {"turn_id": "turn-priority", "input_event_key": "item_tool", "trigger": "tool"}},
+    }
+    clarify_event = {
+        "type": "response.create",
+        "response": {"metadata": {"turn_id": "turn-priority", "input_event_key": "item_clarify", "trigger": "clarify"}},
+    }
+
+    async def _run() -> None:
+        await api._send_response_create(ws, tool_event, origin="tool_output")
+        await api._send_response_create(ws, clarify_event, origin="assistant_message")
+        assert len([e for e in ws.sent if e.get("type") == "response.create"]) == 0
+
+        await api.handle_response_done({"type": "response.done", "response": {"id": "resp-active"}})
+        api._active_response_id = "resp-tool"
+        api._response_in_flight = True
+        api.response_in_progress = True
+        await api.handle_response_done({"type": "response.done", "response": {"id": "resp-tool"}})
+
+    asyncio.run(_run())
+
+    response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert len(response_create_events) == 2
+    ordered_keys = [((event.get("response") or {}).get("metadata") or {}).get("input_event_key") for event in response_create_events]
+    assert ordered_keys == ["item_tool", "item_clarify"]
+
+
+def test_response_create_queue_dedupes_same_canonical_key_when_blocked() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._response_in_flight = True
+    api.response_in_progress = True
+    api._active_response_id = "resp-active"
+
+    duplicate_event = {
+        "type": "response.create",
+        "response": {"metadata": {"turn_id": "turn-dedupe", "input_event_key": "item_dup", "trigger": "clarify"}},
+    }
+
+    async def _run() -> None:
+        await api._send_response_create(ws, duplicate_event, origin="assistant_message")
+        await api._send_response_create(ws, duplicate_event, origin="assistant_message")
+        api._response_in_flight = False
+        api.response_in_progress = False
+        api._active_response_id = None
+        await api._drain_response_create_queue(source_trigger="response_done")
+
+    asyncio.run(_run())
+
+    response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert len(response_create_events) == 1
+
+
+def test_response_create_queue_drains_on_active_cleared_fallback() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._response_in_flight = True
+    api.response_in_progress = True
+    api._active_response_id = "resp-stuck"
+
+    queued_event = {
+        "type": "response.create",
+        "response": {"metadata": {"turn_id": "turn-fallback", "input_event_key": "item_fallback", "trigger": "clarify"}},
+    }
+
+    async def _run() -> None:
+        await api._send_response_create(ws, queued_event, origin="assistant_message")
+        api._response_in_flight = False
+        api.response_in_progress = False
+        api._active_response_id = None
+        await api._drain_response_create_queue(source_trigger="active_cleared")
+
+    asyncio.run(_run())
+
+    response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert len(response_create_events) == 1

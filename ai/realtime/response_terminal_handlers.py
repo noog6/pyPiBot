@@ -510,7 +510,7 @@ class ResponseTerminalHandlers:
                 OrchestrationPhase.IDLE,
                 reason="reflection enqueued",
             )
-        api._response_create_queue_drain_source = "explicit_caller"
-        await api._drain_response_create_queue()
+        api._response_create_queue_drain_source = "active_cleared"
+        await api._drain_response_create_queue(source_trigger="active_cleared")
         if api._pending_image_stimulus and not api._pending_image_flush_after_playback:
             await api._flush_pending_image_stimulus("response completed")
