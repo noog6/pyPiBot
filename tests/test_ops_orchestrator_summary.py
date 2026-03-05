@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+import time
+import types
+import sys
+
+if "audioop" not in sys.modules:
+    sys.modules["audioop"] = types.ModuleType("audioop")
+
 from core.ops_models import HealthStatus
 from services.health_probes import HealthProbeResult
 from services.ops_orchestrator import OpsOrchestrator
@@ -158,3 +165,94 @@ def test_start_loop_emits_startup_snapshot(monkeypatch) -> None:
     orchestrator.start_loop(loop_period_s=0.1, heartbeat_period_s=0.2)
 
     assert reasons == ["startup"]
+
+
+def test_tick_reports_warmup_for_transient_startup_degradations(monkeypatch) -> None:
+    orchestrator = _new_orchestrator()
+    orchestrator._health_debounce_s = 0.0
+    captured = []
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_run_health_probes",
+        lambda: [
+            HealthProbeResult("audio", HealthStatus.DEGRADED, "Audio partially available"),
+            HealthProbeResult(
+                "realtime",
+                HealthStatus.DEGRADED,
+                "Realtime session offline",
+                details={"connected": 0, "ready": 0},
+            ),
+            HealthProbeResult("battery", HealthStatus.OK, "Battery nominal"),
+        ],
+    )
+    monkeypatch.setattr(orchestrator, "_maybe_run_micro_presence", lambda now: None)
+    monkeypatch.setattr(orchestrator, "_maybe_run_memory_maintenance", lambda now: None)
+    monkeypatch.setattr(orchestrator, "_emit_health_snapshot", lambda snapshot: captured.append(snapshot))
+
+    orchestrator._tick()
+
+    assert captured[-1].status == HealthStatus.WARMUP
+    assert captured[-1].summary.startswith("Warming up:")
+
+
+def test_tick_exits_warmup_to_ok_when_startup_criteria_met(monkeypatch, caplog) -> None:
+    orchestrator = _new_orchestrator()
+    orchestrator._health_debounce_s = 0.0
+    captured = []
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_run_health_probes",
+        lambda: [
+            HealthProbeResult("audio", HealthStatus.OK, "Audio input/output ready"),
+            HealthProbeResult(
+                "realtime",
+                HealthStatus.OK,
+                "Realtime session connected",
+                details={"connected": 1, "ready": 1},
+            ),
+            HealthProbeResult("battery", HealthStatus.OK, "Battery nominal"),
+        ],
+    )
+    monkeypatch.setattr(orchestrator, "_maybe_run_micro_presence", lambda now: None)
+    monkeypatch.setattr(orchestrator, "_maybe_run_memory_maintenance", lambda now: None)
+    monkeypatch.setattr(orchestrator, "_emit_health_snapshot", lambda snapshot: captured.append(snapshot))
+
+    with caplog.at_level("INFO"):
+        orchestrator._tick()
+
+    assert captured[-1].status == HealthStatus.OK
+    assert captured[-1].summary == "All systems nominal"
+    assert "Warmup transition: warmup -> active" in caplog.text
+
+
+def test_tick_reports_degraded_after_warmup_timeout_when_issue_persists(monkeypatch) -> None:
+    orchestrator = _new_orchestrator()
+    orchestrator._health_debounce_s = 0.0
+    orchestrator._warmup_grace_period_s = 1.0
+    orchestrator._warmup_started_at = time.monotonic() - 2.0
+    captured = []
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_run_health_probes",
+        lambda: [
+            HealthProbeResult("audio", HealthStatus.DEGRADED, "Audio partially available"),
+            HealthProbeResult(
+                "realtime",
+                HealthStatus.DEGRADED,
+                "Realtime session offline",
+                details={"connected": 0, "ready": 0},
+            ),
+            HealthProbeResult("battery", HealthStatus.OK, "Battery nominal"),
+        ],
+    )
+    monkeypatch.setattr(orchestrator, "_maybe_run_micro_presence", lambda now: None)
+    monkeypatch.setattr(orchestrator, "_maybe_run_memory_maintenance", lambda now: None)
+    monkeypatch.setattr(orchestrator, "_emit_health_snapshot", lambda snapshot: captured.append(snapshot))
+
+    orchestrator._tick()
+
+    assert captured[-1].status == HealthStatus.DEGRADED
+    assert captured[-1].summary.startswith("Degraded:")

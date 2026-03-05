@@ -607,6 +607,8 @@ interaction_states:
 # Health monitoring
 health:
   debounce_s: 2.0
+  warmup:
+    grace_period_s: 20.0
   network:
     enabled: false
     host: "api.openai.com"

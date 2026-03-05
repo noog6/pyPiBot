@@ -11,6 +11,7 @@ class HealthStatus(str, Enum):
     """Overall health classification for the runtime."""
 
     OK = "ok"
+    WARMUP = "warmup"
     DEGRADED = "degraded"
     FAILING = "failing"
 

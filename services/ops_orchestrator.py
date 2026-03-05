@@ -88,6 +88,14 @@ class OpsOrchestrator:
         self._memory_maintenance_run_count = 0
         self._semantic_offline_streak_threshold = 20
         self._startup_snapshot_emitted = False
+        self._warmup_started_at = time.monotonic()
+        self._warmup_grace_period_s = 20.0
+        self._warmup_active = True
+        self._warmup_exit_reason: str | None = None
+        self._warmup_tolerated_probe_states: dict[str, set[HealthStatus]] = {
+            "realtime": {HealthStatus.DEGRADED},
+            "audio": {HealthStatus.DEGRADED},
+        }
         OpsOrchestrator._instance = self
 
     @classmethod
@@ -105,6 +113,9 @@ class OpsOrchestrator:
             self._stop_event.clear()
             self._loop_wake_event.clear()
             self._shutdown_requested_at = None
+            self._warmup_started_at = time.monotonic()
+            self._warmup_active = True
+            self._warmup_exit_reason = None
             self._loop_thread = threading.Thread(target=self._loop, daemon=True)
             self._loop_thread.start()
             self._emit_canonical_snapshot(time.time(), reason="startup")
@@ -282,14 +293,24 @@ class OpsOrchestrator:
         timestamp = time.time()
         probe_results = self._run_health_probes()
         changed, overall_status, details = self._apply_health_results(probe_results, now)
+        warmup_status, warmup_summary, warmup_details = self._compute_warmup_state(
+            results=probe_results,
+            now=now,
+        )
+        details.update(warmup_details)
         health_snapshot: HealthSnapshot | None = None
         with self._lock:
             self._counters.ticks += 1
             if changed or self._latest_health is None:
-                summary = self._summarize_health(overall_status, probe_results)
+                if warmup_status is not None:
+                    status = warmup_status
+                    summary = warmup_summary
+                else:
+                    status = overall_status
+                    summary = self._summarize_health(status, probe_results)
                 health_snapshot = HealthSnapshot(
                     timestamp=timestamp,
-                    status=overall_status,
+                    status=status,
                     summary=summary,
                     details={
                         "mode": self._mode.value,
@@ -455,6 +476,11 @@ class OpsOrchestrator:
                 )
             ),
         )
+        warmup_cfg = health_cfg.get("warmup") or {}
+        self._warmup_grace_period_s = max(
+            1.0,
+            float(warmup_cfg.get("grace_period_s", self._warmup_grace_period_s)),
+        )
         now = time.monotonic()
         self._memory_maintenance_next_ts = now + self._memory_maintenance_interval_s
         self._memory_maintenance_run_count = 0
@@ -612,6 +638,68 @@ class OpsOrchestrator:
             return HealthStatus.DEGRADED
         return HealthStatus.OK
 
+    def _compute_warmup_state(
+        self,
+        *,
+        results: list[HealthProbeResult],
+        now: float,
+    ) -> tuple[HealthStatus | None, str, dict[str, str | float | int]]:
+        elapsed_s = max(now - self._warmup_started_at, 0.0)
+        details: dict[str, str | float | int] = {
+            "startup_phase": "warmup" if self._warmup_active else "active",
+            "warmup_elapsed_s": round(elapsed_s, 3),
+            "warmup_grace_period_s": round(self._warmup_grace_period_s, 3),
+        }
+        if not self._warmup_active:
+            details["warmup_exit_reason"] = self._warmup_exit_reason or "criteria_met"
+            return None, "", details
+
+        by_name = {result.name: result for result in results}
+        realtime = by_name.get("realtime")
+        realtime_connected = bool(realtime and realtime.details.get("connected"))
+        realtime_ready = bool(realtime and realtime.details.get("ready"))
+        all_required_ready = self._warmup_required_components_ready(results)
+        criteria_met = realtime_connected and realtime_ready and all_required_ready
+        timed_out = elapsed_s >= self._warmup_grace_period_s
+        if criteria_met or timed_out:
+            self._warmup_active = False
+            reason = "criteria_met" if criteria_met else "timeout"
+            self._warmup_exit_reason = reason
+            details["startup_phase"] = "active"
+            details["warmup_exit_reason"] = reason
+            LOGGER.info(
+                "[Ops] Warmup transition: warmup -> active reason=%s elapsed_s=%.3f",
+                reason,
+                elapsed_s,
+            )
+            return None, "", details
+
+        details["warmup_exit_reason"] = "pending"
+        return HealthStatus.WARMUP, self._summarize_warmup(results), details
+
+    def _warmup_required_components_ready(self, results: list[HealthProbeResult]) -> bool:
+        for result in results:
+            tolerated_states = self._warmup_tolerated_probe_states.get(result.name)
+            if tolerated_states and result.status in tolerated_states:
+                continue
+            if result.status in (HealthStatus.DEGRADED, HealthStatus.FAILING):
+                return False
+        return True
+
+    def _summarize_warmup(self, results: list[HealthProbeResult]) -> str:
+        impacted = [
+            result
+            for result in results
+            if result.status != HealthStatus.OK
+            and result.status in self._warmup_tolerated_probe_states.get(result.name, set())
+        ]
+        if not impacted:
+            return "Warming up: initializing subsystems"
+        impacted_text = "; ".join(
+            f"{result.name} ({self._concise_reason(result.summary)})" for result in impacted
+        )
+        return self._truncate_summary(f"Warming up: {impacted_text}")
+
     def _summarize_health(
         self,
         status: HealthStatus,
@@ -687,7 +775,7 @@ class OpsOrchestrator:
         self._emit_health_alert(snapshot)
 
     def _emit_health_alert(self, snapshot: HealthSnapshot) -> None:
-        if snapshot.status == HealthStatus.OK:
+        if snapshot.status in (HealthStatus.OK, HealthStatus.WARMUP):
             return
         severity = "critical" if snapshot.status == HealthStatus.FAILING else "warning"
         self._emit_alert(
