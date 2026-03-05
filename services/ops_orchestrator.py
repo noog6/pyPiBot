@@ -292,12 +292,15 @@ class OpsOrchestrator:
         now = time.monotonic()
         timestamp = time.time()
         probe_results = self._run_health_probes()
+        warmup_was_active = self._warmup_active
         changed, overall_status, details = self._apply_health_results(probe_results, now)
         warmup_status, warmup_summary, warmup_details = self._compute_warmup_state(
             results=probe_results,
             now=now,
         )
         details.update(warmup_details)
+        warmup_just_exited = warmup_was_active and not self._warmup_active
+        changed = changed or warmup_just_exited
         health_snapshot: HealthSnapshot | None = None
         with self._lock:
             self._counters.ticks += 1
