@@ -133,6 +133,7 @@ def test_duplicate_assistant_message_create_single_flight_guard(monkeypatch) -> 
     """Deterministic run-405 repro now guarded to single assistant_message response.create."""
 
     api = _make_api_stub()
+    _wire_runtime(api)
     ws = _RecordingWs()
     api.websocket = ws
 
@@ -362,6 +363,78 @@ def test_server_auto_synthetic_key_rebound_blocks_stale_assistant_message_releas
     ]
 
     assert assistant_creates == []
+
+
+def test_empty_transcript_guard_cancels_server_auto_and_skips_substantive_answer(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+
+    async def _false(*_args, **_kwargs) -> bool:
+        return False
+
+    api._maybe_handle_confirmation_decision_timeout = _false
+    api._maybe_handle_approval_response = _false
+    api._handle_stop_word = _false
+    api._maybe_handle_research_permission_response = _false
+    api._maybe_handle_research_budget_response = _false
+    api._maybe_apply_late_confirmation_decision = _false
+    api._maybe_process_research_intent = _false
+    api._has_active_confirmation_token = lambda: False
+    api._is_awaiting_confirmation_phase = lambda: False
+    api._asr_verify_short_utterance_ms = 1200
+    api._vad_turn_detection = {}
+    api._utterance_trust_snapshot_by_input_event_key = {}
+
+    prompts: list[str] = []
+
+    async def _assistant(message, *_args, **_kwargs):
+        prompts.append(str(message))
+
+    api.send_assistant_message = _assistant
+
+    async def _run() -> None:
+        api._active_response_origin = "server_auto"
+        api._active_response_id = "resp-server-auto-empty-1"
+        api._active_server_auto_input_event_key = "item_empty"
+        api._record_pending_server_auto_response(
+            turn_id="turn_1",
+            response_id="resp-server-auto-empty-1",
+            canonical_key=api._canonical_utterance_key(turn_id="turn_1", input_event_key="item_empty"),
+        )
+        api._set_response_obligation(
+            turn_id="turn_1",
+            input_event_key="item_empty",
+            source="input_audio_transcription",
+        )
+        await api._handle_input_audio_transcription_completed_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "item_empty",
+                "transcript": "...",
+            },
+            ws,
+        )
+
+    asyncio.run(_run())
+
+    cancels = [event for event in ws.sent if event.get("type") == "response.cancel"]
+    assert cancels
+    assert prompts == ["I didn't catch that—could you repeat?"]
+    assert all("pants" not in msg.lower() and "color" not in msg.lower() for msg in prompts)
+
+    obligation_key = api._response_obligation_key(turn_id="turn_1", input_event_key="item_empty")
+    assert obligation_key not in api._response_obligations
+
+    pending = api._pending_server_auto_response_for_turn(turn_id="turn_1")
+    assert pending is not None
+    assert pending.active is False
+    assert pending.cancelled_for_upgrade is True
+
+    watchdog_tasks = getattr(api, "_transcript_response_watchdog_tasks", {})
+    task = watchdog_tasks.get("item_empty")
+    assert task is None or task.done()
 
 
 

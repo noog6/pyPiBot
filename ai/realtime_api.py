@@ -9311,6 +9311,47 @@ class RealtimeAPI:
             turn_id=resolved_turn_id,
             input_event_key=input_event_key,
         )
+        transcript_word_count = int(trust_snapshot.get("word_count") or 0)
+        if not transcript or transcript_word_count <= 0:
+            pending = self._pending_server_auto_response_for_turn(turn_id=resolved_turn_id)
+            if isinstance(pending, PendingServerAutoResponse) and pending.active and pending.response_id:
+                cancel_event = {"type": "response.cancel", "response_id": pending.response_id}
+                self._record_cancel_issued_timing(pending.response_id)
+                self._stale_response_ids().add(pending.response_id)
+                self._mark_pending_server_auto_response_cancelled(turn_id=resolved_turn_id, reason="empty_transcript")
+                self._suppress_cancelled_response_audio(pending.response_id)
+                transport = self._get_or_create_transport()
+                await transport.send_json(websocket, cancel_event)
+            self._clear_response_obligation(
+                turn_id=resolved_turn_id,
+                input_event_key=input_event_key,
+                reason="empty_transcript",
+                origin="input_audio_transcription",
+            )
+            self._set_response_gating_verdict(
+                turn_id=resolved_turn_id,
+                input_event_key=input_event_key,
+                action="CLARIFY",
+                reason="empty_transcript",
+            )
+            self._mark_transcript_response_outcome(
+                input_event_key=input_event_key,
+                turn_id=resolved_turn_id,
+                outcome="response_not_scheduled",
+                reason="empty_transcript",
+                details="transcript_missing_or_zero_words",
+            )
+            if not confirmation_active:
+                await self.send_assistant_message(
+                    "I didn't catch that—could you repeat?",
+                    websocket,
+                    response_metadata={
+                        "trigger": "empty_transcript_guard",
+                        "input_event_key": input_event_key,
+                        "turn_id": resolved_turn_id,
+                    },
+                )
+            return
         if transcript and not confirmation_active and await self._maybe_verify_on_risk_clarify(
             transcript=transcript,
             websocket=websocket,
