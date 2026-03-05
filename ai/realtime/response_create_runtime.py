@@ -875,6 +875,7 @@ class ResponseCreateRuntime:
         if api._pending_response_create is None and api._response_create_queue:
             api._dedupe_queued_confirmation_reminders()
             queued_candidates: list[tuple[int, int, dict[str, Any], dict[str, Any], str, str, str]] = []
+            retained_queue_entries: list[dict[str, Any]] = []
             for queued in list(api._response_create_queue):
                 metadata = api._extract_response_create_metadata(queued.get("event") or {})
                 queued_trigger = api._extract_response_create_trigger(metadata)
@@ -893,6 +894,7 @@ class ResponseCreateRuntime:
                 ):
                     skipped_reason = "canonical_terminal_state"
                     continue
+                retained_queue_entries.append(queued)
                 if not api._can_release_queued_response_create(queued_trigger, metadata):
                     skipped_reason = "release_gate_blocked"
                     continue
@@ -907,6 +909,7 @@ class ResponseCreateRuntime:
                         picked_input_event_key,
                     )
                 )
+            api._response_create_queue = deque(retained_queue_entries)
             if queued_candidates:
                 queued_candidates.sort(key=lambda item: (-item[0], item[1]))
                 _, _, queued, metadata, queued_trigger, picked_turn_id, picked_input_event_key = queued_candidates[0]
