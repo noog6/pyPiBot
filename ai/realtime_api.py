@@ -952,6 +952,7 @@ class RealtimeAPI:
         self._pending_server_auto_response_by_turn_id: dict[str, PendingServerAutoResponse] = {}
         self._cancelled_response_ids: set[str] = set()
         self._cancelled_deliverable_logged_ids: set[str] = set()
+        self._cancelled_response_timing_by_id: dict[str, dict[str, Any]] = {}
         self._active_server_auto_input_event_key: str | None = None
         self._current_input_event_key: str | None = None
         self._active_input_event_key_by_turn_id: dict[str, str] = {}
@@ -3648,6 +3649,63 @@ class RealtimeAPI:
         )
         logged_ids.add(normalized_response_id)
 
+    def _cancelled_response_timing_state(self, response_id: str) -> dict[str, Any] | None:
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            return None
+        store = getattr(self, "_cancelled_response_timing_by_id", None)
+        if not isinstance(store, dict):
+            store = {}
+            self._cancelled_response_timing_by_id = store
+        state = store.get(normalized_response_id)
+        if not isinstance(state, dict):
+            state = {
+                "cancel_issued_at": None,
+                "first_audio_delta_seen_at": None,
+                "output_audio_done_at": None,
+                "race_logged": False,
+            }
+            store[normalized_response_id] = state
+        return state
+
+    def _record_cancel_issued_timing(self, response_id: str) -> None:
+        state = self._cancelled_response_timing_state(response_id)
+        if state is None:
+            return
+        state["cancel_issued_at"] = float(time.time())
+        state["first_audio_delta_seen_at"] = None
+        state["output_audio_done_at"] = None
+        state["race_logged"] = False
+
+    def _record_cancelled_audio_race_transition(self, *, response_id: str, event_type: str) -> None:
+        state = self._cancelled_response_timing_state(response_id)
+        if state is None:
+            return
+        now = float(time.time())
+        if event_type == "response.output_audio.delta" and state.get("first_audio_delta_seen_at") is None:
+            state["first_audio_delta_seen_at"] = now
+        if event_type == "response.output_audio.done" and state.get("output_audio_done_at") is None:
+            state["output_audio_done_at"] = now
+        cancel_issued_at = state.get("cancel_issued_at")
+        if cancel_issued_at is None or bool(state.get("race_logged", False)):
+            return
+        first_audio_delta_seen_at = state.get("first_audio_delta_seen_at")
+        output_audio_done_at = state.get("output_audio_done_at")
+        delta_after_cancel_ms: str
+        if isinstance(first_audio_delta_seen_at, (int, float)):
+            delta_after_cancel_ms = str(int((float(first_audio_delta_seen_at) - float(cancel_issued_at)) * 1000))
+        else:
+            delta_after_cancel_ms = "na"
+        logger.info(
+            "cancel_audio_race_observed response_id=%s cancel_issued_at=%s first_audio_delta_seen_at=%s output_audio_done_at=%s delta_after_cancel_ms=%s",
+            str(response_id or "").strip() or "unknown",
+            f"{float(cancel_issued_at):.6f}",
+            f"{float(first_audio_delta_seen_at):.6f}" if isinstance(first_audio_delta_seen_at, (int, float)) else "na",
+            f"{float(output_audio_done_at):.6f}" if isinstance(output_audio_done_at, (int, float)) else "na",
+            delta_after_cancel_ms,
+        )
+        state["race_logged"] = True
+
     def _clear_cancelled_response_tracking(self, response_id: str) -> None:
         normalized_response_id = str(response_id or "").strip()
         if not normalized_response_id:
@@ -3658,6 +3716,9 @@ class RealtimeAPI:
         logged_ids = getattr(self, "_cancelled_deliverable_logged_ids", None)
         if isinstance(logged_ids, set):
             logged_ids.discard(normalized_response_id)
+        timing_store = getattr(self, "_cancelled_response_timing_by_id", None)
+        if isinstance(timing_store, dict):
+            timing_store.pop(normalized_response_id, None)
 
     def _canonical_utterance_key(self, *, turn_id: str, input_event_key: str | None) -> str:
         return self._lifecycle_state_coordinator().canonical_utterance_key(
@@ -8242,6 +8303,10 @@ class RealtimeAPI:
         _ = websocket
         response_id = self._response_id_from_event(event)
         if self._is_cancelled_or_superseded_response_id(response_id):
+            self._record_cancelled_audio_race_transition(
+                response_id=response_id,
+                event_type="response.output_audio.delta",
+            )
             logger.debug(
                 "audio_delta_suppressed run_id=%s response_id=%s event_type=response.output_audio.delta",
                 self._current_run_id() or "",
@@ -8351,6 +8416,7 @@ class RealtimeAPI:
             return False
         if pending_active and old_response_id:
             cancel_event = {"type": "response.cancel", "response_id": old_response_id}
+            self._record_cancel_issued_timing(old_response_id)
             log_ws_event("Outgoing", cancel_event)
             self._track_outgoing_event(cancel_event, origin="server_auto_upgrade")
             self._mark_pending_server_auto_response_cancelled(
@@ -8581,8 +8647,13 @@ class RealtimeAPI:
 
     async def _handle_event_legacy(self, event: dict[str, Any], websocket: Any) -> None:
         event_type = event.get("type")
+        response_id = self._response_id_from_event(event)
         if self._is_cancelled_response_event(event):
-            response_id = self._response_id_from_event(event)
+            if event_type == "response.output_audio.done":
+                self._record_cancelled_audio_race_transition(
+                    response_id=response_id,
+                    event_type="response.output_audio.done",
+                )
             if event_type in {"response.done", "response.completed"}:
                 self._log_cancelled_deliverable_once(response_id, source_event=str(event_type or "unknown"))
                 if event_type == "response.completed":

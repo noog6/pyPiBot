@@ -189,3 +189,101 @@ def test_cancelled_audio_delta_is_suppressed_without_side_effects() -> None:
         "run-123",
         "resp-cancelled",
     )
+
+
+def test_cancelled_audio_events_capture_timing_and_emit_race_log_once() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._cancelled_response_ids = {"resp-cancelled"}
+    api._superseded_response_ids = set()
+    api._cancelled_response_timing_by_id = {
+        "resp-cancelled": {
+            "cancel_issued_at": 100.0,
+            "first_audio_delta_seen_at": None,
+            "output_audio_done_at": None,
+            "race_logged": False,
+        }
+    }
+    api._current_run_id = lambda: "run-123"
+    api._audio_accum = bytearray()
+    api._mic_receive_on_first_audio = True
+    api._audio_playback_busy = False
+    api._speaking_started = False
+    api._is_active_response_guarded = lambda: False
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._cancel_micro_ack = lambda **_kwargs: None
+    api._current_turn_id_or_unknown = lambda: "turn-1"
+    api._canonical_response_state_mutate = lambda **_kwargs: None
+    api._canonical_lifecycle_state = lambda _key: {}
+    api._lifecycle_controller = lambda: SimpleNamespace(on_audio_delta=lambda _key: None)
+    api._active_response_canonical_key = ""
+    api.audio_player = SimpleNamespace(play_audio=AsyncMock())
+    api.mic = SimpleNamespace(is_receiving=False, start_receiving=AsyncMock())
+    api.state_manager = SimpleNamespace(update_state=AsyncMock())
+
+    with patch("ai.realtime_api.time.time", side_effect=[100.25, 100.5]), patch("ai.realtime_api.logger.info") as info_log:
+        asyncio.run(
+            api._handle_response_output_audio_delta_event(
+                {
+                    "type": "response.output_audio.delta",
+                    "response": {"id": "resp-cancelled"},
+                    "delta": "c29tZV9hdWRpbw==",
+                },
+                None,
+            )
+        )
+        asyncio.run(
+            api._handle_event_legacy(
+                {
+                    "type": "response.output_audio.done",
+                    "response": {"id": "resp-cancelled"},
+                },
+                None,
+            )
+        )
+
+    timing = api._cancelled_response_timing_by_id["resp-cancelled"]
+    assert timing["cancel_issued_at"] == 100.0
+    assert timing["first_audio_delta_seen_at"] == 100.25
+    assert timing["output_audio_done_at"] == 100.5
+    race_logs = [
+        call
+        for call in info_log.call_args_list
+        if call.args and isinstance(call.args[0], str) and call.args[0].startswith("cancel_audio_race_observed")
+    ]
+    assert len(race_logs) == 1
+
+
+def test_cancelled_audio_done_without_delta_still_logs_race_with_na_delta() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._cancelled_response_ids = {"resp-cancelled"}
+    api._superseded_response_ids = set()
+    api._cancelled_response_timing_by_id = {
+        "resp-cancelled": {
+            "cancel_issued_at": 10.0,
+            "first_audio_delta_seen_at": None,
+            "output_audio_done_at": None,
+            "race_logged": False,
+        }
+    }
+
+    with patch("ai.realtime_api.time.time", return_value=10.4), patch("ai.realtime_api.logger.info") as info_log:
+        asyncio.run(
+            api._handle_event_legacy(
+                {
+                    "type": "response.output_audio.done",
+                    "response_id": "resp-cancelled",
+                },
+                None,
+            )
+        )
+
+    timing = api._cancelled_response_timing_by_id["resp-cancelled"]
+    assert timing["output_audio_done_at"] == 10.4
+    assert timing["first_audio_delta_seen_at"] is None
+    race_logs = [
+        call
+        for call in info_log.call_args_list
+        if call.args and isinstance(call.args[0], str) and call.args[0].startswith("cancel_audio_race_observed")
+    ]
+    assert len(race_logs) == 1
+    assert race_logs[0].args[-1] == "na"
