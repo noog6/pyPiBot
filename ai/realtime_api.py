@@ -617,6 +617,7 @@ class RealtimeAPI:
 
         self.assistant_reply = ""
         self._assistant_reply_accum = ""
+        self._assistant_reply_response_id: str | None = None
         self._audio_accum = bytearray()
         self._audio_accum_response_id: str | None = None
         self._audio_accum_bytes_target = 9600
@@ -3413,12 +3414,35 @@ class RealtimeAPI:
         normalized_lines = lines[:suffix_start] + [_MEMORY_RECALL_CONCISE_FOLLOWUP]
         return "\n".join(normalized_lines)
 
-    def _append_assistant_reply_text(self, text: str, *, allow_separator: bool = True) -> None:
+    def _append_assistant_reply_text(
+        self,
+        text: str,
+        *,
+        allow_separator: bool = True,
+        response_id: str | None = None,
+    ) -> None:
         """Append assistant text while optionally inserting a boundary separator."""
 
         segment = str(text or "")
         if not segment:
             return
+        active_response_id = str(getattr(self, "_active_response_id", "") or "").strip()
+        normalized_response_id = str(response_id or "").strip()
+        if normalized_response_id and active_response_id and normalized_response_id != active_response_id:
+            logger.debug(
+                "assistant_text_delta_discarded reason=inactive_response response_id=%s active_response_id=%s",
+                normalized_response_id,
+                active_response_id,
+            )
+            return
+        buffer_response_id = str(getattr(self, "_assistant_reply_response_id", "") or "").strip()
+        if normalized_response_id and buffer_response_id and normalized_response_id != buffer_response_id:
+            self.assistant_reply = ""
+            self._assistant_reply_accum = ""
+        if normalized_response_id:
+            self._assistant_reply_response_id = normalized_response_id
+        elif active_response_id and not buffer_response_id:
+            self._assistant_reply_response_id = active_response_id
         prior = str(getattr(self, "_assistant_reply_accum", "") or "")
         needs_separator = (
             allow_separator
@@ -5657,6 +5681,7 @@ class RealtimeAPI:
             await transport.send_json(websocket, cancel_event)
         self.assistant_reply = ""
         self._assistant_reply_accum = ""
+        self._assistant_reply_response_id = None
         clarify_key = f"{input_event_key}:clarify"
         clarify_text = (
             "I can’t see right now. Want me to take a quick look with the camera?"
@@ -8990,7 +9015,9 @@ class RealtimeAPI:
         self.response_in_progress = True
         self._response_in_flight = True
         self._speaking_started = False
+        self.assistant_reply = ""
         self._assistant_reply_accum = ""
+        self._assistant_reply_response_id = self._active_response_id
         self._tool_call_records = []
         self._last_tool_call_results = []
         self._last_response_metadata = {}
@@ -9151,6 +9178,10 @@ class RealtimeAPI:
             cancel_event = {"type": "response.cancel", "response_id": old_response_id}
             self._record_cancel_issued_timing(old_response_id)
             self._stale_response_ids().add(old_response_id)
+            if str(getattr(self, "_assistant_reply_response_id", "") or "").strip() == old_response_id:
+                self.assistant_reply = ""
+                self._assistant_reply_accum = ""
+                self._assistant_reply_response_id = None
             log_ws_event("Outgoing", cancel_event)
             self._track_outgoing_event(cancel_event, origin="server_auto_upgrade")
             self._mark_pending_server_auto_response_cancelled(
@@ -9526,7 +9557,7 @@ class RealtimeAPI:
             self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
             delta = event.get("delta", "")
             self._mark_first_assistant_utterance_observed_if_needed(delta)
-            self._append_assistant_reply_text(delta, allow_separator=False)
+            self._append_assistant_reply_text(delta, allow_separator=False, response_id=response_id)
             self.state_manager.update_state(InteractionState.SPEAKING, "text output")
         elif event_type == "response.output_text.delta":
             if self._is_active_response_guarded():
@@ -9539,7 +9570,7 @@ class RealtimeAPI:
                 len(delta),
             )
             self._mark_first_assistant_utterance_observed_if_needed(delta)
-            self._append_assistant_reply_text(delta, allow_separator=False)
+            self._append_assistant_reply_text(delta, allow_separator=False, response_id=response_id)
             self.state_manager.update_state(InteractionState.SPEAKING, "text output")
         elif event_type in {"response.output_text.done", "response.text.done"}:
             if self._is_active_response_guarded():
@@ -9555,7 +9586,7 @@ class RealtimeAPI:
             self._mark_utterance_info_summary(deliverable_seen=True)
             delta = event.get("delta", "")
             self._mark_first_assistant_utterance_observed_if_needed(delta)
-            self._append_assistant_reply_text(delta, allow_separator=False)
+            self._append_assistant_reply_text(delta, allow_separator=False, response_id=response_id)
         elif event_type == "response.output_audio_transcript.done":
             await self.handle_transcribe_response_done()
             self.state_manager.update_state(
@@ -9580,7 +9611,7 @@ class RealtimeAPI:
                 return
             self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
             self._mark_first_assistant_utterance_observed_if_needed(extracted_text)
-            self._append_assistant_reply_text(extracted_text)
+            self._append_assistant_reply_text(extracted_text, response_id=response_id)
             self.state_manager.update_state(InteractionState.SPEAKING, "text output")
             current_turn_id = self._current_turn_id_or_unknown()
             current_input_event_key = str(getattr(self, "_current_input_event_key", "") or "").strip()

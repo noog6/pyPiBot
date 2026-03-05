@@ -98,6 +98,62 @@ def test_cancel_and_replace_server_auto_on_transcript_final_includes_preference_
     assert api._is_cancelled_response_event({"response_id": "resp-replacement"}) is False
 
 
+
+
+def test_cancel_and_replace_clears_old_text_buffer_and_rejects_stale_deltas() -> None:
+    api = _build_api_stub()
+    transport = _Transport()
+
+    api.assistant_reply = "I don't have that"
+    api._assistant_reply_accum = "I don't have that"
+    api._assistant_reply_response_id = "resp-server-auto"
+
+    api._pending_server_auto_response_by_turn_id["turn_2"] = PendingServerAutoResponse(
+        turn_id="turn_2",
+        response_id="resp-server-auto",
+        canonical_key="run-464:turn_2:synthetic_server_auto_1",
+        created_at_ms=1,
+        active=True,
+    )
+    api._get_or_create_transport = lambda: transport
+    api._peek_pending_preference_memory_context_payload = lambda **_kwargs: None
+
+    async def _fake_send_response_create(_websocket, _event, **_kwargs):
+        return True
+
+    api._send_response_create = _fake_send_response_create
+
+    replaced = asyncio.run(
+        api._cancel_and_replace_pending_server_auto_on_transcript_final(
+            websocket=object(),
+            turn_id="turn_2",
+            input_event_key="item_abc",
+            origin_label="upgraded_response",
+        )
+    )
+
+    assert replaced is True
+    assert api.assistant_reply == ""
+    assert api._assistant_reply_accum == ""
+    assert api._assistant_reply_response_id is None
+
+    asyncio.run(
+        api._handle_event_legacy(
+            {"type": "response.text.delta", "response_id": "resp-server-auto", "delta": "that"},
+            websocket=None,
+        )
+    )
+
+    assert api.assistant_reply == ""
+    assert api._assistant_reply_accum == ""
+
+    api._active_response_id = "resp-replacement"
+    api._append_assistant_reply_text("Your favorite editor is Vim.", response_id="resp-replacement")
+
+    assert api.assistant_reply == "Your favorite editor is Vim."
+    assert api._assistant_reply_accum == "Your favorite editor is Vim."
+    assert api._assistant_reply_response_id == "resp-replacement"
+
 def test_transcript_final_without_pending_server_auto_does_not_cancel_or_replace() -> None:
     api = _build_api_stub()
     transport = _Transport()
