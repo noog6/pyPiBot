@@ -955,6 +955,8 @@ class RealtimeAPI:
         self._suppressed_audio_response_ids: set[str] = set()
         self._cancelled_deliverable_logged_ids: set[str] = set()
         self._cancelled_response_timing_by_id: dict[str, dict[str, Any]] = {}
+        self._stale_response_drop_window_by_id: dict[str, dict[str, Any]] = {}
+        self._stale_response_drop_window_s = 3.0
         self._active_server_auto_input_event_key: str | None = None
         self._current_input_event_key: str | None = None
         self._active_input_event_key_by_turn_id: dict[str, str] = {}
@@ -3601,6 +3603,98 @@ class RealtimeAPI:
         )
         return pending
 
+    def should_cancel_and_replace(
+        self,
+        *,
+        server_auto_state: PendingServerAutoResponse | None,
+        transcript_final_state: dict[str, Any] | None,
+        pref_ctx_state: dict[str, Any] | None,
+    ) -> bool:
+        _ = transcript_final_state
+        _ = pref_ctx_state
+        if not isinstance(server_auto_state, PendingServerAutoResponse) or not server_auto_state.active:
+            return False
+        canonical_key = str(server_auto_state.canonical_key or "").strip()
+        if canonical_key and self._canonical_first_audio_started(canonical_key):
+            return False
+        return True
+
+    def _clear_canonical_terminal_delivery_state(self, *, canonical_key: str) -> None:
+        normalized_key = str(canonical_key or "").strip()
+        if not normalized_key:
+            return
+        self._canonical_response_state_mutate(
+            canonical_key=normalized_key,
+            turn_id=self._current_turn_id_or_unknown(),
+            input_event_key=None,
+            mutator=lambda record: (
+                setattr(record, "cancel_sent", False),
+                setattr(record, "done", False),
+            ),
+        )
+
+    def _mark_canonical_cancelled_for_upgrade(
+        self,
+        *,
+        canonical_key: str,
+        turn_id: str,
+        response_id: str,
+    ) -> None:
+        normalized_key = str(canonical_key or "").strip()
+        if not normalized_key:
+            return
+        self._canonical_response_state_mutate(
+            canonical_key=normalized_key,
+            turn_id=turn_id,
+            input_event_key=None,
+            mutator=lambda record: (
+                setattr(record, "created", True),
+                setattr(record, "cancel_sent", True),
+                setattr(record, "done", False),
+                setattr(record, "response_id", str(response_id or "")),
+            ),
+        )
+        self._lifecycle_controller().on_cancel_sent(normalized_key)
+
+    def _record_stale_response_drop(self, *, response_id: str, event_type: str) -> None:
+        normalized_response_id = str(response_id or "").strip() or "unknown"
+        normalized_event_type = str(event_type or "").strip() or "unknown"
+        now = time.monotonic()
+        window_s = max(0.5, float(getattr(self, "_stale_response_drop_window_s", 3.0) or 3.0))
+        store = getattr(self, "_stale_response_drop_window_by_id", None)
+        if not isinstance(store, dict):
+            store = {}
+            self._stale_response_drop_window_by_id = store
+        state = store.get(normalized_response_id)
+        if not isinstance(state, dict) or (now - float(state.get("started_at", now))) > window_s:
+            state = {
+                "started_at": now,
+                "counts": {},
+                "summary_emitted": False,
+            }
+            store[normalized_response_id] = state
+        counts = state.get("counts")
+        if not isinstance(counts, dict):
+            counts = {}
+            state["counts"] = counts
+        counts[normalized_event_type] = int(counts.get(normalized_event_type, 0)) + 1
+        if counts[normalized_event_type] == 1:
+            logger.debug(
+                "dropped_stale_response_event response_id=%s event_type=%s",
+                normalized_response_id,
+                normalized_event_type,
+            )
+            return
+        if state.get("summary_emitted", False):
+            return
+        state["summary_emitted"] = True
+        logger.info(
+            "dropped_stale_response_event_summary response_id=%s counts=%s window_s=%s",
+            normalized_response_id,
+            json.dumps(counts, sort_keys=True),
+            int(window_s),
+        )
+
     def _stale_response_ids(self) -> set[str]:
         stale_ids = getattr(self, "_stale_response_ids_set", None)
         if not isinstance(stale_ids, set):
@@ -3624,10 +3718,9 @@ class RealtimeAPI:
             return False
         if not self._is_stale_response_event(event):
             return False
-        logger.info(
-            "dropped_stale_response_event response_id=%s event_type=%s",
-            self._response_id_from_event(event) or "unknown",
-            event_type or "unknown",
+        self._record_stale_response_drop(
+            response_id=self._response_id_from_event(event),
+            event_type=event_type,
         )
         return True
 
@@ -8490,6 +8583,15 @@ class RealtimeAPI:
         )
         if pending is None:
             return False
+        replacement_canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+        if str(pending.canonical_key or "").strip() == replacement_canonical_key:
+            logger.info(
+                "upgrade_flow_fallback outcome=keep_server_auto reason=same_canonical_key run_id=%s turn_id=%s canonical_key=%s",
+                self._current_run_id() or "",
+                turn_id,
+                replacement_canonical_key,
+            )
+            return False
         if pending_active and old_response_id:
             cancel_event = {"type": "response.cancel", "response_id": old_response_id}
             self._record_cancel_issued_timing(old_response_id)
@@ -8501,6 +8603,11 @@ class RealtimeAPI:
                 reason="transcript_final_upgrade",
             )
             self._suppress_cancelled_response_audio(old_response_id)
+            self._mark_canonical_cancelled_for_upgrade(
+                canonical_key=pending.canonical_key,
+                turn_id=turn_id,
+                response_id=old_response_id,
+            )
             transport = self._get_or_create_transport()
             await transport.send_json(websocket, cancel_event)
             if str(getattr(self, "_active_response_id", "") or "").strip() == old_response_id:
@@ -8513,7 +8620,7 @@ class RealtimeAPI:
         metadata["input_event_key"] = str(input_event_key or "").strip()
         metadata["safety_override"] = "true"
         metadata["transcript_upgrade_replacement"] = "true"
-        replacement_canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+        self._clear_canonical_terminal_delivery_state(canonical_key=replacement_canonical_key)
         pref_payload = self._peek_pending_preference_memory_context_payload(
             turn_id=turn_id,
             input_event_key=input_event_key,
@@ -8683,6 +8790,34 @@ class RealtimeAPI:
             ):
                 return
             if decision_path == "upgraded_response":
+                pending = self._pending_server_auto_response_for_turn(turn_id=resolved_turn_id)
+                replacement_canonical_key = self._canonical_utterance_key(
+                    turn_id=resolved_turn_id,
+                    input_event_key=input_event_key,
+                )
+                can_cancel = self.should_cancel_and_replace(
+                    server_auto_state=pending,
+                    transcript_final_state={
+                        "turn_id": resolved_turn_id,
+                        "input_event_key": input_event_key,
+                    },
+                    pref_ctx_state=self._peek_pending_preference_memory_context_payload(
+                        turn_id=resolved_turn_id,
+                        input_event_key=input_event_key,
+                    ),
+                )
+                if pending is not None and not can_cancel:
+                    fallback_reason = "audio_already_started"
+                    if str(getattr(pending, "canonical_key", "") or "").strip() == replacement_canonical_key:
+                        fallback_reason = "same_canonical_key"
+                    logger.info(
+                        "upgrade_flow_fallback outcome=keep_server_auto reason=%s run_id=%s turn_id=%s input_event_key=%s",
+                        fallback_reason,
+                        self._current_run_id() or "",
+                        resolved_turn_id,
+                        input_event_key,
+                    )
+                    return
                 if await self._cancel_and_replace_pending_server_auto_on_transcript_final(
                     websocket=websocket,
                     turn_id=resolved_turn_id,

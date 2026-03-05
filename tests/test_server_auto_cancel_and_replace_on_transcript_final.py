@@ -35,6 +35,13 @@ def _build_api_stub() -> RealtimeAPI:
     api._active_response_id = "resp-server-auto"
     api._canonical_utterance_key = lambda *, turn_id, input_event_key: f"run-464:{turn_id}:{input_event_key}"
     api._current_utterance_seq = lambda: 2
+    api._canonical_response_state_by_key = {}
+    api._canonical_response_state_store = lambda: api._canonical_response_state_by_key
+    api._sync_legacy_response_state_mirrors = lambda: None
+    api._debug_assert_canonical_state_invariants = lambda **_kwargs: None
+    from ai.interaction_lifecycle_controller import InteractionLifecycleController
+    lifecycle_controller = InteractionLifecycleController()
+    api._lifecycle_controller = lambda: lifecycle_controller
     api._cancel_micro_ack = lambda **_kwargs: None
     api._canonical_first_audio_started = lambda _canonical_key: True
     return api
@@ -154,6 +161,24 @@ def test_cancel_and_replace_returns_false_when_replacement_blocked() -> None:
     assert cancel_reasons == ["upgrade_selected", "upgrade_blocked"]
 
 
+def test_upgrade_fallback_keeps_server_auto_when_audio_started() -> None:
+    api = _build_api_stub()
+    pending = PendingServerAutoResponse(
+        turn_id="turn_5",
+        response_id="resp-server-auto",
+        canonical_key="run-464:turn_5:synthetic_server_auto_1",
+        created_at_ms=1,
+        active=True,
+    )
+    api._canonical_first_audio_started = lambda _canonical_key: True
+
+    assert api.should_cancel_and_replace(
+        server_auto_state=pending,
+        transcript_final_state={"turn_id": "turn_5", "input_event_key": "item_555"},
+        pref_ctx_state=None,
+    ) is False
+
+
 def test_upgrade_replacement_allowed_when_audio_started() -> None:
     api = _build_api_stub()
     api._response_create_runtime = None
@@ -207,3 +232,27 @@ def test_upgrade_replacement_allowed_when_audio_started() -> None:
 
     sent = asyncio.run(runtime.send_response_create(ws, event, origin="upgraded_response"))
     assert sent is True
+
+
+def test_terminal_state_is_per_canonical_key_not_turn_id() -> None:
+    api = _build_api_stub()
+    api._canonical_response_state_by_key = {}
+    api._canonical_response_state_store = lambda: api._canonical_response_state_by_key
+    api._sync_legacy_response_state_mirrors = lambda: None
+    api._debug_assert_canonical_state_invariants = lambda **_kwargs: None
+
+    cancelled_key = "run-464:turn_8:synthetic_server_auto_1"
+    replacement_key = "run-464:turn_8:item_real"
+    api._mark_canonical_cancelled_for_upgrade(
+        canonical_key=cancelled_key,
+        turn_id="turn_8",
+        response_id="resp-old",
+    )
+    api._clear_canonical_terminal_delivery_state(canonical_key=replacement_key)
+
+    assert api._drop_response_create_for_terminal_state(
+        turn_id="turn_8",
+        input_event_key="item_real",
+        origin="upgraded_response",
+        response_metadata={"transcript_upgrade_replacement": "true"},
+    ) is False

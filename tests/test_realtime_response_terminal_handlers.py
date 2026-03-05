@@ -168,3 +168,25 @@ def test_handle_response_done_marks_micro_ack_as_non_deliverable() -> None:
         "deliverable_selected response_id=%s selected=false reason=micro_ack_non_deliverable",
         "resp_1",
     )
+
+
+def test_handle_response_done_uses_active_canonical_key_for_lifecycle() -> None:
+    api = _make_api()
+    lifecycle_calls: list[str] = []
+    api._active_response_input_event_key = "item_real"
+    api._active_response_canonical_key = "run-472:turn_1:synthetic_server_auto_2"
+    api._response_delivery_state = lambda **_kwargs: None
+    api._lifecycle_controller = lambda: SimpleNamespace(on_response_done=lambda key: lifecycle_calls.append(key))
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+
+    asyncio.run(api.handle_response_done({"type": "response.done"}))
+
+    assert lifecycle_calls == ["run-472:turn_1:synthetic_server_auto_2"]

@@ -358,11 +358,11 @@ def test_stale_response_done_event_is_dropped() -> None:
     api._superseded_response_ids = set()
     api.handle_response_done = AsyncMock()
 
-    with patch("ai.realtime_api.logger.info") as info_log:
+    with patch("ai.realtime_api.logger.debug") as debug_log:
         asyncio.run(api._handle_response_done_event({"type": "response.done", "response_id": "resp-stale"}, None))
 
     api.handle_response_done.assert_not_called()
-    info_log.assert_any_call(
+    debug_log.assert_any_call(
         "dropped_stale_response_event response_id=%s event_type=%s",
         "resp-stale",
         "response.done",
@@ -380,7 +380,7 @@ def test_stale_response_audio_transcript_delta_is_dropped_without_merge() -> Non
     api._mark_first_assistant_utterance_observed_if_needed = AsyncMock()
     api._append_assistant_reply_text = AsyncMock()
 
-    with patch("ai.realtime_api.logger.info") as info_log:
+    with patch("ai.realtime_api.logger.debug") as debug_log:
         asyncio.run(
             api._handle_event_legacy(
                 {
@@ -395,7 +395,7 @@ def test_stale_response_audio_transcript_delta_is_dropped_without_merge() -> Non
     api._mark_utterance_info_summary.assert_not_called()
     api._mark_first_assistant_utterance_observed_if_needed.assert_not_called()
     api._append_assistant_reply_text.assert_not_called()
-    info_log.assert_any_call(
+    debug_log.assert_any_call(
         "dropped_stale_response_event response_id=%s event_type=%s",
         "resp-stale",
         "response.output_audio_transcript.delta",
@@ -411,7 +411,7 @@ def test_stale_response_output_audio_done_is_dropped_without_playback_completion
     api.handle_audio_response_done = AsyncMock()
     api.state_manager = SimpleNamespace(update_state=AsyncMock())
 
-    with patch("ai.realtime_api.logger.info") as info_log:
+    with patch("ai.realtime_api.logger.debug") as debug_log:
         asyncio.run(
             api._handle_event_legacy(
                 {
@@ -424,8 +424,31 @@ def test_stale_response_output_audio_done_is_dropped_without_playback_completion
 
     api.handle_audio_response_done.assert_not_called()
     api.state_manager.update_state.assert_not_called()
-    info_log.assert_any_call(
+    debug_log.assert_any_call(
         "dropped_stale_response_event response_id=%s event_type=%s",
         "resp-stale",
         "response.output_audio.done",
+    )
+
+
+def test_dropped_stale_response_event_is_rate_limited() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._stale_response_ids_set = {"resp-stale"}
+    api._cancelled_response_ids = set()
+    api._suppressed_audio_response_ids = set()
+    api._superseded_response_ids = set()
+    api._stale_response_drop_window_by_id = {}
+    api._stale_response_drop_window_s = 3.0
+
+    with patch("ai.realtime_api.logger.info") as info_log:
+        assert api._should_drop_stale_response_event({"type": "response.done", "response_id": "resp-stale"}) is True
+        assert api._should_drop_stale_response_event({"type": "response.done", "response_id": "resp-stale"}) is True
+        assert api._should_drop_stale_response_event({"type": "response.done", "response_id": "resp-stale"}) is True
+
+    assert info_log.call_count == 1
+    info_log.assert_called_with(
+        "dropped_stale_response_event_summary response_id=%s counts=%s window_s=%s",
+        "resp-stale",
+        '{"response.done": 2}',
+        3,
     )
