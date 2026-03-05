@@ -23,7 +23,11 @@ def _build_api_stub() -> RealtimeAPI:
     api = RealtimeAPI.__new__(RealtimeAPI)
     api._pending_server_auto_response_by_turn_id = {}
     api._cancelled_response_ids = set()
+    api._suppressed_audio_response_ids = set()
     api._cancelled_response_timing_by_id = {}
+    api._audio_accum = bytearray()
+    api._audio_accum_response_id = None
+    api.audio_player = None
     api._current_run_id = lambda: "run-464"
     api._track_outgoing_event = lambda *_args, **_kwargs: None
     api._response_in_flight = True
@@ -76,6 +80,7 @@ def test_cancel_and_replace_server_auto_on_transcript_final_includes_preference_
     assert replacement_calls[0]["origin"] == "upgraded_response"
     assert "Vim" in str(replacement_calls[0]["memory_brief_note"])
     assert api._is_cancelled_response_event({"response_id": "resp-server-auto"}) is True
+    assert "resp-server-auto" in api._suppressed_audio_response_ids
     timing = api._cancelled_response_timing_by_id.get("resp-server-auto")
     assert isinstance(timing, dict)
     assert timing.get("cancel_issued_at") is not None

@@ -222,6 +222,21 @@ class AudioPlayer:
             self._pending = max(0, self._pending - removed)
             self._ratecv_state = None
 
+    def cancel_current_response(self) -> None:
+        """Best-effort cancel for current response audio.
+
+        Guarantees queued audio is flushed and future chunks can be suppressed by callers.
+        True mid-buffer interruption depends on backend support, so stream interruption is
+        attempted opportunistically and failures are tolerated.
+        """
+
+        self.flush()
+        try:
+            self.stream.stop_stream()
+            self.stream.start_stream()
+        except Exception:
+            logger.debug("Audio stream interruption unavailable during cancel_current_response")
+
     def close(self) -> None:
         """Close the audio output stream."""
 

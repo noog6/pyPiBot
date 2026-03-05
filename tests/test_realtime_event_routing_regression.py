@@ -147,9 +147,11 @@ def test_response_id_from_event_prefers_explicit_over_nested_response_object() -
 def test_cancelled_audio_delta_is_suppressed_without_side_effects() -> None:
     api = RealtimeAPI.__new__(RealtimeAPI)
     api._cancelled_response_ids = {"resp-cancelled"}
+    api._suppressed_audio_response_ids = set()
     api._superseded_response_ids = set()
     api._current_run_id = lambda: "run-123"
     api._audio_accum = bytearray(b"seed")
+    api._audio_accum_response_id = "resp-other"
     api._mic_receive_on_first_audio = True
     api._audio_playback_busy = False
     api._speaking_started = False
@@ -194,6 +196,7 @@ def test_cancelled_audio_delta_is_suppressed_without_side_effects() -> None:
 def test_cancelled_audio_events_capture_timing_and_emit_race_log_once() -> None:
     api = RealtimeAPI.__new__(RealtimeAPI)
     api._cancelled_response_ids = {"resp-cancelled"}
+    api._suppressed_audio_response_ids = set()
     api._superseded_response_ids = set()
     api._cancelled_response_timing_by_id = {
         "resp-cancelled": {
@@ -256,6 +259,7 @@ def test_cancelled_audio_events_capture_timing_and_emit_race_log_once() -> None:
 def test_cancelled_audio_done_without_delta_still_logs_race_with_na_delta() -> None:
     api = RealtimeAPI.__new__(RealtimeAPI)
     api._cancelled_response_ids = {"resp-cancelled"}
+    api._suppressed_audio_response_ids = set()
     api._superseded_response_ids = set()
     api._cancelled_response_timing_by_id = {
         "resp-cancelled": {
@@ -287,3 +291,60 @@ def test_cancelled_audio_done_without_delta_still_logs_race_with_na_delta() -> N
     ]
     assert len(race_logs) == 1
     assert race_logs[0].args[-1] == "na"
+
+
+def test_suppress_cancelled_response_audio_clears_accumulator_and_flushes_player() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._suppressed_audio_response_ids = set()
+    api._audio_accum = bytearray(b"stale")
+    api._audio_accum_response_id = "resp-x"
+    player = SimpleNamespace(cancel_current_response=AsyncMock())
+    player.cancel_current_response = lambda: setattr(player, "cancelled", True)
+    player.cancelled = False
+    api.audio_player = player
+
+    api._suppress_cancelled_response_audio("resp-x")
+
+    assert "resp-x" in api._suppressed_audio_response_ids
+    assert api._audio_accum == bytearray()
+    assert api._audio_accum_response_id is None
+    assert player.cancelled is True
+
+
+def test_suppressed_response_audio_delta_is_dropped_without_enqueue() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._cancelled_response_ids = set()
+    api._suppressed_audio_response_ids = {"resp-x"}
+    api._superseded_response_ids = set()
+    api._current_run_id = lambda: "run-123"
+    api._audio_accum = bytearray()
+    api._audio_accum_response_id = None
+    api._mic_receive_on_first_audio = True
+    api._audio_playback_busy = False
+    api._speaking_started = False
+    api._is_active_response_guarded = lambda: False
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._cancel_micro_ack = lambda **_kwargs: None
+    api._current_turn_id_or_unknown = lambda: "turn-1"
+    api._canonical_response_state_mutate = lambda **_kwargs: None
+    api._canonical_lifecycle_state = lambda _key: {}
+    api._lifecycle_controller = lambda: SimpleNamespace(on_audio_delta=lambda _key: None)
+    api._active_response_canonical_key = ""
+    api.audio_player = SimpleNamespace(play_audio=AsyncMock())
+    api.mic = SimpleNamespace(is_receiving=False, start_receiving=AsyncMock())
+    api.state_manager = SimpleNamespace(update_state=AsyncMock())
+
+    asyncio.run(
+        api._handle_response_output_audio_delta_event(
+            {
+                "type": "response.output_audio.delta",
+                "response": {"id": "resp-x"},
+                "delta": "c29tZV9hdWRpbw==",
+            },
+            None,
+        )
+    )
+
+    assert api._audio_playback_busy is False
+    assert api._audio_accum == bytearray()
+    api.audio_player.play_audio.assert_not_called()
