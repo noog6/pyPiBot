@@ -68,6 +68,27 @@ def test_clarify_replaces_answer_no_mixed_output() -> None:
     assert transport.sent == [{"type": "response.cancel", "response_id": "resp-old"}]
     assert sent_messages
     msg, metadata = sent_messages[0]
-    assert "Quick check" not in msg
-    assert "I can’t see right now" in msg
+    assert msg == "I can’t see right now. Want me to take a quick look with the camera?"
+    assert "Actually, I can see" not in msg
+    assert "gray" not in msg.lower()
     assert metadata["input_event_key"] == "evt-1:clarify"
+
+
+def test_visual_unavailable_message_normalizer_blocks_vision_claims_without_camera_tool_result() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._tool_call_records = []
+    api._current_turn_id_or_unknown = lambda: "turn-3"
+
+    sanitized = api._normalize_verify_clarify_message(
+        message=(
+            "I can’t see right now. Want me to take a quick look with the camera? "
+            "Actually, I can see that your pants look gray."
+        ),
+        metadata={
+            "trigger": "asr_verify_on_risk",
+            "reason": "visual_unavailable",
+            "turn_id": "turn-3",
+        },
+    )
+
+    assert sanitized == "I can’t see right now. Want me to take a quick look with the camera?"
