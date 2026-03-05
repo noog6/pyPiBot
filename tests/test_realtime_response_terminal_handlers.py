@@ -146,3 +146,25 @@ def test_handle_response_done_logs_normal_deliverable_selection() -> None:
         "resp_1",
     )
 
+
+
+def test_handle_response_done_marks_micro_ack_as_non_deliverable() -> None:
+    api = _make_api()
+    api._active_response_origin = "micro_ack"
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+
+    with patch("ai.realtime.response_terminal_handlers.logger.info") as info_log:
+        asyncio.run(api.handle_response_done({"type": "response.done"}))
+
+    info_log.assert_any_call(
+        "deliverable_selected response_id=%s selected=false reason=micro_ack_non_deliverable",
+        "resp_1",
+    )

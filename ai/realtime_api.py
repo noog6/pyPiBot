@@ -2509,11 +2509,10 @@ class RealtimeAPI:
         metadata_turn_id = str(metadata.get("turn_id") or "").strip() if isinstance(metadata, dict) else ""
         metadata_input_event_key = str(metadata.get("input_event_key") or "").strip() if isinstance(metadata, dict) else ""
         consumes_canonical_slot = self._response_consumes_canonical_slot(metadata)
+        is_micro_ack = isinstance(metadata, dict) and str(metadata.get("micro_ack", "")).strip().lower() == "true"
         pending_origin = {
-            "origin": normalized_origin,
-            "micro_ack": "true"
-            if isinstance(metadata, dict) and str(metadata.get("micro_ack", "")).strip().lower() == "true"
-            else "false",
+            "origin": "micro_ack" if is_micro_ack else normalized_origin,
+            "micro_ack": "true" if is_micro_ack else "false",
             "consumes_canonical_slot": "true" if consumes_canonical_slot else "false",
             "turn_id": metadata_turn_id,
             "input_event_key": metadata_input_event_key,
@@ -4495,6 +4494,13 @@ class RealtimeAPI:
         if not isinstance(metadata, dict):
             return False
         return str(metadata.get("explicit_multipart", "")).strip().lower() in {"true", "1", "yes"}
+
+    def _should_upgrade_with_audio_started(self, metadata: dict[str, Any] | None, *, origin: str) -> bool:
+        if not isinstance(metadata, dict):
+            return False
+        if str(metadata.get("transcript_upgrade_replacement", "")).strip().lower() in {"true", "1", "yes"}:
+            return True
+        return str(origin or "").strip().lower() == "upgraded_response"
 
     def _canonical_lifecycle_state(self, canonical_key: str) -> dict[str, bool]:
         lifecycle_state = getattr(self, "_canonical_response_lifecycle_state", None)
@@ -8465,6 +8471,7 @@ class RealtimeAPI:
         input_event_key: str,
         origin_label: str = "upgraded_response",
     ) -> bool:
+        self._cancel_micro_ack(turn_id=turn_id, reason="upgrade_selected")
         pending = self._pending_server_auto_response_for_turn(turn_id=turn_id)
         pending_active = bool(isinstance(pending, PendingServerAutoResponse) and pending.active)
         old_response_id = pending.response_id if pending_active and pending is not None else ""
@@ -8522,7 +8529,7 @@ class RealtimeAPI:
             len(pref_prompt_note),
             str(pref_hit).lower(),
         )
-        await self._send_response_create(
+        replacement_sent = await self._send_response_create(
             websocket,
             replacement_event,
             origin=origin_label,
@@ -8535,6 +8542,9 @@ class RealtimeAPI:
             record_ai_call=True,
             memory_brief_note=pref_prompt_note or None,
         )
+        if not replacement_sent:
+            self._cancel_micro_ack(turn_id=turn_id, reason="upgrade_blocked")
+            return False
         self._mark_pending_server_auto_response_replaced(turn_id=turn_id)
         return True
 
@@ -8601,14 +8611,6 @@ class RealtimeAPI:
             input_event_key,
             len(pending_server_auto_keys),
         )
-        self._maybe_schedule_micro_ack(
-            turn_id=resolved_turn_id,
-            category=self._micro_ack_category_for_reason("transcript_finalized"),
-            channel="voice",
-            action=self._canonical_utterance_key(turn_id=resolved_turn_id, input_event_key=input_event_key),
-            reason="transcript_finalized",
-            expected_delay_ms=700,
-        )
         self._start_transcript_response_watchdog(
             turn_id=resolved_turn_id,
             input_event_key=input_event_key,
@@ -8648,6 +8650,17 @@ class RealtimeAPI:
                     input_event_key,
                     decision_path,
                 )
+            if decision_path != "upgraded_response":
+                self._maybe_schedule_micro_ack(
+                    turn_id=resolved_turn_id,
+                    category=self._micro_ack_category_for_reason("transcript_finalized"),
+                    channel="voice",
+                    action=self._canonical_utterance_key(turn_id=resolved_turn_id, input_event_key=input_event_key),
+                    reason="transcript_finalized",
+                    expected_delay_ms=700,
+                )
+            else:
+                self._cancel_micro_ack(turn_id=resolved_turn_id, reason="upgrade_selected")
             self._record_user_input(transcript, source="input_audio_transcription")
             if await self._maybe_handle_approval_response(transcript, websocket):
                 return

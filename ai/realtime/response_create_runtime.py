@@ -80,7 +80,11 @@ class ResponseCreateRuntime:
         consumes_canonical_slot = api._response_consumes_canonical_slot(response_metadata)
         explicit_multipart = api._response_is_explicit_multipart(response_metadata)
         transcript_upgrade_replacement = str(response_metadata.get("transcript_upgrade_replacement", "")).strip().lower() in {"true", "1", "yes"}
-        if consumes_canonical_slot and api._canonical_first_audio_started(canonical_key) and not explicit_multipart:
+        allow_audio_started_upgrade = api._should_upgrade_with_audio_started(
+            response_metadata,
+            origin=normalized_origin,
+        )
+        if consumes_canonical_slot and api._canonical_first_audio_started(canonical_key) and not explicit_multipart and not allow_audio_started_upgrade:
             logger.info(
                 "response_schedule_blocked run_id=%s turn_id=%s origin=%s mode=direct reason=canonical_audio_already_started canonical_key=%s",
                 api._current_run_id() or "",
@@ -158,6 +162,7 @@ class ResponseCreateRuntime:
             consumes_canonical_slot
             and api._canonical_first_audio_started(canonical_key)
             and not api._response_is_explicit_multipart(response_metadata)
+            and not allow_audio_started_upgrade
         ):
             logger.info(
                 "response_schedule_blocked run_id=%s turn_id=%s origin=%s mode=queued reason=canonical_audio_already_started canonical_key=%s",
@@ -502,6 +507,10 @@ class ResponseCreateRuntime:
         consumes_canonical_slot = api._response_consumes_canonical_slot(response_metadata)
         explicit_multipart = api._response_is_explicit_multipart(response_metadata)
         transcript_upgrade_replacement = str(response_metadata.get("transcript_upgrade_replacement", "")).strip().lower() in {"true", "1", "yes"}
+        allow_audio_started_upgrade = api._should_upgrade_with_audio_started(
+            response_metadata,
+            origin=normalized_origin,
+        )
         suppression_turns = getattr(api, "_preference_recall_suppressed_turns", set())
         created_keys = getattr(api, "_response_created_canonical_keys", set())
         single_flight_block_reason = ("" if transcript_upgrade_replacement else api._single_flight_block_reason(
@@ -526,7 +535,7 @@ class ResponseCreateRuntime:
             response_in_flight=bool(api._response_in_flight),
             audio_playback_busy=bool(api._audio_playback_busy),
             consumes_canonical_slot=consumes_canonical_slot,
-            canonical_audio_started=api._canonical_first_audio_started(canonical_key),
+            canonical_audio_started=(api._canonical_first_audio_started(canonical_key) and not allow_audio_started_upgrade),
             explicit_multipart=explicit_multipart,
             single_flight_block_reason=single_flight_block_reason,
             already_delivered=api._is_response_already_delivered(turn_id=turn_id, input_event_key=current_input_event_key),
