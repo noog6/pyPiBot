@@ -234,6 +234,59 @@ def test_duplicate_assistant_message_create_single_flight_guard(monkeypatch) -> 
         assert same_key[0]["origin"] == "assistant_message"
 
 
+def test_active_response_create_gate_queues_tool_followup_and_dedupes() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+
+    assistant_event = {
+        "type": "response.create",
+        "response": {"metadata": {"turn_id": "turn_1", "input_event_key": "item_assistant", "origin": "assistant_message"}},
+    }
+    tool_event = {
+        "type": "response.create",
+        "response": {
+            "metadata": {
+                "turn_id": "turn_1",
+                "input_event_key": "item_tool_followup",
+                "origin": "tool_output",
+                "tool_followup": "true",
+                "tool_call_id": "call-1",
+            }
+        },
+    }
+    duplicate_assistant_event = {
+        "type": "response.create",
+        "response": {"metadata": {"turn_id": "turn_1", "input_event_key": "item_tool_followup", "origin": "assistant_message"}},
+    }
+
+    async def _run() -> None:
+        sent_assistant = await api._send_response_create(ws, assistant_event, origin="assistant_message")
+        assert sent_assistant is True
+        queued_tool = await api._send_response_create(ws, tool_event, origin="tool_output")
+        assert queued_tool is False
+        duplicate_queued = api._schedule_pending_response_create(
+            websocket=ws,
+            response_create_event=duplicate_assistant_event,
+            origin="assistant_message",
+            reason="active_response",
+            record_ai_call=False,
+            debug_context=None,
+            memory_brief_note=None,
+        )
+        assert duplicate_queued is False
+
+        api._active_response_id = None
+        api._response_in_flight = False
+        await api._drain_response_create_queue(source_trigger="response_done")
+
+    asyncio.run(_run())
+
+    sent_types = [event.get("type") for event in ws.sent]
+    assert sent_types.count("response.create") == 2
+    assert api._pending_response_create is None
+
+
 def test_editor_path_single_assistant_create_with_guarded_server_auto(monkeypatch) -> None:
     """Control case: editor recall produces one assistant_message create, stale server_auto stays guarded."""
 
