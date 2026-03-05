@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import asyncio
+from collections import deque
 import sys
 import types
 
@@ -363,6 +364,67 @@ def test_server_auto_audio_does_not_start_before_gating() -> None:
 
     assert sent == [{"type": "response.cancel", "response_id": "resp-server-auto"}]
     assert api._audio_playback_busy is False
+
+
+def test_cancel_and_replace_conversation_item_added_uses_output_item_response_mapping(monkeypatch) -> None:
+    api = _build_api_stub()
+    api._response_trace_context_by_id = {}
+    api._stale_response_map = {}
+    api._stale_response_map_ttl_s = 15.0
+    api._stale_response_ids_set = set()
+    api._stale_response_drop_window_by_id = {}
+    api._stale_response_drop_window_s = 3.0
+    api._response_id_by_output_item_id = {}
+    api._active_response_id = None
+    api._active_response_origin = "unknown"
+    api._active_response_input_event_key = None
+    api._active_response_canonical_key = None
+    api._lifecycle_trace_item_added_unknown_events = deque()
+    api._lifecycle_trace_item_added_unknown_threshold = 3
+    api._lifecycle_trace_item_added_unknown_window_s = 10.0
+    api._lifecycle_trace_item_added_unknown_cooldown_s = 30.0
+    api._lifecycle_trace_item_added_unknown_last_escalation_ts = 0.0
+    api._lifecycle_trace_item_added_unknown_debug = True
+    api._lifecycle_trace_transcript_delta_state = {}
+    api._lifecycle_trace_transcript_delta_sample_n = 20
+    api._lifecycle_trace_transcript_delta_inactivity_ms = 750
+    api._current_turn_id_or_unknown = lambda: "turn_2"
+    api._active_input_event_key_by_turn_id = {"turn_2": "item_new"}
+
+    info_logs: list[str] = []
+
+    async def _noop_handle_event_legacy(_event, _websocket):
+        return None
+
+    api._handle_event_legacy = _noop_handle_event_legacy
+
+    monkeypatch.setattr("ai.realtime_api.logger.info", lambda message, *args: info_logs.append(message % args))
+
+    asyncio.run(
+        api._handle_response_lifecycle_event(
+            {
+                "type": "response.output_item.added",
+                "response_id": "resp-server-auto",
+                "item": {"id": "item_assistant_1", "type": "message", "role": "assistant"},
+            },
+            websocket=None,
+        )
+    )
+
+    api._mark_pending_server_auto_response_cancelled(turn_id="turn_2", reason="transcript_final_upgrade")
+
+    asyncio.run(
+        api._handle_response_lifecycle_event(
+            {
+                "type": "conversation.item.added",
+                "item": {"id": "item_assistant_1", "type": "message", "role": "assistant"},
+            },
+            websocket=None,
+        )
+    )
+
+    assert not any("response_lifecycle_trace_unknown_item_added_spike" in line for line in info_logs)
+    assert len(api._lifecycle_trace_item_added_unknown_events) == 0
 
 
 def test_late_cancelled_output_audio_done_uses_stale_response_correlation() -> None:
