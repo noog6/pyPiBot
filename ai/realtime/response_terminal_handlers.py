@@ -183,9 +183,9 @@ class ResponseTerminalHandlers:
                     state="done",
                 )
         if delivery_state_before_done == "cancelled":
-            logger.info(
-                "deliverable_selected response_id=%s selected=false reason=cancelled",
-                active_response_id or "unknown",
+            api._log_cancelled_deliverable_once(
+                active_response_id,
+                source_event="response.done.handler",
             )
         else:
             logger.info(
@@ -371,6 +371,7 @@ class ResponseTerminalHandlers:
 
     async def handle_response_completed(self, event: dict[str, Any] | None = None) -> None:
         api = self._api
+        response_id = api._response_id_from_event(event) or str(getattr(api, "_active_response_id", "") or "").strip()
         turn_id = api._current_turn_id_or_unknown()
         done_input_event_key = str(getattr(api, "_active_response_input_event_key", "") or "").strip()
         api._cancel_micro_ack(turn_id=turn_id, reason="response_completed")
@@ -421,6 +422,7 @@ class ResponseTerminalHandlers:
                 "Skipping IDLE transition for response.completed while still listening; deferring until speech stop."
             )
         logger.info("Received response.completed event.")
+        api._clear_cancelled_response_tracking(response_id)
         if event:
             api._last_response_metadata = {
                 "event_type": event.get("type"),
