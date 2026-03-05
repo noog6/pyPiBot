@@ -13,6 +13,7 @@ if "audioop" not in sys.modules:
 from ai.orchestration import OrchestrationPhase
 from ai.realtime.event_router import EventRouter
 from ai.realtime.input_audio_events import InputAudioEventHandlers
+from ai.micro_ack_manager import MicroAckConfig, MicroAckManager
 from ai.realtime_api import PendingResponseCreate, RealtimeAPI
 from interaction import InteractionState
 
@@ -157,7 +158,7 @@ def _api_stub() -> RealtimeAPI:
 
 def test_speech_stopped_schedules_micro_ack() -> None:
     api = _api_stub()
-    api.state_manager.state = InteractionState.LISTENING
+    api.state_manager.state = InteractionState.THINKING
     api._active_input_event_key_by_turn_id = {"turn-1": "input-1"}
     asyncio.run(api.handle_event({"type": "input_audio_buffer.speech_stopped"}, api.websocket))
     assert ("turn-1", "start_of_work", "speech_stopped", 700) in api._micro_ack_manager.scheduled
@@ -383,6 +384,75 @@ def test_send_response_create_does_not_schedule_micro_ack_while_deferred() -> No
     assert api._micro_ack_manager.scheduled == []
     api.loop.close()
 
+
+
+
+def test_emit_time_tool_followup_imminence_suppresses_scheduled_micro_ack(monkeypatch) -> None:
+    api = _api_stub()
+    api.state_manager.state = InteractionState.THINKING
+    api._active_input_event_key_by_turn_id = {"turn-1": "input-1"}
+    api._canonical_utterance_key = lambda *, turn_id, input_event_key: f"{turn_id}:{input_event_key}"
+    api._extract_response_create_metadata = (
+        lambda event: (((event or {}).get("response") or {}).get("metadata") or {})
+    )
+
+    emitted: list[tuple[str, str]] = []
+    api._micro_ack_manager = MicroAckManager(
+        config=MicroAckConfig(
+            delay_ms=20,
+            global_cooldown_ms=0,
+            channel_cooldown_ms={"voice": 0, "text": 0},
+            category_cooldown_ms={"start_of_work": 0, "latency_mask": 0, "safety_gate": 0, "failure_fallback": 0},
+        ),
+        on_emit=lambda context, phrase_id, _phrase: emitted.append((context.turn_id, phrase_id)),
+        on_log=api._log_micro_ack_event,
+        suppression_reason=api._micro_ack_suppression_reason,
+    )
+
+    debug_messages: list[str] = []
+
+    def _capture_debug(message, *args, **kwargs):
+        _ = kwargs
+        debug_messages.append(message % args)
+        return None
+
+    monkeypatch.setattr("ai.realtime_api.logger.debug", _capture_debug)
+
+    api._maybe_schedule_micro_ack(
+        turn_id="turn-1",
+        category="start_of_work",
+        channel="voice",
+        reason="speech_stopped",
+        expected_delay_ms=700,
+    )
+
+    api._tool_followup_state_by_canonical_key = {"turn-1:input-1": "scheduled"}
+    api._pending_response_create = PendingResponseCreate(
+        websocket=None,
+        event={
+            "type": "response.create",
+            "response": {
+                "metadata": {
+                    "tool_followup": "true",
+                    "turn_id": "turn-1",
+                    "parent_turn_id": "turn-1",
+                    "parent_input_event_key": "input-1",
+                    "input_event_key": "input-1",
+                    "tool_call_id": "call-1",
+                }
+            },
+        },
+        origin="tool_followup",
+        turn_id="turn-1",
+        created_at=time.monotonic(),
+        reason="queued",
+    )
+
+    api.loop.run_until_complete(asyncio.sleep(0.05))
+
+    assert emitted == []
+    assert any("micro_ack_suppressed" in msg and "reason=tool_followup_imminent" in msg for msg in debug_messages)
+    api.loop.close()
 
 def test_maybe_schedule_micro_ack_suppressed_during_pending_confirmation() -> None:
     api = _api_stub()
