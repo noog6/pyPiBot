@@ -123,7 +123,33 @@ class ResponseTerminalHandlers:
             response_end_time = time.perf_counter()
             response_duration = response_end_time - api.response_start_time
             _log_runtime("realtime_api_response", response_duration)
+            total_ms = response_duration * 1000.0
+            if total_ms > 2000.0:
+                turn_id = api._current_turn_id_or_unknown()
+                turn_timestamps_store = getattr(api, "_turn_diagnostic_timestamps", {})
+                turn_timestamps = turn_timestamps_store.get(turn_id, {}) if isinstance(turn_timestamps_store, dict) else {}
+                transcript_final_ts = turn_timestamps.get("transcript_final")
+                preference_recall_start_ts = turn_timestamps.get("preference_recall_start")
+                preference_recall_end_ts = turn_timestamps.get("preference_recall_end")
+                cancel_replace_ms = float(turn_timestamps.get("cancel_replace_ms") or 0.0)
+                t_wait_transcript_final_ms = 0.0
+                if isinstance(transcript_final_ts, (int, float)):
+                    t_wait_transcript_final_ms = max(0.0, (float(transcript_final_ts) - float(getattr(api, "_response_start_monotonic", 0.0) or 0.0)) * 1000.0)
+                t_pref_recall_ms = 0.0
+                if isinstance(preference_recall_start_ts, (int, float)) and isinstance(preference_recall_end_ts, (int, float)):
+                    t_pref_recall_ms = max(0.0, (float(preference_recall_end_ts) - float(preference_recall_start_ts)) * 1000.0)
+                t_wait_response_done_ms = max(0.0, total_ms - t_wait_transcript_final_ms - t_pref_recall_ms - cancel_replace_ms)
+                logger.debug(
+                    "realtime_api_response_timing_breakdown t_wait_transcript_final_ms=%.1f t_pref_recall_ms=%.1f "
+                    "t_cancel_replace_ms=%.1f t_wait_response_done_ms=%.1f total_ms=%.1f",
+                    t_wait_transcript_final_ms,
+                    t_pref_recall_ms,
+                    cancel_replace_ms,
+                    t_wait_response_done_ms,
+                    total_ms,
+                )
             api.response_start_time = None
+            api._response_start_monotonic = None
 
         log_info("Assistant audio response complete.", style="bold blue")
         api.response_in_progress = False

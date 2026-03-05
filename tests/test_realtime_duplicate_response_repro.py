@@ -61,6 +61,7 @@ def _make_api_stub() -> RealtimeAPI:
     api._preference_recall_locked_input_event_keys = set()
     api._pending_server_auto_input_event_keys = deque(maxlen=64)
     api._active_server_auto_input_event_key = None
+    api._server_auto_audio_deferral_timeout_ms = 225
     api._current_input_event_key = None
     api._active_input_event_key_by_turn_id = {}
     api._input_event_key_counter = 0
@@ -1151,3 +1152,91 @@ def test_response_create_queue_drains_on_active_cleared_fallback() -> None:
 
     response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
     assert len(response_create_events) == 1
+
+
+def test_response_create_queue_stats_increment_and_drain_under_active_block() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._response_in_flight = True
+    api.response_in_progress = True
+    api._active_response_id = "resp-active"
+    api._active_response_origin = "assistant_message"
+
+    first_event = {
+        "type": "response.create",
+        "response": {"metadata": {"turn_id": "turn-stats", "input_event_key": "item_first", "trigger": "clarify"}},
+    }
+    second_event = {
+        "type": "response.create",
+        "response": {"metadata": {"turn_id": "turn-stats", "input_event_key": "item_second", "trigger": "clarify"}},
+    }
+
+    async def _run() -> None:
+        await api._send_response_create(ws, first_event, origin="assistant_message")
+        await api._send_response_create(ws, second_event, origin="assistant_message")
+        assert len([e for e in ws.sent if e.get("type") == "response.create"]) == 0
+
+        api._response_in_flight = False
+        api.response_in_progress = False
+        api._active_response_id = None
+        await api._drain_response_create_queue(source_trigger="response_done")
+        api._response_in_flight = False
+        api.response_in_progress = False
+        api._active_response_id = None
+        await api._drain_response_create_queue(source_trigger="response_done")
+
+    asyncio.run(_run())
+
+    response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert len(response_create_events) == 2
+    assert ((response_create_events[-1].get("response") or {}).get("metadata") or {}).get("input_event_key") == "item_second"
+    assert api._response_create_queued_creates_total >= 2
+    assert api._response_create_drains_total >= 2
+
+
+def test_server_auto_short_utterance_defers_audio_until_transcript_final(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_response_turn_id = "turn-delay"
+    api._active_input_event_key_by_turn_id["turn-delay"] = "item_delay"
+    api._active_utterance = {"duration_ms": 900, "transcript": ""}
+
+    deferred_calls: list[tuple[str, str, str]] = []
+    started_audio: list[str] = []
+
+    api._upgrade_likely_for_server_auto_turn = lambda **_kwargs: (False, "none")
+
+    def _record_defer(*, turn_id: str, input_event_key: str, response_id: str) -> None:
+        deferred_calls.append((turn_id, input_event_key, response_id))
+
+    api._schedule_server_auto_audio_deferral = _record_defer
+    api._start_audio_response_if_needed = lambda *, response_id: started_audio.append(str(response_id))
+    api._mark_transcript_response_outcome = lambda **_kwargs: None
+
+    cancelled_audio_races: list[str] = []
+    api._record_cancelled_audio_race_transition = lambda **kwargs: cancelled_audio_races.append(str(kwargs.get("response_id") or ""))
+
+    async def _run() -> None:
+        await api._handle_response_created_event(
+            {
+                "type": "response.created",
+                "response": {
+                    "id": "resp-server-auto-delay",
+                    "metadata": {
+                        "turn_id": "turn-delay",
+                        "input_event_key": "item_delay",
+                    },
+                },
+            },
+            ws,
+        )
+
+    asyncio.run(_run())
+
+    assert deferred_calls == [("turn-delay", "item_delay", "resp-server-auto-delay")]
+    assert started_audio == []
+    assert cancelled_audio_races == []
