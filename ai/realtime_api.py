@@ -1580,6 +1580,11 @@ class RealtimeAPI:
     def _on_assistant_output_item_added(self, item: dict[str, Any]) -> None:
         if self._is_active_response_guarded():
             return
+        if not self._allow_text_output_state_transition(
+            response_id=getattr(self, "_active_response_id", None),
+            event_type="response.output_item.added",
+        ):
+            return
         if item.get("type") != "message" or item.get("role") != "assistant":
             return
         extracted_text, part_types = self._extract_assistant_text_from_content(item.get("content", []))
@@ -1914,6 +1919,23 @@ class RealtimeAPI:
         manager = getattr(self, "_micro_ack_manager", None)
         if manager is None or self.loop is None:
             return
+        active_input_event_key = self._active_input_event_key_for_turn(turn_id)
+        if not active_input_event_key:
+            return
+        interaction_state = getattr(getattr(self, "state_manager", None), "state", None)
+        if interaction_state == InteractionState.IDLE:
+            return
+        delivery_state = self._response_delivery_state(turn_id=turn_id, input_event_key=active_input_event_key)
+        if delivery_state in {"done", "cancelled"}:
+            return
+        canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=active_input_event_key)
+        lifecycle_state = self._lifecycle_controller().state_for(canonical_key)
+        if lifecycle_state in {
+            InteractionLifecycleState.DONE,
+            InteractionLifecycleState.CANCELLED,
+            InteractionLifecycleState.REPLACED,
+        }:
+            return
         near_ready_reason = self._micro_ack_near_ready_suppression_reason(
             turn_id=turn_id,
             category=category,
@@ -1942,7 +1964,7 @@ class RealtimeAPI:
         metadata_intent = str(metadata.get("intent") or metadata.get("normalized_intent") or "").strip() or None
         metadata_action = str(metadata.get("action") or metadata.get("trigger") or "").strip() or None
         metadata_tool_call_id = str(metadata.get("tool_call_id") or "").strip() or None
-        canonical_key = str(getattr(self, "_active_response_canonical_key", "") or "").strip() or None
+        canonical_key = str(getattr(self, "_active_response_canonical_key", "") or "").strip() or canonical_key
 
         self._pending_micro_ack_reason = reason
         context = MicroAckContext(
@@ -1969,6 +1991,29 @@ class RealtimeAPI:
             )
         finally:
             self._pending_micro_ack_reason = None
+
+    def _allow_text_output_state_transition(self, *, response_id: str | None, event_type: str) -> bool:
+        normalized_response_id = str(response_id or "").strip()
+        active_response_id = str(getattr(self, "_active_response_id", "") or "").strip()
+        if not normalized_response_id or not active_response_id or normalized_response_id != active_response_id:
+            logger.debug(
+                "text_output_transition_suppressed run_id=%s event_type=%s reason=response_binding_missing response_id=%s active_response_id=%s",
+                self._current_run_id() or "",
+                event_type,
+                normalized_response_id or "unknown",
+                active_response_id or "unknown",
+            )
+            return False
+        if self._response_status(normalized_response_id) != "active":
+            logger.debug(
+                "text_output_transition_suppressed run_id=%s event_type=%s reason=response_not_active response_id=%s status=%s",
+                self._current_run_id() or "",
+                event_type,
+                normalized_response_id,
+                self._response_status(normalized_response_id),
+            )
+            return False
+        return True
 
     def _micro_ack_near_ready_suppression_reason(
         self,
@@ -9961,6 +10006,8 @@ class RealtimeAPI:
         elif event_type == "response.text.delta":
             if self._is_active_response_guarded():
                 return
+            if not self._allow_text_output_state_transition(response_id=response_id, event_type=event_type):
+                return
             self._mark_utterance_info_summary(deliverable_seen=True)
             self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
             delta = event.get("delta", "")
@@ -9969,6 +10016,8 @@ class RealtimeAPI:
             self.state_manager.update_state(InteractionState.SPEAKING, "text output")
         elif event_type == "response.output_text.delta":
             if self._is_active_response_guarded():
+                return
+            if not self._allow_text_output_state_transition(response_id=response_id, event_type=event_type):
                 return
             self._mark_utterance_info_summary(deliverable_seen=True)
             self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
@@ -10003,6 +10052,8 @@ class RealtimeAPI:
             )
         elif event_type == "conversation.item.added":
             if self._is_active_response_guarded():
+                return
+            if not self._allow_text_output_state_transition(response_id=response_id, event_type=event_type):
                 return
             item = event.get("item", {})
             if not isinstance(item, dict):
