@@ -355,6 +355,42 @@ def test_tick_reports_degraded_after_warmup_timeout_when_issue_persists(monkeypa
     assert captured[-1].summary.startswith("Degraded:")
 
 
+def test_tick_does_not_keep_warmup_status_after_timeout_transition(monkeypatch) -> None:
+    orchestrator = _new_orchestrator()
+    orchestrator._health_debounce_s = 60.0
+    captured = []
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_run_health_probes",
+        lambda: [
+            HealthProbeResult("audio", HealthStatus.DEGRADED, "Audio partially available"),
+            HealthProbeResult(
+                "realtime",
+                HealthStatus.DEGRADED,
+                "Realtime session offline",
+                details={"connected": 0, "ready": 0},
+            ),
+            HealthProbeResult("battery", HealthStatus.OK, "Battery nominal"),
+        ],
+    )
+    monkeypatch.setattr(orchestrator, "_maybe_run_micro_presence", lambda now: None)
+    monkeypatch.setattr(orchestrator, "_maybe_run_memory_maintenance", lambda now: None)
+    monkeypatch.setattr(orchestrator, "_emit_health_snapshot", lambda snapshot: captured.append(snapshot))
+
+    orchestrator._warmup_grace_period_s = 60.0
+    orchestrator._tick()
+
+    orchestrator._warmup_grace_period_s = 1.0
+    orchestrator._warmup_started_at = time.monotonic() - 2.0
+    orchestrator._tick()
+
+    assert captured[0].status == HealthStatus.WARMUP
+    assert captured[-1].status != HealthStatus.WARMUP
+    assert captured[-1].status == HealthStatus.DEGRADED
+    assert captured[-1].details.get("warmup_exit_reason") == "timeout"
+
+
 def test_emit_health_alert_ignores_pending_summary_and_alerts_real_degraded(monkeypatch) -> None:
     orchestrator = _new_orchestrator()
     emitted = []
