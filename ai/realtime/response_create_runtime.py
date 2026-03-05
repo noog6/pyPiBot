@@ -91,6 +91,23 @@ class ResponseCreateRuntime:
         tool_followup = str(response_metadata.get("tool_followup", "")).strip().lower() in {"true", "1", "yes"}
         tool_call_id = str(response_metadata.get("tool_call_id") or "").strip()
         if tool_followup:
+            parent_turn_id = str(response_metadata.get("parent_turn_id") or turn_id or "").strip() or turn_id
+            parent_input_event_key = str(response_metadata.get("parent_input_event_key") or "").strip() or None
+            if hasattr(api, "_should_suppress_tool_followup_after_turn_deliverable") and api._should_suppress_tool_followup_after_turn_deliverable(
+                turn_id=parent_turn_id,
+                parent_input_event_key=parent_input_event_key,
+            ):
+                logger.info(
+                    "tool_followup_create_suppressed canonical_key=%s reason=deliverable_already_sent parent_turn_id=%s",
+                    canonical_key,
+                    parent_turn_id,
+                )
+                api._set_tool_followup_state(
+                    canonical_key=canonical_key,
+                    state="dropped",
+                    reason="deliverable_already_sent",
+                )
+                return False
             current_state = api._tool_followup_state(canonical_key=canonical_key)
             if current_state in {"creating", "created", "done", "dropped"}:
                 logger.info(
@@ -540,6 +557,23 @@ class ResponseCreateRuntime:
         tool_followup_release = str(response_metadata.get("tool_followup_release", "")).strip().lower() in {"true", "1", "yes"}
         tool_followup_state = "new"
         if tool_followup:
+            parent_turn_id = str(response_metadata.get("parent_turn_id") or turn_id or "").strip() or turn_id
+            parent_input_event_key = str(response_metadata.get("parent_input_event_key") or "").strip() or None
+            if hasattr(api, "_should_suppress_tool_followup_after_turn_deliverable") and api._should_suppress_tool_followup_after_turn_deliverable(
+                turn_id=parent_turn_id,
+                parent_input_event_key=parent_input_event_key,
+            ):
+                logger.info(
+                    "tool_followup_create_suppressed canonical_key=%s reason=deliverable_already_sent parent_turn_id=%s",
+                    canonical_key,
+                    parent_turn_id,
+                )
+                api._set_tool_followup_state(
+                    canonical_key=canonical_key,
+                    state="dropped",
+                    reason="deliverable_already_sent",
+                )
+                return False
             tool_followup_state = api._tool_followup_state(canonical_key=canonical_key)
             if tool_followup_release and tool_followup_state in {"scheduled", "scheduled_release", "blocked_active_response", "released_on_response_done"}:
                 pass
