@@ -441,6 +441,65 @@ def test_server_auto_synthetic_key_rebound_blocks_stale_assistant_message_releas
     assert assistant_creates == []
 
 
+
+def test_empty_transcript_cancels_pending_micro_ack_without_emitting() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+
+    class _MicroAckManager:
+        def __init__(self) -> None:
+            self.cancelled: list[tuple[str, str]] = []
+
+        def cancel(self, *, turn_id: str, reason: str) -> None:
+            self.cancelled.append((turn_id, reason))
+
+    manager = _MicroAckManager()
+    api._micro_ack_manager = manager
+    api._pending_micro_ack_by_turn_channel = {
+        ("turn_1", "voice"): type("_Marker", (), {"category": "start_of_work", "priority": 1, "reason": "speech_stopped"})()
+    }
+
+    async def _false(*_args, **_kwargs) -> bool:
+        return False
+
+    api._maybe_handle_confirmation_decision_timeout = _false
+    api._maybe_handle_approval_response = _false
+    api._handle_stop_word = _false
+    api._maybe_handle_research_permission_response = _false
+    api._maybe_handle_research_budget_response = _false
+    api._maybe_apply_late_confirmation_decision = _false
+    api._maybe_process_research_intent = _false
+    api._has_active_confirmation_token = lambda: False
+    api._is_awaiting_confirmation_phase = lambda: False
+    api._asr_verify_short_utterance_ms = 1200
+    api._vad_turn_detection = {}
+    api._utterance_trust_snapshot_by_input_event_key = {}
+
+    prompts: list[str] = []
+
+    async def _assistant(message, *_args, **_kwargs):
+        prompts.append(str(message))
+
+    api.send_assistant_message = _assistant
+
+    async def _run() -> None:
+        await api._handle_input_audio_transcription_completed_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "item_empty",
+                "transcript": "...",
+            },
+            ws,
+        )
+
+    asyncio.run(_run())
+
+    assert manager.cancelled == [("turn_1", "transcript_completed_empty")]
+    assert api._pending_micro_ack_by_turn_channel == {}
+    assert prompts == []
+
 def test_realtime_empty_transcript_blocks_speech(monkeypatch) -> None:
     api = _make_api_stub()
     _wire_runtime(api)
