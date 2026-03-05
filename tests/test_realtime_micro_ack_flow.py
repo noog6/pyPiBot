@@ -14,7 +14,7 @@ if "audioop" not in sys.modules:
 from ai.orchestration import OrchestrationPhase
 from ai.realtime.event_router import EventRouter
 from ai.realtime.input_audio_events import InputAudioEventHandlers
-from ai.micro_ack_manager import MicroAckConfig, MicroAckManager
+from ai.micro_ack_manager import MicroAckCategory, MicroAckConfig, MicroAckManager
 from ai.realtime_api import PendingResponseCreate, RealtimeAPI
 from interaction import InteractionState
 
@@ -76,6 +76,42 @@ class _Mic:
 
     def start_receiving(self) -> None:
         self.is_receiving = True
+
+
+class _FakeTimerHandle:
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
+class _FakeLoop:
+    def __init__(self) -> None:
+        self.scheduled: list[tuple[_FakeTimerHandle, object, tuple[object, ...]]] = []
+        self.created_coroutines: list[object] = []
+
+    def call_later(self, _delay: float, callback, *args):
+        handle = _FakeTimerHandle()
+        self.scheduled.append((handle, callback, args))
+        return handle
+
+    def create_task(self, coroutine):
+        self.created_coroutines.append(coroutine)
+        return coroutine
+
+    def fire_scheduled_callbacks(self) -> None:
+        queued = list(self.scheduled)
+        self.scheduled.clear()
+        for handle, callback, args in queued:
+            if not handle.cancelled:
+                callback(*args)
+
+    def drain_created_coroutines(self) -> None:
+        queued = list(self.created_coroutines)
+        self.created_coroutines.clear()
+        for coroutine in queued:
+            asyncio.run(coroutine)
 
 
 def _api_stub() -> RealtimeAPI:
@@ -178,7 +214,7 @@ def test_response_created_cancels_prescheduled_micro_ack_for_turn_channel() -> N
     turn_id = "turn-fixed"
     input_event_key = "input-fixed"
     api._active_input_event_key_by_turn_id = {turn_id: input_event_key}
-    api.state_manager.state = InteractionState.LISTENING
+    api.state_manager.state = InteractionState.THINKING
 
     api._maybe_schedule_micro_ack(
         turn_id=turn_id,
@@ -214,7 +250,7 @@ def test_response_text_delta_cancels_pending_micro_ack_marker(monkeypatch) -> No
     api._current_turn_id_or_unknown = lambda: turn_id
     api._active_response_id = "resp-text-delta"
     api._response_status_by_id = {"resp-text-delta": "active"}
-    api.state_manager.state = InteractionState.LISTENING
+    api.state_manager.state = InteractionState.THINKING
     api._active_input_event_key_by_turn_id = {turn_id: "input-text-delta"}
 
     api._maybe_schedule_micro_ack(
@@ -533,6 +569,94 @@ def test_talk_over_aborts_active_response_and_clears_pending() -> None:
     assert cleared == [{"turn_id": "turn-1", "input_event_key": "", "reason": "talk_over_abort"}]
     assert '{"type": "response.cancel"}' in api.websocket.sent
     api.loop.close()
+
+
+def test_maybe_schedule_micro_ack_emits_after_timer_fire_without_real_sleep() -> None:
+    api = _api_stub()
+    fake_loop = _FakeLoop()
+    api.loop = fake_loop
+    api.state_manager.state = InteractionState.THINKING
+    api._active_input_event_key_by_turn_id = {"turn-1": "input-1"}
+
+    emitted_messages: list[dict[str, object]] = []
+
+    async def _capture_send(_message, _websocket, *, speak=True, response_metadata=None, utterance_context=None):
+        emitted_messages.append({
+            "speak": speak,
+            "response_metadata": response_metadata,
+            "utterance_context": utterance_context,
+        })
+
+    api.send_assistant_message = _capture_send
+    api._micro_ack_manager = MicroAckManager(
+        config=MicroAckConfig(
+            delay_ms=5,
+            global_cooldown_ms=0,
+            channel_cooldown_ms={"voice": 0, "text": 0},
+            category_cooldown_ms={"start_of_work": 0, "latency_mask": 0, "safety_gate": 0, "failure_fallback": 0},
+        ),
+        on_emit=api._emit_micro_ack,
+        on_log=api._log_micro_ack_event,
+        suppression_reason=api._micro_ack_suppression_reason,
+    )
+
+    api._maybe_schedule_micro_ack(
+        turn_id="turn-1",
+        category=MicroAckCategory.START_OF_WORK,
+        channel="voice",
+        reason="speech_stopped",
+        expected_delay_ms=700,
+    )
+
+    fake_loop.fire_scheduled_callbacks()
+    fake_loop.drain_created_coroutines()
+
+    assert len(emitted_messages) == 1
+    assert emitted_messages[0]["response_metadata"]["micro_ack"] == "true"
+
+
+def test_cancel_micro_ack_before_timer_fire_prevents_emission_without_real_sleep() -> None:
+    api = _api_stub()
+    fake_loop = _FakeLoop()
+    api.loop = fake_loop
+    api.state_manager.state = InteractionState.THINKING
+    api._active_input_event_key_by_turn_id = {"turn-1": "input-1"}
+
+    emitted_messages: list[dict[str, object]] = []
+
+    async def _capture_send(_message, _websocket, *, speak=True, response_metadata=None, utterance_context=None):
+        emitted_messages.append({
+            "speak": speak,
+            "response_metadata": response_metadata,
+            "utterance_context": utterance_context,
+        })
+
+    api.send_assistant_message = _capture_send
+    api._micro_ack_manager = MicroAckManager(
+        config=MicroAckConfig(
+            delay_ms=5,
+            global_cooldown_ms=0,
+            channel_cooldown_ms={"voice": 0, "text": 0},
+            category_cooldown_ms={"start_of_work": 0, "latency_mask": 0, "safety_gate": 0, "failure_fallback": 0},
+        ),
+        on_emit=api._emit_micro_ack,
+        on_log=api._log_micro_ack_event,
+        suppression_reason=api._micro_ack_suppression_reason,
+    )
+
+    api._maybe_schedule_micro_ack(
+        turn_id="turn-1",
+        category=MicroAckCategory.START_OF_WORK,
+        channel="voice",
+        reason="speech_stopped",
+        expected_delay_ms=700,
+    )
+    api._cancel_micro_ack(turn_id="turn-1", reason="response_started")
+
+    fake_loop.fire_scheduled_callbacks()
+    fake_loop.drain_created_coroutines()
+
+    assert emitted_messages == []
 
 
 def test_emit_micro_ack_respects_quiet_mode() -> None:
