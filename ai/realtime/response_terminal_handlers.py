@@ -224,6 +224,7 @@ class ResponseTerminalHandlers:
         active_response_origin_before_clear = getattr(api, "_active_response_origin", "unknown")
         active_response_input_event_key_before_clear = getattr(api, "_active_response_input_event_key", None)
         active_response_canonical_key_before_clear = getattr(api, "_active_response_canonical_key", None)
+        active_response_was_provisional = api._is_provisional_response(response_id=active_response_id_before_clear)
         suppressed_turns = getattr(api, "_preference_recall_suppressed_turns", None)
         if not isinstance(suppressed_turns, set):
             suppressed_turns = set()
@@ -279,6 +280,11 @@ class ResponseTerminalHandlers:
         elif str(active_response_origin_before_clear or "").strip().lower() == "micro_ack":
             logger.info(
                 "deliverable_selected response_id=%s selected=false reason=micro_ack_non_deliverable",
+                active_response_id or "unknown",
+            )
+        elif active_response_was_provisional and api._is_empty_response_done(canonical_key=done_canonical_key):
+            logger.info(
+                "deliverable_selected response_id=%s selected=false reason=provisional_empty_non_deliverable",
                 active_response_id or "unknown",
             )
         else:
@@ -387,12 +393,23 @@ class ResponseTerminalHandlers:
             )
         logger.info("Received response.done event.")
         api._emit_utterance_info_summary(anchor="response.done")
-        if api._is_empty_response_done(canonical_key=done_canonical_key):
+        is_empty_done = api._is_empty_response_done(canonical_key=done_canonical_key)
+        if is_empty_done and not active_response_was_provisional:
             api._record_silent_turn_incident(
                 turn_id=turn_id,
                 canonical_key=done_canonical_key,
                 origin=active_response_origin_before_clear,
                 response_id=active_response_id_before_clear,
+            )
+        elif is_empty_done and active_response_was_provisional:
+            api._mark_provisional_response_completed_empty(response_id=active_response_id_before_clear)
+            logger.info(
+                "provisional_response_completed_empty run_id=%s turn_id=%s canonical_key=%s origin=%s response_id=%s",
+                api._current_run_id() or "",
+                turn_id,
+                done_canonical_key,
+                str(active_response_origin_before_clear or "").strip() or "unknown",
+                str(active_response_id_before_clear or "").strip() or "none",
             )
         await api._maybe_schedule_empty_response_retry(
             websocket=api.websocket,
