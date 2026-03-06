@@ -754,3 +754,85 @@ def test_empty_retry_create_not_dropped_without_same_turn_final_deliverable() ->
     )
 
     assert dropped is False
+
+
+
+def test_empty_retry_not_scheduled_after_same_turn_final_deliverable() -> None:
+    api = _make_api()
+    turn_id = "turn_1"
+    final_input_event_key = "tool:call_123"
+    final_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=final_input_event_key)
+    sent_events: list[dict[str, object]] = []
+
+    api._canonical_response_state_store()[final_canonical_key] = CanonicalResponseState(
+        turn_id=turn_id,
+        input_event_key=final_input_event_key,
+        origin="tool_output",
+        deliverable_class="final",
+    )
+
+    async def _capture_send_response_create(_websocket, event, **kwargs):
+        sent_events.append({"event": event, **kwargs})
+        return True
+
+    api._send_response_create = _capture_send_response_create
+
+    asyncio.run(
+        api._maybe_schedule_empty_response_retry(
+            websocket=object(),
+            turn_id=turn_id,
+            canonical_key=api._canonical_utterance_key(turn_id=turn_id, input_event_key="synthetic_server_auto_3"),
+            input_event_key="synthetic_server_auto_3",
+            origin="server_auto",
+            delivery_state_before_done="done",
+        )
+    )
+
+    assert sent_events == []
+
+
+def test_playback_complete_drain_drops_same_turn_empty_retry_after_final_deliverable() -> None:
+    api = _make_api()
+    ws = object()
+    sent: list[dict[str, object]] = []
+
+    async def _capture_send(*_args, **_kwargs):
+        sent.append({"sent": True})
+        return True
+
+    api._send_response_create = _capture_send
+    api._active_response_id = None
+    api._active_response_origin = "unknown"
+
+    turn_id = "turn_1"
+    final_input_event_key = "tool:call_123"
+    final_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=final_input_event_key)
+    api._canonical_response_state_store()[final_canonical_key] = CanonicalResponseState(
+        turn_id=turn_id,
+        input_event_key=final_input_event_key,
+        origin="tool_output",
+        deliverable_class="final",
+    )
+
+    api._pending_response_create = PendingResponseCreate(
+        websocket=ws,
+        event={
+            "type": "response.create",
+            "response": {
+                "metadata": {
+                    "turn_id": turn_id,
+                    "input_event_key": "synthetic_server_auto_3__empty_retry",
+                    "retry_reason": "empty_response_done",
+                }
+            },
+        },
+        origin="server_auto",
+        turn_id=turn_id,
+        created_at=0.0,
+        reason="awaiting_transcript_final",
+    )
+
+    asyncio.run(api._drain_response_create_queue(source_trigger="playback_complete"))
+
+    assert sent == []
+    assert api._pending_response_create is None
