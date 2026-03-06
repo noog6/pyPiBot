@@ -1441,6 +1441,25 @@ class RealtimeAPI:
     async def _handle_response_lifecycle_event(self, event: dict[str, Any], websocket: Any) -> None:
         event_type = str(event.get("type") or "unknown")
         response_id = self._response_id_from_event(event)
+        if self._should_drop_stale_response_event(event):
+            return
+        if self._is_cancelled_response_event(event):
+            if event_type == "response.output_audio.done":
+                self._record_cancelled_audio_race_transition(
+                    response_id=response_id,
+                    event_type="response.output_audio.done",
+                )
+            if event_type in {"response.done", "response.completed"}:
+                self._log_cancelled_deliverable_once(response_id, source_event=str(event_type or "unknown"))
+                if event_type == "response.completed":
+                    self._clear_cancelled_response_tracking(response_id)
+            else:
+                logger.debug(
+                    "cancelled_response_event_suppressed response_id=%s event_type=%s",
+                    response_id or "unknown",
+                    event_type or "unknown",
+                )
+            return
         if not response_id:
             response_id = str(getattr(self, "_active_response_id", "") or "").strip()
         trace_context = self._response_trace_by_id().get(response_id, {}) if response_id else {}
