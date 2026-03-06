@@ -4094,6 +4094,43 @@ class RealtimeAPI:
         )
         return pending
 
+    def _quarantine_cancelled_response_id(
+        self,
+        *,
+        response_id: str | None,
+        turn_id: str,
+        input_event_key: str | None,
+        origin: str,
+        reason: str,
+    ) -> None:
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            return
+        cancelled_ids = getattr(self, "_cancelled_response_ids", None)
+        if not isinstance(cancelled_ids, set):
+            cancelled_ids = set()
+            self._cancelled_response_ids = cancelled_ids
+        cancelled_ids.add(normalized_response_id)
+        self._stale_response_ids().add(normalized_response_id)
+        self._set_response_status(response_id=normalized_response_id, status="cancelled")
+        self._record_cancel_issued_timing(normalized_response_id)
+        canonical_key = self._canonical_utterance_key(
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+        )
+        self._remember_stale_response_context(
+            response_id=normalized_response_id,
+            canonical_key=canonical_key,
+            origin=str(origin or "unknown").strip() or "unknown",
+            turn_id=str(turn_id or "unknown").strip() or "unknown",
+            input_event_key=str(input_event_key or "unknown").strip() or "unknown",
+        )
+        self._suppress_cancelled_response_audio(normalized_response_id)
+        self._clear_cancelled_response_blocking_state(
+            response_id=normalized_response_id,
+            reason=reason,
+        )
+
     def should_cancel_and_replace(
         self,
         *,
@@ -9884,6 +9921,13 @@ class RealtimeAPI:
                 return
             if verdict.action in {"CLARIFY", "UPGRADE"}:
                 if response_id:
+                    self._quarantine_cancelled_response_id(
+                        response_id=response_id,
+                        turn_id=active_turn_id,
+                        input_event_key=active_input_event_key,
+                        origin=str(getattr(self, "_active_response_origin", "unknown") or "unknown"),
+                        reason=f"audio_delta_{verdict.action.lower()}",
+                    )
                     cancel_event = {"type": "response.cancel", "response_id": response_id}
                     transport = self._get_or_create_transport()
                     await transport.send_json(websocket, cancel_event)

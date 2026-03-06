@@ -502,3 +502,58 @@ def test_transcript_final_skips_verify_on_risk_when_confirmation_active() -> Non
 
     verify_gate.assert_not_awaited()
     api._maybe_handle_approval_response.assert_awaited_once_with("yes", None)
+
+
+def test_audio_delta_upgrade_quarantines_response_before_cancel_send() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._cancelled_response_ids = set()
+    api._suppressed_audio_response_ids = set()
+    api._superseded_response_ids = set()
+    api._stale_response_ids_set = set()
+    api._response_status_by_id = {}
+    api._stale_response_map = {}
+    api._stale_response_map_ttl_s = 15.0
+    api._cancelled_response_timing_by_id = {}
+    api._audio_accum = bytearray()
+    api._audio_accum_response_id = None
+    api._is_active_response_guarded = lambda: False
+    api._active_response_origin = "server_auto"
+    api._active_response_input_event_key = "synthetic_server_auto_3"
+    api._active_response_canonical_key = "507:turn_3:synthetic_server_auto_3"
+    api._active_response_id = "resp-cancelled-late"
+    api._response_in_flight = True
+    api.response_in_progress = True
+    api._active_server_auto_input_event_key = "synthetic_server_auto_3"
+    api._active_response_confirmation_guarded = False
+    api._active_response_preference_guarded = False
+    api._current_run_id = lambda: "run-507"
+    api._current_turn_id_or_unknown = lambda: "turn_3"
+    api._get_response_gating_verdict = lambda **_kwargs: SimpleNamespace(action="UPGRADE")
+    api._canonical_utterance_key = lambda **_kwargs: "507:turn_3:synthetic_server_auto_3"
+    api.audio_player = None
+
+    transport = SimpleNamespace(send_json=AsyncMock())
+    api._get_or_create_transport = lambda: transport
+
+    websocket = object()
+    asyncio.run(
+        api._handle_response_output_audio_delta_event(
+            {
+                "type": "response.output_audio.delta",
+                "response_id": "resp-cancelled-late",
+                "delta": "c29tZV9hdWRpbw==",
+            },
+            websocket=websocket,
+        )
+    )
+
+    assert "resp-cancelled-late" in api._cancelled_response_ids
+    assert "resp-cancelled-late" in api._stale_response_ids_set
+    assert "resp-cancelled-late" in api._suppressed_audio_response_ids
+    assert api._response_status_by_id["resp-cancelled-late"] == "cancelled"
+    assert "resp-cancelled-late" in api._cancelled_response_timing_by_id
+    assert api._active_response_id is None
+    transport.send_json.assert_awaited_once_with(
+        websocket,
+        {"type": "response.cancel", "response_id": "resp-cancelled-late"},
+    )
