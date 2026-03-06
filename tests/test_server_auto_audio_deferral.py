@@ -27,6 +27,7 @@ def _api_stub() -> RealtimeAPI:
     api._server_auto_audio_waiters_by_turn_id = {}
     api._server_auto_audio_defer_tasks_by_turn_id = {}
     api._server_auto_pre_audio_hold_by_turn_id = {}
+    api._server_auto_pre_audio_hold_phase_by_key = {}
     api._audio_response_started_ids = set()
     api._server_auto_audio_deferral_timeout_ms = 20
     api._cancelled_response_ids = set()
@@ -149,3 +150,37 @@ def test_pre_audio_hold_timeout_schedules_single_transcript_finalized_micro_ack_
 
     assert api._started is True
     assert len(scheduled_micro_acks) == 1
+
+
+def test_pre_audio_hold_rejects_duplicate_and_out_of_order_transitions() -> None:
+    api = _api_stub()
+    api._record_pending_server_auto_response(turn_id="turn-1", response_id="resp-1", canonical_key="run-476:turn-1:item-1")
+
+    api._set_server_auto_pre_audio_hold(turn_id="turn-1", enabled=True, reason="awaiting_transcript_final", response_id="resp-1")
+    api._set_server_auto_pre_audio_hold(turn_id="turn-1", enabled=True, reason="duplicate_hold", response_id="resp-1")
+    api._set_server_auto_pre_audio_hold(turn_id="turn-1", enabled=False, reason="transcript_final_linked", response_id="resp-1")
+    api._set_server_auto_pre_audio_hold(turn_id="turn-1", enabled=False, reason="duplicate_release", response_id="resp-1")
+
+    assert api._server_auto_pre_audio_hold_phase_by_key[("turn-1", "resp-1")] == "released"
+    assert api._server_auto_pre_audio_hold_active(turn_id="turn-1", response_id="resp-1") is False
+
+
+def test_audio_deferral_waiter_terminates_when_different_response_releases_hold() -> None:
+    api = _api_stub()
+    api.audio_player = SimpleNamespace(start_response=lambda: setattr(api, "_started", True))
+    api._started = False
+    api._active_response_id = "resp-2"
+    api._record_pending_server_auto_response(turn_id="turn-1", response_id="resp-1", canonical_key="run-476:turn-1:item-1")
+    api._set_server_auto_pre_audio_hold(turn_id="turn-1", enabled=True, reason="awaiting_transcript_final", response_id="resp-1")
+    api._set_server_auto_pre_audio_hold(turn_id="turn-1", enabled=False, reason="pending_replaced", response_id="resp-1")
+    api._record_pending_server_auto_response(turn_id="turn-1", response_id="resp-2", canonical_key="run-476:turn-1:item-2")
+    api._set_server_auto_pre_audio_hold(turn_id="turn-1", enabled=True, reason="awaiting_transcript_final", response_id="resp-2")
+
+    async def _run() -> None:
+        api._schedule_server_auto_audio_deferral(turn_id="turn-1", input_event_key="item-1", response_id="resp-1")
+        await asyncio.sleep(0.01)
+
+    asyncio.run(_run())
+
+    assert api._started is False
+    assert "turn-1" not in api._server_auto_audio_waiters_by_turn_id
