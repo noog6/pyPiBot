@@ -98,14 +98,14 @@ class ResponseCreateRuntime:
                 parent_input_event_key=parent_input_event_key,
             ):
                 logger.info(
-                    "tool_followup_create_suppressed canonical_key=%s reason=deliverable_already_sent parent_turn_id=%s",
+                    "tool_followup_create_suppressed canonical_key=%s reason=final_deliverable_already_sent parent_turn_id=%s",
                     canonical_key,
                     parent_turn_id,
                 )
                 api._set_tool_followup_state(
                     canonical_key=canonical_key,
                     state="dropped",
-                    reason="deliverable_already_sent",
+                    reason="final_deliverable_already_sent",
                 )
                 return False
             current_state = api._tool_followup_state(canonical_key=canonical_key)
@@ -564,14 +564,14 @@ class ResponseCreateRuntime:
                 parent_input_event_key=parent_input_event_key,
             ):
                 logger.info(
-                    "tool_followup_create_suppressed canonical_key=%s reason=deliverable_already_sent parent_turn_id=%s",
+                    "tool_followup_create_suppressed canonical_key=%s reason=final_deliverable_already_sent parent_turn_id=%s",
                     canonical_key,
                     parent_turn_id,
                 )
                 api._set_tool_followup_state(
                     canonical_key=canonical_key,
                     state="dropped",
-                    reason="deliverable_already_sent",
+                    reason="final_deliverable_already_sent",
                 )
                 return False
             tool_followup_state = api._tool_followup_state(canonical_key=canonical_key)

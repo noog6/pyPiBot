@@ -1066,8 +1066,8 @@ def test_tool_followup_blocked_by_active_response_released_on_response_done(monk
     asyncio.run(_run())
 
     response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
-    assert len(response_create_events) == 0
-    assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
+    assert len(response_create_events) == 1
+    assert api._tool_followup_state(canonical_key=canonical_key) in {"creating", "created", "released_on_response_done"}
     assert any(
         "tool_followup_state" in entry
         and f"canonical_key={canonical_key}" in entry
@@ -1075,10 +1075,10 @@ def test_tool_followup_blocked_by_active_response_released_on_response_done(monk
         and "reason=response_done response_id=resp-active-release" in entry
         for entry in captured_logs
     )
-    assert any(
+    assert not any(
         "tool_followup_create_suppressed" in entry
         and f"canonical_key={canonical_key}" in entry
-        and "reason=deliverable_already_sent" in entry
+        and "reason=final_deliverable_already_sent" in entry
         for entry in captured_logs
     )
 
@@ -1365,7 +1365,10 @@ def test_tool_followup_suppressed_after_parent_deliverable(monkeypatch) -> None:
         canonical_key=parent_key,
         turn_id="turn_tool_parent",
         input_event_key="item_parent",
-        mutator=lambda record: setattr(record, "origin", "assistant_message"),
+        mutator=lambda record: (
+            setattr(record, "origin", "assistant_message"),
+            setattr(record, "deliverable_class", "final"),
+        ),
     )
 
     response_create_event, canonical_key = api._build_tool_followup_response_create_event(
@@ -1395,7 +1398,7 @@ def test_tool_followup_suppressed_after_parent_deliverable(monkeypatch) -> None:
     assert any(
         "tool_followup_create_suppressed" in entry
         and f"canonical_key={canonical_key}" in entry
-        and "reason=deliverable_already_sent" in entry
+        and "reason=final_deliverable_already_sent" in entry
         for entry in captured_logs
     )
 
@@ -1413,7 +1416,10 @@ def test_tool_followup_not_suppressed_when_parent_response_was_empty(monkeypatch
         canonical_key=parent_key,
         turn_id="turn_tool_parent_empty",
         input_event_key="item_parent_empty",
-        mutator=lambda record: setattr(record, "origin", "server_auto"),
+        mutator=lambda record: (
+            setattr(record, "origin", "server_auto"),
+            setattr(record, "deliverable_class", "progress"),
+        ),
     )
 
     response_create_event, canonical_key = api._build_tool_followup_response_create_event(
@@ -1444,6 +1450,124 @@ def test_tool_followup_not_suppressed_when_parent_response_was_empty(monkeypatch
     assert not any(
         "tool_followup_create_suppressed" in entry
         and f"canonical_key={canonical_key}" in entry
-        and "reason=deliverable_already_sent" in entry
+        and "reason=final_deliverable_already_sent" in entry
+        for entry in captured_logs
+    )
+
+
+def test_tool_followup_released_after_playback_complete_when_parent_deliverable_is_progress(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._response_in_flight = True
+    api.response_in_progress = True
+    api._audio_playback_busy = True
+    api._active_response_id = "resp-progress-parent"
+    api._active_response_origin = "upgraded_response"
+    api._current_response_turn_id = "turn_3"
+    api._active_response_input_event_key = "item_parent_progress"
+    api._active_input_event_key_by_turn_id["turn_3"] = "item_parent_progress"
+
+    parent_key = api._canonical_utterance_key(turn_id="turn_3", input_event_key="item_parent_progress")
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id="turn_3",
+        input_event_key="item_parent_progress",
+        mutator=lambda record: (
+            setattr(record, "origin", "upgraded_response"),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "progress"),
+        ),
+    )
+
+    response_create_event, canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_s2T1Yr4QhXnkEeLs",
+        response_create_event={"type": "response.create"},
+    )
+
+    captured_logs: list[str] = []
+    original_info = logger.info
+
+    def _capture_info(message: str, *args, **kwargs):
+        rendered = str(message)
+        if args:
+            rendered = rendered % args
+        captured_logs.append(rendered)
+        return original_info(message, *args, **kwargs)
+
+    monkeypatch.setattr(logger, "info", _capture_info)
+
+    async def _run() -> None:
+        await api._send_response_create(ws, response_create_event, origin="tool_output")
+        assert api._tool_followup_state(canonical_key=canonical_key) == "blocked_active_response"
+
+        api._response_in_flight = False
+        api.response_in_progress = False
+        api._audio_playback_busy = False
+        api._active_response_id = None
+        await api._drain_response_create_queue(source_trigger="playback_complete")
+
+    asyncio.run(_run())
+
+    response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert len(response_create_events) == 1
+    assert api._tool_followup_state(canonical_key=canonical_key) in {"creating", "created"}
+    assert any(
+        "tool_followup_state" in entry
+        and f"canonical_key={canonical_key}" in entry
+        and "state=blocked_active_response" in entry
+        for entry in captured_logs
+    )
+
+
+def test_tool_followup_suppressed_when_parent_deliverable_is_final(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_response_turn_id = "turn_tool_final"
+    api._active_input_event_key_by_turn_id["turn_tool_final"] = "item_parent_final"
+
+    parent_key = api._canonical_utterance_key(turn_id="turn_tool_final", input_event_key="item_parent_final")
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id="turn_tool_final",
+        input_event_key="item_parent_final",
+        mutator=lambda record: (
+            setattr(record, "origin", "assistant_message"),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "final"),
+        ),
+    )
+
+    response_create_event, canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_final_1",
+        response_create_event={"type": "response.create"},
+    )
+
+    captured_logs: list[str] = []
+    original_info = logger.info
+
+    def _capture_info(message: str, *args, **kwargs):
+        rendered = str(message)
+        if args:
+            rendered = rendered % args
+        captured_logs.append(rendered)
+        return original_info(message, *args, **kwargs)
+
+    monkeypatch.setattr(logger, "info", _capture_info)
+
+    async def _run() -> None:
+        await api._send_response_create(ws, response_create_event, origin="tool_output")
+
+    asyncio.run(_run())
+
+    assert [event for event in ws.sent if event.get("type") == "response.create"] == []
+    assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
+    assert any(
+        "tool_followup_create_suppressed" in entry
+        and f"canonical_key={canonical_key}" in entry
+        and "reason=final_deliverable_already_sent" in entry
         for entry in captured_logs
     )
