@@ -970,6 +970,8 @@ class RealtimeAPI:
         self._cancelled_deliverable_logged_ids: set[str] = set()
         self._cancelled_response_timing_by_id: dict[str, dict[str, Any]] = {}
         self._response_status_by_id: dict[str, str] = {}
+        self._provisional_response_ids: set[str] = set()
+        self._provisional_response_ids_completed_empty: set[str] = set()
         self._stale_response_drop_window_by_id: dict[str, dict[str, Any]] = {}
         self._stale_response_drop_window_s = 3.0
         self._stale_response_map: dict[str, dict[str, Any]] = {}
@@ -3975,6 +3977,40 @@ class RealtimeAPI:
             active=True,
             pre_audio_hold=False,
         )
+
+    def _mark_response_provisional(self, *, response_id: str | None) -> None:
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            return
+        provisional_ids = getattr(self, "_provisional_response_ids", None)
+        if not isinstance(provisional_ids, set):
+            provisional_ids = set()
+            self._provisional_response_ids = provisional_ids
+        provisional_ids.add(normalized_response_id)
+
+    def _is_provisional_response(self, *, response_id: str | None) -> bool:
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            return False
+        provisional_ids = getattr(self, "_provisional_response_ids", None)
+        return isinstance(provisional_ids, set) and normalized_response_id in provisional_ids
+
+    def _mark_provisional_response_completed_empty(self, *, response_id: str | None) -> None:
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            return
+        completed = getattr(self, "_provisional_response_ids_completed_empty", None)
+        if not isinstance(completed, set):
+            completed = set()
+            self._provisional_response_ids_completed_empty = completed
+        completed.add(normalized_response_id)
+
+    def _is_provisional_response_completed_empty(self, *, response_id: str | None) -> bool:
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            return False
+        completed = getattr(self, "_provisional_response_ids_completed_empty", None)
+        return isinstance(completed, set) and normalized_response_id in completed
 
     def _set_server_auto_pre_audio_hold(self, *, turn_id: str, enabled: bool, reason: str) -> None:
         normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
@@ -9544,11 +9580,6 @@ class RealtimeAPI:
                 ),
             )
         created_keys_size_after = len(getattr(self, "_response_created_canonical_keys", set()) or ())
-        if consumes_canonical_slot:
-            self._record_substantive_response(
-                turn_id=turn_id,
-                canonical_key=canonical_key,
-            )
         logger.debug(
             "[RESPTRACE] response_created run_id=%s turn_id=%s origin=%s response_id=%s resolved_input_event_key=%s "
             "canonical_key=%s consumes_canonical_slot=%s created_keys_size_before=%s created_keys_size_after=%s "
@@ -9573,6 +9604,14 @@ class RealtimeAPI:
             lifecycle_canonical_key,
             origin=origin,
         )
+        if consumes_canonical_slot and not (
+            origin == "server_auto"
+            and lifecycle_created_decision.action is LifecycleDecisionAction.DEFER
+        ):
+            self._record_substantive_response(
+                turn_id=turn_id,
+                canonical_key=canonical_key,
+            )
         self._log_lifecycle_event(
             turn_id=turn_id,
             input_event_key=resolved_input_event_key,
@@ -9608,6 +9647,7 @@ class RealtimeAPI:
                 response_id=self._active_response_id,
                 canonical_key=lifecycle_canonical_key,
             )
+            self._mark_response_provisional(response_id=self._active_response_id)
         self._active_response_input_event_key = str(resolved_input_event_key or "").strip() or None
         self._bind_active_input_event_key_for_turn(
             turn_id=turn_id,

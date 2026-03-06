@@ -70,6 +70,8 @@ def _make_api() -> RealtimeAPI:
     api._set_response_delivery_state = lambda **_kwargs: None
     api._current_run_id = lambda: "run-test"
     api._is_empty_response_done = lambda **_kwargs: False
+    api._is_provisional_response = lambda **_kwargs: False
+    api._mark_provisional_response_completed_empty = lambda **_kwargs: None
     api._record_silent_turn_incident = lambda **_kwargs: None
     api._emit_preference_recall_skip_trace_if_needed = lambda **_kwargs: None
     api._log_turn_conversation_efficiency = lambda **_kwargs: None
@@ -190,3 +192,60 @@ def test_handle_response_done_uses_active_canonical_key_for_lifecycle() -> None:
     asyncio.run(api.handle_response_done({"type": "response.done"}))
 
     assert lifecycle_calls == ["run-472:turn_1:synthetic_server_auto_2"]
+
+
+def test_handle_response_done_marks_empty_provisional_as_non_deliverable_without_silent_incident() -> None:
+    api = _make_api()
+    api._active_response_origin = "server_auto"
+    api._active_response_id = "resp_prov_1"
+    api._is_empty_response_done = lambda **_kwargs: True
+    api._is_provisional_response = lambda **_kwargs: True
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    record_silent = Mock()
+    mark_completed = Mock()
+    api._record_silent_turn_incident = record_silent
+    api._mark_provisional_response_completed_empty = mark_completed
+
+    with patch("ai.realtime.response_terminal_handlers.logger.info") as info_log:
+        asyncio.run(api.handle_response_done({"type": "response.done"}))
+
+    info_log.assert_any_call(
+        "deliverable_selected response_id=%s selected=false reason=provisional_empty_non_deliverable",
+        "resp_prov_1",
+    )
+    mark_completed.assert_called_once_with(response_id="resp_prov_1")
+    record_silent.assert_not_called()
+
+
+def test_handle_response_done_records_silent_incident_for_non_provisional_empty() -> None:
+    api = _make_api()
+    api._active_response_origin = "server_auto"
+    api._active_response_id = "resp_nonprov_1"
+    api._is_empty_response_done = lambda **_kwargs: True
+    api._is_provisional_response = lambda **_kwargs: False
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    record_silent = Mock()
+    mark_completed = Mock()
+    api._record_silent_turn_incident = record_silent
+    api._mark_provisional_response_completed_empty = mark_completed
+
+    asyncio.run(api.handle_response_done({"type": "response.done"}))
+
+    record_silent.assert_called_once()
+    mark_completed.assert_not_called()
