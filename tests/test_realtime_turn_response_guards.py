@@ -11,6 +11,8 @@ if "audioop" not in sys.modules:
 
 from collections import deque
 
+from ai.realtime.response_create_runtime import ResponseCreateRuntime
+from ai.realtime.types import CanonicalResponseState
 from ai.realtime_api import PendingResponseCreate, RealtimeAPI
 from core.logging import logger
 from interaction import InteractionState
@@ -44,6 +46,7 @@ def _make_api() -> RealtimeAPI:
     api._turn_diagnostic_timestamps = {}
     api._preference_recall_suppressed_turns = set()
     api._preference_recall_locked_input_event_keys = set()
+    api._response_create_runtime = ResponseCreateRuntime(api)
     api._current_run_id = lambda: "run-395"
     api._extract_confirmation_reminder_dedupe_key = lambda event: None
     api._sync_pending_response_create_queue = lambda: None
@@ -704,3 +707,50 @@ def test_tool_followup_cleanup_ignores_non_tool_canonical_keys() -> None:
     api._set_tool_followup_state(canonical_key=canonical_key, state="done", reason="response_done")
 
     assert api._pending_response_create is not None
+
+
+def test_empty_retry_create_dropped_after_same_turn_final_deliverable() -> None:
+    api = _make_api()
+    outcomes: list[dict[str, str]] = []
+    api._mark_transcript_response_outcome = lambda **kwargs: outcomes.append(kwargs)
+    turn_id = "turn_1"
+    final_input_event_key = "tool:call_123"
+    final_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=final_input_event_key)
+
+    api._canonical_response_state_store()[final_canonical_key] = CanonicalResponseState(
+        turn_id=turn_id,
+        input_event_key=final_input_event_key,
+        origin="tool_output",
+        deliverable_class="final",
+    )
+
+    dropped = api._drop_response_create_for_terminal_state(
+        turn_id=turn_id,
+        input_event_key="synthetic_server_auto_3__empty_retry",
+        origin="server_auto",
+        response_metadata={
+            "input_event_key": "synthetic_server_auto_3__empty_retry",
+            "retry_reason": "empty_response_done",
+        },
+    )
+
+    assert dropped is True
+    assert outcomes
+    assert outcomes[0]["reason"] == "canonical_delivery_terminal_state"
+
+
+def test_empty_retry_create_not_dropped_without_same_turn_final_deliverable() -> None:
+    api = _make_api()
+    turn_id = "turn_1"
+
+    dropped = api._drop_response_create_for_terminal_state(
+        turn_id=turn_id,
+        input_event_key="synthetic_server_auto_3__empty_retry",
+        origin="server_auto",
+        response_metadata={
+            "input_event_key": "synthetic_server_auto_3__empty_retry",
+            "retry_reason": "empty_response_done",
+        },
+    )
+
+    assert dropped is False

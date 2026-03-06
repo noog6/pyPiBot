@@ -5382,6 +5382,19 @@ class RealtimeAPI:
                 return True
         return False
 
+    def _turn_has_final_deliverable(self, *, turn_id: str) -> bool:
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return False
+        for state in self._canonical_response_state_store().values():
+            if not isinstance(state, CanonicalResponseState):
+                continue
+            if str(state.turn_id or "").strip() != normalized_turn_id:
+                continue
+            if str(getattr(state, "deliverable_class", "unknown") or "unknown").strip().lower() == "final":
+                return True
+        return False
+
     def _release_blocked_tool_followups_for_response_done(self, *, response_id: str) -> None:
         normalized_response_id = str(response_id or "").strip()
         if not normalized_response_id:
@@ -7742,6 +7755,28 @@ class RealtimeAPI:
         retry_reason = ""
         if isinstance(response_metadata, dict):
             retry_reason = str(response_metadata.get("retry_reason") or "").strip().lower()
+
+        if retry_reason == "empty_response_done" and self._turn_has_final_deliverable(turn_id=turn_id):
+            logger.info(
+                "response_dropped_terminal_state run_id=%s turn_id=%s canonical_key=%s prior_state=%s",
+                self._current_run_id() or "",
+                turn_id,
+                self._canonical_utterance_key(turn_id=turn_id, input_event_key=str(input_event_key or "").strip()),
+                "turn_final_deliverable",
+            )
+            self._mark_transcript_response_outcome(
+                input_event_key=str(input_event_key or "").strip(),
+                turn_id=turn_id,
+                outcome="response_not_scheduled",
+                reason="canonical_delivery_terminal_state",
+                details=(
+                    "canonical delivery terminal state "
+                    f"origin={str(origin or '').strip().lower() or 'unknown'} "
+                    "prior_state=turn_final_deliverable "
+                    f"canonical_key={self._canonical_utterance_key(turn_id=turn_id, input_event_key=str(input_event_key or '').strip())}"
+                ),
+            )
+            return True
 
         terminal_state_canonical_key = self._canonical_utterance_key(
             turn_id=turn_id,
