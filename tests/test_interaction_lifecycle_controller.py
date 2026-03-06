@@ -61,3 +61,17 @@ def test_replace_marks_old_key_replaced() -> None:
     assert controller.state_for(old_key) == InteractionLifecycleState.REPLACED
     assert controller.decide_response_create_allow(old_key, origin="assistant_message").action is LifecycleDecisionAction.CANCEL
     assert controller.decide_response_create_allow(new_key, origin="assistant_message").action is LifecycleDecisionAction.ALLOW
+
+
+def test_key_rebound_moves_record_without_terminal_replace() -> None:
+    controller = InteractionLifecycleController()
+    old_key = "run-1:turn-1:synthetic"
+    new_key = "run-1:turn-1:item-1"
+
+    controller.on_transcript_final(old_key)
+    controller.on_response_created(old_key, origin="server_auto")
+    controller.on_key_rebound(old_key, new_key)
+
+    assert controller.state_for(old_key) == InteractionLifecycleState.NEW
+    assert controller.state_for(new_key) == InteractionLifecycleState.SERVER_AUTO_CREATED
+    assert controller.decide_response_create_allow(new_key, origin="assistant_message").action is LifecycleDecisionAction.CANCEL

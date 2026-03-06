@@ -4586,6 +4586,7 @@ class RealtimeAPI:
         *,
         turn_id: str,
         replacement_input_event_key: str,
+        cause: str = "transcript_final_rebind",
     ) -> None:
         normalized_replacement = str(replacement_input_event_key or "").strip()
         if not normalized_replacement:
@@ -4618,14 +4619,25 @@ class RealtimeAPI:
             old_lifecycle = lifecycle_state.pop(old_canonical_key)
             if new_canonical_key not in lifecycle_state:
                 lifecycle_state[new_canonical_key] = old_lifecycle
-        self._lifecycle_controller().on_replaced(old_canonical_key, new_canonical_key)
+        lifecycle = self._lifecycle_controller()
+        old_lifecycle_state = lifecycle.state_for(old_canonical_key)
+        should_mark_replaced = old_lifecycle_state in {
+            InteractionLifecycleState.CANCELLED,
+            InteractionLifecycleState.DONE,
+            InteractionLifecycleState.REPLACED,
+        }
+        if should_mark_replaced:
+            lifecycle.on_replaced(old_canonical_key, new_canonical_key)
+        else:
+            lifecycle.on_key_rebound(old_canonical_key, new_canonical_key)
+        transition_decision = "transition_replaced" if should_mark_replaced else "transition_key_rebound"
         self._log_lifecycle_event(
             turn_id=turn_id,
             input_event_key=normalized_replacement,
             canonical_key=new_canonical_key,
             origin="server_auto",
             response_id=getattr(self, "_active_response_id", None),
-            decision="transition_replaced",
+            decision=f"{transition_decision}:cause={str(cause or 'unknown').strip() or 'unknown'}",
         )
 
         if str(getattr(self, "_active_response_input_event_key", "") or "").strip() == active_key:
@@ -10198,6 +10210,17 @@ class RealtimeAPI:
                 replacement_canonical_key,
             )
             return False
+        old_pending_canonical_key = str(pending.canonical_key or "").strip()
+        if old_pending_canonical_key:
+            self._lifecycle_controller().on_replaced(old_pending_canonical_key, replacement_canonical_key)
+            self._log_lifecycle_event(
+                turn_id=turn_id,
+                input_event_key=input_event_key,
+                canonical_key=replacement_canonical_key,
+                origin=origin_label,
+                response_id=old_response_id or None,
+                decision="transition_replaced:cause=replacement_create",
+            )
         if pending_active and old_response_id:
             cancel_event = {"type": "response.cancel", "response_id": old_response_id}
             self._record_cancel_issued_timing(old_response_id)
@@ -10299,6 +10322,7 @@ class RealtimeAPI:
         self._rebind_active_response_correlation_key(
             turn_id=resolved_turn_id,
             replacement_input_event_key=input_event_key,
+            cause="transcript_final_rebind",
         )
         self._clear_stale_pending_server_auto_for_turn(
             turn_id=resolved_turn_id,
