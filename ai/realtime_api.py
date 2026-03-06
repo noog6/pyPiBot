@@ -5263,6 +5263,69 @@ class RealtimeAPI:
             reason,
             prior_state,
         )
+        if normalized_state in {"done", "dropped"}:
+            self._clear_stale_assistant_message_creates_for_tool_followup(
+                canonical_key=normalized_canonical_key,
+                state=normalized_state,
+            )
+
+    def _clear_stale_assistant_message_creates_for_tool_followup(
+        self,
+        *,
+        canonical_key: str,
+        state: str,
+    ) -> None:
+        if ":tool:" not in str(canonical_key or ""):
+            return
+        normalized_canonical_key = str(canonical_key or "").strip()
+        if not normalized_canonical_key:
+            return
+
+        dropped_pending = False
+        pending = getattr(self, "_pending_response_create", None)
+        if pending is not None and str(getattr(pending, "origin", "") or "").strip().lower() == "assistant_message":
+            pending_metadata = self._extract_response_create_metadata(getattr(pending, "event", {}) or {})
+            pending_turn_id = str(pending_metadata.get("turn_id") or pending.turn_id or "").strip() or pending.turn_id
+            pending_input_event_key = str(pending_metadata.get("input_event_key") or "").strip()
+            pending_canonical_key = self._canonical_utterance_key(
+                turn_id=pending_turn_id,
+                input_event_key=pending_input_event_key,
+            )
+            if pending_canonical_key == normalized_canonical_key:
+                self._pending_response_create = None
+                dropped_pending = True
+
+        dropped_queue = 0
+        queue = getattr(self, "_response_create_queue", None)
+        if isinstance(queue, deque) and queue:
+            retained: deque[dict[str, Any]] = deque()
+            for queued in queue:
+                origin = str(queued.get("origin") or "").strip().lower() if isinstance(queued, dict) else ""
+                if origin != "assistant_message":
+                    retained.append(queued)
+                    continue
+                metadata = self._extract_response_create_metadata(queued.get("event") or {})
+                queued_turn_id = str(queued.get("turn_id") or "").strip()
+                queued_input_event_key = str(metadata.get("input_event_key") or "").strip()
+                queued_canonical_key = self._canonical_utterance_key(
+                    turn_id=queued_turn_id,
+                    input_event_key=queued_input_event_key,
+                )
+                if queued_canonical_key == normalized_canonical_key:
+                    dropped_queue += 1
+                    continue
+                retained.append(queued)
+            self._response_create_queue = retained
+
+        if dropped_pending or dropped_queue:
+            self._sync_pending_response_create_queue()
+            logger.info(
+                "tool_followup_cleanup_stale_creates canonical_key=%s state=%s dropped_pending=%s dropped_queue=%s",
+                normalized_canonical_key,
+                state,
+                str(dropped_pending).lower(),
+                dropped_queue,
+            )
 
     def _build_tool_followup_response_create_event(
         self,

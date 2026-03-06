@@ -627,3 +627,80 @@ def test_empty_transcript_blocked_state_rejects_injection_response_attempts() ->
 
     assert len(outcomes) == 3
     assert all(entry["reason"] == "empty_transcript_blocked" for entry in outcomes)
+
+
+def test_tool_followup_done_clears_stale_pending_assistant_create() -> None:
+    api = _make_api()
+    input_event_key = "tool:call_123"
+    canonical_key = api._canonical_utterance_key(turn_id="turn_1", input_event_key=input_event_key)
+    api._pending_response_create = PendingResponseCreate(
+        websocket=None,
+        event={
+            "type": "response.create",
+            "response": {"metadata": {"turn_id": "turn_1", "input_event_key": input_event_key}},
+        },
+        origin="assistant_message",
+        turn_id="turn_1",
+        created_at=0.0,
+        reason="audio_playback_busy",
+    )
+
+    api._set_tool_followup_state(canonical_key=canonical_key, state="done", reason="response_done")
+
+    assert api._pending_response_create is None
+
+
+def test_tool_followup_done_clears_stale_assistant_queue_residue_only() -> None:
+    api = _make_api()
+    input_event_key = "tool:call_123"
+    canonical_key = api._canonical_utterance_key(turn_id="turn_1", input_event_key=input_event_key)
+    api._response_create_queue.append(
+        {
+            "websocket": None,
+            "event": {
+                "type": "response.create",
+                "response": {"metadata": {"input_event_key": input_event_key}},
+            },
+            "origin": "assistant_message",
+            "turn_id": "turn_1",
+            "record_ai_call": False,
+        }
+    )
+    api._response_create_queue.append(
+        {
+            "websocket": None,
+            "event": {
+                "type": "response.create",
+                "response": {"metadata": {"input_event_key": input_event_key}},
+            },
+            "origin": "tool_output",
+            "turn_id": "turn_1",
+            "record_ai_call": False,
+        }
+    )
+
+    api._set_tool_followup_state(canonical_key=canonical_key, state="done", reason="response_done")
+
+    assert len(api._response_create_queue) == 1
+    assert api._response_create_queue[0]["origin"] == "tool_output"
+
+
+def test_tool_followup_cleanup_ignores_non_tool_canonical_keys() -> None:
+    api = _make_api()
+    input_event_key = "input_evt_1"
+    canonical_key = api._canonical_utterance_key(turn_id="turn_1", input_event_key=input_event_key)
+    api._pending_response_create = PendingResponseCreate(
+        websocket=None,
+        event={
+            "type": "response.create",
+            "response": {"metadata": {"turn_id": "turn_1", "input_event_key": input_event_key}},
+        },
+        origin="assistant_message",
+        turn_id="turn_1",
+        created_at=0.0,
+        reason="audio_playback_busy",
+    )
+
+    api._set_tool_followup_state(canonical_key=canonical_key, state="done", reason="response_done")
+
+    assert api._pending_response_create is not None
