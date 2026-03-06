@@ -1342,3 +1342,79 @@ def test_response_done_cancels_prescheduled_micro_ack_using_response_mapping() -
     assert (target_turn_id, "response_done") in cancel_calls
     assert (target_turn_id, "voice") not in api._pending_micro_ack_by_turn_channel
     api.loop.close()
+
+
+def test_emit_micro_ack_discards_substantive_phrase_and_schedules_tool_followup() -> None:
+    api = _api_stub()
+    sent_messages: list[str] = []
+    sent_response_creates: list[dict[str, object]] = []
+
+    async def _capture_send(message, _websocket, *, speak=True, response_metadata=None, utterance_context=None):
+        _ = (speak, response_metadata, utterance_context)
+        sent_messages.append(str(message))
+
+    async def _capture_response_create(_websocket, event, *, origin, **kwargs):
+        _ = kwargs
+        sent_response_creates.append({"event": event, "origin": origin})
+        return True
+
+    api.send_assistant_message = _capture_send
+    api._send_response_create = _capture_response_create
+    api._current_response_turn_id = "turn-1"
+    api._active_input_event_key_by_turn_id = {"turn-1": "item-1"}
+
+    context = type(
+        "Ctx",
+        (),
+        {
+            "turn_id": "turn-1",
+            "channel": "voice",
+            "category": "latency_mask",
+            "intent": None,
+            "action": "look_center",
+            "tool_call_id": "call-1",
+        },
+    )()
+
+    api._emit_micro_ack(context, "p1", "I've queued the movement to center now.")
+    api.loop.run_until_complete(asyncio.sleep(0))
+
+    assert sent_messages == []
+    assert len(sent_response_creates) == 1
+    assert sent_response_creates[0]["origin"] == "tool_output"
+    metadata = sent_response_creates[0]["event"]["response"]["metadata"]
+    assert metadata["tool_followup"] == "true"
+    assert metadata["tool_call_id"] == "call-1"
+
+    api.loop.close()
+
+
+def test_emit_micro_ack_allows_short_non_substantive_phrase() -> None:
+    api = _api_stub()
+    sent_messages: list[str] = []
+
+    async def _capture_send(message, _websocket, *, speak=True, response_metadata=None, utterance_context=None):
+        _ = (speak, response_metadata, utterance_context)
+        sent_messages.append(str(message))
+
+    api.send_assistant_message = _capture_send
+
+    context = type(
+        "Ctx",
+        (),
+        {
+            "turn_id": "turn-1",
+            "channel": "voice",
+            "category": "latency_mask",
+            "intent": None,
+            "action": None,
+            "tool_call_id": "call-2",
+        },
+    )()
+
+    api._emit_micro_ack(context, "p2", "One sec.")
+    api.loop.run_until_complete(asyncio.sleep(0))
+
+    assert sent_messages == ["One sec."]
+
+    api.loop.close()

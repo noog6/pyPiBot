@@ -1398,3 +1398,52 @@ def test_tool_followup_suppressed_after_parent_deliverable(monkeypatch) -> None:
         and "reason=deliverable_already_sent" in entry
         for entry in captured_logs
     )
+
+
+def test_tool_followup_not_suppressed_when_parent_response_was_empty(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_response_turn_id = "turn_tool_parent_empty"
+    api._active_input_event_key_by_turn_id["turn_tool_parent_empty"] = "item_parent_empty"
+    api._set_response_delivery_state(turn_id="turn_tool_parent_empty", input_event_key="item_parent_empty", state="done")
+    parent_key = api._canonical_utterance_key(turn_id="turn_tool_parent_empty", input_event_key="item_parent_empty")
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id="turn_tool_parent_empty",
+        input_event_key="item_parent_empty",
+        mutator=lambda record: setattr(record, "origin", "server_auto"),
+    )
+
+    response_create_event, canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_parent_empty_1",
+        response_create_event={"type": "response.create"},
+    )
+
+    captured_logs: list[str] = []
+    original_info = logger.info
+
+    def _capture_info(message: str, *args, **kwargs):
+        rendered = str(message)
+        if args:
+            rendered = rendered % args
+        captured_logs.append(rendered)
+        return original_info(message, *args, **kwargs)
+
+    monkeypatch.setattr(logger, "info", _capture_info)
+
+    async def _run() -> None:
+        await api._send_response_create(ws, response_create_event, origin="tool_output")
+
+    asyncio.run(_run())
+
+    response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert len(response_create_events) == 1
+    assert api._tool_followup_state(canonical_key=canonical_key) in {"creating", "created"}
+    assert not any(
+        "tool_followup_create_suppressed" in entry
+        and f"canonical_key={canonical_key}" in entry
+        and "reason=deliverable_already_sent" in entry
+        for entry in captured_logs
+    )

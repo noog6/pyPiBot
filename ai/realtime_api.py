@@ -2219,6 +2219,15 @@ class RealtimeAPI:
         websocket = getattr(self, "websocket", None)
         if websocket is None or self.loop is None:
             return
+        if not self._micro_ack_phrase_is_non_substantive(phrase):
+            logger.info(
+                "micro_ack_discarded reason=substantive_content turn_id=%s phrase_id=%s tool_call_id=%s",
+                context.turn_id,
+                phrase_id,
+                context.tool_call_id or "none",
+            )
+            self._schedule_tool_followup_after_micro_ack_discard(context=context)
+            return
         speak = self._should_speak_micro_ack(context.channel)
 
         async def _emit() -> None:
@@ -2241,6 +2250,57 @@ class RealtimeAPI:
             )
 
         self.loop.create_task(_emit())
+
+    def _micro_ack_phrase_is_non_substantive(self, phrase: str) -> bool:
+        normalized_phrase = str(phrase or "").strip()
+        if not normalized_phrase:
+            return False
+        token_count = len([token for token in re.split(r"\s+", normalized_phrase) if token])
+        if token_count > 8:
+            return False
+        normalized = re.sub(r"\s+", " ", normalized_phrase).lower()
+        substantive_markers = (
+            "queued",
+            "queueing",
+            "started",
+            "completed",
+            "done",
+            "i have",
+            "i've",
+            "i will",
+            "i can",
+            "moving",
+            "turned",
+            "action",
+            "request",
+            "because",
+            "here's",
+        )
+        if any(marker in normalized for marker in substantive_markers):
+            return False
+        return True
+
+    def _schedule_tool_followup_after_micro_ack_discard(self, *, context: MicroAckContext) -> None:
+        tool_call_id = str(getattr(context, "tool_call_id", "") or "").strip()
+        if not tool_call_id:
+            return
+        response_create_event, canonical_key = self._build_tool_followup_response_create_event(call_id=tool_call_id)
+
+        async def _emit_followup() -> None:
+            await self._send_response_create(
+                self.websocket,
+                response_create_event,
+                origin="tool_output",
+                record_ai_call=True,
+            )
+
+        logger.info(
+            "micro_ack_discard_followup_scheduled turn_id=%s tool_call_id=%s canonical_key=%s",
+            context.turn_id,
+            tool_call_id,
+            canonical_key,
+        )
+        self.loop.create_task(_emit_followup())
 
     def _conversation_efficiency_state(self, *, turn_id: str) -> ConversationEfficiencyState:
         normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
@@ -5112,7 +5172,7 @@ class RealtimeAPI:
                 continue
             if str(state.origin or "").strip().lower() == "micro_ack":
                 continue
-            if state.created or state.audio_started or state.deliverable_observed or state.done:
+            if state.audio_started or state.deliverable_observed:
                 return True
         return False
 
