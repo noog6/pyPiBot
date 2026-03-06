@@ -5382,6 +5382,55 @@ class RealtimeAPI:
                 return True
         return False
 
+    def _turn_has_pending_tool_followup(self, *, turn_id: str) -> bool:
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return False
+        followup_states = getattr(self, "_tool_followup_state_by_canonical_key", None)
+        if not isinstance(followup_states, dict):
+            return False
+        pending_states = {
+            "scheduled",
+            "blocked_active_response",
+            "scheduled_release",
+            "released_on_response_done",
+            "creating",
+            "created",
+        }
+        turn_prefix = f":{normalized_turn_id}:"
+        for canonical_key, raw_state in followup_states.items():
+            normalized_canonical_key = str(canonical_key or "").strip()
+            if ":tool:" not in normalized_canonical_key:
+                continue
+            if turn_prefix not in normalized_canonical_key:
+                continue
+            state = str(raw_state or "").strip().lower() or "new"
+            if state in pending_states:
+                return True
+        return False
+
+    def _response_done_deliverable_decision(
+        self,
+        *,
+        turn_id: str,
+        origin: str,
+        delivery_state_before_done: str | None,
+        active_response_was_provisional: bool,
+        done_canonical_key: str,
+    ) -> tuple[bool, str]:
+        if delivery_state_before_done == "cancelled":
+            return False, "cancelled"
+        if str(origin or "").strip().lower() == "micro_ack":
+            return False, "micro_ack_non_deliverable"
+        if active_response_was_provisional and self._is_empty_response_done(canonical_key=done_canonical_key):
+            return False, "provisional_empty_non_deliverable"
+        if (
+            str(origin or "").strip().lower() == "server_auto"
+            and self._turn_has_pending_tool_followup(turn_id=turn_id)
+        ):
+            return False, "tool_followup_precedence"
+        return True, "normal"
+
     def _turn_has_final_deliverable(self, *, turn_id: str) -> bool:
         normalized_turn_id = str(turn_id or "").strip()
         if not normalized_turn_id:
