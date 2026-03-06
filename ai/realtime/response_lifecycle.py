@@ -184,6 +184,13 @@ class ResponseLifecycleTracker:
                 turn_id,
             )
             return
+        if hasattr(self._api, "_turn_has_final_deliverable") and self._api._turn_has_final_deliverable(turn_id=turn_id):
+            logger.info(
+                "empty_response_retry_skipped reason=turn_final_deliverable run_id=%s turn_id=%s",
+                run_id,
+                turn_id,
+            )
+            return
         if decision.action == EmptyResponseDecisionAction.EMIT_EXHAUSTED_FALLBACK:
             logger.info(
                 "empty_response_retry_skipped reason=%s run_id=%s turn_id=%s canonical_key=%s attempts=%s max_attempts=%s",

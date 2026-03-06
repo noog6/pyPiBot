@@ -7805,13 +7805,14 @@ class RealtimeAPI:
         if isinstance(response_metadata, dict):
             retry_reason = str(response_metadata.get("retry_reason") or "").strip().lower()
 
-        if self._turn_has_final_deliverable(turn_id=turn_id):
+        is_empty_retry = retry_reason == "empty_response_done" or normalized_input_event_key.endswith("__empty_retry")
+        if is_empty_retry and self._turn_has_final_deliverable(turn_id=turn_id):
             logger.info(
                 "response_dropped_terminal_state run_id=%s turn_id=%s canonical_key=%s prior_state=%s",
                 self._current_run_id() or "",
                 turn_id,
                 self._canonical_utterance_key(turn_id=turn_id, input_event_key=str(input_event_key or "").strip()),
-                "turn_final_deliverable",
+                "turn_final_deliverable_empty_retry",
             )
             self._mark_transcript_response_outcome(
                 input_event_key=str(input_event_key or "").strip(),
@@ -7821,7 +7822,7 @@ class RealtimeAPI:
                 details=(
                     "canonical delivery terminal state "
                     f"origin={str(origin or '').strip().lower() or 'unknown'} "
-                    "prior_state=turn_final_deliverable "
+                    "prior_state=turn_final_deliverable_empty_retry "
                     f"canonical_key={self._canonical_utterance_key(turn_id=turn_id, input_event_key=str(input_event_key or '').strip())}"
                 ),
             )

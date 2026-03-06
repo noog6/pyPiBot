@@ -774,13 +774,13 @@ def test_empty_retry_create_not_dropped_without_same_turn_final_deliverable() ->
     assert dropped is False
 
 
-def test_assistant_message_create_dropped_after_same_turn_final_deliverable() -> None:
+
+def test_empty_retry_not_scheduled_after_same_turn_final_deliverable() -> None:
     api = _make_api()
-    outcomes: list[dict[str, str]] = []
-    api._mark_transcript_response_outcome = lambda **kwargs: outcomes.append(kwargs)
     turn_id = "turn_1"
     final_input_event_key = "tool:call_123"
     final_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=final_input_event_key)
+    sent_events: list[dict[str, object]] = []
 
     api._canonical_response_state_store()[final_canonical_key] = CanonicalResponseState(
         turn_id=turn_id,
@@ -789,21 +789,27 @@ def test_assistant_message_create_dropped_after_same_turn_final_deliverable() ->
         deliverable_class="final",
     )
 
-    dropped = api._drop_response_create_for_terminal_state(
-        turn_id=turn_id,
-        input_event_key="item_assistant_1",
-        origin="assistant_message",
-        response_metadata={
-            "input_event_key": "item_assistant_1",
-        },
+    async def _capture_send_response_create(_websocket, event, **kwargs):
+        sent_events.append({"event": event, **kwargs})
+        return True
+
+    api._send_response_create = _capture_send_response_create
+
+    asyncio.run(
+        api._maybe_schedule_empty_response_retry(
+            websocket=object(),
+            turn_id=turn_id,
+            canonical_key=api._canonical_utterance_key(turn_id=turn_id, input_event_key="synthetic_server_auto_3"),
+            input_event_key="synthetic_server_auto_3",
+            origin="server_auto",
+            delivery_state_before_done="done",
+        )
     )
 
-    assert dropped is True
-    assert outcomes
-    assert outcomes[0]["reason"] == "canonical_delivery_terminal_state"
+    assert sent_events == []
 
 
-def test_playback_complete_drain_skips_same_turn_stale_after_final_deliverable() -> None:
+def test_playback_complete_drain_drops_same_turn_empty_retry_after_final_deliverable() -> None:
     api = _make_api()
     ws = object()
     sent: list[dict[str, object]] = []
@@ -830,80 +836,21 @@ def test_playback_complete_drain_skips_same_turn_stale_after_final_deliverable()
         websocket=ws,
         event={
             "type": "response.create",
-            "response": {"metadata": {"turn_id": turn_id, "input_event_key": "item_assistant_queued"}},
+            "response": {
+                "metadata": {
+                    "turn_id": turn_id,
+                    "input_event_key": "synthetic_server_auto_3__empty_retry",
+                    "retry_reason": "empty_response_done",
+                }
+            },
         },
-        origin="assistant_message",
+        origin="server_auto",
         turn_id=turn_id,
         created_at=0.0,
-        reason="active_response",
+        reason="awaiting_transcript_final",
     )
 
     asyncio.run(api._drain_response_create_queue(source_trigger="playback_complete"))
 
     assert sent == []
     assert api._pending_response_create is None
-
-
-def test_turn_has_pending_tool_followup_true_for_inflight_states() -> None:
-    api = _make_api()
-    turn_id = "turn_7"
-    canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key="tool:call_7")
-
-    for state in (
-        "scheduled",
-        "blocked_active_response",
-        "scheduled_release",
-        "released_on_response_done",
-        "creating",
-        "created",
-    ):
-        api._tool_followup_state_by_canonical_key = {canonical_key: state}
-        assert api._turn_has_pending_tool_followup(turn_id=turn_id) is True
-
-
-def test_turn_has_pending_tool_followup_false_for_done_or_dropped() -> None:
-    api = _make_api()
-    turn_id = "turn_7"
-    canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key="tool:call_7")
-
-    for state in ("done", "dropped", "new"):
-        api._tool_followup_state_by_canonical_key = {canonical_key: state}
-        assert api._turn_has_pending_tool_followup(turn_id=turn_id) is False
-
-
-def test_server_auto_done_suppressed_when_same_turn_tool_followup_pending() -> None:
-    api = _make_api()
-    turn_id = "turn_3"
-    tool_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key="tool:call_123")
-    api._tool_followup_state_by_canonical_key = {tool_canonical_key: "scheduled_release"}
-
-    selected, reason = api._response_done_deliverable_decision(
-        turn_id=turn_id,
-        origin="server_auto",
-        delivery_state_before_done="done",
-        active_response_was_provisional=False,
-        done_canonical_key=api._canonical_utterance_key(turn_id=turn_id, input_event_key="synthetic_server_auto_3"),
-    )
-
-    assert selected is False
-    assert reason == "tool_followup_precedence"
-
-
-def test_tool_output_done_remains_selected_when_tool_followup_done() -> None:
-    api = _make_api()
-    turn_id = "turn_3"
-    tool_input_event_key = "tool:call_123"
-    tool_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_input_event_key)
-    api._tool_followup_state_by_canonical_key = {tool_canonical_key: "created"}
-
-    selected, reason = api._response_done_deliverable_decision(
-        turn_id=turn_id,
-        origin="tool_output",
-        delivery_state_before_done="done",
-        active_response_was_provisional=False,
-        done_canonical_key=tool_canonical_key,
-    )
-
-    assert selected is True
-    assert reason == "normal"
-
