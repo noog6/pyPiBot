@@ -21,6 +21,9 @@ from interaction import InteractionState
 class _FakeStateManager:
     state = None
 
+    def update_state(self, state, _reason: str) -> None:
+        self.state = state
+
 
 def _make_api() -> RealtimeAPI:
     api = RealtimeAPI.__new__(RealtimeAPI)
@@ -42,19 +45,34 @@ def _make_api() -> RealtimeAPI:
     api._response_done_serial = 0
     api._response_schedule_logged_turn_ids = set()
     api._conversation_efficiency_by_turn = {}
+    api._conversation_efficiency_logged_turns = set()
     api._silent_turn_incident_count = 0
     api._turn_diagnostic_timestamps = {}
     api._preference_recall_suppressed_turns = set()
+    api._preference_recall_suppressed_input_event_keys = set()
     api._preference_recall_locked_input_event_keys = set()
+    api._active_response_confirmation_guarded = False
+    api._active_response_preference_guarded = False
+    api._active_server_auto_input_event_key = None
+    api._active_input_event_key_by_turn_id = {}
     api._response_create_runtime = ResponseCreateRuntime(api)
     api._current_run_id = lambda: "run-395"
     api._extract_confirmation_reminder_dedupe_key = lambda event: None
     api._sync_pending_response_create_queue = lambda: None
     api._mark_transcript_response_outcome = lambda **kwargs: None
     api._can_release_queued_response_create = lambda trigger, metadata: True
+    api.websocket = None
+
+    async def _noop_async(*_args, **_kwargs):
+        return None
+
+    api._enqueue_response_done_reflection = _noop_async
+    api._emit_preference_recall_skip_trace_if_needed = lambda **kwargs: None
     api.state_manager = _FakeStateManager()
     api.assistant_reply = ""
     api._assistant_reply_accum = ""
+    api.rate_limits = {}
+    api._last_response_metadata = {}
     return api
 
 
