@@ -184,6 +184,17 @@ class ResponseLifecycleTracker:
                 turn_id,
             )
             return
+        if (
+            normalized_origin == "server_auto"
+            and hasattr(self._api, "_turn_has_pending_tool_followup")
+            and self._api._turn_has_pending_tool_followup(turn_id=turn_id)
+        ):
+            logger.info(
+                "empty_response_retry_skipped reason=tool_followup_pending run_id=%s turn_id=%s",
+                run_id,
+                turn_id,
+            )
+            return
         if hasattr(self._api, "_turn_has_final_deliverable") and self._api._turn_has_final_deliverable(turn_id=turn_id):
             logger.info(
                 "empty_response_retry_skipped reason=turn_final_deliverable run_id=%s turn_id=%s",
