@@ -427,7 +427,7 @@ def test_cancel_and_replace_conversation_item_added_uses_output_item_response_ma
     assert len(api._lifecycle_trace_item_added_unknown_events) == 0
 
 
-def test_late_cancelled_output_audio_done_uses_stale_response_correlation() -> None:
+def test_late_cancelled_output_audio_done_is_suppressed_before_lifecycle_trace() -> None:
     api = _build_api_stub()
     api._active_response_id = None
     api._active_response_origin = "unknown"
@@ -451,12 +451,11 @@ def test_late_cancelled_output_audio_done_uses_stale_response_correlation() -> N
 
     api._mark_pending_server_auto_response_cancelled(turn_id="turn_2", reason="transcript_final_upgrade")
 
-    observed: list[dict[str, str]] = []
-
-    def _capture_trace(**kwargs):
-        observed.append({k: str(v) for k, v in kwargs.items()})
-
-    api._emit_response_lifecycle_trace = _capture_trace
+    observed: list[tuple[str, str]] = []
+    api._record_cancelled_audio_race_transition = (
+        lambda **kwargs: observed.append((str(kwargs.get("response_id")), str(kwargs.get("event_type"))))
+    )
+    api._emit_response_lifecycle_trace = lambda **_kwargs: observed.append(("trace", "emitted"))
 
     asyncio.run(
         api._handle_response_lifecycle_event(
@@ -465,9 +464,34 @@ def test_late_cancelled_output_audio_done_uses_stale_response_correlation() -> N
         )
     )
 
-    assert observed
-    assert observed[0]["response_id"] == "resp-server-auto"
-    assert observed[0]["canonical_key"] == "run-464:turn_2:synthetic_server_auto_1"
+    assert observed == [("resp-server-auto", "response.output_audio.done")]
+
+
+def test_empty_transcript_cancelled_response_late_audio_done_is_suppressed() -> None:
+    api = _build_api_stub()
+    api._active_response_id = None
+    api._pending_server_auto_response_by_turn_id["turn_3"] = PendingServerAutoResponse(
+        turn_id="turn_3",
+        response_id="resp-empty",
+        canonical_key="run-464:turn_3:synthetic_server_auto_3",
+        created_at_ms=1,
+        active=True,
+    )
+    api._active_input_event_key_by_turn_id = {"turn_3": "item_empty"}
+    api._mark_pending_server_auto_response_cancelled(turn_id="turn_3", reason="empty_transcript")
+
+    observed: list[str] = []
+    api._record_cancelled_audio_race_transition = lambda **_kwargs: observed.append("race")
+    api._emit_response_lifecycle_trace = lambda **_kwargs: observed.append("trace")
+
+    asyncio.run(
+        api._handle_response_lifecycle_event(
+            {"type": "response.output_audio.done", "response_id": "resp-empty"},
+            websocket=object(),
+        )
+    )
+
+    assert observed == ["race"]
 
 
 class _StateManagerStub:
