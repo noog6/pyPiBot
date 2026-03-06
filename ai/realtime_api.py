@@ -1596,6 +1596,7 @@ class RealtimeAPI:
         if not extracted_text:
             return
         self._mark_utterance_info_summary(deliverable_seen=True)
+        self._record_active_canonical_deliverable_class(text=extracted_text, reason="response.output_item.added")
         self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
         self._mark_first_assistant_utterance_observed_if_needed(extracted_text)
         self._append_assistant_reply_text(extracted_text)
@@ -4745,6 +4746,56 @@ class RealtimeAPI:
             reason,
         )
 
+    def _classify_deliverable_text(self, text: str) -> str:
+        normalized = re.sub(r"\s+", " ", str(text or "")).strip().lower()
+        if not normalized:
+            return "unknown"
+        progress_markers = (
+            "checking",
+            "retrieving",
+            "one moment",
+            "let me",
+            "hold on",
+            "give me a second",
+            "looking that up",
+            "i'm checking",
+            "i am checking",
+        )
+        if any(marker in normalized for marker in progress_markers):
+            return "progress"
+        return "final"
+
+    def _record_active_canonical_deliverable_class(self, *, text: str, reason: str) -> None:
+        canonical_key = self._active_canonical_key_for_deliverable_marker()
+        if not canonical_key:
+            return
+        observed_class = self._classify_deliverable_text(text)
+        if observed_class == "unknown":
+            return
+
+        def _mutator(record: CanonicalResponseState) -> None:
+            prior_class = str(getattr(record, "deliverable_class", "unknown") or "unknown").strip().lower() or "unknown"
+            if prior_class == "final":
+                return
+            if prior_class == observed_class:
+                return
+            if prior_class == "progress" and observed_class != "final":
+                return
+            record.deliverable_class = observed_class
+
+        self._canonical_response_state_mutate(
+            canonical_key=canonical_key,
+            turn_id=self._current_turn_id_or_unknown(),
+            input_event_key=getattr(self, "_active_response_input_event_key", None),
+            mutator=_mutator,
+        )
+        logger.debug(
+            "canonical_deliverable_class_set canonical_key=%s class=%s reason=%s",
+            canonical_key,
+            observed_class,
+            reason,
+        )
+
     def _response_delivery_state(self, *, turn_id: str, input_event_key: str | None) -> str | None:
         key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
         state = self._canonical_response_state(key)
@@ -5172,7 +5223,7 @@ class RealtimeAPI:
                 continue
             if str(state.origin or "").strip().lower() == "micro_ack":
                 continue
-            if state.audio_started or state.deliverable_observed:
+            if str(getattr(state, "deliverable_class", "unknown") or "unknown").strip().lower() == "final":
                 return True
         return False
 
@@ -10286,6 +10337,7 @@ class RealtimeAPI:
             self._mark_utterance_info_summary(deliverable_seen=True)
             self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
             delta = event.get("delta", "")
+            self._record_active_canonical_deliverable_class(text=delta, reason=event_type)
             self._mark_first_assistant_utterance_observed_if_needed(delta)
             self._append_assistant_reply_text(delta, allow_separator=False, response_id=response_id)
             self.state_manager.update_state(InteractionState.SPEAKING, "text output")
@@ -10297,6 +10349,7 @@ class RealtimeAPI:
             self._mark_utterance_info_summary(deliverable_seen=True)
             self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
             delta = event.get("delta", "")
+            self._record_active_canonical_deliverable_class(text=delta, reason=event_type)
             logger.debug(
                 "assistant_content_event_received event_type=response.output_text.delta delta_len=%s",
                 len(delta),
@@ -10344,6 +10397,7 @@ class RealtimeAPI:
             if not extracted_text:
                 return
             self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
+            self._record_active_canonical_deliverable_class(text=extracted_text, reason="conversation.item.added")
             self._mark_first_assistant_utterance_observed_if_needed(extracted_text)
             self._append_assistant_reply_text(extracted_text, response_id=response_id)
             self.state_manager.update_state(InteractionState.SPEAKING, "text output")
