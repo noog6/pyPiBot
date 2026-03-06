@@ -7756,7 +7756,7 @@ class RealtimeAPI:
         if isinstance(response_metadata, dict):
             retry_reason = str(response_metadata.get("retry_reason") or "").strip().lower()
 
-        if retry_reason == "empty_response_done" and self._turn_has_final_deliverable(turn_id=turn_id):
+        if self._turn_has_final_deliverable(turn_id=turn_id):
             logger.info(
                 "response_dropped_terminal_state run_id=%s turn_id=%s canonical_key=%s prior_state=%s",
                 self._current_run_id() or "",

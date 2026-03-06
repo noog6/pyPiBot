@@ -754,3 +754,73 @@ def test_empty_retry_create_not_dropped_without_same_turn_final_deliverable() ->
     )
 
     assert dropped is False
+
+
+def test_assistant_message_create_dropped_after_same_turn_final_deliverable() -> None:
+    api = _make_api()
+    outcomes: list[dict[str, str]] = []
+    api._mark_transcript_response_outcome = lambda **kwargs: outcomes.append(kwargs)
+    turn_id = "turn_1"
+    final_input_event_key = "tool:call_123"
+    final_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=final_input_event_key)
+
+    api._canonical_response_state_store()[final_canonical_key] = CanonicalResponseState(
+        turn_id=turn_id,
+        input_event_key=final_input_event_key,
+        origin="tool_output",
+        deliverable_class="final",
+    )
+
+    dropped = api._drop_response_create_for_terminal_state(
+        turn_id=turn_id,
+        input_event_key="item_assistant_1",
+        origin="assistant_message",
+        response_metadata={
+            "input_event_key": "item_assistant_1",
+        },
+    )
+
+    assert dropped is True
+    assert outcomes
+    assert outcomes[0]["reason"] == "canonical_delivery_terminal_state"
+
+
+def test_playback_complete_drain_skips_same_turn_stale_after_final_deliverable() -> None:
+    api = _make_api()
+    ws = object()
+    sent: list[dict[str, object]] = []
+
+    async def _capture_send(*_args, **_kwargs):
+        sent.append({"sent": True})
+        return True
+
+    api._send_response_create = _capture_send
+    api._active_response_id = None
+    api._active_response_origin = "unknown"
+
+    turn_id = "turn_1"
+    final_input_event_key = "tool:call_123"
+    final_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=final_input_event_key)
+    api._canonical_response_state_store()[final_canonical_key] = CanonicalResponseState(
+        turn_id=turn_id,
+        input_event_key=final_input_event_key,
+        origin="tool_output",
+        deliverable_class="final",
+    )
+
+    api._pending_response_create = PendingResponseCreate(
+        websocket=ws,
+        event={
+            "type": "response.create",
+            "response": {"metadata": {"turn_id": turn_id, "input_event_key": "item_assistant_queued"}},
+        },
+        origin="assistant_message",
+        turn_id=turn_id,
+        created_at=0.0,
+        reason="active_response",
+    )
+
+    asyncio.run(api._drain_response_create_queue(source_trigger="playback_complete"))
+
+    assert sent == []
+    assert api._pending_response_create is None
