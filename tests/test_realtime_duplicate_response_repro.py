@@ -1571,3 +1571,30 @@ def test_tool_followup_suppressed_when_parent_deliverable_is_final(monkeypatch) 
         and "reason=final_deliverable_already_sent" in entry
         for entry in captured_logs
     )
+
+
+def test_rebind_active_response_logs_transition_key_rebound_with_cause() -> None:
+    api = _make_api_stub()
+    api._active_response_origin = "server_auto"
+    api._response_in_flight = True
+    api._active_server_auto_input_event_key = "synthetic_server_auto_turn_1_1"
+    api._active_response_id = "resp-server-auto-1"
+
+    old_key = api._canonical_utterance_key(turn_id="turn_1", input_event_key="synthetic_server_auto_turn_1_1")
+    api._lifecycle_controller().on_response_created(old_key, origin="server_auto")
+
+    recorded: list[str] = []
+
+    def _capture(**kwargs):
+        recorded.append(str(kwargs.get("decision") or ""))
+
+    api._log_lifecycle_event = _capture
+
+    api._rebind_active_response_correlation_key(
+        turn_id="turn_1",
+        replacement_input_event_key="item_1",
+        cause="transcript_final_rebind",
+    )
+
+    assert api._active_server_auto_input_event_key == "item_1"
+    assert recorded == ["transition_key_rebound:cause=transcript_final_rebind"]

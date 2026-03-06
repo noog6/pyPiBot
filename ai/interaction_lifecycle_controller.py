@@ -113,6 +113,21 @@ class InteractionLifecycleController:
         if old_record.transcript_final_seen:
             new_record.transcript_final_seen = True
 
+    def on_key_rebound(self, old_canonical_key: str, new_canonical_key: str) -> None:
+        old_key = str(old_canonical_key or "").strip()
+        new_key = str(new_canonical_key or "").strip()
+        if not old_key or not new_key or old_key == new_key:
+            return
+        old_record = self._records.pop(old_key, None)
+        if old_record is None:
+            return
+        if new_key not in self._records:
+            self._records[new_key] = old_record
+            return
+        new_record = self._records[new_key]
+        if old_record.transcript_final_seen:
+            new_record.transcript_final_seen = True
+
     def audio_started(self, canonical_key: str) -> bool:
         state = self.state_for(canonical_key)
         return state == InteractionLifecycleState.AUDIO_STARTED
