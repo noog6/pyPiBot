@@ -272,25 +272,24 @@ class ResponseTerminalHandlers:
         api._release_blocked_tool_followups_for_response_done(
             response_id=str(active_response_id_before_clear or ""),
         )
-        if delivery_state_before_done == "cancelled":
+        selected, selection_reason = api._response_done_deliverable_decision(
+            turn_id=turn_id,
+            origin=str(active_response_origin_before_clear or ""),
+            delivery_state_before_done=delivery_state_before_done,
+            active_response_was_provisional=active_response_was_provisional,
+            done_canonical_key=done_canonical_key,
+        )
+        if selection_reason == "cancelled":
             api._log_cancelled_deliverable_once(
                 active_response_id,
                 source_event="response.done.handler",
             )
-        elif str(active_response_origin_before_clear or "").strip().lower() == "micro_ack":
-            logger.info(
-                "deliverable_selected response_id=%s selected=false reason=micro_ack_non_deliverable",
-                active_response_id or "unknown",
-            )
-        elif active_response_was_provisional and api._is_empty_response_done(canonical_key=done_canonical_key):
-            logger.info(
-                "deliverable_selected response_id=%s selected=false reason=provisional_empty_non_deliverable",
-                active_response_id or "unknown",
-            )
         else:
             logger.info(
-                "deliverable_selected response_id=%s selected=true reason=normal",
+                "deliverable_selected response_id=%s selected=%s reason=%s",
                 active_response_id or "unknown",
+                str(selected).lower(),
+                selection_reason,
             )
         suppressed_turn_id = api._current_turn_id_or_unknown()
         suppressed_turn_present_before = suppressed_turn_id in suppressed_turns

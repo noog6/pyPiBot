@@ -21,6 +21,9 @@ from interaction import InteractionState
 class _FakeStateManager:
     state = None
 
+    def update_state(self, state, _reason: str) -> None:
+        self.state = state
+
 
 def _make_api() -> RealtimeAPI:
     api = RealtimeAPI.__new__(RealtimeAPI)
@@ -42,19 +45,34 @@ def _make_api() -> RealtimeAPI:
     api._response_done_serial = 0
     api._response_schedule_logged_turn_ids = set()
     api._conversation_efficiency_by_turn = {}
+    api._conversation_efficiency_logged_turns = set()
     api._silent_turn_incident_count = 0
     api._turn_diagnostic_timestamps = {}
     api._preference_recall_suppressed_turns = set()
+    api._preference_recall_suppressed_input_event_keys = set()
     api._preference_recall_locked_input_event_keys = set()
+    api._active_response_confirmation_guarded = False
+    api._active_response_preference_guarded = False
+    api._active_server_auto_input_event_key = None
+    api._active_input_event_key_by_turn_id = {}
     api._response_create_runtime = ResponseCreateRuntime(api)
     api._current_run_id = lambda: "run-395"
     api._extract_confirmation_reminder_dedupe_key = lambda event: None
     api._sync_pending_response_create_queue = lambda: None
     api._mark_transcript_response_outcome = lambda **kwargs: None
     api._can_release_queued_response_create = lambda trigger, metadata: True
+    api.websocket = None
+
+    async def _noop_async(*_args, **_kwargs):
+        return None
+
+    api._enqueue_response_done_reflection = _noop_async
+    api._emit_preference_recall_skip_trace_if_needed = lambda **kwargs: None
     api.state_manager = _FakeStateManager()
     api.assistant_reply = ""
     api._assistant_reply_accum = ""
+    api.rate_limits = {}
+    api._last_response_metadata = {}
     return api
 
 
@@ -824,3 +842,68 @@ def test_playback_complete_drain_skips_same_turn_stale_after_final_deliverable()
 
     assert sent == []
     assert api._pending_response_create is None
+
+
+def test_turn_has_pending_tool_followup_true_for_inflight_states() -> None:
+    api = _make_api()
+    turn_id = "turn_7"
+    canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key="tool:call_7")
+
+    for state in (
+        "scheduled",
+        "blocked_active_response",
+        "scheduled_release",
+        "released_on_response_done",
+        "creating",
+        "created",
+    ):
+        api._tool_followup_state_by_canonical_key = {canonical_key: state}
+        assert api._turn_has_pending_tool_followup(turn_id=turn_id) is True
+
+
+def test_turn_has_pending_tool_followup_false_for_done_or_dropped() -> None:
+    api = _make_api()
+    turn_id = "turn_7"
+    canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key="tool:call_7")
+
+    for state in ("done", "dropped", "new"):
+        api._tool_followup_state_by_canonical_key = {canonical_key: state}
+        assert api._turn_has_pending_tool_followup(turn_id=turn_id) is False
+
+
+def test_server_auto_done_suppressed_when_same_turn_tool_followup_pending() -> None:
+    api = _make_api()
+    turn_id = "turn_3"
+    tool_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key="tool:call_123")
+    api._tool_followup_state_by_canonical_key = {tool_canonical_key: "scheduled_release"}
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id=turn_id,
+        origin="server_auto",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id=turn_id, input_event_key="synthetic_server_auto_3"),
+    )
+
+    assert selected is False
+    assert reason == "tool_followup_precedence"
+
+
+def test_tool_output_done_remains_selected_when_tool_followup_done() -> None:
+    api = _make_api()
+    turn_id = "turn_3"
+    tool_input_event_key = "tool:call_123"
+    tool_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_input_event_key)
+    api._tool_followup_state_by_canonical_key = {tool_canonical_key: "created"}
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id=turn_id,
+        origin="tool_output",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=tool_canonical_key,
+    )
+
+    assert selected is True
+    assert reason == "normal"
+
