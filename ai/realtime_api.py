@@ -1004,6 +1004,7 @@ class RealtimeAPI:
         self._server_auto_audio_waiters_by_turn_id: dict[str, asyncio.Event] = {}
         self._server_auto_audio_defer_tasks_by_turn_id: dict[str, asyncio.Task[Any]] = {}
         self._server_auto_pre_audio_hold_by_turn_id: dict[str, bool] = {}
+        self._server_auto_pre_audio_hold_phase_by_key: dict[tuple[str, str], str] = {}
         self._audio_response_started_ids: set[str] = set()
         self._server_auto_audio_deferral_timeout_ms = max(
             0,
@@ -4012,32 +4013,106 @@ class RealtimeAPI:
         completed = getattr(self, "_provisional_response_ids_completed_empty", None)
         return isinstance(completed, set) and normalized_response_id in completed
 
-    def _set_server_auto_pre_audio_hold(self, *, turn_id: str, enabled: bool, reason: str) -> None:
+    def _set_server_auto_pre_audio_hold(
+        self,
+        *,
+        turn_id: str,
+        enabled: bool,
+        reason: str,
+        response_id: str | None = None,
+    ) -> None:
         normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            pending = self._pending_server_auto_response_for_turn(turn_id=normalized_turn_id)
+            if pending is not None:
+                normalized_response_id = str(pending.response_id or "").strip()
+        if not normalized_response_id:
+            normalized_response_id = str(getattr(self, "_active_response_id", "") or "").strip()
+        if not normalized_response_id:
+            logger.debug(
+                "server_auto_pre_audio_hold_transition_rejected run_id=%s turn_id=%s response_id=unknown transition=missing_response_id reason=%s",
+                self._current_run_id() or "",
+                normalized_turn_id,
+                reason,
+            )
+            return
+        phase_store = getattr(self, "_server_auto_pre_audio_hold_phase_by_key", None)
+        if not isinstance(phase_store, dict):
+            phase_store = {}
+            self._server_auto_pre_audio_hold_phase_by_key = phase_store
+        hold_phase = "held" if enabled else "released"
+        hold_key = (normalized_turn_id, normalized_response_id)
+        prior_phase = str(phase_store.get(hold_key) or "not_started")
+        transition_allowed = (
+            (prior_phase == "not_started" and hold_phase == "held")
+            or (prior_phase == "held" and hold_phase == "released")
+        )
+        if not transition_allowed:
+            logger.debug(
+                "server_auto_pre_audio_hold_transition_rejected run_id=%s turn_id=%s response_id=%s prior_phase=%s requested_phase=%s reason=%s",
+                self._current_run_id() or "",
+                normalized_turn_id,
+                normalized_response_id,
+                prior_phase,
+                hold_phase,
+                reason,
+            )
+            return
+        phase_store[hold_key] = hold_phase
         hold_store = getattr(self, "_server_auto_pre_audio_hold_by_turn_id", None)
         if not isinstance(hold_store, dict):
             hold_store = {}
             self._server_auto_pre_audio_hold_by_turn_id = hold_store
         pending = self._pending_server_auto_response_for_turn(turn_id=normalized_turn_id)
-        if pending is not None:
+        if pending is not None and str(pending.response_id or "").strip() == normalized_response_id:
             pending.pre_audio_hold = bool(enabled)
-        if enabled:
+        if hold_phase == "held":
             hold_store[normalized_turn_id] = True
         else:
-            hold_store.pop(normalized_turn_id, None)
+            turn_has_hold = any(
+                phase == "held" and hold_turn_id == normalized_turn_id
+                for (hold_turn_id, _hold_response_id), phase in phase_store.items()
+            )
+            if turn_has_hold:
+                hold_store[normalized_turn_id] = True
+            else:
+                hold_store.pop(normalized_turn_id, None)
         logger.info(
-            "server_auto_pre_audio_hold run_id=%s turn_id=%s enabled=%s reason=%s",
+            "server_auto_pre_audio_hold run_id=%s turn_id=%s response_id=%s enabled=%s phase=%s reason=%s",
             self._current_run_id() or "",
             normalized_turn_id,
+            normalized_response_id,
             str(bool(enabled)).lower(),
+            hold_phase,
             reason,
         )
 
-    def _server_auto_pre_audio_hold_active(self, *, turn_id: str) -> bool:
+    def _server_auto_pre_audio_hold_active(self, *, turn_id: str, response_id: str | None = None) -> bool:
+        normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
+        normalized_response_id = str(response_id or "").strip()
+        phase_store = getattr(self, "_server_auto_pre_audio_hold_phase_by_key", None)
+        if normalized_response_id and isinstance(phase_store, dict):
+            return str(phase_store.get((normalized_turn_id, normalized_response_id)) or "not_started") == "held"
         hold_store = getattr(self, "_server_auto_pre_audio_hold_by_turn_id", None)
         if not isinstance(hold_store, dict):
             return False
-        return bool(hold_store.get(str(turn_id or "").strip() or "turn-unknown", False))
+        return bool(hold_store.get(normalized_turn_id, False))
+
+    def _server_auto_pre_audio_hold_released_for_other_response(self, *, turn_id: str, response_id: str) -> bool:
+        phase_store = getattr(self, "_server_auto_pre_audio_hold_phase_by_key", None)
+        if not isinstance(phase_store, dict):
+            return False
+        normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
+        normalized_response_id = str(response_id or "").strip()
+        for (candidate_turn_id, candidate_response_id), phase in phase_store.items():
+            if candidate_turn_id != normalized_turn_id:
+                continue
+            if candidate_response_id == normalized_response_id:
+                continue
+            if str(phase or "") == "released":
+                return True
+        return False
 
     def _pending_server_auto_response_for_turn(self, *, turn_id: str) -> PendingServerAutoResponse | None:
         store = getattr(self, "_pending_server_auto_response_by_turn_id", None)
@@ -4060,7 +4135,12 @@ class RealtimeAPI:
             return None
         pending.active = False
         pending.cancelled_for_upgrade = True
-        self._set_server_auto_pre_audio_hold(turn_id=turn_id, enabled=False, reason=f"pending_cancelled:{reason}")
+        self._set_server_auto_pre_audio_hold(
+            turn_id=turn_id,
+            enabled=False,
+            reason=f"pending_cancelled:{reason}",
+            response_id=pending.response_id,
+        )
         cancelled_ids = getattr(self, "_cancelled_response_ids", None)
         if not isinstance(cancelled_ids, set):
             cancelled_ids = set()
@@ -4333,7 +4413,12 @@ class RealtimeAPI:
         if pending is None:
             return
         pending.active = False
-        self._set_server_auto_pre_audio_hold(turn_id=turn_id, enabled=False, reason="pending_replaced")
+        self._set_server_auto_pre_audio_hold(
+            turn_id=turn_id,
+            enabled=False,
+            reason="pending_replaced",
+            response_id=pending.response_id,
+        )
 
     def _is_cancelled_response_event(self, event: dict[str, Any]) -> bool:
         response_id = self._response_id_from_event(event)
@@ -6379,17 +6464,19 @@ class RealtimeAPI:
         started_ids.add(normalized_response_id)
 
     def _signal_server_auto_transcript_final(self, *, turn_id: str) -> None:
+        pending = self._pending_server_auto_response_for_turn(turn_id=turn_id)
         self._set_server_auto_pre_audio_hold(
             turn_id=turn_id,
             enabled=False,
             reason="transcript_final_linked",
+            response_id=(pending.response_id if pending is not None else None),
         )
         waiter = getattr(self, "_server_auto_audio_waiters_by_turn_id", {}).get(turn_id)
         if isinstance(waiter, asyncio.Event):
             waiter.set()
 
     def _should_start_deferred_server_auto_audio(self, *, turn_id: str, input_event_key: str, response_id: str) -> bool:
-        if self._server_auto_pre_audio_hold_active(turn_id=turn_id):
+        if self._server_auto_pre_audio_hold_active(turn_id=turn_id, response_id=response_id):
             return False
         if self._is_cancelled_or_superseded_response_id(response_id):
             return False
@@ -6425,17 +6512,29 @@ class RealtimeAPI:
             micro_ack_sent_during_hold = False
             try:
                 while True:
+                    if self._server_auto_pre_audio_hold_released_for_other_response(
+                        turn_id=turn_id,
+                        response_id=response_id,
+                    ):
+                        logger.debug(
+                            "server_auto_audio_deferral_waiter_stale run_id=%s turn_id=%s response_id=%s reason=hold_released_for_other_response",
+                            self._current_run_id() or "",
+                            turn_id,
+                            response_id,
+                        )
+                        break
                     timed_out = False
                     try:
                         await asyncio.wait_for(waiter.wait(), timeout=self._server_auto_audio_deferral_timeout_ms / 1000.0)
                     except asyncio.TimeoutError:
                         timed_out = True
-                    if self._server_auto_pre_audio_hold_active(turn_id=turn_id):
+                    if self._server_auto_pre_audio_hold_active(turn_id=turn_id, response_id=response_id):
                         if self._is_cancelled_or_superseded_response_id(response_id) or str(getattr(self, "_active_response_id", "") or "").strip() != response_id:
                             self._set_server_auto_pre_audio_hold(
                                 turn_id=turn_id,
                                 enabled=False,
                                 reason="proceed_without_transcript_final",
+                                response_id=response_id,
                             )
                             break
                         if timed_out and not micro_ack_sent_during_hold:
@@ -10018,6 +10117,7 @@ class RealtimeAPI:
                     turn_id=turn_id,
                     enabled=should_delay_for_transcript_final,
                     reason=("awaiting_transcript_final" if should_delay_for_transcript_final else "upgrade_likely"),
+                    response_id=self._active_response_id,
                 )
                 logger.info(
                     "server_auto_audio_start_deferred run_id=%s turn_id=%s response_id=%s timeout_ms=%s reasons=%s",
