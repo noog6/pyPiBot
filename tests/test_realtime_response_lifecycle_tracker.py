@@ -59,6 +59,7 @@ def _make_api() -> RealtimeAPI:
     api._function_call_accumulator = _StubFunctionCallAccumulator()
     api._debug_dump_canonical_key_timeline = lambda **kwargs: None
     api._lifecycle_controller = lambda: type("_Lifecycle", (), {"on_response_done": lambda self, *_: None})()
+    api._turn_has_pending_tool_followup = lambda **_kwargs: False
     return api
 
 
@@ -118,6 +119,36 @@ def test_created_done_with_assistant_content_does_not_retry() -> None:
     assert sent_events == []
 
 
+def test_server_auto_empty_retry_skipped_while_tool_followup_pending() -> None:
+    api = _make_api()
+    sent_events: list[dict] = []
+
+    async def _capture_send_response_create(_websocket, event, **_kwargs):
+        sent_events.append(event)
+        return True
+
+    api._send_response_create = _capture_send_response_create
+    api._turn_has_pending_tool_followup = lambda **_kwargs: True
+
+    canonical_key = api._canonical_utterance_key(turn_id="turn_1", input_event_key="synthetic_server_auto_3")
+
+    asyncio.run(
+        api._maybe_schedule_empty_response_retry(
+            websocket=object(),
+            turn_id="turn_1",
+            canonical_key=canonical_key,
+            input_event_key="synthetic_server_auto_3",
+            origin="server_auto",
+            delivery_state_before_done="done",
+        )
+    )
+
+    assert sent_events == []
+    assert api._empty_response_retry_counts == {}
+    assert api._empty_response_retry_canonical_keys == set()
+
+
+
 def test_terminal_cancelled_state_skips_retry_with_reason() -> None:
     decision = decide_empty_response_done_action(
         origin="prompt",
@@ -135,7 +166,6 @@ def test_terminal_cancelled_state_skips_retry_with_reason() -> None:
 
 def test_empty_response_retry_exhausted_emits_fallback_without_scheduling_retry(caplog) -> None:
     api = _make_api()
-    caplog.set_level(logging.INFO, logger="ai.realtime.response_lifecycle")
 
     origin_input_event_key = "input_evt_3"
     retry_input_event_key = f"{origin_input_event_key}__empty_retry"
