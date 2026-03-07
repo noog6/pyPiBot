@@ -161,6 +161,11 @@ def test_pre_audio_hold_rejects_duplicate_and_out_of_order_transitions() -> None
     api._set_server_auto_pre_audio_hold(turn_id="turn-1", enabled=False, reason="transcript_final_linked", response_id="resp-1")
     api._set_server_auto_pre_audio_hold(turn_id="turn-1", enabled=False, reason="duplicate_release", response_id="resp-1")
 
+    hold_record = api._server_auto_pre_audio_hold_by_turn_id["turn-1"]
+    assert hold_record.turn_id == "turn-1"
+    assert hold_record.response_id == "resp-1"
+    assert hold_record.hold_started_at <= hold_record.hold_released_at
+    assert hold_record.last_reason == "transcript_final_linked"
     assert api._server_auto_pre_audio_hold_phase_by_key[("turn-1", "resp-1")] == "released"
     assert api._server_auto_pre_audio_hold_active(turn_id="turn-1", response_id="resp-1") is False
 
@@ -179,6 +184,24 @@ def test_audio_deferral_waiter_terminates_when_different_response_releases_hold(
     async def _run() -> None:
         api._schedule_server_auto_audio_deferral(turn_id="turn-1", input_event_key="item-1", response_id="resp-1")
         await asyncio.sleep(0.01)
+
+    asyncio.run(_run())
+
+    assert api._started is False
+    assert "turn-1" not in api._server_auto_audio_waiters_by_turn_id
+
+
+def test_audio_deferral_waiter_terminates_when_pending_response_changes() -> None:
+    api = _api_stub()
+    api.audio_player = SimpleNamespace(start_response=lambda: setattr(api, "_started", True))
+    api._started = False
+    api._record_pending_server_auto_response(turn_id="turn-1", response_id="resp-1", canonical_key="run-476:turn-1:item-1")
+    api._set_server_auto_pre_audio_hold(turn_id="turn-1", enabled=True, reason="awaiting_transcript_final", response_id="resp-1")
+
+    async def _run() -> None:
+        api._schedule_server_auto_audio_deferral(turn_id="turn-1", input_event_key="item-1", response_id="resp-1")
+        api._record_pending_server_auto_response(turn_id="turn-1", response_id="resp-2", canonical_key="run-476:turn-1:item-2")
+        await asyncio.sleep(0.02)
 
     asyncio.run(_run())
 

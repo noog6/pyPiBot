@@ -1224,6 +1224,11 @@ def test_server_auto_audio_deferral_timeout_schedules_before_transcript_final_up
     monkeypatch.setattr("ai.realtime_api.asyncio.wait_for", _deterministic_wait_for)
 
     async def _run() -> None:
+        api._record_pending_server_auto_response(
+            turn_id=turn_id,
+            response_id=response_id,
+            canonical_key=f"run-test:{turn_id}:{input_event_key}",
+        )
         api._set_server_auto_pre_audio_hold(turn_id=turn_id, enabled=True, reason="test_pre_audio_hold")
         api._schedule_server_auto_audio_deferral(
             turn_id=turn_id,
