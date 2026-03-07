@@ -1863,3 +1863,227 @@ def test_tool_followup_cleanup_stale_assistant_creates_remains_available() -> No
     api._clear_stale_assistant_message_creates_for_tool_followup(canonical_key=canonical_key, state="created")
     assert api._pending_response_create is None
     assert not list(api._response_create_queue)
+
+
+def test_tool_followup_release_suppressed_when_upgraded_parent_already_covered_action(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._response_in_flight = True
+    api.response_in_progress = True
+    api._audio_playback_busy = True
+    api._active_response_id = "resp-upgraded-1"
+    api._active_response_origin = "upgraded_response"
+    api._current_response_turn_id = "turn_mix_1"
+    api._active_response_input_event_key = "item_mix_parent"
+    api._active_input_event_key_by_turn_id["turn_mix_1"] = "item_mix_parent"
+
+    parent_key = api._canonical_utterance_key(turn_id="turn_mix_1", input_event_key="item_mix_parent")
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id="turn_mix_1",
+        input_event_key="item_mix_parent",
+        mutator=lambda record: (
+            setattr(record, "origin", "upgraded_response"),
+            setattr(record, "response_id", "resp-upgraded-1"),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "progress"),
+            setattr(record, "done", True),
+        ),
+    )
+
+    response_create_event, canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_mix_1",
+        response_create_event={"type": "response.create"},
+        tool_name="look_around",
+    )
+
+    captured_logs: list[str] = []
+    original_info = logger.info
+
+    def _capture_info(message: str, *args, **kwargs):
+        rendered = str(message)
+        if args:
+            rendered = rendered % args
+        captured_logs.append(rendered)
+        return original_info(message, *args, **kwargs)
+
+    monkeypatch.setattr(logger, "info", _capture_info)
+
+    async def _run() -> None:
+        await api._send_response_create(ws, response_create_event, origin="tool_output")
+        assert api._tool_followup_state(canonical_key=canonical_key) == "blocked_active_response"
+        api._release_blocked_tool_followups_for_response_done(response_id="resp-upgraded-1")
+        api._response_in_flight = False
+        api.response_in_progress = False
+        api._audio_playback_busy = False
+        await api._drain_response_create_queue(source_trigger="playback_complete")
+
+    asyncio.run(_run())
+
+    assert [event for event in ws.sent if event.get("type") == "response.create"] == []
+    assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
+    assert any("tool_followup_release_suppressed" in entry for entry in captured_logs)
+
+
+def test_tool_followup_release_preserved_for_distinct_tool_result_information(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._response_in_flight = True
+    api.response_in_progress = True
+    api._audio_playback_busy = True
+    api._active_response_id = "resp-upgraded-2"
+    api._active_response_origin = "upgraded_response"
+    api._current_response_turn_id = "turn_mix_2"
+    api._active_response_input_event_key = "item_mix_parent_2"
+    api._active_input_event_key_by_turn_id["turn_mix_2"] = "item_mix_parent_2"
+
+    parent_key = api._canonical_utterance_key(turn_id="turn_mix_2", input_event_key="item_mix_parent_2")
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id="turn_mix_2",
+        input_event_key="item_mix_parent_2",
+        mutator=lambda record: (
+            setattr(record, "origin", "upgraded_response"),
+            setattr(record, "response_id", "resp-upgraded-2"),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "progress"),
+            setattr(record, "done", True),
+        ),
+    )
+
+    response_create_event, canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_mix_2",
+        response_create_event={"type": "response.create"},
+        tool_name="perform_research",
+        tool_result_has_distinct_info=True,
+    )
+
+    captured_logs: list[str] = []
+    original_info = logger.info
+
+    def _capture_info(message: str, *args, **kwargs):
+        rendered = str(message)
+        if args:
+            rendered = rendered % args
+        captured_logs.append(rendered)
+        return original_info(message, *args, **kwargs)
+
+    monkeypatch.setattr(logger, "info", _capture_info)
+
+    async def _run() -> None:
+        await api._send_response_create(ws, response_create_event, origin="tool_output")
+        assert api._tool_followup_state(canonical_key=canonical_key) == "blocked_active_response"
+        api._release_blocked_tool_followups_for_response_done(response_id="resp-upgraded-2")
+        api._response_in_flight = False
+        api.response_in_progress = False
+        api._audio_playback_busy = False
+        await api._drain_response_create_queue(source_trigger="playback_complete")
+
+    asyncio.run(_run())
+
+    assert len([event for event in ws.sent if event.get("type") == "response.create"]) == 1
+    assert api._tool_followup_state(canonical_key=canonical_key) in {"creating", "created"}
+    assert not any("tool_followup_release_suppressed" in entry for entry in captured_logs)
+
+
+def test_tool_followup_release_preserved_for_non_upgraded_parent_origin() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._response_in_flight = True
+    api.response_in_progress = True
+    api._audio_playback_busy = True
+    api._active_response_id = "resp-assistant-1"
+    api._active_response_origin = "assistant_message"
+    api._current_response_turn_id = "turn_mix_3"
+    api._active_response_input_event_key = "item_mix_parent_3"
+    api._active_input_event_key_by_turn_id["turn_mix_3"] = "item_mix_parent_3"
+
+    parent_key = api._canonical_utterance_key(turn_id="turn_mix_3", input_event_key="item_mix_parent_3")
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id="turn_mix_3",
+        input_event_key="item_mix_parent_3",
+        mutator=lambda record: (
+            setattr(record, "origin", "assistant_message"),
+            setattr(record, "response_id", "resp-assistant-1"),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "progress"),
+            setattr(record, "done", True),
+        ),
+    )
+
+    response_create_event, canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_mix_3",
+        response_create_event={"type": "response.create"},
+        tool_name="look_around",
+    )
+
+    async def _run() -> None:
+        await api._send_response_create(ws, response_create_event, origin="tool_output")
+        assert api._tool_followup_state(canonical_key=canonical_key) == "blocked_active_response"
+        api._release_blocked_tool_followups_for_response_done(response_id="resp-assistant-1")
+        api._response_in_flight = False
+        api.response_in_progress = False
+        api._audio_playback_busy = False
+        await api._drain_response_create_queue(source_trigger="playback_complete")
+
+    asyncio.run(_run())
+
+    assert len([event for event in ws.sent if event.get("type") == "response.create"]) == 1
+
+
+def test_tool_followup_suppressed_release_does_not_regress_queue_drain_idempotency() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._response_in_flight = True
+    api.response_in_progress = True
+    api._audio_playback_busy = True
+    api._active_response_id = "resp-upgraded-3"
+    api._active_response_origin = "upgraded_response"
+    api._current_response_turn_id = "turn_mix_4"
+    api._active_response_input_event_key = "item_mix_parent_4"
+    api._active_input_event_key_by_turn_id["turn_mix_4"] = "item_mix_parent_4"
+
+    parent_key = api._canonical_utterance_key(turn_id="turn_mix_4", input_event_key="item_mix_parent_4")
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id="turn_mix_4",
+        input_event_key="item_mix_parent_4",
+        mutator=lambda record: (
+            setattr(record, "origin", "upgraded_response"),
+            setattr(record, "response_id", "resp-upgraded-3"),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "progress"),
+            setattr(record, "done", True),
+        ),
+    )
+
+    response_create_event, canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_mix_4",
+        response_create_event={"type": "response.create"},
+        tool_name="look_around",
+    )
+
+    async def _run() -> None:
+        await api._send_response_create(ws, response_create_event, origin="tool_output")
+        api._release_blocked_tool_followups_for_response_done(response_id="resp-upgraded-3")
+        api._response_in_flight = False
+        api.response_in_progress = False
+        api._audio_playback_busy = False
+        await api._drain_response_create_queue(source_trigger="playback_complete")
+        await api._drain_response_create_queue(source_trigger="playback_complete")
+
+    asyncio.run(_run())
+
+    assert [event for event in ws.sent if event.get("type") == "response.create"] == []
+    assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
+    assert api._pending_response_create is None
+    assert len(api._response_create_queue) == 0
