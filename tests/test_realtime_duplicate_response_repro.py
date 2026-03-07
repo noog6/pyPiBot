@@ -843,6 +843,7 @@ def test_duplicate_tool_result_is_deduped_by_tool_followup_canonical_key(monkeyp
         return original_info(message, *args, **kwargs)
 
     monkeypatch.setattr(logger, "info", _capture_info)
+    monkeypatch.setattr(logger, "debug", _capture_info)
 
     asyncio.run(api.execute_function_call("perform_research", "call_research_2", {"query": "logs"}, ws))
     api._response_in_flight = False
@@ -946,6 +947,7 @@ def test_tool_followup_scheduled_while_active_drains_once_without_active_error(m
         return original_info(message, *args, **kwargs)
 
     monkeypatch.setattr(logger, "info", _capture_info)
+    monkeypatch.setattr(logger, "debug", _capture_info)
 
     async def _run() -> None:
         await api._send_response_create(ws, response_create_event, origin="tool_output")
@@ -996,6 +998,7 @@ def test_duplicate_tool_followup_delivery_events_only_create_once_after_drain(mo
         return original_info(message, *args, **kwargs)
 
     monkeypatch.setattr(logger, "info", _capture_info)
+    monkeypatch.setattr(logger, "debug", _capture_info)
 
     async def _run() -> None:
         await api._send_response_create(ws, response_create_event, origin="tool_output")
@@ -1057,6 +1060,7 @@ def test_tool_followup_blocked_by_active_response_released_on_response_done(monk
         return original_info(message, *args, **kwargs)
 
     monkeypatch.setattr(logger, "info", _capture_info)
+    monkeypatch.setattr(logger, "debug", _capture_info)
 
     async def _run() -> None:
         await api._send_response_create(ws, response_create_event, origin="tool_output")
@@ -1107,6 +1111,7 @@ def test_tool_followup_second_arbitration_denied_for_same_canonical_key(monkeypa
         return original_info(message, *args, **kwargs)
 
     monkeypatch.setattr(logger, "info", _capture_info)
+    monkeypatch.setattr(logger, "debug", _capture_info)
 
     async def _run() -> None:
         await api._send_response_create(ws, response_create_event, origin="tool_output")
@@ -1389,6 +1394,7 @@ def test_tool_followup_suppressed_after_parent_deliverable(monkeypatch) -> None:
         return original_info(message, *args, **kwargs)
 
     monkeypatch.setattr(logger, "info", _capture_info)
+    monkeypatch.setattr(logger, "debug", _capture_info)
 
     async def _run() -> None:
         await api._send_response_create(ws, response_create_event, origin="tool_output")
@@ -1440,6 +1446,7 @@ def test_tool_followup_not_suppressed_when_parent_response_was_empty(monkeypatch
         return original_info(message, *args, **kwargs)
 
     monkeypatch.setattr(logger, "info", _capture_info)
+    monkeypatch.setattr(logger, "debug", _capture_info)
 
     async def _run() -> None:
         await api._send_response_create(ws, response_create_event, origin="tool_output")
@@ -1499,6 +1506,7 @@ def test_tool_followup_released_after_playback_complete_when_parent_deliverable_
         return original_info(message, *args, **kwargs)
 
     monkeypatch.setattr(logger, "info", _capture_info)
+    monkeypatch.setattr(logger, "debug", _capture_info)
 
     async def _run() -> None:
         await api._send_response_create(ws, response_create_event, origin="tool_output")
@@ -1559,6 +1567,7 @@ def test_tool_followup_suppressed_when_parent_deliverable_is_final(monkeypatch) 
         return original_info(message, *args, **kwargs)
 
     monkeypatch.setattr(logger, "info", _capture_info)
+    monkeypatch.setattr(logger, "debug", _capture_info)
 
     async def _run() -> None:
         await api._send_response_create(ws, response_create_event, origin="tool_output")
@@ -1669,6 +1678,7 @@ def test_assistant_message_not_scheduled_when_same_turn_tool_followup_owner_exis
         return original_info(message, *args, **kwargs)
 
     monkeypatch.setattr(logger, "info", _capture_info)
+    monkeypatch.setattr(logger, "debug", _capture_info)
 
     async def _run() -> None:
         await api.send_assistant_message(
@@ -1762,6 +1772,7 @@ def test_assistant_message_not_scheduled_when_same_turn_final_deliverable_exists
         return original_info(message, *args, **kwargs)
 
     monkeypatch.setattr(logger, "info", _capture_info)
+    monkeypatch.setattr(logger, "debug", _capture_info)
 
     async def _run() -> None:
         await api.send_assistant_message(

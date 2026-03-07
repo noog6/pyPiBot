@@ -479,3 +479,26 @@ def test_emit_health_alert_ignores_pending_summary_and_alerts_real_degraded(monk
     assert len(emitted) == 1
     assert emitted[0].severity == "warning"
     assert emitted[0].key == "health_degraded"
+
+
+def test_emit_health_snapshot_demotes_stale_warmup_after_active_transition(monkeypatch) -> None:
+    orchestrator = _new_orchestrator()
+    info_logs: list[str] = []
+    debug_logs: list[str] = []
+
+    monkeypatch.setattr("services.ops_orchestrator.LOGGER.info", lambda msg, *args, **kwargs: info_logs.append(msg % args if args else msg))
+    monkeypatch.setattr("services.ops_orchestrator.LOGGER.debug", lambda msg, *args, **kwargs: debug_logs.append(msg % args if args else msg))
+
+    from core.ops_models import HealthSnapshot
+
+    snapshot = HealthSnapshot(
+        timestamp=time.time(),
+        status=HealthStatus.WARMUP,
+        summary="Warming up: initializing subsystems",
+        details={"startup_phase": "active"},
+    )
+
+    orchestrator._emit_health_snapshot(snapshot)
+
+    assert any("status=warmup" in entry and "startup_phase=active" in entry for entry in debug_logs)
+    assert not any("status=warmup" in entry and "startup_phase=active" in entry for entry in info_logs)

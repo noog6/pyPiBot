@@ -28,7 +28,7 @@ class ResponseCreateRuntime:
         api._response_create_queued_creates_total = int(getattr(api, "_response_create_queued_creates_total", 0) or 0) + 1
         api._sync_pending_response_create_queue()
         if str(reason or "").strip().lower() == "active_response":
-            logger.info(
+            logger.debug(
                 "response_create_blocked_active canonical_key=%s active_response_id=%s qsize=%s reason=%s",
                 canonical_key,
                 str(getattr(api, "_active_response_id", "") or "").strip() or "pending_create_ack",
@@ -402,7 +402,7 @@ class ResponseCreateRuntime:
         api._response_create_queued_creates_total = int(getattr(api, "_response_create_queued_creates_total", 0) or 0) + 1
         api._sync_pending_response_create_queue()
         if str(reason or "").strip().lower() == "active_response":
-            logger.info(
+            logger.debug(
                 "response_create_blocked_active canonical_key=%s active_response_id=%s qsize=%s reason=%s",
                 canonical_key,
                 str(getattr(api, "_active_response_id", "") or "").strip() or "pending_create_ack",
@@ -415,7 +415,10 @@ class ResponseCreateRuntime:
                 api._current_run_id() or "",
                 current_input_event_key or "unknown",
             )
-        logger.info(
+        schedule_log_method = logger.info
+        if str(reason or "").strip().lower() == "active_response":
+            schedule_log_method = logger.debug
+        schedule_log_method(
             "response_create_scheduled turn_id=%s origin=%s reason=%s",
             candidate.turn_id,
             candidate.origin,

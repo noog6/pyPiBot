@@ -796,19 +796,25 @@ class OpsOrchestrator:
             pending_count = snapshot.details.get("memory_pending_count")
             retry_blocked_count = snapshot.details.get("memory_retry_blocked_count")
             oldest_age_ms = snapshot.details.get("memory_oldest_pending_age_ms")
+            startup_phase = str(snapshot.details.get("startup_phase") or "unknown")
+            snapshot_log_method = LOGGER.info
+            if snapshot.status is HealthStatus.WARMUP and startup_phase == "active":
+                snapshot_log_method = LOGGER.debug
             if all(isinstance(value, (int, float)) for value in (pending_count, retry_blocked_count, oldest_age_ms)):
-                LOGGER.info(
-                    "[Ops] Health snapshot: status=%s summary=%s memory_queue_pending=%s memory_queue_retry_blocked=%s memory_queue_oldest_age_ms=%s",
+                snapshot_log_method(
+                    "[Ops] Health snapshot: status=%s startup_phase=%s summary=%s memory_queue_pending=%s memory_queue_retry_blocked=%s memory_queue_oldest_age_ms=%s",
                     snapshot.status.value,
+                    startup_phase,
                     snapshot.summary,
                     int(pending_count),
                     int(retry_blocked_count),
                     int(oldest_age_ms),
                 )
             else:
-                LOGGER.info(
-                    "[Ops] Health snapshot: status=%s summary=%s",
+                snapshot_log_method(
+                    "[Ops] Health snapshot: status=%s startup_phase=%s summary=%s",
                     snapshot.status.value,
+                    startup_phase,
                     snapshot.summary,
                 )
         self._emit_health_alert(snapshot)
