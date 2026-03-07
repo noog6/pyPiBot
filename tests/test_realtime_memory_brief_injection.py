@@ -94,6 +94,51 @@ def test_send_response_create_injects_preference_memory_context_before_response(
     assert "Vim" in ws.events[0]["item"]["content"][0]["text"]
 
 
+
+
+def test_pending_preference_context_resolves_from_response_owner_map() -> None:
+    api = _make_api_stub()
+    api._response_id_by_canonical_key = {
+        api._canonical_utterance_key(turn_id="turn_owner", input_event_key="item_owner"): "resp_owner"
+    }
+    payload = {"prompt_note": "owner note", "hit": True, "returned_count": 1}
+    api._set_pending_preference_memory_context(
+        turn_id="turn_owner",
+        input_event_key="item_owner",
+        memory_context=payload,
+    )
+
+    resolved = api._peek_pending_preference_memory_context_payload(
+        turn_id="turn_owner",
+        input_event_key="item_owner",
+    )
+
+    assert isinstance(resolved, dict)
+    assert resolved["prompt_note"] == "owner note"
+    assert api._pending_preference_memory_context_response_id_by_turn_id["turn_owner"] == "resp_owner"
+    assert api._pending_preference_memory_context_by_response_id["resp_owner"]["payload"]["prompt_note"] == "owner note"
+
+
+def test_pending_preference_context_rejects_mismatched_owner_record() -> None:
+    api = _make_api_stub()
+    canonical_key = api._canonical_utterance_key(turn_id="turn_a", input_event_key="item_a")
+    api._pending_preference_memory_context_by_canonical_key = {
+        canonical_key: {
+            "payload": {"prompt_note": "wrong owner", "hit": True},
+            "owner_turn_id": "turn_b",
+            "owner_canonical_key": canonical_key,
+            "owner_response_id": "",
+        }
+    }
+
+    resolved = api._peek_pending_preference_memory_context_payload(
+        turn_id="turn_a",
+        input_event_key="item_a",
+    )
+
+    assert resolved is None
+
+
 def test_send_response_create_preserves_brief_when_deferred() -> None:
     api = _make_api_stub()
     api._response_in_flight = True
