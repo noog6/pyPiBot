@@ -7,7 +7,11 @@ from ai.realtime_api import RealtimeAPI
 
 
 class _FakeManager:
+    def __init__(self) -> None:
+        self.last_retrieve_kwargs = {}
+
     def retrieve_for_turn(self, **kwargs):
+        self.last_retrieve_kwargs = dict(kwargs)
         return None
 
     def get_active_user_id(self):
@@ -105,3 +109,38 @@ def test_prepare_turn_memory_brief_logs_semantic_runtime_health_when_streak_non_
     assert "semantic_scoring_skipped_reason=query_embedding_timeout" in message
     assert "query_fingerprint_hash=abcdef0123456789" in message
     assert "query_fingerprint_length=19" in message
+
+
+def test_memory_intent_classifier_distinguishes_preference_and_topic_recall() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+
+    assert api._classify_memory_intent("What's my favorite editor?") == "preference_recall"
+    assert api._classify_memory_intent("What do you remember about dogs?") == "topic_recall"
+
+
+def test_prepare_turn_memory_brief_shapes_topic_query_for_recall(monkeypatch) -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._pending_turn_memory_brief = None
+    api._memory_retrieval_enabled = True
+    api._memory_retrieval_max_memories = 2
+    api._memory_retrieval_max_chars = 400
+    api._memory_retrieval_cooldown_s = 0.0
+    api._memory_retrieval_scope = "user_global"
+    api._memory_retrieval_min_user_chars = 1
+    api._memory_retrieval_min_user_tokens = 1
+    fake_manager = _FakeManager()
+    api._memory_manager = fake_manager
+    api._memory_retrieval_error_throttle_s = 60.0
+    api._memory_retrieval_last_error_log_at = 0.0
+    api._memory_retrieval_suppressed_errors = 0
+
+    monkeypatch.setattr("ai.realtime.memory_runtime.logger.debug", lambda *_args, **_kwargs: None)
+
+    api._prepare_turn_memory_brief(
+        "Theo, can you look around and tell me what you remember about dogs?",
+        source="unit-test",
+        memory_intent=True,
+        memory_intent_subtype="topic_recall",
+    )
+
+    assert fake_manager.last_retrieve_kwargs["latest_user_utterance"] == "dogs"
