@@ -23,6 +23,12 @@ Run this command as part of setup for each environment:
 
 ## Cognitive stack roadmap (mandatory)
 - Read `docs/architecture/theo_cognitive_stack.md` before major architecture work.
+- Treat the following as “major architecture work”:
+  - Changes to lifecycle gating/response create semantics.
+  - Changes to memory retrieval/recall flow.
+  - Changes to tool governance/confirmation behavior.
+  - Any new queueing/arbitration/policy module.
+- When any major-architecture trigger applies, include a one-line `Owning layer:` declaration in the commit and PR summary.
 - Current plateau: runtime/nervous-system behavior is meaningfully stabilized; perception/memory is partial; decision arbitration and higher cognition are the active frontier.
 - Classify each task by owning layer before editing code.
 - Do not conflate arbitration, idempotency/single-flight, scheduling/queueing, governance/policy gating, and perception/context enrichment.
