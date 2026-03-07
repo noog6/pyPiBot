@@ -1656,6 +1656,8 @@ def test_assistant_message_not_scheduled_when_same_turn_tool_followup_owner_exis
         api._canonical_utterance_key(turn_id="turn_owner_tool", input_event_key="tool:call_owner")
     ] = "blocked_active_response"
 
+    api._mark_transcript_response_outcome = RealtimeAPI._mark_transcript_response_outcome.__get__(api, RealtimeAPI)
+
     captured_logs: list[str] = []
     original_info = logger.info
 
@@ -1683,8 +1685,45 @@ def test_assistant_message_not_scheduled_when_same_turn_tool_followup_owner_exis
 
     assert api._pending_response_create is None
     assert not list(api._response_create_queue)
-    assert any("response_not_scheduled" in entry and "reason=same_turn_already_owned" in entry for entry in captured_logs)
-    assert any("owner=tool_followup_owned" in entry for entry in captured_logs)
+    suppression_logs = [
+        entry
+        for entry in captured_logs
+        if "response_not_scheduled" in entry and "reason=same_turn_already_owned" in entry
+    ]
+    assert len(suppression_logs) == 1
+    assert "owner=tool_followup_owned" in suppression_logs[0]
+
+
+def test_assistant_message_schedules_normally_without_same_turn_owner() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+
+    async def _run() -> None:
+        await api.send_assistant_message(
+            "All set.",
+            ws,
+            response_metadata={
+                "turn_id": "turn_free",
+                "input_event_key": "item_free",
+                "trigger": "assistant_message",
+            },
+        )
+
+    asyncio.run(_run())
+
+    assistant_response_creates = [
+        event
+        for event in ws.sent
+        if event.get("type") == "response.create"
+        and ((event.get("response") or {}).get("metadata") or {}).get("origin") == "assistant_message"
+    ]
+
+    assert len(assistant_response_creates) == 1
+    metadata = (assistant_response_creates[0].get("response") or {}).get("metadata") or {}
+    assert metadata.get("turn_id") == "turn_free"
+    assert metadata.get("input_event_key") == "item_free"
 
 
 def test_assistant_message_not_scheduled_when_same_turn_final_deliverable_exists(monkeypatch) -> None:
@@ -1697,6 +1736,8 @@ def test_assistant_message_not_scheduled_when_same_turn_final_deliverable_exists
     api._active_response_origin = "server_auto"
     api._current_response_turn_id = "turn_owner_final"
     api._active_input_event_key_by_turn_id["turn_owner_final"] = "item_owner_final"
+
+    api._mark_transcript_response_outcome = RealtimeAPI._mark_transcript_response_outcome.__get__(api, RealtimeAPI)
 
     final_key = api._canonical_utterance_key(turn_id="turn_owner_final", input_event_key="item_owner_final")
     api._canonical_response_state_mutate(

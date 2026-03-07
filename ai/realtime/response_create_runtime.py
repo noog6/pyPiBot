@@ -250,15 +250,6 @@ class ResponseCreateRuntime:
                     or ""
                 ).strip()
             if owner_reason:
-                logger.info(
-                    "response_not_scheduled run_id=%s turn_id=%s input_event_key=%s reason=same_turn_already_owned details=owner=%s canonical_key=%s origin=%s",
-                    api._current_run_id() or "",
-                    turn_id,
-                    current_input_event_key or "unknown",
-                    owner_reason,
-                    canonical_key,
-                    normalized_origin,
-                )
                 api._mark_transcript_response_outcome(
                     input_event_key=current_input_event_key,
                     turn_id=turn_id,
