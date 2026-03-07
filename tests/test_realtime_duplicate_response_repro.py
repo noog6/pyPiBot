@@ -2244,97 +2244,24 @@ def test_gesture_followup_dropped_on_response_done_and_playback_complete_when_pa
         assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
 
 
-def test_tool_followup_builder_uses_active_response_parent_key_when_turn_binding_is_tool_key() -> None:
+def test_low_risk_gesture_followup_payload_is_status_only() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
-    api._current_response_turn_id = "turn_parent_key"
-    api._active_input_event_key_by_turn_id["turn_parent_key"] = "tool:call_stale"
-    api._active_response_input_event_key = "item_parent_context"
+    api._current_response_turn_id = "turn_gesture_payload"
+    api._active_input_event_key_by_turn_id["turn_gesture_payload"] = "item_parent_payload"
 
     response_create_event, _ = api._build_tool_followup_response_create_event(
-        call_id="call_parent_key",
+        call_id="call_gesture_payload",
         response_create_event={"type": "response.create"},
         tool_name="gesture_look_center",
     )
 
-    metadata = ((response_create_event.get("response") or {}).get("metadata") or {})
-    assert metadata.get("parent_input_event_key") == "item_parent_context"
+    payload = response_create_event.get("response") or {}
+    metadata = payload.get("metadata") or {}
+    instructions = str(payload.get("instructions") or "")
 
-
-def test_tool_followup_parent_coverage_suppression_falls_back_to_non_tool_parent_state() -> None:
-    api = _make_api_stub()
-    _wire_runtime(api)
-
-    parent_key = api._canonical_utterance_key(turn_id="turn_parent_fallback", input_event_key="item_parent")
-    api._canonical_response_state_mutate(
-        canonical_key=parent_key,
-        turn_id="turn_parent_fallback",
-        input_event_key="item_parent",
-        mutator=lambda record: (
-            setattr(record, "origin", "upgraded_response"),
-            setattr(record, "response_id", "resp-parent-fallback"),
-            setattr(record, "deliverable_observed", True),
-            setattr(record, "deliverable_class", "progress"),
-            setattr(record, "done", True),
-        ),
-    )
-
-    assert api._should_suppress_queued_tool_followup_release(
-        response_metadata={
-            "tool_followup": "true",
-            "tool_followup_suppress_if_parent_covered": "true",
-            "turn_id": "turn_parent_fallback",
-            "parent_turn_id": "turn_parent_fallback",
-            "parent_input_event_key": "tool:call_stale",
-        },
-        blocked_by_response_id=None,
-    )
-
-
-def test_gesture_followup_dropped_when_parent_key_was_overwritten_by_tool_key_then_released_on_playback_complete() -> None:
-    api = _make_api_stub()
-    _wire_runtime(api)
-    ws = _RecordingWs()
-    api.websocket = ws
-    api._response_in_flight = True
-    api.response_in_progress = True
-    api._audio_playback_busy = True
-    api._active_response_id = "resp-upgraded-parent"
-    api._active_response_origin = "upgraded_response"
-    api._current_response_turn_id = "turn_mix_parent_fix"
-    api._active_response_input_event_key = "item_mix_parent_fix"
-    api._active_input_event_key_by_turn_id["turn_mix_parent_fix"] = "tool:call_stale"
-
-    parent_key = api._canonical_utterance_key(turn_id="turn_mix_parent_fix", input_event_key="item_mix_parent_fix")
-    api._canonical_response_state_mutate(
-        canonical_key=parent_key,
-        turn_id="turn_mix_parent_fix",
-        input_event_key="item_mix_parent_fix",
-        mutator=lambda record: (
-            setattr(record, "origin", "upgraded_response"),
-            setattr(record, "response_id", "resp-upgraded-parent"),
-            setattr(record, "deliverable_observed", True),
-            setattr(record, "deliverable_class", "progress"),
-            setattr(record, "done", True),
-        ),
-    )
-
-    response_create_event, canonical_key = api._build_tool_followup_response_create_event(
-        call_id="call_parent_fix",
-        response_create_event={"type": "response.create"},
-        tool_name="gesture_look_center",
-    )
-
-    async def _run() -> None:
-        await api._send_response_create(ws, response_create_event, origin="tool_output")
-        assert api._tool_followup_state(canonical_key=canonical_key) == "blocked_active_response"
-        api._release_blocked_tool_followups_for_response_done(response_id="resp-upgraded-parent")
-        api._response_in_flight = False
-        api.response_in_progress = False
-        api._audio_playback_busy = False
-        await api._drain_response_create_queue(source_trigger="playback_complete")
-
-    asyncio.run(_run())
-
-    assert [event for event in ws.sent if event.get("type") == "response.create"] == []
-    assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
+    assert metadata.get("tool_followup") == "true"
+    assert metadata.get("tool_followup_suppress_if_parent_covered") == "true"
+    assert metadata.get("tool_followup_status_only") == "true"
+    assert "Gesture follow-up only" in instructions
+    assert "Do not restate or re-answer semantic memory/preferences content" in instructions
