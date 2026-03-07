@@ -5948,6 +5948,46 @@ class RealtimeAPI:
                 return True
         return False
 
+    def _assistant_message_same_turn_owner_reason(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str | None,
+        canonical_key: str,
+    ) -> str | None:
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return None
+
+        if self._turn_has_pending_tool_followup(turn_id=normalized_turn_id):
+            return "tool_followup_owned"
+
+        if self._turn_has_final_deliverable(turn_id=normalized_turn_id):
+            return "terminal_deliverable_owned"
+
+        lifecycle_state = self._lifecycle_controller().state_for(canonical_key)
+        if lifecycle_state in {
+            InteractionLifecycleState.DONE,
+            InteractionLifecycleState.REPLACED,
+            InteractionLifecycleState.CANCELLED,
+        }:
+            return f"canonical_{lifecycle_state.value}"
+
+        if self._is_active_response_blocking() and bool(getattr(self, "_active_response_consumes_canonical_slot", True)):
+            active_origin = str(getattr(self, "_active_response_origin", "") or "").strip().lower()
+            active_turn_id = str(getattr(self, "_current_response_turn_id", "") or "").strip()
+            active_input_event_key = str(getattr(self, "_active_response_input_event_key", "") or "").strip()
+            active_canonical_key = str(getattr(self, "_active_response_canonical_key", "") or "").strip()
+            if not active_canonical_key and active_turn_id and active_input_event_key:
+                active_canonical_key = self._canonical_utterance_key(
+                    turn_id=active_turn_id,
+                    input_event_key=active_input_event_key,
+                )
+            if active_origin != "micro_ack" and active_canonical_key and active_canonical_key == canonical_key:
+                return "active_response_owned"
+
+        return None
+
     def _release_blocked_tool_followups_for_response_done(self, *, response_id: str) -> None:
         normalized_response_id = str(response_id or "").strip()
         if not normalized_response_id:
