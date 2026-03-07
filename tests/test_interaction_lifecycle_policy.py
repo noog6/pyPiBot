@@ -1,6 +1,8 @@
 import sys
 import types
 
+import pytest
+
 if "audioop" not in sys.modules:
     sys.modules["audioop"] = types.ModuleType("audioop")
 
@@ -9,6 +11,111 @@ from ai.interaction_lifecycle_policy import (
     ResponseCreateDecisionAction,
     ServerAutoCreatedDecisionAction,
 )
+
+
+@pytest.mark.parametrize(
+    (
+        "case_name",
+        "kwargs",
+        "expected_action",
+        "expected_reason",
+    ),
+    [
+        (
+            "architecture_law_active_response_beats_send",
+            dict(
+                response_in_flight=True,
+                audio_playback_busy=False,
+                consumes_canonical_slot=True,
+                canonical_audio_started=False,
+                explicit_multipart=False,
+                single_flight_block_reason="",
+                already_delivered=False,
+                preference_recall_lock_blocked=False,
+                canonical_key_already_created=False,
+                has_safety_override=False,
+                suppression_active=False,
+                normalized_origin="assistant_message",
+                awaiting_transcript_final=False,
+            ),
+            ResponseCreateDecisionAction.SCHEDULE,
+            "active_response",
+        ),
+        (
+            "architecture_law_suppression_beats_send",
+            dict(
+                response_in_flight=False,
+                audio_playback_busy=False,
+                consumes_canonical_slot=True,
+                canonical_audio_started=False,
+                explicit_multipart=False,
+                single_flight_block_reason="",
+                already_delivered=False,
+                preference_recall_lock_blocked=False,
+                canonical_key_already_created=False,
+                has_safety_override=False,
+                suppression_active=True,
+                normalized_origin="server_auto",
+                awaiting_transcript_final=False,
+            ),
+            ResponseCreateDecisionAction.BLOCK,
+            "preference_recall_suppressed",
+        ),
+        (
+            "architecture_law_awaiting_transcript_final_beats_send",
+            dict(
+                response_in_flight=False,
+                audio_playback_busy=False,
+                consumes_canonical_slot=True,
+                canonical_audio_started=False,
+                explicit_multipart=False,
+                single_flight_block_reason="",
+                already_delivered=False,
+                preference_recall_lock_blocked=False,
+                canonical_key_already_created=False,
+                has_safety_override=False,
+                suppression_active=False,
+                normalized_origin="server_auto",
+                awaiting_transcript_final=True,
+            ),
+            ResponseCreateDecisionAction.SCHEDULE,
+            "awaiting_transcript_final",
+        ),
+        (
+            "architecture_law_active_response_defers_before_single_flight_block",
+            dict(
+                response_in_flight=True,
+                audio_playback_busy=False,
+                consumes_canonical_slot=True,
+                canonical_audio_started=False,
+                explicit_multipart=False,
+                single_flight_block_reason="already_created",
+                already_delivered=False,
+                preference_recall_lock_blocked=False,
+                canonical_key_already_created=False,
+                has_safety_override=False,
+                suppression_active=False,
+                normalized_origin="assistant_message",
+                awaiting_transcript_final=False,
+            ),
+            ResponseCreateDecisionAction.SCHEDULE,
+            "active_response",
+        ),
+    ],
+)
+def test_decide_response_create_precedence_matrix(
+    case_name: str,
+    kwargs: dict[str, object],
+    expected_action: ResponseCreateDecisionAction,
+    expected_reason: str,
+) -> None:
+    _ = case_name
+    policy = InteractionLifecyclePolicy()
+
+    decision = policy.decide_response_create(**kwargs)
+
+    assert decision.action is expected_action
+    assert decision.reason_code == expected_reason
 
 
 def test_decide_response_create_prefers_schedule_for_active_response() -> None:

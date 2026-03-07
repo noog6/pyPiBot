@@ -10,6 +10,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+from ai.decision_arbitration import (
+    ArbitrationAction,
+    ArbitrationCandidate,
+    decide_arbitration,
+)
+
 
 class ResponseCreateDecisionAction(str, Enum):
     SEND = "send"
@@ -63,57 +69,113 @@ class InteractionLifecyclePolicy:
         normalized_origin: str,
         awaiting_transcript_final: bool,
     ) -> ResponseCreateDecision:
+        candidates: list[ArbitrationCandidate] = []
         if response_in_flight:
-            return ResponseCreateDecision(
-                action=ResponseCreateDecisionAction.SCHEDULE,
-                reason_code="active_response",
-                queue_reason="active_response",
+            candidates.append(
+                ArbitrationCandidate(
+                    candidate_id="active_response",
+                    action=ArbitrationAction.DEFER,
+                    reason_code="active_response",
+                    priority=100,
+                )
             )
         if audio_playback_busy:
-            return ResponseCreateDecision(
-                action=ResponseCreateDecisionAction.SCHEDULE,
-                reason_code="audio_playback_busy",
-                queue_reason="audio_playback_busy",
+            candidates.append(
+                ArbitrationCandidate(
+                    candidate_id="audio_playback_busy",
+                    action=ArbitrationAction.DEFER,
+                    reason_code="audio_playback_busy",
+                    priority=90,
+                )
             )
         if consumes_canonical_slot and canonical_audio_started and not explicit_multipart:
-            return ResponseCreateDecision(
-                action=ResponseCreateDecisionAction.BLOCK,
-                reason_code="canonical_audio_already_started",
+            candidates.append(
+                ArbitrationCandidate(
+                    candidate_id="canonical_audio_started",
+                    action=ArbitrationAction.REFUSE,
+                    reason_code="canonical_audio_already_started",
+                    priority=80,
+                )
             )
         if consumes_canonical_slot and single_flight_block_reason:
-            return ResponseCreateDecision(
-                action=ResponseCreateDecisionAction.BLOCK,
-                reason_code=single_flight_block_reason,
+            candidates.append(
+                ArbitrationCandidate(
+                    candidate_id="single_flight_block",
+                    action=ArbitrationAction.REFUSE,
+                    reason_code=single_flight_block_reason,
+                    priority=70,
+                )
             )
         if already_delivered:
-            return ResponseCreateDecision(
-                action=ResponseCreateDecisionAction.BLOCK,
-                reason_code="already_delivered",
+            candidates.append(
+                ArbitrationCandidate(
+                    candidate_id="already_delivered",
+                    action=ArbitrationAction.REFUSE,
+                    reason_code="already_delivered",
+                    priority=60,
+                )
             )
         if preference_recall_lock_blocked:
-            return ResponseCreateDecision(
-                action=ResponseCreateDecisionAction.BLOCK,
-                reason_code="preference_recall_lock_blocked",
+            candidates.append(
+                ArbitrationCandidate(
+                    candidate_id="preference_recall_lock_blocked",
+                    action=ArbitrationAction.REFUSE,
+                    reason_code="preference_recall_lock_blocked",
+                    priority=50,
+                )
             )
         if consumes_canonical_slot and canonical_key_already_created and not has_safety_override:
-            return ResponseCreateDecision(
-                action=ResponseCreateDecisionAction.BLOCK,
-                reason_code="canonical_response_already_created",
+            candidates.append(
+                ArbitrationCandidate(
+                    candidate_id="canonical_key_already_created",
+                    action=ArbitrationAction.REFUSE,
+                    reason_code="canonical_response_already_created",
+                    priority=40,
+                )
             )
         if suppression_active and normalized_origin == "server_auto":
-            return ResponseCreateDecision(
-                action=ResponseCreateDecisionAction.BLOCK,
-                reason_code="preference_recall_suppressed",
+            candidates.append(
+                ArbitrationCandidate(
+                    candidate_id="preference_recall_suppressed",
+                    action=ArbitrationAction.REFUSE,
+                    reason_code="preference_recall_suppressed",
+                    priority=30,
+                )
             )
         if awaiting_transcript_final and normalized_origin == "server_auto":
+            candidates.append(
+                ArbitrationCandidate(
+                    candidate_id="awaiting_transcript_final",
+                    action=ArbitrationAction.DEFER,
+                    reason_code="awaiting_transcript_final",
+                    priority=20,
+                )
+            )
+
+        arbitration_decision = decide_arbitration(
+            policy_name="response_create",
+            candidates=candidates,
+            default_candidate=ArbitrationCandidate(
+                candidate_id="direct_send",
+                action=ArbitrationAction.DO_NOW,
+                reason_code="direct_send",
+                priority=0,
+            ),
+        )
+        if arbitration_decision.action is ArbitrationAction.DEFER:
             return ResponseCreateDecision(
                 action=ResponseCreateDecisionAction.SCHEDULE,
-                reason_code="awaiting_transcript_final",
-                queue_reason="awaiting_transcript_final",
+                reason_code=arbitration_decision.reason_code,
+                queue_reason=arbitration_decision.reason_code,
+            )
+        if arbitration_decision.action is ArbitrationAction.REFUSE:
+            return ResponseCreateDecision(
+                action=ResponseCreateDecisionAction.BLOCK,
+                reason_code=arbitration_decision.reason_code,
             )
         return ResponseCreateDecision(
             action=ResponseCreateDecisionAction.SEND,
-            reason_code="direct_send",
+            reason_code=arbitration_decision.reason_code,
         )
 
     def decide_server_auto_created(
@@ -127,29 +189,67 @@ class InteractionLifecyclePolicy:
         suppression_by_input_event: bool,
         obligation_replacement: bool,
     ) -> ServerAutoCreatedDecision:
+        candidates: list[ArbitrationCandidate] = []
         if normalized_origin != "server_auto":
-            return ServerAutoCreatedDecision(
-                action=ServerAutoCreatedDecisionAction.ALLOW,
-                reason_code="origin_not_server_auto",
+            candidates.append(
+                ArbitrationCandidate(
+                    candidate_id="origin_not_server_auto",
+                    action=ArbitrationAction.DO_NOW,
+                    reason_code="origin_not_server_auto",
+                    priority=100,
+                )
             )
         if not has_turn_id or not has_canonical_key:
-            return ServerAutoCreatedDecision(
-                action=ServerAutoCreatedDecisionAction.DEFER,
-                reason_code="missing_turn_or_canonical",
+            candidates.append(
+                ArbitrationCandidate(
+                    candidate_id="missing_turn_or_canonical",
+                    action=ArbitrationAction.DEFER,
+                    reason_code="missing_turn_or_canonical",
+                    priority=90,
+                )
             )
         if obligation_replacement:
-            return ServerAutoCreatedDecision(
-                action=ServerAutoCreatedDecisionAction.CANCEL_PRE_AUDIO,
-                reason_code="response_obligation_replacement",
+            candidates.append(
+                ArbitrationCandidate(
+                    candidate_id="response_obligation_replacement",
+                    action=ArbitrationAction.REFUSE,
+                    reason_code="response_obligation_replacement",
+                    priority=80,
+                )
             )
         if suppression_by_turn or suppression_window_active or suppression_by_input_event:
+            candidates.append(
+                ArbitrationCandidate(
+                    candidate_id="preference_recall_suppressed",
+                    action=ArbitrationAction.REFUSE,
+                    reason_code="preference_recall_suppressed",
+                    priority=70,
+                )
+            )
+
+        arbitration_decision = decide_arbitration(
+            policy_name="server_auto_created",
+            candidates=candidates,
+            default_candidate=ArbitrationCandidate(
+                candidate_id="allow",
+                action=ArbitrationAction.DO_NOW,
+                reason_code="allow",
+                priority=0,
+            ),
+        )
+        if arbitration_decision.action is ArbitrationAction.DEFER:
+            return ServerAutoCreatedDecision(
+                action=ServerAutoCreatedDecisionAction.DEFER,
+                reason_code=arbitration_decision.reason_code,
+            )
+        if arbitration_decision.action is ArbitrationAction.REFUSE:
             return ServerAutoCreatedDecision(
                 action=ServerAutoCreatedDecisionAction.CANCEL_PRE_AUDIO,
-                reason_code="preference_recall_suppressed",
+                reason_code=arbitration_decision.reason_code,
             )
         return ServerAutoCreatedDecision(
             action=ServerAutoCreatedDecisionAction.ALLOW,
-            reason_code="allow",
+            reason_code=arbitration_decision.reason_code,
         )
 
     def decide_watchdog_timeout(
