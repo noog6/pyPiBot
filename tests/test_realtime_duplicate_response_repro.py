@@ -1897,7 +1897,7 @@ def test_tool_followup_release_suppressed_when_upgraded_parent_already_covered_a
     response_create_event, canonical_key = api._build_tool_followup_response_create_event(
         call_id="call_mix_1",
         response_create_event={"type": "response.create"},
-        tool_name="look_around",
+        tool_name="gesture_look_around",
     )
 
     captured_logs: list[str] = []
@@ -1990,8 +1990,7 @@ def test_tool_followup_release_preserved_for_distinct_tool_result_information(mo
     assert api._tool_followup_state(canonical_key=canonical_key) in {"creating", "created"}
     assert not any("tool_followup_release_suppressed" in entry for entry in captured_logs)
 
-
-def test_tool_followup_release_preserved_for_non_upgraded_parent_origin() -> None:
+def test_tool_followup_release_suppressed_for_assistant_parent_covering_gesture_action() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
     ws = _RecordingWs()
@@ -2022,7 +2021,7 @@ def test_tool_followup_release_preserved_for_non_upgraded_parent_origin() -> Non
     response_create_event, canonical_key = api._build_tool_followup_response_create_event(
         call_id="call_mix_3",
         response_create_event={"type": "response.create"},
-        tool_name="look_around",
+        tool_name="gesture_look_around",
     )
 
     async def _run() -> None:
@@ -2036,7 +2035,57 @@ def test_tool_followup_release_preserved_for_non_upgraded_parent_origin() -> Non
 
     asyncio.run(_run())
 
-    assert len([event for event in ws.sent if event.get("type") == "response.create"]) == 1
+    assert len([event for event in ws.sent if event.get("type") == "response.create"]) == 0
+    assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
+
+
+def test_tool_followup_release_suppressed_for_server_auto_parent_covering_gesture_action() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._response_in_flight = True
+    api.response_in_progress = True
+    api._audio_playback_busy = True
+    api._active_response_id = "resp-server-auto-1"
+    api._active_response_origin = "server_auto"
+    api._current_response_turn_id = "turn_mix_server_auto"
+    api._active_response_input_event_key = "item_mix_server_auto_parent"
+    api._active_input_event_key_by_turn_id["turn_mix_server_auto"] = "item_mix_server_auto_parent"
+
+    parent_key = api._canonical_utterance_key(turn_id="turn_mix_server_auto", input_event_key="item_mix_server_auto_parent")
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id="turn_mix_server_auto",
+        input_event_key="item_mix_server_auto_parent",
+        mutator=lambda record: (
+            setattr(record, "origin", "server_auto"),
+            setattr(record, "response_id", "resp-server-auto-1"),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "progress"),
+            setattr(record, "done", True),
+        ),
+    )
+
+    response_create_event, canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_mix_server_auto_1",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+
+    async def _run() -> None:
+        await api._send_response_create(ws, response_create_event, origin="tool_output")
+        assert api._tool_followup_state(canonical_key=canonical_key) == "blocked_active_response"
+        api._release_blocked_tool_followups_for_response_done(response_id="resp-server-auto-1")
+        api._response_in_flight = False
+        api.response_in_progress = False
+        api._audio_playback_busy = False
+        await api._drain_response_create_queue(source_trigger="response_done")
+
+    asyncio.run(_run())
+
+    assert [event for event in ws.sent if event.get("type") == "response.create"] == []
+    assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
 
 
 def test_tool_followup_suppressed_release_does_not_regress_queue_drain_idempotency() -> None:
@@ -2070,7 +2119,7 @@ def test_tool_followup_suppressed_release_does_not_regress_queue_drain_idempoten
     response_create_event, canonical_key = api._build_tool_followup_response_create_event(
         call_id="call_mix_4",
         response_create_event={"type": "response.create"},
-        tool_name="look_around",
+        tool_name="gesture_look_around",
     )
 
     async def _run() -> None:
@@ -2114,7 +2163,7 @@ def test_tool_followup_create_seam_suppresses_parent_covered_even_without_blocke
     response_create_event, canonical_key = api._build_tool_followup_response_create_event(
         call_id="call_mix_5",
         response_create_event={"type": "response.create"},
-        tool_name="look_around",
+        tool_name="gesture_look_around",
     )
     metadata = ((response_create_event.get("response") or {}).get("metadata") or {})
     metadata.pop("blocked_by_response_id", None)
@@ -2142,7 +2191,7 @@ def test_tool_followup_create_seam_suppresses_parent_covered_even_without_blocke
     assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
 
 
-def test_tool_followup_create_seam_suppression_applies_to_response_done_and_playback_complete() -> None:
+def test_gesture_followup_dropped_on_response_done_and_playback_complete_when_parent_already_spoke_action() -> None:
     for trigger in ("response_done", "playback_complete"):
         api = _make_api_stub()
         _wire_runtime(api)
@@ -2156,8 +2205,8 @@ def test_tool_followup_create_seam_suppression_applies_to_response_done_and_play
             turn_id=f"turn_mix_{trigger}",
             input_event_key="item_parent",
             mutator=lambda record: (
-                setattr(record, "origin", "upgraded_response"),
-                setattr(record, "response_id", f"resp-upgraded-{trigger}"),
+                setattr(record, "origin", "assistant_message"),
+                setattr(record, "response_id", f"resp-parent-ack-{trigger}"),
                 setattr(record, "deliverable_observed", True),
                 setattr(record, "deliverable_class", "progress"),
                 setattr(record, "done", True),
@@ -2167,10 +2216,10 @@ def test_tool_followup_create_seam_suppression_applies_to_response_done_and_play
         response_create_event, canonical_key = api._build_tool_followup_response_create_event(
             call_id=f"call_mix_{trigger}",
             response_create_event={"type": "response.create"},
-            tool_name="look_around",
+            tool_name="gesture_look_around",
         )
         metadata = ((response_create_event.get("response") or {}).get("metadata") or {})
-        metadata["blocked_by_response_id"] = f"resp-upgraded-{trigger}"
+        metadata["blocked_by_response_id"] = f"resp-parent-ack-{trigger}"
         metadata["parent_turn_id"] = f"turn_mix_{trigger}"
         metadata["parent_input_event_key"] = "item_parent"
 
