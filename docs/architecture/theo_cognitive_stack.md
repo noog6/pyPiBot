@@ -70,6 +70,18 @@ YH -.-> D
   fail-closed policy boundaries; changes that do not belong here are memory
   quality tuning or realtime lifecycle orchestration.
 
+## Fast Layer Triage Matrix
+
+| Question being answered | Owning layer | Example code anchor |
+| --- | --- | --- |
+| Is this signal/context worth using, and how should it be grounded? | Perception & Memory Interfaces | `services/memory_manager.py` |
+| Do we respond now/later/never? | Decision Arbitration Layer | `ai/interaction_lifecycle_policy.py` |
+| May this tool execute under risk/cost policy? | Governance Spine | `ai/governance.py` |
+| Can transport/lifecycle safely carry out action? | Runtime / Nervous System | `ai/realtime_api.py` |
+| How should Theo express this consistently without drifting? | Character / Persona Layer | prompt/session persona config (future character module) |
+
+> **Anti-pattern:** Do not move governance or cognitive policy checks into lifecycle scheduling code except for deterministic safety interlocks.
+
 ## Layer-by-Layer Guidance
 
 ### 1) Physical Platform
