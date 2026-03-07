@@ -317,6 +317,42 @@ def test_tick_exits_warmup_to_ok_when_startup_criteria_met(monkeypatch) -> None:
     assert orchestrator._warmup_active is False
 
 
+def test_tick_remains_ok_post_warmup_when_realtime_response_in_progress(monkeypatch) -> None:
+    orchestrator = _new_orchestrator()
+    orchestrator._health_debounce_s = 0.0
+    orchestrator._warmup_active = False
+    orchestrator._warmup_exit_reason = "criteria_met"
+    captured = []
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_run_health_probes",
+        lambda: [
+            HealthProbeResult("audio", HealthStatus.OK, "Audio input/output ready"),
+            HealthProbeResult(
+                "realtime",
+                HealthStatus.OK,
+                "Realtime session connected (response in progress)",
+                details={
+                    "connected": 1,
+                    "ready": 0,
+                    "injection_ready_reason": "response_in_progress",
+                },
+            ),
+            HealthProbeResult("battery", HealthStatus.OK, "Battery nominal"),
+        ],
+    )
+    monkeypatch.setattr(orchestrator, "_maybe_run_micro_presence", lambda now: None)
+    monkeypatch.setattr(orchestrator, "_maybe_run_memory_maintenance", lambda now: None)
+    monkeypatch.setattr(orchestrator, "_emit_health_snapshot", lambda snapshot: captured.append(snapshot))
+
+    orchestrator._tick()
+
+    assert captured[-1].status == HealthStatus.OK
+    assert captured[-1].summary == "All systems nominal"
+    assert captured[-1].details["realtime_summary"] == "Realtime session connected (response in progress)"
+
+
 def test_tick_does_not_exit_warmup_until_probe_results_settle(monkeypatch) -> None:
     orchestrator = _new_orchestrator()
     orchestrator._health_debounce_s = 5.0

@@ -142,11 +142,11 @@ def test_probe_realtime_session_connected_not_ready_is_warmup() -> None:
     assert result.summary == "Realtime connected (awaiting injection readiness)"
 
 
-def test_probe_realtime_session_first_turn_unsettled_is_warmup() -> None:
+def test_probe_realtime_session_first_turn_unsettled_is_ok_note() -> None:
     result = probe_realtime_session(_ConnectedFirstTurnRealtime())
 
-    assert result.status.value == "warmup"
-    assert result.summary == "Realtime connected (first turn not yet settled)"
+    assert result.status.value == "ok"
+    assert result.summary == "Realtime session connected (response in progress)"
 
 
 def test_probe_realtime_session_disconnected_remains_failing() -> None:

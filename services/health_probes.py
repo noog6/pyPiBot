@@ -264,10 +264,11 @@ def probe_realtime_session(realtime_api: Any | None) -> HealthProbeResult:
         status = HealthStatus.OK
         summary = "Realtime session connected"
     elif connected:
-        status = HealthStatus.WARMUP
         if injection_ready_reason == "response_in_progress":
-            summary = "Realtime connected (first turn not yet settled)"
+            status = HealthStatus.OK
+            summary = "Realtime session connected (response in progress)"
         else:
+            status = HealthStatus.WARMUP
             summary = "Realtime connected (awaiting injection readiness)"
     elif failures > 0:
         status = HealthStatus.FAILING
