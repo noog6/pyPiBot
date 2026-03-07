@@ -5935,7 +5935,7 @@ class RealtimeAPI:
             response_payload["metadata"] = metadata
         tool_call_id = str(call_id or "").strip() or "unknown"
         turn_id = self._current_turn_id_or_unknown()
-        parent_input_event_key = self._active_input_event_key_for_turn(turn_id)
+        parent_input_event_key = self._parent_input_event_key_for_tool_followup(turn_id=turn_id)
         tool_input_event_key = self._tool_followup_input_event_key(call_id=tool_call_id)
         metadata["turn_id"] = turn_id
         metadata["input_event_key"] = tool_input_event_key
@@ -5953,6 +5953,22 @@ class RealtimeAPI:
             metadata["tool_result_has_distinct_info"] = "true"
         canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_input_event_key)
         return event, canonical_key
+
+    def _parent_input_event_key_for_tool_followup(self, *, turn_id: str) -> str:
+        parent_input_event_key = self._active_input_event_key_for_turn(turn_id)
+        if parent_input_event_key and not parent_input_event_key.startswith("tool:"):
+            return parent_input_event_key
+
+        active_response_turn_id = str(getattr(self, "_current_response_turn_id", "") or "").strip()
+        active_response_input_event_key = str(getattr(self, "_active_response_input_event_key", "") or "").strip()
+        if (
+            active_response_turn_id == str(turn_id or "").strip()
+            and active_response_input_event_key
+            and not active_response_input_event_key.startswith("tool:")
+        ):
+            return active_response_input_event_key
+
+        return parent_input_event_key
 
     def _tool_result_has_distinct_followup_info(self, *, tool_name: str, result: Any) -> bool:
         normalized_tool_name = str(tool_name or "").strip().lower()
@@ -6029,7 +6045,7 @@ class RealtimeAPI:
         if not state_entry:
             parent_turn_id = str(response_metadata.get("parent_turn_id") or response_metadata.get("turn_id") or "").strip()
             parent_input_event_key = str(response_metadata.get("parent_input_event_key") or "").strip()
-            if parent_turn_id and parent_input_event_key:
+            if parent_turn_id and parent_input_event_key and not parent_input_event_key.startswith("tool:"):
                 parent_canonical_key = self._canonical_utterance_key(
                     turn_id=parent_turn_id,
                     input_event_key=parent_input_event_key,
@@ -6037,6 +6053,20 @@ class RealtimeAPI:
                 candidate = self._canonical_response_state_store().get(parent_canonical_key)
                 if isinstance(candidate, CanonicalResponseState):
                     state_entry = (parent_canonical_key, candidate)
+            if not state_entry and parent_turn_id:
+                for canonical_key, candidate in self._canonical_response_state_store().items():
+                    if not isinstance(candidate, CanonicalResponseState):
+                        continue
+                    if str(candidate.turn_id or "").strip() != parent_turn_id:
+                        continue
+                    candidate_input_event_key = str(candidate.input_event_key or "").strip()
+                    if not candidate_input_event_key or candidate_input_event_key.startswith("tool:"):
+                        continue
+                    candidate_origin = str(candidate.origin or "").strip().lower()
+                    if candidate_origin in {"", "micro_ack", "tool_output"}:
+                        continue
+                    state_entry = (canonical_key, candidate)
+                    break
         if not state_entry:
             return False
         _, parent_state = state_entry
