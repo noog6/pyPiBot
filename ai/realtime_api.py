@@ -10358,6 +10358,14 @@ class RealtimeAPI:
             suppression_by_input_event=suppression_by_input_event,
             obligation_replacement=obligation_replacement,
         )
+        logger.info(
+            "arbitration_decision surface=server_auto_created action=%s reason_code=%s selected_candidate_id=%s turn_id=%s canonical_key=%s",
+            policy_decision.action.value,
+            policy_decision.reason_code,
+            policy_decision.selected_candidate_id,
+            normalized_turn_id or "unknown",
+            normalized_canonical_key or "unknown",
+        )
         if policy_decision.action is ServerAutoCreatedDecisionAction.CANCEL_PRE_AUDIO:
             return ServerAutoArbitrationOutcome.CANCEL_PRE_AUDIO, policy_decision.reason_code
         if policy_decision.action is ServerAutoCreatedDecisionAction.DEFER:

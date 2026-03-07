@@ -75,3 +75,13 @@ def test_key_rebound_moves_record_without_terminal_replace() -> None:
     assert controller.state_for(old_key) == InteractionLifecycleState.NEW
     assert controller.state_for(new_key) == InteractionLifecycleState.SERVER_AUTO_CREATED
     assert controller.decide_response_create_allow(new_key, origin="assistant_message").action is LifecycleDecisionAction.CANCEL
+
+
+def test_response_created_transition_reason_is_origin_neutral() -> None:
+    controller = InteractionLifecycleController()
+    key = "run-1:turn-1:item-1"
+
+    decision = controller.on_response_created(key, origin="assistant_message")
+
+    assert decision.action is LifecycleDecisionAction.ALLOW
+    assert decision.reason == "transitioned=response_created"
