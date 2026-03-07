@@ -11,6 +11,7 @@ if "audioop" not in sys.modules:
 
 from ai.governance import ActionPacket
 from ai.realtime.response_create_runtime import ResponseCreateRuntime
+from ai.realtime.types import PendingResponseCreate
 from ai.realtime_api import InteractionState, RealtimeAPI
 from ai.interaction_lifecycle_controller import InteractionLifecycleState
 from core.logging import logger
@@ -1639,3 +1640,174 @@ def test_rebind_active_response_skips_when_new_key_already_active() -> None:
     assert recorded == [
         "transition_rebind_skipped:new_key_already_active:new_state=audio_started:cause=transcript_final_rebind"
     ]
+
+
+def test_assistant_message_not_scheduled_when_same_turn_tool_followup_owner_exists(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._response_in_flight = True
+    api.response_in_progress = True
+    api._active_response_origin = "server_auto"
+    api._current_response_turn_id = "turn_owner_tool"
+    api._active_input_event_key_by_turn_id["turn_owner_tool"] = "item_owner_tool"
+    api._tool_followup_state_by_canonical_key[
+        api._canonical_utterance_key(turn_id="turn_owner_tool", input_event_key="tool:call_owner")
+    ] = "blocked_active_response"
+
+    captured_logs: list[str] = []
+    original_info = logger.info
+
+    def _capture_info(message: str, *args, **kwargs):
+        rendered = str(message)
+        if args:
+            rendered = rendered % args
+        captured_logs.append(rendered)
+        return original_info(message, *args, **kwargs)
+
+    monkeypatch.setattr(logger, "info", _capture_info)
+
+    async def _run() -> None:
+        await api.send_assistant_message(
+            "Working on it.",
+            ws,
+            response_metadata={
+                "turn_id": "turn_owner_tool",
+                "input_event_key": "item_owner_tool",
+                "trigger": "preference_recall",
+            },
+        )
+
+    asyncio.run(_run())
+
+    assert api._pending_response_create is None
+    assert not list(api._response_create_queue)
+    assert any("response_not_scheduled" in entry and "reason=same_turn_already_owned" in entry for entry in captured_logs)
+    assert any("owner=tool_followup_owned" in entry for entry in captured_logs)
+
+
+def test_assistant_message_not_scheduled_when_same_turn_final_deliverable_exists(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._response_in_flight = True
+    api.response_in_progress = True
+    api._active_response_origin = "server_auto"
+    api._current_response_turn_id = "turn_owner_final"
+    api._active_input_event_key_by_turn_id["turn_owner_final"] = "item_owner_final"
+
+    final_key = api._canonical_utterance_key(turn_id="turn_owner_final", input_event_key="item_owner_final")
+    api._canonical_response_state_mutate(
+        canonical_key=final_key,
+        turn_id="turn_owner_final",
+        input_event_key="item_owner_final",
+        mutator=lambda state: (
+            setattr(state, "origin", "tool_output"),
+            setattr(state, "deliverable_observed", True),
+            setattr(state, "deliverable_class", "final"),
+        ),
+    )
+
+    captured_logs: list[str] = []
+    original_info = logger.info
+
+    def _capture_info(message: str, *args, **kwargs):
+        rendered = str(message)
+        if args:
+            rendered = rendered % args
+        captured_logs.append(rendered)
+        return original_info(message, *args, **kwargs)
+
+    monkeypatch.setattr(logger, "info", _capture_info)
+
+    async def _run() -> None:
+        await api.send_assistant_message(
+            "Already answered.",
+            ws,
+            response_metadata={
+                "turn_id": "turn_owner_final",
+                "input_event_key": "item_owner_final",
+                "trigger": "preference_recall",
+            },
+        )
+
+    asyncio.run(_run())
+
+    assert api._pending_response_create is None
+    assert not list(api._response_create_queue)
+    assert any("owner=terminal_deliverable_owned" in entry for entry in captured_logs)
+
+
+def test_assistant_message_still_schedules_without_stronger_same_turn_owner() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._response_in_flight = True
+    api.response_in_progress = True
+    api._active_response_origin = "server_auto"
+    api._current_response_turn_id = "turn_other"
+    api._active_input_event_key_by_turn_id["turn_owner_none"] = "item_owner_none"
+
+    async def _run() -> None:
+        await api.send_assistant_message(
+            "Queued while active response completes.",
+            ws,
+            response_metadata={
+                "turn_id": "turn_owner_none",
+                "input_event_key": "item_owner_none",
+                "trigger": "preference_recall",
+            },
+        )
+
+    asyncio.run(_run())
+
+    assert api._pending_response_create is not None
+    assert api._pending_response_create.origin == "assistant_message"
+
+
+def test_tool_followup_cleanup_stale_assistant_creates_remains_available() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    event = {
+        "type": "response.create",
+        "response": {"metadata": {"turn_id": "turn_cleanup", "input_event_key": "tool:call_cleanup"}},
+    }
+    api._pending_response_create = PendingResponseCreate(
+        websocket=ws,
+        event=event,
+        origin="assistant_message",
+        turn_id="turn_cleanup",
+        created_at=0.0,
+        reason="active_response",
+        record_ai_call=False,
+        debug_context=None,
+        memory_brief_note=None,
+        queued_reminder_key=None,
+        enqueued_done_serial=0,
+        enqueue_seq=1,
+    )
+    api._response_create_queue.append(
+        {
+            "websocket": ws,
+            "event": event,
+            "origin": "assistant_message",
+            "turn_id": "turn_cleanup",
+            "record_ai_call": False,
+            "debug_context": None,
+            "memory_brief_note": None,
+            "queued_reminder_key": None,
+            "enqueued_done_serial": 0,
+            "enqueue_seq": 2,
+        }
+    )
+
+    assert api._pending_response_create is not None
+    canonical_key = api._canonical_utterance_key(turn_id="turn_cleanup", input_event_key="tool:call_cleanup")
+    api._clear_stale_assistant_message_creates_for_tool_followup(canonical_key=canonical_key, state="created")
+    assert api._pending_response_create is None
+    assert not list(api._response_create_queue)

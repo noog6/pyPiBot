@@ -237,6 +237,37 @@ class ResponseCreateRuntime:
                 canonical_key,
             )
             return False
+        if normalized_origin == "assistant_message":
+            owner_reason = ""
+            owner_fn = getattr(api, "_assistant_message_same_turn_owner_reason", None)
+            if callable(owner_fn):
+                owner_reason = str(
+                    owner_fn(
+                        turn_id=turn_id,
+                        input_event_key=current_input_event_key,
+                        canonical_key=canonical_key,
+                    )
+                    or ""
+                ).strip()
+            if owner_reason:
+                logger.info(
+                    "response_not_scheduled run_id=%s turn_id=%s input_event_key=%s reason=same_turn_already_owned details=owner=%s canonical_key=%s origin=%s",
+                    api._current_run_id() or "",
+                    turn_id,
+                    current_input_event_key or "unknown",
+                    owner_reason,
+                    canonical_key,
+                    normalized_origin,
+                )
+                api._mark_transcript_response_outcome(
+                    input_event_key=current_input_event_key,
+                    turn_id=turn_id,
+                    outcome="response_not_scheduled",
+                    reason="same_turn_already_owned",
+                    details=f"owner={owner_reason} canonical_key={canonical_key} origin={normalized_origin}",
+                )
+                return False
+
         if (
             consumes_canonical_slot
             and canonical_key in created_keys
