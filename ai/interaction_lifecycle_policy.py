@@ -17,6 +17,29 @@ from ai.decision_arbitration import (
 )
 
 
+# Precedence law (highest to lowest):
+# - Response create arbitration prioritizes active runtime deferrals first,
+#   then hard canonical/single-flight guards, then suppression/transcript waits.
+# - Server auto-created arbitration allows non-server_auto passthrough first,
+#   then canonical readiness defer, then refusal gates.
+_RC_PRIORITY_ACTIVE_RESPONSE = 100
+_RC_PRIORITY_AUDIO_PLAYBACK_BUSY = 90
+_RC_PRIORITY_CANONICAL_AUDIO_STARTED = 80
+_RC_PRIORITY_SINGLE_FLIGHT_BLOCK = 70
+_RC_PRIORITY_ALREADY_DELIVERED = 60
+_RC_PRIORITY_PREFERENCE_RECALL_LOCK = 50
+_RC_PRIORITY_CANONICAL_KEY_ALREADY_CREATED = 40
+_RC_PRIORITY_SUPPRESSION_ACTIVE_SERVER_AUTO = 30
+_RC_PRIORITY_AWAITING_TRANSCRIPT_FINAL = 20
+_RC_PRIORITY_DEFAULT_DIRECT_SEND = 0
+
+_SAC_PRIORITY_ORIGIN_NOT_SERVER_AUTO = 100
+_SAC_PRIORITY_MISSING_TURN_OR_CANONICAL = 90
+_SAC_PRIORITY_OBLIGATION_REPLACEMENT = 80
+_SAC_PRIORITY_SUPPRESSION_ACTIVE = 70
+_SAC_PRIORITY_DEFAULT_ALLOW = 0
+
+
 class ResponseCreateDecisionAction(str, Enum):
     SEND = "send"
     SCHEDULE = "schedule"
@@ -78,7 +101,7 @@ class InteractionLifecyclePolicy:
                     candidate_id="active_response",
                     action=ArbitrationAction.DEFER,
                     reason_code="active_response",
-                    priority=100,
+                    priority=_RC_PRIORITY_ACTIVE_RESPONSE,
                 )
             )
         if audio_playback_busy:
@@ -87,7 +110,7 @@ class InteractionLifecyclePolicy:
                     candidate_id="audio_playback_busy",
                     action=ArbitrationAction.DEFER,
                     reason_code="audio_playback_busy",
-                    priority=90,
+                    priority=_RC_PRIORITY_AUDIO_PLAYBACK_BUSY,
                 )
             )
         if consumes_canonical_slot and canonical_audio_started and not explicit_multipart:
@@ -96,7 +119,7 @@ class InteractionLifecyclePolicy:
                     candidate_id="canonical_audio_started",
                     action=ArbitrationAction.REFUSE,
                     reason_code="canonical_audio_already_started",
-                    priority=80,
+                    priority=_RC_PRIORITY_CANONICAL_AUDIO_STARTED,
                 )
             )
         if consumes_canonical_slot and single_flight_block_reason:
@@ -105,7 +128,7 @@ class InteractionLifecyclePolicy:
                     candidate_id="single_flight_block",
                     action=ArbitrationAction.REFUSE,
                     reason_code=single_flight_block_reason,
-                    priority=70,
+                    priority=_RC_PRIORITY_SINGLE_FLIGHT_BLOCK,
                 )
             )
         if already_delivered:
@@ -114,7 +137,7 @@ class InteractionLifecyclePolicy:
                     candidate_id="already_delivered",
                     action=ArbitrationAction.REFUSE,
                     reason_code="already_delivered",
-                    priority=60,
+                    priority=_RC_PRIORITY_ALREADY_DELIVERED,
                 )
             )
         if preference_recall_lock_blocked:
@@ -123,7 +146,7 @@ class InteractionLifecyclePolicy:
                     candidate_id="preference_recall_lock_blocked",
                     action=ArbitrationAction.REFUSE,
                     reason_code="preference_recall_lock_blocked",
-                    priority=50,
+                    priority=_RC_PRIORITY_PREFERENCE_RECALL_LOCK,
                 )
             )
         if consumes_canonical_slot and canonical_key_already_created and not has_safety_override:
@@ -132,7 +155,7 @@ class InteractionLifecyclePolicy:
                     candidate_id="canonical_key_already_created",
                     action=ArbitrationAction.REFUSE,
                     reason_code="canonical_response_already_created",
-                    priority=40,
+                    priority=_RC_PRIORITY_CANONICAL_KEY_ALREADY_CREATED,
                 )
             )
         if suppression_active and normalized_origin == "server_auto":
@@ -141,7 +164,7 @@ class InteractionLifecyclePolicy:
                     candidate_id="preference_recall_suppressed",
                     action=ArbitrationAction.REFUSE,
                     reason_code="preference_recall_suppressed",
-                    priority=30,
+                    priority=_RC_PRIORITY_SUPPRESSION_ACTIVE_SERVER_AUTO,
                 )
             )
         if awaiting_transcript_final and normalized_origin == "server_auto":
@@ -150,7 +173,7 @@ class InteractionLifecyclePolicy:
                     candidate_id="awaiting_transcript_final",
                     action=ArbitrationAction.DEFER,
                     reason_code="awaiting_transcript_final",
-                    priority=20,
+                    priority=_RC_PRIORITY_AWAITING_TRANSCRIPT_FINAL,
                 )
             )
 
@@ -161,7 +184,7 @@ class InteractionLifecyclePolicy:
                 candidate_id="direct_send",
                 action=ArbitrationAction.DO_NOW,
                 reason_code="direct_send",
-                priority=0,
+                priority=_RC_PRIORITY_DEFAULT_DIRECT_SEND,
             ),
         )
         if arbitration_decision.action is ArbitrationAction.DEFER:
@@ -201,7 +224,7 @@ class InteractionLifecyclePolicy:
                     candidate_id="origin_not_server_auto",
                     action=ArbitrationAction.DO_NOW,
                     reason_code="origin_not_server_auto",
-                    priority=100,
+                    priority=_SAC_PRIORITY_ORIGIN_NOT_SERVER_AUTO,
                 )
             )
         if not has_turn_id or not has_canonical_key:
@@ -210,7 +233,7 @@ class InteractionLifecyclePolicy:
                     candidate_id="missing_turn_or_canonical",
                     action=ArbitrationAction.DEFER,
                     reason_code="missing_turn_or_canonical",
-                    priority=90,
+                    priority=_SAC_PRIORITY_MISSING_TURN_OR_CANONICAL,
                 )
             )
         if obligation_replacement:
@@ -219,7 +242,7 @@ class InteractionLifecyclePolicy:
                     candidate_id="response_obligation_replacement",
                     action=ArbitrationAction.REFUSE,
                     reason_code="response_obligation_replacement",
-                    priority=80,
+                    priority=_SAC_PRIORITY_OBLIGATION_REPLACEMENT,
                 )
             )
         if suppression_by_turn or suppression_window_active or suppression_by_input_event:
@@ -228,7 +251,7 @@ class InteractionLifecyclePolicy:
                     candidate_id="preference_recall_suppressed",
                     action=ArbitrationAction.REFUSE,
                     reason_code="preference_recall_suppressed",
-                    priority=70,
+                    priority=_SAC_PRIORITY_SUPPRESSION_ACTIVE,
                 )
             )
 
@@ -239,7 +262,7 @@ class InteractionLifecyclePolicy:
                 candidate_id="allow",
                 action=ArbitrationAction.DO_NOW,
                 reason_code="allow",
-                priority=0,
+                priority=_SAC_PRIORITY_DEFAULT_ALLOW,
             ),
         )
         if arbitration_decision.action is ArbitrationAction.DEFER:
