@@ -55,6 +55,13 @@ def _make_api_stub() -> RealtimeAPI:
     api._active_response_consumes_canonical_slot = True
     api._audio_accum = bytearray()
     api._audio_accum_bytes_target = 9600
+    api._asr_verify_short_utterance_ms = 300
+    api._asr_verify_min_confidence = 0.6
+    api._server_auto_audio_deferral_timeout_ms = 225
+    api._server_auto_audio_deferral_short_utterance_grace_ms = 225
+    api._vad_turn_detection = {"profile": "test"}
+    api._utterance_trust_snapshot_by_input_event_key = {}
+    api._asr_verify_on_risk_enabled = False
     api._tool_call_records = []
     api._last_tool_call_results = []
     api._assistant_reply_accum = ""
@@ -1588,6 +1595,75 @@ def test_server_auto_response_created_binds_to_active_turn_key_after_memory_inte
     assert api._active_server_auto_input_event_key == "item-2"
     assert ("item-2", "response_created") in outcome_calls
     assert not any(key == "item-1" and outcome == "response_created" for key, outcome in outcome_calls[1:])
+
+
+def test_memory_intent_transcript_final_upgrades_from_pending_server_auto_even_after_done(monkeypatch) -> None:
+    api = _make_api_stub()
+    ws = _RecordingWs()
+
+    async def _false(*_args, **_kwargs) -> bool:
+        return False
+
+    async def _capture_upgrade(**_kwargs) -> bool:
+        upgrade_calls.append(dict(_kwargs))
+        return True
+
+    upgrade_calls: list[dict[str, object]] = []
+    info_logs: list[str] = []
+
+    api._maybe_handle_confirmation_decision_timeout = _false
+    api._maybe_handle_approval_response = _false
+    api._handle_stop_word = _false
+    api._maybe_handle_research_permission_response = _false
+    api._maybe_handle_research_budget_response = _false
+    api._maybe_apply_late_confirmation_decision = _false
+    api._maybe_process_research_intent = _false
+    api._maybe_handle_preference_recall_intent = _false
+    api._has_active_confirmation_token = lambda: False
+    api._is_awaiting_confirmation_phase = lambda: False
+    api._is_user_approved_interrupt_response = lambda _response: False
+    api._log_user_transcript = lambda *_args, **_kwargs: None
+    api._record_user_input = lambda *_args, **_kwargs: None
+    api._track_outgoing_event = lambda *_args, **_kwargs: None
+    api._active_response_origin = "unknown"
+    api._active_response_id = None
+    api._active_server_auto_input_event_key = None
+    api._current_response_turn_id = "turn_1"
+    api._pending_server_auto_response_by_turn_id = {
+        "turn_1": PendingServerAutoResponse(
+            turn_id="turn_1",
+            response_id="resp-server-auto-done",
+            canonical_key=api._canonical_utterance_key(
+                turn_id="turn_1",
+                input_event_key="synthetic_server_auto_1",
+            ),
+            created_at_ms=1,
+            active=False,
+        )
+    }
+
+    monkeypatch.setattr(api, "_cancel_and_replace_pending_server_auto_on_transcript_final", _capture_upgrade)
+    monkeypatch.setattr(
+        logger,
+        "info",
+        lambda msg, *args, **_kwargs: info_logs.append(msg % args if args else msg),
+    )
+
+    asyncio.run(
+        api.handle_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "item-memory",
+                "transcript": "Go back to center and tell me my favorite editor.",
+            },
+            ws,
+        )
+    )
+
+    assert len(upgrade_calls) == 1
+    assert upgrade_calls[0]["turn_id"] == "turn_1"
+    assert upgrade_calls[0]["input_event_key"] == "item-memory"
+    assert any("memory_intent_decision_path" in entry and "decision_path=upgraded_response" in entry for entry in info_logs)
 
 
 def test_resptrace_logs_for_scheduled_and_drained_response_create(monkeypatch) -> None:

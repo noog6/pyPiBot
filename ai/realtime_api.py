@@ -11559,6 +11559,26 @@ class RealtimeAPI:
             replacement_input_event_key=input_event_key,
             cause="transcript_final_rebind",
         )
+        transcript_canonical_key = self._canonical_utterance_key(
+            turn_id=resolved_turn_id,
+            input_event_key=input_event_key,
+        )
+        pending_server_auto = self._pending_server_auto_response_for_turn(turn_id=resolved_turn_id)
+        pending_server_auto_key = str(getattr(pending_server_auto, "canonical_key", "") or "").strip()
+        pending_server_auto_active = bool(
+            isinstance(pending_server_auto, PendingServerAutoResponse) and pending_server_auto.active
+        )
+        logger.info(
+            "transcript_final_handoff run_id=%s turn_id=%s old_key=%s new_key=%s prior_response_id=%s pending_server_auto_active=%s canonical_owner_before=%s canonical_owner_after=%s",
+            self._current_run_id() or "",
+            resolved_turn_id,
+            pending_server_auto_key or "none",
+            transcript_canonical_key,
+            str(getattr(pending_server_auto, "response_id", "") or "none"),
+            str(pending_server_auto_active).lower(),
+            pending_server_auto_key or "none",
+            transcript_canonical_key,
+        )
         self._clear_stale_pending_server_auto_for_turn(
             turn_id=resolved_turn_id,
             active_input_event_key=input_event_key,
@@ -11578,6 +11598,22 @@ class RealtimeAPI:
                 turn_id=self._current_turn_id_or_unknown(),
                 input_event_key=input_event_key,
                 source="input_audio_transcription",
+            )
+            logger.info(
+                "response_obligation_eval run_id=%s turn_id=%s input_event_key=%s obligation_state=%s response_created_seen=%s response_done_seen=%s action=%s reason=%s",
+                self._current_run_id() or "",
+                resolved_turn_id,
+                input_event_key,
+                "open",
+                str(
+                    self._summary_response_created_seen_for_canonical(
+                        turn_id=resolved_turn_id,
+                        canonical_key=transcript_canonical_key,
+                    )
+                ).lower(),
+                str(self._response_delivery_state(turn_id=resolved_turn_id, input_event_key=input_event_key) == "done").lower(),
+                "schedule",
+                "memory_intent_transcript_final",
             )
         pending_server_auto_keys = getattr(self, "_pending_server_auto_input_event_keys", None)
         if not isinstance(pending_server_auto_keys, deque):
@@ -11701,7 +11737,12 @@ class RealtimeAPI:
         if transcript:
             decision_path = "canonical_transcript"
             if memory_intent:
-                decision_path = "upgraded_response" if str(getattr(self, "_active_response_origin", "")).strip().lower() == "server_auto" else "canonical_transcript"
+                transcript_upgrade_candidate = bool(
+                    pending_server_auto is not None
+                    and pending_server_auto_key
+                    and pending_server_auto_key != transcript_canonical_key
+                )
+                decision_path = "upgraded_response" if transcript_upgrade_candidate else "canonical_transcript"
                 logger.info(
                     "memory_intent_decision_path run_id=%s turn_id=%s input_event_key=%s decision_path=%s",
                     self._current_run_id() or "",
@@ -11747,6 +11788,7 @@ class RealtimeAPI:
                     turn_id=resolved_turn_id,
                     input_event_key=input_event_key,
                 )
+                pending_is_active = bool(isinstance(pending, PendingServerAutoResponse) and pending.active)
                 can_cancel = self.should_cancel_and_replace(
                     server_auto_state=pending,
                     transcript_final_state={
@@ -11758,10 +11800,30 @@ class RealtimeAPI:
                         input_event_key=input_event_key,
                     ),
                 )
-                if pending is not None and not can_cancel:
+                logger.info(
+                    "canonical_response_schedule_eval run_id=%s turn_id=%s input_event_key=%s synthetic_key=%s transcript_key=%s action=%s reason=%s",
+                    self._current_run_id() or "",
+                    resolved_turn_id,
+                    input_event_key,
+                    str(getattr(pending, "canonical_key", "") or "none"),
+                    replacement_canonical_key,
+                    "replace" if pending is not None else "skip",
+                    "pending_server_auto_present" if pending is not None else "no_pending_server_auto",
+                )
+                if pending_is_active and not can_cancel:
                     fallback_reason = "audio_already_started"
                     if str(getattr(pending, "canonical_key", "") or "").strip() == replacement_canonical_key:
                         fallback_reason = "same_canonical_key"
+                    logger.info(
+                        "canonical_response_schedule_eval run_id=%s turn_id=%s input_event_key=%s synthetic_key=%s transcript_key=%s action=%s reason=%s",
+                        self._current_run_id() or "",
+                        resolved_turn_id,
+                        input_event_key,
+                        str(getattr(pending, "canonical_key", "") or "none"),
+                        replacement_canonical_key,
+                        "skip",
+                        fallback_reason,
+                    )
                     logger.info(
                         "upgrade_flow_fallback outcome=keep_server_auto reason=%s run_id=%s turn_id=%s input_event_key=%s",
                         fallback_reason,
