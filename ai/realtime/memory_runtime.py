@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import time
+import re
 from typing import Protocol
 
 from core.logging import logger
@@ -27,6 +28,29 @@ MEMORY_INTENT_MARKERS = (
     "favourite",
 )
 
+PREFERENCE_MEMORY_MARKERS = (
+    "prefer",
+    "preferred",
+    "preference",
+    "favorite",
+    "favourite",
+    "what do i use",
+    "remind me",
+    "which",
+)
+
+PREFERENCE_MEMORY_DOMAINS = {
+    "editor",
+    "ide",
+    "tool",
+    "workflow",
+    "language",
+    "theme",
+    "music",
+    "drink",
+    "food",
+}
+
 
 class MemoryRuntimeAPI(Protocol):
     _pending_turn_memory_brief: object | None
@@ -40,11 +64,40 @@ class MemoryRuntime:
 
     api: MemoryRuntimeAPI
 
-    def is_memory_intent(self, text: str) -> bool:
+    def classify_memory_intent(self, text: str) -> str:
         normalized = " ".join((text or "").lower().split())
         if not normalized:
-            return False
-        return any(marker in normalized for marker in MEMORY_INTENT_MARKERS)
+            return "none"
+        if not any(marker in normalized for marker in MEMORY_INTENT_MARKERS):
+            return "none"
+
+        has_preference_marker = any(marker in normalized for marker in PREFERENCE_MEMORY_MARKERS)
+        has_preference_domain = any(domain in normalized for domain in PREFERENCE_MEMORY_DOMAINS)
+        if has_preference_marker and has_preference_domain:
+            return "preference_recall"
+
+        if "remember about" in normalized or "what do you remember" in normalized:
+            return "topic_recall"
+
+        return "general_memory"
+
+    def is_memory_intent(self, text: str) -> bool:
+        return self.classify_memory_intent(text) != "none"
+
+    def build_memory_retrieval_query(self, user_text: str, *, memory_intent_subtype: str) -> str:
+        normalized = " ".join((user_text or "").split())
+        if memory_intent_subtype == "topic_recall":
+            lowered = normalized.lower()
+            for marker in ("remember about", "remember of"):
+                if marker not in lowered:
+                    continue
+                topic_fragment = lowered.split(marker, 1)[1]
+                topic_fragment = re.split(r"[?.!,;:]", topic_fragment, maxsplit=1)[0]
+                topic_fragment = re.sub(r"\b(my|the|a|an)\b", " ", topic_fragment)
+                topic = " ".join(topic_fragment.split())
+                if topic:
+                    return topic
+        return normalized
 
     def should_skip_turn_memory_retrieval(self, user_text: str) -> bool:
         text = user_text.strip()
@@ -55,7 +108,14 @@ class MemoryRuntime:
         noisy = {"ok", "okay", "thanks", "thank you", "yes", "no", "cool", "nice", "got it"}
         return text.lower() in noisy
 
-    def prepare_turn_memory_brief(self, user_text: str, *, source: str, memory_intent: bool = False) -> None:
+    def prepare_turn_memory_brief(
+        self,
+        user_text: str,
+        *,
+        source: str,
+        memory_intent: bool = False,
+        memory_intent_subtype: str = "none",
+    ) -> None:
         api = self.api
         if self.should_skip_turn_memory_retrieval(user_text):
             api._pending_turn_memory_brief = None
@@ -67,9 +127,13 @@ class MemoryRuntime:
         if manager is None:
             api._pending_turn_memory_brief = None
             return
+        retrieval_query = self.build_memory_retrieval_query(
+            user_text,
+            memory_intent_subtype=memory_intent_subtype,
+        )
         try:
             api._pending_turn_memory_brief = manager.retrieve_for_turn(
-                latest_user_utterance=user_text,
+                latest_user_utterance=retrieval_query,
                 user_id=manager.get_active_user_id(),
                 max_memories=int(getattr(api, "_memory_retrieval_max_memories", 3)),
                 max_chars=int(getattr(api, "_memory_retrieval_max_chars", 450)),
@@ -82,8 +146,10 @@ class MemoryRuntime:
             if retrieval_debug:
                 if memory_intent:
                     logger.info(
-                        "turn_memory_retrieval_cooldown_bypassed source=%s cooldown_bypassed_reason=memory_intent",
+                        "turn_memory_retrieval_cooldown_bypassed source=%s cooldown_bypassed_reason=memory_intent memory_intent_subtype=%s retrieval_query=%s",
                         source,
+                        memory_intent_subtype,
+                        retrieval_query,
                     )
                 semantic_runtime_health = manager.get_semantic_runtime_health()
                 semantic_streak = int(semantic_runtime_health.get("query_embedding_not_ready_streak", 0))

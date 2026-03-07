@@ -382,6 +382,28 @@ def test_preference_recall_query_builder_includes_editor_variants() -> None:
 
 
 
+
+
+def test_mixed_topic_memory_request_does_not_trigger_preference_recall() -> None:
+    api = _make_api_stub()
+
+    matched, keywords = api._is_preference_recall_intent(
+        "Theo, can you look around and tell me what you remember about dogs?"
+    )
+
+    assert matched is False
+    assert keywords == []
+
+
+def test_mixed_action_and_preference_request_still_triggers_preference_recall() -> None:
+    api = _make_api_stub()
+
+    matched, keywords = api._is_preference_recall_intent(
+        "Can you look at center and remind me what editor I use again?"
+    )
+
+    assert matched is True
+    assert "editor" in keywords
 def test_preference_question_accepts_items_payload(monkeypatch) -> None:
     api = _make_api_stub()
     sent_messages: list[str] = []

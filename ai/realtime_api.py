@@ -158,6 +158,7 @@ _PREFERENCE_RECALL_MARKERS = (
     "favorite",
     "favourite",
     "what do i use",
+    "remind me",
     "which",
 )
 _PREFERENCE_RECALL_DOMAINS = {
@@ -3364,7 +3365,8 @@ class RealtimeAPI:
         clean_text = text.strip()
         if not clean_text:
             return
-        memory_intent = self._is_memory_intent(clean_text)
+        memory_intent_subtype = self._classify_memory_intent(clean_text)
+        memory_intent = memory_intent_subtype != "none"
         self._last_user_input_text = clean_text
         self._last_user_input_time = time.monotonic()
         self._last_user_input_source = source
@@ -3372,10 +3374,18 @@ class RealtimeAPI:
             self._last_user_battery_query_time = self._last_user_input_time
         self._update_topic_suppression_from_user_text(clean_text)
         self._mark_preference_recall_candidate(clean_text, source=source)
-        self._prepare_turn_memory_brief(clean_text, source=source, memory_intent=memory_intent)
+        self._prepare_turn_memory_brief(
+            clean_text,
+            source=source,
+            memory_intent=memory_intent,
+            memory_intent_subtype=memory_intent_subtype,
+        )
 
     def _is_memory_intent(self, text: str) -> bool:
         return self._get_memory_runtime().is_memory_intent(text)
+
+    def _classify_memory_intent(self, text: str) -> str:
+        return self._get_memory_runtime().classify_memory_intent(text)
 
     def _get_memory_runtime(self) -> MemoryRuntime:
         runtime = getattr(self, "_memory_runtime", None)
@@ -3733,7 +3743,8 @@ class RealtimeAPI:
         normalized = " ".join((text or "").lower().split())
         if not normalized:
             return False, []
-        if self._is_memory_intent(normalized):
+        memory_intent_subtype = self._classify_memory_intent(normalized)
+        if memory_intent_subtype == "preference_recall":
             return True, self._extract_preference_keywords(normalized)
         has_marker = any(marker in normalized for marker in _PREFERENCE_RECALL_MARKERS)
         has_domain = any(domain in normalized for domain in _PREFERENCE_RECALL_DOMAINS)
@@ -6518,11 +6529,19 @@ class RealtimeAPI:
     def _should_skip_turn_memory_retrieval(self, user_text: str) -> bool:
         return self._get_memory_runtime().should_skip_turn_memory_retrieval(user_text)
 
-    def _prepare_turn_memory_brief(self, user_text: str, *, source: str, memory_intent: bool = False) -> None:
+    def _prepare_turn_memory_brief(
+        self,
+        user_text: str,
+        *,
+        source: str,
+        memory_intent: bool = False,
+        memory_intent_subtype: str = "none",
+    ) -> None:
         self._get_memory_runtime().prepare_turn_memory_brief(
             user_text,
             source=source,
             memory_intent=memory_intent,
+            memory_intent_subtype=memory_intent_subtype,
         )
 
     def _consume_pending_memory_brief_note(self) -> str | None:
@@ -11195,12 +11214,14 @@ class RealtimeAPI:
             active_input_event_key=input_event_key,
             reason="new_transcript_final",
         )
-        memory_intent = self._is_memory_intent(transcript or "")
+        memory_intent_subtype = self._classify_memory_intent(transcript or "")
+        memory_intent = memory_intent_subtype != "none"
         logger.info(
-            "memory_intent_classification run_id=%s source=input_audio_transcription input_event_key=%s memory_intent=%s",
+            "memory_intent_classification run_id=%s source=input_audio_transcription input_event_key=%s memory_intent=%s memory_intent_subtype=%s",
             self._current_run_id() or "",
             input_event_key,
             str(memory_intent).lower(),
+            memory_intent_subtype,
         )
         if memory_intent:
             self._set_response_obligation(
