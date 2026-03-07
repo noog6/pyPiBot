@@ -631,3 +631,47 @@ def test_upgrade_flow_snapshot_log_includes_pending_owner_response_id(monkeypatc
 
     assert replaced is True
     assert any("upgrade_flow_snapshot" in line and "pending_owner_response_id=resp-42" in line for line in captured)
+
+
+def test_upgrade_chain_id_propagates_into_replacement_metadata() -> None:
+    api = _build_api_stub()
+    transport = _Transport()
+    replacement_calls: list[dict[str, object]] = []
+
+    api._pending_server_auto_response_by_turn_id["turn_8"] = PendingServerAutoResponse(
+        turn_id="turn_8",
+        response_id="resp-server-auto",
+        canonical_key="run-464:turn_8:synthetic_server_auto_8",
+        created_at_ms=1,
+        active=True,
+        upgrade_chain_id="run-464:turn_8:synthetic_server_auto_8",
+    )
+    api._record_response_trace_context(
+        "resp-server-auto",
+        turn_id="turn_8",
+        input_event_key="synthetic_server_auto_8",
+        canonical_key="run-464:turn_8:synthetic_server_auto_8",
+        origin="server_auto",
+        upgrade_chain_id="run-464:turn_8:synthetic_server_auto_8",
+    )
+    api._get_or_create_transport = lambda: transport
+    api._peek_pending_preference_memory_context_payload = lambda **_kwargs: None
+
+    async def _fake_send_response_create(_websocket, event, **kwargs):
+        replacement_calls.append({"event": event, **kwargs})
+        return True
+
+    api._send_response_create = _fake_send_response_create
+
+    replaced = asyncio.run(
+        api._cancel_and_replace_pending_server_auto_on_transcript_final(
+            websocket=object(),
+            turn_id="turn_8",
+            input_event_key="item_888",
+            origin_label="upgraded_response",
+        )
+    )
+
+    assert replaced is True
+    metadata = replacement_calls[0]["event"]["response"]["metadata"]
+    assert metadata["upgrade_chain_id"] == "run-464:turn_8:synthetic_server_auto_8"

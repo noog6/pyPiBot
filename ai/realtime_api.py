@@ -276,6 +276,7 @@ class PendingServerAutoResponse:
     active: bool = True
     cancelled_for_upgrade: bool = False
     pre_audio_hold: bool = False
+    upgrade_chain_id: str = ""
 
 
 @dataclass
@@ -1458,24 +1459,7 @@ class RealtimeAPI:
     async def _handle_response_lifecycle_event(self, event: dict[str, Any], websocket: Any) -> None:
         event_type = str(event.get("type") or "unknown")
         response_id = self._response_id_from_event(event)
-        if self._should_drop_stale_response_event(event):
-            return
-        if self._is_cancelled_response_event(event):
-            if event_type == "response.output_audio.done":
-                self._record_cancelled_audio_race_transition(
-                    response_id=response_id,
-                    event_type="response.output_audio.done",
-                )
-            if event_type in {"response.done", "response.completed"}:
-                self._log_cancelled_deliverable_once(response_id, source_event=str(event_type or "unknown"))
-                if event_type == "response.completed":
-                    self._clear_cancelled_response_tracking(response_id)
-            else:
-                logger.debug(
-                    "cancelled_response_event_suppressed response_id=%s event_type=%s",
-                    response_id or "unknown",
-                    event_type or "unknown",
-                )
+        if not self._should_process_response_event_ingress(event, source="lifecycle"):
             return
         if not response_id:
             response_id = str(getattr(self, "_active_response_id", "") or "").strip()
@@ -1539,6 +1523,7 @@ class RealtimeAPI:
                     origin=origin,
                     turn_id=turn_id,
                     input_event_key=input_event_key,
+                    upgrade_chain_id=self._upgrade_chain_id_from_response(response_id),
                 )
         self._emit_response_lifecycle_trace(
             event_type=event_type,
@@ -3975,6 +3960,7 @@ class RealtimeAPI:
         turn_id: str,
         response_id: str | None,
         canonical_key: str,
+        upgrade_chain_id: str = "",
     ) -> None:
         normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
         normalized_response_id = str(response_id or "").strip()
@@ -3995,6 +3981,7 @@ class RealtimeAPI:
                 created_at_ms=int(time.time() * 1000),
                 active=True,
                 pre_audio_hold=False,
+                upgrade_chain_id=str(upgrade_chain_id or "").strip(),
             )
             by_response_id[normalized_response_id] = pending
         else:
@@ -4003,6 +3990,7 @@ class RealtimeAPI:
             pending.active = True
             pending.cancelled_for_upgrade = False
             pending.pre_audio_hold = False
+            pending.upgrade_chain_id = str(upgrade_chain_id or pending.upgrade_chain_id or "").strip()
         response_id_by_turn_id[normalized_turn_id] = normalized_response_id
         legacy_by_turn_id[normalized_turn_id] = pending
 
@@ -4298,6 +4286,7 @@ class RealtimeAPI:
             origin=str(trace_context.get("origin") or "server_auto").strip() or "server_auto",
             turn_id=str(turn_id or trace_context.get("turn_id") or "unknown").strip() or "unknown",
             input_event_key=self._active_input_event_key_for_turn(turn_id),
+            upgrade_chain_id=str(getattr(pending, "upgrade_chain_id", "") or trace_context.get("upgrade_chain_id") or "").strip(),
         )
         self._clear_cancelled_response_blocking_state(
             response_id=pending.response_id,
@@ -4431,21 +4420,24 @@ class RealtimeAPI:
             counts = {}
             state["counts"] = counts
         counts[normalized_event_type] = int(counts.get(normalized_event_type, 0)) + 1
+        chain_id = self._upgrade_chain_id_from_response(normalized_response_id)
         if counts[normalized_event_type] == 1:
             logger.debug(
-                "dropped_stale_response_event response_id=%s event_type=%s",
+                "dropped_stale_response_event response_id=%s event_type=%s upgrade_chain_id=%s",
                 normalized_response_id,
                 normalized_event_type,
+                chain_id or "none",
             )
             return
         if state.get("summary_emitted", False):
             return
         state["summary_emitted"] = True
         logger.info(
-            "dropped_stale_response_event_summary response_id=%s counts=%s window_s=%s",
+            "dropped_stale_response_event_summary response_id=%s counts=%s window_s=%s upgrade_chain_id=%s",
             normalized_response_id,
             json.dumps(counts, sort_keys=True),
             int(window_s),
+            chain_id or "none",
         )
 
     def _stale_response_ids(self) -> set[str]:
@@ -4476,6 +4468,7 @@ class RealtimeAPI:
         origin: str,
         turn_id: str,
         input_event_key: str,
+        upgrade_chain_id: str = "",
     ) -> None:
         normalized_response_id = str(response_id or "").strip()
         if not normalized_response_id:
@@ -4495,6 +4488,9 @@ class RealtimeAPI:
         state["input_event_key"] = str(
             input_event_key or state.get("input_event_key") or "unknown"
         ).strip() or "unknown"
+        state["upgrade_chain_id"] = str(state.get("upgrade_chain_id") or "").strip()
+        if str(upgrade_chain_id or "").strip():
+            state["upgrade_chain_id"] = str(upgrade_chain_id or "").strip()
         state["expires_at_monotonic"] = now + ttl_s
         store[normalized_response_id] = state
 
@@ -4514,6 +4510,7 @@ class RealtimeAPI:
             "origin": str(state.get("origin") or "").strip(),
             "turn_id": str(state.get("turn_id") or "").strip(),
             "input_event_key": str(state.get("input_event_key") or "").strip(),
+            "upgrade_chain_id": str(state.get("upgrade_chain_id") or "").strip(),
         }
 
     def _clear_stale_response_context(self, response_id: str) -> None:
@@ -4613,6 +4610,155 @@ class RealtimeAPI:
 
     def _is_cancelled_or_superseded_response_id(self, response_id: str | None) -> bool:
         return self._response_status(response_id) == "cancelled"
+
+    def _upgrade_chain_id_from_response(self, response_id: str | None) -> str:
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            return ""
+        trace_context = self._response_trace_by_id().get(normalized_response_id, {})
+        if isinstance(trace_context, dict):
+            trace_chain_id = str(trace_context.get("upgrade_chain_id") or "").strip()
+            if trace_chain_id:
+                return trace_chain_id
+        stale_context = self._stale_response_context(normalized_response_id)
+        return str(stale_context.get("upgrade_chain_id") or "").strip()
+
+    def _ensure_upgrade_chain_id(self, *, turn_id: str, input_event_key: str, response_id: str | None) -> str:
+        normalized_response_id = str(response_id or "").strip()
+        existing = self._upgrade_chain_id_from_response(normalized_response_id)
+        if existing:
+            return existing
+        run_id = str(self._current_run_id() or "").strip() or "run-unknown"
+        normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
+        normalized_input_event_key = str(input_event_key or "").strip() or (normalized_response_id or "unknown")
+        return f"{run_id}:{normalized_turn_id}:{normalized_input_event_key}"
+
+    def _set_upgrade_chain_trace_context(
+        self,
+        *,
+        response_id: str | None,
+        chain_id: str,
+        turn_id: str,
+        input_event_key: str,
+        canonical_key: str,
+        origin: str,
+    ) -> None:
+        normalized_response_id = str(response_id or "").strip()
+        normalized_chain_id = str(chain_id or "").strip()
+        if not normalized_response_id or not normalized_chain_id:
+            return
+        self._record_response_trace_context(
+            normalized_response_id,
+            upgrade_chain_id=normalized_chain_id,
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            canonical_key=canonical_key,
+            origin=origin,
+        )
+
+    def _should_process_response_event_ingress(self, event: dict[str, Any], *, source: str) -> bool:
+        event_type = str(event.get("type") or "unknown")
+        response_id = self._response_id_from_event(event)
+        if self._should_drop_stale_response_event(event):
+            return False
+        cancelled_ids = getattr(self, "_cancelled_response_ids", set())
+        if (
+            event_type == "response.completed"
+            and response_id
+            and isinstance(cancelled_ids, set)
+            and response_id in cancelled_ids
+        ):
+            self._log_cancelled_deliverable_once(response_id, source_event=event_type)
+            self._clear_cancelled_response_tracking(response_id)
+            self._log_lifecycle_coherence(
+                stage="cancelled_provisional_terminalization",
+                turn_id=self._current_turn_id_or_unknown(),
+                response_id=response_id,
+                canonical_key=str(getattr(self, "_active_response_canonical_key", "") or "").strip(),
+            )
+            return False
+        if not self._is_cancelled_response_event(event):
+            return True
+        if event_type in {"response.output_audio.delta", "response.output_audio.done"}:
+            self._record_cancelled_audio_race_transition(
+                response_id=response_id,
+                event_type=event_type,
+            )
+            if event_type == "response.output_audio.delta":
+                logger.debug(
+                    "audio_delta_suppressed run_id=%s response_id=%s event_type=response.output_audio.delta",
+                    self._current_run_id() or "",
+                    response_id or "unknown",
+                )
+        if event_type in {"response.done", "response.completed"}:
+            self._set_response_status(response_id=response_id, status="terminal_done")
+            self._log_cancelled_deliverable_once(response_id, source_event=event_type)
+            if event_type == "response.completed":
+                self._clear_cancelled_response_tracking(response_id)
+            self._log_lifecycle_coherence(
+                stage="cancelled_provisional_terminalization",
+                turn_id=self._current_turn_id_or_unknown(),
+                response_id=response_id,
+                canonical_key=str(getattr(self, "_active_response_canonical_key", "") or "").strip(),
+            )
+        else:
+            logger.debug(
+                "cancelled_response_event_suppressed response_id=%s event_type=%s source=%s",
+                response_id or "unknown",
+                event_type or "unknown",
+                source,
+            )
+        return False
+
+    def _log_lifecycle_coherence(
+        self,
+        *,
+        stage: str,
+        turn_id: str,
+        response_id: str | None = None,
+        canonical_key: str | None = None,
+    ) -> None:
+        violations: list[str] = []
+        normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
+        normalized_response_id = str(response_id or "").strip()
+        normalized_canonical_key = str(canonical_key or "").strip()
+        pending = self._pending_server_auto_response_for_turn(turn_id=normalized_turn_id)
+        if stage in {"transcript_final_rebind", "replacement_scheduled", "replacement_created"}:
+            active_turn_map = getattr(self, "_active_input_event_key_by_turn_id", {})
+            if isinstance(active_turn_map, dict) and normalized_turn_id not in active_turn_map:
+                violations.append("missing_active_input_event_key_for_turn")
+        if stage == "transcript_final_rebind":
+            active_key = str(getattr(self, "_active_response_canonical_key", "") or "").strip()
+            if normalized_canonical_key and active_key and active_key != normalized_canonical_key:
+                violations.append("active_canonical_pointer_mismatch")
+        if stage == "replacement_scheduled":
+            if pending is not None and pending.active:
+                violations.append("pending_server_auto_still_active_after_replacement_schedule")
+        if stage == "replacement_created":
+            if pending is None:
+                violations.append("pending_server_auto_missing_on_replacement_created")
+        if stage == "cancelled_provisional_terminalization" and normalized_response_id:
+            if self._response_status(normalized_response_id) != "terminal_done":
+                violations.append("cancelled_response_not_terminal_done")
+        if violations:
+            logger.warning(
+                "lifecycle_coherence_violation run_id=%s stage=%s turn_id=%s response_id=%s canonical_key=%s violations=%s",
+                self._current_run_id() or "",
+                stage,
+                normalized_turn_id,
+                normalized_response_id or "none",
+                normalized_canonical_key or "none",
+                ",".join(violations),
+            )
+            return
+        logger.debug(
+            "lifecycle_coherence_ok run_id=%s stage=%s turn_id=%s response_id=%s canonical_key=%s",
+            self._current_run_id() or "",
+            stage,
+            normalized_turn_id,
+            normalized_response_id or "none",
+            normalized_canonical_key or "none",
+        )
 
     def _suppress_cancelled_response_audio(self, response_id: str | None) -> None:
         normalized_response_id = str(response_id or "").strip()
@@ -4915,6 +5061,18 @@ class RealtimeAPI:
         )
 
         _update_local_active_response_pointers()
+        self._set_upgrade_chain_trace_context(
+            response_id=getattr(self, "_active_response_id", None),
+            chain_id=self._ensure_upgrade_chain_id(
+                turn_id=turn_id,
+                input_event_key=normalized_replacement,
+                response_id=getattr(self, "_active_response_id", None),
+            ),
+            turn_id=turn_id,
+            input_event_key=normalized_replacement,
+            canonical_key=new_canonical_key,
+            origin="server_auto",
+        )
         logger.debug(
             "[RESPTRACE] response_key_rebound run_id=%s turn_id=%s old_input_event_key=%s new_input_event_key=%s "
             "old_canonical_key=%s new_canonical_key=%s",
@@ -4924,6 +5082,12 @@ class RealtimeAPI:
             normalized_replacement,
             old_canonical_key,
             new_canonical_key,
+        )
+        self._log_lifecycle_coherence(
+            stage="transcript_final_rebind",
+            turn_id=turn_id,
+            response_id=str(getattr(self, "_active_response_id", "") or "").strip(),
+            canonical_key=new_canonical_key,
         )
 
     def _resptrace_suppression_reason(self, *, turn_id: str, input_event_key: str) -> str:
@@ -5935,6 +6099,7 @@ class RealtimeAPI:
         response_id: str | None,
         decision: str,
         level: int = logging.INFO,
+        upgrade_chain_id: str | None = None,
     ) -> None:
         resolved_turn_id = str(turn_id or "").strip() or "turn-unknown"
         resolved_input_event_key = str(input_event_key or "").strip() or "unknown"
@@ -5945,6 +6110,7 @@ class RealtimeAPI:
         resolved_origin = str(origin or "").strip() or "unknown"
         resolved_response_id = str(response_id or "").strip() or "none"
         resolved_decision = str(decision or "").strip() or "unknown"
+        resolved_upgrade_chain_id = str(upgrade_chain_id or "").strip() or self._upgrade_chain_id_from_response(response_id)
         resolved_level = level
         if (
             resolved_level >= logging.INFO
@@ -5953,7 +6119,7 @@ class RealtimeAPI:
             resolved_level = logging.DEBUG
         logger.log(
             resolved_level,
-            "lifecycle_event run_id=%s turn_id=%s input_event_key=%s canonical_key=%s origin=%s response_id=%s decision=%s",
+            "lifecycle_event run_id=%s turn_id=%s input_event_key=%s canonical_key=%s origin=%s response_id=%s decision=%s upgrade_chain_id=%s",
             self._current_run_id() or "",
             resolved_turn_id,
             resolved_input_event_key,
@@ -5961,13 +6127,14 @@ class RealtimeAPI:
             resolved_origin,
             resolved_response_id,
             resolved_decision,
+            resolved_upgrade_chain_id or "none",
         )
         self._append_lifecycle_timeline_event(
             canonical_key=resolved_canonical_key,
             entry=(
                 f"decision={resolved_decision};origin={resolved_origin};"
                 f"response_id={resolved_response_id};turn_id={resolved_turn_id};"
-                f"input_event_key={resolved_input_event_key}"
+                f"input_event_key={resolved_input_event_key};upgrade_chain_id={resolved_upgrade_chain_id or 'none'}"
             ),
         )
 
@@ -10030,6 +10197,7 @@ class RealtimeAPI:
         response_metadata = response.get("metadata") if isinstance(response, dict) else None
         metadata_turn_id = str(response_metadata.get("turn_id") or "").strip() if isinstance(response_metadata, dict) else ""
         metadata_input_event_key = str(response_metadata.get("input_event_key") or "").strip() if isinstance(response_metadata, dict) else ""
+        metadata_upgrade_chain_id = str(response_metadata.get("upgrade_chain_id") or "").strip() if isinstance(response_metadata, dict) else ""
         pending_origin_context = getattr(self, "_last_consumed_response_origin_context", {})
         if not isinstance(pending_origin_context, dict):
             pending_origin_context = {}
@@ -10184,8 +10352,28 @@ class RealtimeAPI:
                 state="created",
                 reason="response_created",
             )
+        if str((response_metadata or {}).get("transcript_upgrade_replacement", "")).strip().lower() in {"true", "1", "yes"}:
+            self._log_lifecycle_coherence(
+                stage="replacement_created",
+                turn_id=turn_id,
+                response_id=self._active_response_id,
+                canonical_key=canonical_key,
+            )
         if origin != "server_auto":
             current_input_event_key = resolved_input_event_key
+        upgrade_chain_id = metadata_upgrade_chain_id or self._ensure_upgrade_chain_id(
+            turn_id=turn_id,
+            input_event_key=resolved_input_event_key,
+            response_id=self._active_response_id,
+        )
+        self._set_upgrade_chain_trace_context(
+            response_id=self._active_response_id,
+            chain_id=upgrade_chain_id,
+            turn_id=turn_id,
+            input_event_key=resolved_input_event_key,
+            canonical_key=canonical_key,
+            origin=origin,
+        )
         arbitration_outcome, arbitration_reason_code = self._arbitrate_server_auto_response_created(
             turn_id=turn_id,
             input_event_key=resolved_input_event_key,
@@ -10278,6 +10466,7 @@ class RealtimeAPI:
                 turn_id=turn_id,
                 response_id=self._active_response_id,
                 canonical_key=lifecycle_canonical_key,
+                upgrade_chain_id=upgrade_chain_id,
             )
             self._mark_response_provisional(response_id=self._active_response_id)
         self._active_response_input_event_key = str(resolved_input_event_key or "").strip() or None
@@ -10293,6 +10482,7 @@ class RealtimeAPI:
                 input_event_key=self._active_response_input_event_key or "",
                 canonical_key=lifecycle_canonical_key,
                 origin=origin,
+                upgrade_chain_id=upgrade_chain_id,
             )
         self._emit_response_lifecycle_trace(
             event_type="response.created",
@@ -10496,16 +10686,7 @@ class RealtimeAPI:
     async def _handle_response_output_audio_delta_event(self, event: dict[str, Any], websocket: Any) -> None:
         _ = websocket
         response_id = self._response_id_from_event(event)
-        if self._is_cancelled_or_superseded_response_id(response_id):
-            self._record_cancelled_audio_race_transition(
-                response_id=response_id,
-                event_type="response.output_audio.delta",
-            )
-            logger.debug(
-                "audio_delta_suppressed run_id=%s response_id=%s event_type=response.output_audio.delta",
-                self._current_run_id() or "",
-                response_id or "unknown",
-            )
+        if not self._should_process_response_event_ingress(event, source="audio_delta"):
             return
         if self._is_active_response_guarded():
             return
@@ -10597,14 +10778,7 @@ class RealtimeAPI:
     async def _handle_response_done_event(self, event: dict[str, Any], websocket: Any) -> None:
         _ = websocket
         response_id = self._response_id_from_event(event)
-        if self._should_drop_stale_response_event(event):
-            return
-        if self._is_cancelled_response_event(event):
-            self._set_response_status(response_id=response_id, status="terminal_done")
-            self._log_cancelled_deliverable_once(
-                response_id,
-                source_event="response.done",
-            )
+        if not self._should_process_response_event_ingress(event, source="done"):
             return
         self._set_response_status(response_id=response_id, status="terminal_done")
         await self.handle_response_done(event)
@@ -10633,14 +10807,18 @@ class RealtimeAPI:
             action = "cancel_and_replace"
         elif pending is not None:
             action = "replace_only"
+        upgrade_chain_id = str(getattr(pending, "upgrade_chain_id", "") or "").strip() if pending is not None else ""
+        if not upgrade_chain_id:
+            upgrade_chain_id = self._upgrade_chain_id_from_response(old_response_id)
         logger.info(
-            "upgrade_flow_snapshot run_id=%s turn_id=%s old_response_id=%s pending_owner_response_id=%s pending_server_auto_active=%s action=%s",
+            "upgrade_flow_snapshot run_id=%s turn_id=%s old_response_id=%s pending_owner_response_id=%s pending_server_auto_active=%s action=%s upgrade_chain_id=%s",
             self._current_run_id() or "",
             turn_id,
             old_response_id or "none",
             old_response_id or "none",
             str(pending_active).lower(),
             action,
+            upgrade_chain_id or "none",
         )
         if pending is None:
             return False
@@ -10696,6 +10874,8 @@ class RealtimeAPI:
         metadata["input_event_key"] = str(input_event_key or "").strip()
         metadata["safety_override"] = "true"
         metadata["transcript_upgrade_replacement"] = "true"
+        if upgrade_chain_id:
+            metadata["upgrade_chain_id"] = upgrade_chain_id
         self._clear_canonical_terminal_delivery_state(canonical_key=replacement_canonical_key)
         pref_payload = self._peek_pending_preference_memory_context_payload(
             turn_id=turn_id,
@@ -10704,13 +10884,14 @@ class RealtimeAPI:
         pref_prompt_note = str(pref_payload.get("prompt_note") or "").strip() if isinstance(pref_payload, dict) else ""
         pref_hit = bool(isinstance(pref_payload, dict) and pref_payload.get("hit", False))
         logger.info(
-            "replacement_response_scheduled run_id=%s turn_id=%s canonical_key=%s input_event_key=%s pref_ctx_len=%s pref_hit=%s",
+            "replacement_response_scheduled run_id=%s turn_id=%s canonical_key=%s input_event_key=%s pref_ctx_len=%s pref_hit=%s upgrade_chain_id=%s",
             self._current_run_id() or "",
             turn_id,
             replacement_canonical_key,
             input_event_key,
             len(pref_prompt_note),
             str(pref_hit).lower(),
+            upgrade_chain_id or "none",
         )
         replacement_sent = await self._send_response_create(
             websocket,
@@ -10735,6 +10916,12 @@ class RealtimeAPI:
         turn_timestamps = turn_timestamps_store.setdefault(turn_id, {})
         turn_timestamps["cancel_replace_ms"] = (time.monotonic() - cancel_replace_started_at) * 1000.0
         self._mark_pending_server_auto_response_replaced(turn_id=turn_id)
+        self._log_lifecycle_coherence(
+            stage="replacement_scheduled",
+            turn_id=turn_id,
+            response_id=old_response_id,
+            canonical_key=replacement_canonical_key,
+        )
         return True
 
     async def _handle_input_audio_transcription_completed_event(
@@ -11019,28 +11206,11 @@ class RealtimeAPI:
 
     async def _handle_event_legacy(self, event: dict[str, Any], websocket: Any) -> None:
         event_type = event.get("type")
-        if self._should_drop_stale_response_event(event):
-            return
         response_id = self._response_id_from_event(event)
+        if not self._should_process_response_event_ingress(event, source="legacy"):
+            return
         if event_type in {"response.done", "response.completed"} and response_id:
             self._set_response_status(response_id=response_id, status="terminal_done")
-        if self._is_cancelled_response_event(event):
-            if event_type == "response.output_audio.done":
-                self._record_cancelled_audio_race_transition(
-                    response_id=response_id,
-                    event_type="response.output_audio.done",
-                )
-            if event_type in {"response.done", "response.completed"}:
-                self._log_cancelled_deliverable_once(response_id, source_event=str(event_type or "unknown"))
-                if event_type == "response.completed":
-                    self._clear_cancelled_response_tracking(response_id)
-            else:
-                logger.debug(
-                    "cancelled_response_event_suppressed response_id=%s event_type=%s",
-                    response_id or "unknown",
-                    event_type or "unknown",
-                )
-            return
         if event_type == "response.output_item.added":
             await self._handle_output_item_added_event(event, websocket)
         elif event_type == "response.function_call_arguments.delta":
