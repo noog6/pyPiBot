@@ -43,9 +43,32 @@ flowchart TB
 
     YH[[YOU ARE HERE]]
     YH -.-> R
-    YH -.-> M
-    YH -.-> D
+YH -.-> M
+YH -.-> D
 ```
+
+## Current Module Anchors
+
+- **Runtime / Nervous System** → `ai/realtime_api.py`,
+  `ai/realtime/response_create_runtime.py`.
+  Changes that belong here are lifecycle/transport determinism fixes (cancel/
+  replace sequencing, single-flight/idempotency, release boundaries, and
+  shutdown semantics); changes that do not belong here are policy decisions
+  about *what* Theo should do.
+- **Perception / Memory Interfaces** → `services/memory_manager.py`, memory
+  retrieval hooks in `ai/tools.py`.
+  Changes that belong here are retrieval relevance, recall quality, and context
+  signal shaping; changes that do not belong here are response arbitration
+  policy or transport state-machine control.
+- **Decision Arbitration (emerging)** → `ai/interaction_lifecycle_policy.py`
+  plus response-create arbitration paths.
+  Changes that belong here are explicit choice logic for do-now vs defer vs
+  refuse and conflict resolution among candidates; changes that do not belong
+  here are low-level queueing/idempotency mechanics or broad permission policy.
+- **Governance Spine** → `ai/governance.py`.
+  Changes that belong here are risk-tier gating, confirmation requirements, and
+  fail-closed policy boundaries; changes that do not belong here are memory
+  quality tuning or realtime lifecycle orchestration.
 
 ## Layer-by-Layer Guidance
 
