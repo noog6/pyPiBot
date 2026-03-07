@@ -5903,6 +5903,8 @@ class RealtimeAPI:
         *,
         call_id: str,
         response_create_event: dict[str, Any] | None = None,
+        tool_name: str | None = None,
+        tool_result_has_distinct_info: bool = False,
     ) -> tuple[dict[str, Any], str]:
         event: dict[str, Any] = response_create_event or {"type": "response.create"}
         response_payload = event.setdefault("response", {})
@@ -5924,8 +5926,31 @@ class RealtimeAPI:
             metadata["parent_input_event_key"] = parent_input_event_key
         metadata["tool_followup"] = "true"
         metadata["tool_call_id"] = tool_call_id
+        metadata["tool_followup_suppress_if_parent_covered"] = "true"
+        if tool_name:
+            metadata["tool_name"] = str(tool_name).strip().lower()
+        if tool_result_has_distinct_info:
+            metadata["tool_result_has_distinct_info"] = "true"
         canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_input_event_key)
         return event, canonical_key
+
+    def _tool_result_has_distinct_followup_info(self, *, tool_name: str, result: Any) -> bool:
+        normalized_tool_name = str(tool_name or "").strip().lower()
+        if normalized_tool_name == "perform_research" and isinstance(result, dict):
+            sources = result.get("sources")
+            findings = result.get("findings")
+            summary = str(result.get("summary") or "").strip()
+            if summary:
+                return True
+            if isinstance(sources, list) and len(sources) > 0:
+                return True
+            if isinstance(findings, list) and len(findings) > 0:
+                return True
+        if isinstance(result, dict):
+            distinct_marker = result.get("tool_result_has_distinct_info")
+            if isinstance(distinct_marker, bool):
+                return distinct_marker
+        return False
 
     def _should_suppress_tool_followup_after_turn_deliverable(
         self,
@@ -5952,6 +5977,45 @@ class RealtimeAPI:
             if str(getattr(state, "deliverable_class", "unknown") or "unknown").strip().lower() == "final":
                 return True
         return False
+
+    def _canonical_state_for_response_id(
+        self,
+        *,
+        response_id: str | None,
+    ) -> tuple[str, CanonicalResponseState] | None:
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            return None
+        for canonical_key, state in self._canonical_response_state_store().items():
+            if not isinstance(state, CanonicalResponseState):
+                continue
+            if str(state.response_id or "").strip() != normalized_response_id:
+                continue
+            return canonical_key, state
+        return None
+
+    def _should_suppress_queued_tool_followup_release(
+        self,
+        *,
+        response_metadata: dict[str, Any],
+        blocked_by_response_id: str,
+    ) -> bool:
+        suppressible = str(response_metadata.get("tool_followup_suppress_if_parent_covered", "")).strip().lower()
+        if suppressible not in {"true", "1", "yes"}:
+            return False
+        if str(response_metadata.get("tool_result_has_distinct_info", "")).strip().lower() in {"true", "1", "yes"}:
+            return False
+        state_entry = self._canonical_state_for_response_id(response_id=blocked_by_response_id)
+        if not state_entry:
+            return False
+        _, parent_state = state_entry
+        if str(parent_state.origin or "").strip().lower() != "upgraded_response":
+            return False
+        if not bool(parent_state.done):
+            return False
+        deliverable_class = str(getattr(parent_state, "deliverable_class", "") or "").strip().lower()
+        deliverable_observed = bool(getattr(parent_state, "deliverable_observed", False))
+        return deliverable_observed or deliverable_class in {"progress", "final"}
 
     def _turn_has_pending_tool_followup(self, *, turn_id: str) -> bool:
         normalized_turn_id = str(turn_id or "").strip()
@@ -6088,6 +6152,22 @@ class RealtimeAPI:
             if canonical_key in released_canonical_keys:
                 continue
             if self._tool_followup_state(canonical_key=canonical_key) != "blocked_active_response":
+                continue
+            if self._should_suppress_queued_tool_followup_release(
+                response_metadata=response_metadata,
+                blocked_by_response_id=normalized_response_id,
+            ):
+                self._set_tool_followup_state(
+                    canonical_key=canonical_key,
+                    state="dropped",
+                    reason=f"parent_covered_tool_result response_id={normalized_response_id}",
+                )
+                logger.info(
+                    "tool_followup_release_suppressed turn_id=%s origin=%s reason=parent_covered_tool_result response_id=%s",
+                    turn_id,
+                    origin,
+                    normalized_response_id,
+                )
                 continue
             response_metadata["tool_followup_release"] = "true"
             self._set_tool_followup_state(
@@ -12268,6 +12348,11 @@ class RealtimeAPI:
         response_create_event, tool_followup_canonical_key = self._build_tool_followup_response_create_event(
             call_id=call_id,
             response_create_event={"type": "response.create"},
+            tool_name=function_name,
+            tool_result_has_distinct_info=self._tool_result_has_distinct_followup_info(
+                tool_name=function_name,
+                result=result,
+            ),
         )
         if force_no_tools_followup:
             response_payload = response_create_event.setdefault("response", {})
