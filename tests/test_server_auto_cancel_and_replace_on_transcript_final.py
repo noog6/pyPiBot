@@ -675,3 +675,92 @@ def test_upgrade_chain_id_propagates_into_replacement_metadata() -> None:
     assert replaced is True
     metadata = replacement_calls[0]["event"]["response"]["metadata"]
     assert metadata["upgrade_chain_id"] == "run-464:turn_8:synthetic_server_auto_8"
+
+
+def test_mark_pending_server_auto_response_replaced_is_idempotent_after_upgrade(monkeypatch) -> None:
+    api = _build_api_stub()
+    api._pending_server_auto_response_by_turn_id["turn_20"] = PendingServerAutoResponse(
+        turn_id="turn_20",
+        response_id="resp-server-auto",
+        canonical_key="run-464:turn_20:synthetic_server_auto_20",
+        created_at_ms=1,
+        active=False,
+        cancelled_for_upgrade=True,
+        upgrade_chain_id="run-464:turn_20:synthetic_server_auto_20",
+    )
+    api._active_response_id = "resp-replacement"
+    captured: list[str] = []
+
+    def _capture(message, *args):
+        captured.append(message % args)
+
+    monkeypatch.setattr("ai.realtime_api.logger.info", _capture)
+
+    api._mark_pending_server_auto_response_replaced(turn_id="turn_20")
+
+    pending = api._pending_server_auto_response_for_turn(turn_id="turn_20")
+    assert pending is not None
+    assert pending.active is False
+    assert pending.cancelled_for_upgrade is False
+    assert not any("pending_server_auto_mutation_rejected" in line for line in captured)
+
+
+def test_mark_pending_server_auto_response_replaced_ignores_duplicate(monkeypatch) -> None:
+    api = _build_api_stub()
+    api._pending_server_auto_response_by_turn_id["turn_21"] = PendingServerAutoResponse(
+        turn_id="turn_21",
+        response_id="resp-server-auto",
+        canonical_key="run-464:turn_21:synthetic_server_auto_21",
+        created_at_ms=1,
+        active=False,
+        cancelled_for_upgrade=False,
+        upgrade_chain_id="run-464:turn_21:synthetic_server_auto_21",
+    )
+    api._active_response_id = "resp-replacement"
+    captured: list[str] = []
+
+    def _capture(message, *args):
+        captured.append(message % args)
+
+    monkeypatch.setattr("ai.realtime_api.logger.info", _capture)
+
+    api._mark_pending_server_auto_response_replaced(turn_id="turn_21")
+
+    assert any(
+        "pending_server_auto_mutation_ignored" in line and "reason=idempotent_duplicate" in line
+        for line in captured
+    )
+    assert not any("pending_server_auto_mutation_rejected" in line for line in captured)
+
+
+def test_mark_pending_server_auto_response_replaced_rejects_lineage_mismatch(monkeypatch) -> None:
+    api = _build_api_stub()
+    pending = PendingServerAutoResponse(
+        turn_id="turn_22",
+        response_id="resp-server-auto",
+        canonical_key="run-464:turn_22:synthetic_server_auto_22",
+        created_at_ms=1,
+        active=True,
+        upgrade_chain_id="chain-good",
+    )
+    api._active_response_id = "resp-replacement"
+    captured: list[str] = []
+
+    def _capture(message, *args):
+        captured.append(message % args)
+
+    monkeypatch.setattr("ai.realtime_api.logger.info", _capture)
+
+    allowed = api._pending_server_auto_response_mutation_allowed(
+        pending=pending,
+        turn_id="turn_22",
+        mutation="replaced",
+        expected_response_id="resp-server-auto",
+        expected_upgrade_chain_id="chain-other",
+    )
+
+    assert allowed is False
+    assert any(
+        "pending_server_auto_mutation_rejected" in line and "reason=lineage_mismatch" in line
+        for line in captured
+    )
