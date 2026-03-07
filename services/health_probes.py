@@ -254,12 +254,21 @@ def probe_realtime_session(realtime_api: Any | None) -> HealthProbeResult:
     failures = int(session_health.get("failures", 0))
     reconnects = int(session_health.get("reconnects", 0))
 
+    injection_ready_reason = session_health.get("injection_ready_reason")
+    if isinstance(injection_ready_reason, str):
+        injection_ready_reason = injection_ready_reason.strip().lower()
+    else:
+        injection_ready_reason = ""
+
     if connected and injection_ready:
         status = HealthStatus.OK
         summary = "Realtime session connected"
     elif connected:
-        status = HealthStatus.DEGRADED
-        summary = "Realtime session connected (injection not ready)"
+        status = HealthStatus.WARMUP
+        if injection_ready_reason == "response_in_progress":
+            summary = "Realtime connected (first turn not yet settled)"
+        else:
+            summary = "Realtime connected (awaiting injection readiness)"
     elif failures > 0:
         status = HealthStatus.FAILING
         summary = "Realtime session disconnected"
@@ -273,6 +282,7 @@ def probe_realtime_session(realtime_api: Any | None) -> HealthProbeResult:
         "ready_source": injection_ready_source,
         "injection_ready": injection_ready,
         "injection_ready_source": injection_ready_source,
+        "injection_ready_reason": injection_ready_reason,
         "session_ready": session_ready,
         "session_ready_source": session_ready_source,
         "connected_source": connected_source,

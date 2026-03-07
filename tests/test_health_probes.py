@@ -91,3 +91,78 @@ def test_probe_realtime_session_uses_injection_ready_for_status() -> None:
     assert result.details["injection_ready"] is True
     assert result.details["session_ready"] is False
     assert result.details["session_ready_source"] == "session_health.session_ready"
+
+
+class _ConnectedNotReadyRealtime:
+    def get_session_health(self):
+        return {
+            "connected": True,
+            "ready": False,
+            "injection_ready": False,
+            "injection_ready_reason": "ready_event_not_set",
+        }
+
+
+class _ConnectedFirstTurnRealtime:
+    def get_session_health(self):
+        return {
+            "connected": True,
+            "ready": False,
+            "injection_ready": False,
+            "injection_ready_reason": "response_in_progress",
+        }
+
+
+class _DisconnectedRealtime:
+    def get_session_health(self):
+        return {
+            "connected": False,
+            "ready": False,
+            "failures": 2,
+        }
+
+
+class _ReadyTransitionRealtime:
+    def __init__(self):
+        self.ready = False
+
+    def get_session_health(self):
+        return {
+            "connected": True,
+            "ready": self.ready,
+            "injection_ready": self.ready,
+            "injection_ready_reason": "ready" if self.ready else "ready_event_not_set",
+        }
+
+
+def test_probe_realtime_session_connected_not_ready_is_warmup() -> None:
+    result = probe_realtime_session(_ConnectedNotReadyRealtime())
+
+    assert result.status.value == "warmup"
+    assert result.summary == "Realtime connected (awaiting injection readiness)"
+
+
+def test_probe_realtime_session_first_turn_unsettled_is_warmup() -> None:
+    result = probe_realtime_session(_ConnectedFirstTurnRealtime())
+
+    assert result.status.value == "warmup"
+    assert result.summary == "Realtime connected (first turn not yet settled)"
+
+
+def test_probe_realtime_session_disconnected_remains_failing() -> None:
+    result = probe_realtime_session(_DisconnectedRealtime())
+
+    assert result.status.value == "failing"
+    assert result.summary == "Realtime session disconnected"
+
+
+def test_probe_realtime_session_transitions_to_ok_after_readiness() -> None:
+    realtime = _ReadyTransitionRealtime()
+
+    initial = probe_realtime_session(realtime)
+    realtime.ready = True
+    ready = probe_realtime_session(realtime)
+
+    assert initial.status.value == "warmup"
+    assert ready.status.value == "ok"
+    assert ready.summary == "Realtime session connected"

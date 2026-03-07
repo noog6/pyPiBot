@@ -2828,7 +2828,13 @@ class RealtimeAPI:
         self._injection_bus_instance().ensure_startup_injection_timeout_task()
 
     def get_session_health(self) -> dict[str, Any]:
-        injection_ready = bool(self.is_ready_for_injections())
+        injection_ready_result = self.is_ready_for_injections(with_reason=True)
+        if isinstance(injection_ready_result, tuple):
+            injection_ready, injection_ready_reason = injection_ready_result
+        else:
+            injection_ready = bool(injection_ready_result)
+            injection_ready_reason = "ready" if injection_ready else "not_ready"
+        injection_ready = bool(injection_ready)
         session_ready = bool(self.ready_event.is_set())
         retrieval_metrics = self._memory_manager.get_retrieval_health_metrics(
             scope=self._memory_retrieval_scope,
@@ -2838,6 +2844,7 @@ class RealtimeAPI:
             "connected": self._session_connected,
             "ready": injection_ready,
             "injection_ready": injection_ready,
+            "injection_ready_reason": str(injection_ready_reason),
             "session_ready": session_ready,
             "connection_attempts": self._session_connection_attempts,
             "connections": self._session_connections,
