@@ -139,6 +139,7 @@ pytest -q
 
 ## Documentation
 
+- [docs/architecture/README.md](docs/architecture/README.md)
 - [docs/agent-map.md](docs/agent-map.md)
 - [docs/architecture/theo_cognitive_stack.md](docs/architecture/theo_cognitive_stack.md)
 - [docs/coding-standards.md](docs/coding-standards.md)
