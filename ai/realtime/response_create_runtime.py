@@ -508,6 +508,8 @@ class ResponseCreateRuntime:
         api._bind_active_input_event_key_for_turn(
             turn_id=turn_id,
             input_event_key=current_input_event_key,
+            cause="prepare_response_create",
+            origin=origin,
         )
         with api._utterance_context_scope(turn_id=turn_id, input_event_key=current_input_event_key) as resolved_context:
             turn_id = resolved_context.turn_id

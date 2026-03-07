@@ -2930,6 +2930,8 @@ class RealtimeAPI:
             self._bind_active_input_event_key_for_turn(
                 turn_id=metadata_turn_id,
                 input_event_key=metadata_input_event_key,
+                cause="queue_response_origin",
+                origin=normalized_origin,
             )
         self._pending_response_create_origins.append(pending_origin)
 
@@ -3967,16 +3969,57 @@ class RealtimeAPI:
             self._active_input_event_key_by_turn_id = active_by_turn
         return self._lifecycle_state_coordinator().active_input_event_key_for_turn(active_by_turn, turn_id=turn_id)
 
-    def _bind_active_input_event_key_for_turn(self, *, turn_id: str, input_event_key: str | None) -> None:
+    def _bind_active_input_event_key_for_turn(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str | None,
+        cause: str = "unspecified",
+        response_id: str | None = None,
+        origin: str | None = None,
+    ) -> None:
         active_by_turn = getattr(self, "_active_input_event_key_by_turn_id", None)
         if not isinstance(active_by_turn, dict):
             active_by_turn = {}
             self._active_input_event_key_by_turn_id = active_by_turn
+        normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
+        old_active_key = str(active_by_turn.get(normalized_turn_id) or "").strip()
+        requested_key = str(input_event_key or "").strip()
+        should_block_tool_rebind = (
+            bool(old_active_key)
+            and not old_active_key.startswith("tool:")
+            and requested_key.startswith("tool:")
+        )
+        resolved_key = old_active_key if should_block_tool_rebind else requested_key
         self._lifecycle_state_coordinator().bind_active_input_event_key_for_turn(
             active_by_turn,
-            turn_id=turn_id,
-            input_event_key=input_event_key,
+            turn_id=normalized_turn_id,
+            input_event_key=resolved_key,
         )
+        if should_block_tool_rebind:
+            logger.info(
+                "active_key_transition run_id=%s turn_id=%s old_active_key=%s new_active_key=%s requested_key=%s cause=%s response_id=%s origin=%s blocked_tool_rebind=true",
+                self._current_run_id() or "",
+                normalized_turn_id,
+                old_active_key or "none",
+                resolved_key or "none",
+                requested_key or "none",
+                cause,
+                str(response_id or "").strip() or "unknown",
+                str(origin or "").strip() or "unknown",
+            )
+            return
+        if old_active_key != resolved_key:
+            logger.info(
+                "active_key_transition run_id=%s turn_id=%s old_active_key=%s new_active_key=%s cause=%s response_id=%s origin=%s blocked_tool_rebind=false",
+                self._current_run_id() or "",
+                normalized_turn_id,
+                old_active_key or "none",
+                resolved_key or "none",
+                cause,
+                str(response_id or "").strip() or "unknown",
+                str(origin or "").strip() or "unknown",
+            )
 
     def _log_response_binding_event(self, *, response_key: str, turn_id: str, origin: str) -> None:
         logger.info(
@@ -3986,6 +4029,33 @@ class RealtimeAPI:
             str(response_key or "").strip() or "unknown",
             turn_id or "turn-unknown",
             origin or "unknown",
+        )
+
+    def _log_parent_binding_snapshot(
+        self,
+        *,
+        turn_id: str,
+        response_id: str | None,
+        origin: str,
+        input_event_key: str,
+        response_key: str,
+        response_metadata: dict[str, Any] | None,
+    ) -> None:
+        metadata = response_metadata if isinstance(response_metadata, dict) else {}
+        logger.info(
+            "parent_binding_snapshot run_id=%s turn_id=%s response_id=%s origin=%s input_event_key=%s active_key=%s response_key=%s active_input_event_key=%s active_canonical_key=%s parent_input_event_key=%s parent_turn_id=%s tool_call_id=%s",
+            self._current_run_id() or "",
+            turn_id or "turn-unknown",
+            str(response_id or "").strip() or "unknown",
+            origin or "unknown",
+            input_event_key or "unknown",
+            self._active_input_event_key_for_turn(turn_id) or "unknown",
+            response_key or "unknown",
+            str(getattr(self, "_active_response_input_event_key", "") or "").strip() or "none",
+            str(getattr(self, "_active_response_canonical_key", "") or "").strip() or "none",
+            str(metadata.get("parent_input_event_key") or "").strip() or "none",
+            str(metadata.get("parent_turn_id") or "").strip() or "none",
+            str(metadata.get("tool_call_id") or "").strip() or "none",
         )
 
     def _clear_stale_pending_server_auto_for_turn(
@@ -5952,7 +6022,8 @@ class RealtimeAPI:
             metadata["tool_followup_status_only"] = "true"
             response_payload["instructions"] = (
                 "Gesture follow-up only: acknowledge gesture completion in one short sentence. "
-                "Do not restate or re-answer semantic memory/preferences content already covered by the parent response."
+                "Do not restate or re-answer semantic memory/preferences content already covered by the parent response. "
+                "Do not narrate environment/vision context in gesture-only followups."
             )
         if tool_result_has_distinct_info:
             metadata["tool_result_has_distinct_info"] = "true"
@@ -6035,56 +6106,105 @@ class RealtimeAPI:
             return canonical_key, state
         return None
 
+    def _resolve_parent_state_for_tool_followup(
+        self,
+        *,
+        response_metadata: dict[str, Any],
+        blocked_by_response_id: str | None,
+    ) -> tuple[str, CanonicalResponseState] | None:
+        state_entry: tuple[str, CanonicalResponseState] | None = None
+        resolved_from = "none"
+        normalized_blocked_by = str(blocked_by_response_id or "").strip()
+        if normalized_blocked_by:
+            candidate = self._canonical_state_for_response_id(response_id=normalized_blocked_by)
+            if candidate:
+                state_entry = candidate
+                resolved_from = "response_id"
+        parent_turn_id = str(response_metadata.get("parent_turn_id") or response_metadata.get("turn_id") or "").strip()
+        parent_input_event_key = str(response_metadata.get("parent_input_event_key") or "").strip()
+        if not state_entry and parent_turn_id and parent_input_event_key and not parent_input_event_key.startswith("tool:"):
+            parent_canonical_key = self._canonical_utterance_key(
+                turn_id=parent_turn_id,
+                input_event_key=parent_input_event_key,
+            )
+            candidate = self._canonical_response_state_store().get(parent_canonical_key)
+            if isinstance(candidate, CanonicalResponseState):
+                state_entry = (parent_canonical_key, candidate)
+                resolved_from = "parent_key"
+        if not state_entry and parent_turn_id:
+            for canonical_key, candidate in self._canonical_response_state_store().items():
+                if not isinstance(candidate, CanonicalResponseState):
+                    continue
+                if str(candidate.turn_id or "").strip() != parent_turn_id:
+                    continue
+                candidate_input_event_key = str(candidate.input_event_key or "").strip()
+                if not candidate_input_event_key or candidate_input_event_key.startswith("tool:"):
+                    continue
+                candidate_origin = str(candidate.origin or "").strip().lower()
+                if candidate_origin in {"", "micro_ack", "tool_output"}:
+                    continue
+                state_entry = (canonical_key, candidate)
+                resolved_from = "turn_scan"
+                break
+        tool_call_id = str(response_metadata.get("tool_call_id") or "").strip()
+        resolved_parent_response_id = "none"
+        resolved_parent_canonical_key = "none"
+        parent_covered = False
+        if state_entry:
+            resolved_parent_canonical_key = state_entry[0]
+            resolved_parent_response_id = str(state_entry[1].response_id or "").strip() or "none"
+            parent_origin = str(state_entry[1].origin or "").strip().lower()
+            if parent_origin not in {"micro_ack", "tool_output"} and bool(state_entry[1].done):
+                deliverable_class = str(getattr(state_entry[1], "deliverable_class", "") or "").strip().lower()
+                deliverable_observed = bool(getattr(state_entry[1], "deliverable_observed", False))
+                parent_covered = deliverable_observed or deliverable_class in {"progress", "final"}
+        logger.info(
+            "tool_followup_parent_resolution run_id=%s turn_id=%s tool_call_id=%s parent_input_event_key=%s blocked_by_response_id=%s resolved_parent_response_id=%s resolved_parent_canonical_key=%s resolved_from=%s parent_covered=%s",
+            self._current_run_id() or "",
+            parent_turn_id or str(response_metadata.get("turn_id") or "").strip() or "turn-unknown",
+            tool_call_id or "unknown",
+            parent_input_event_key or "none",
+            normalized_blocked_by or "none",
+            resolved_parent_response_id,
+            resolved_parent_canonical_key,
+            resolved_from,
+            str(parent_covered).lower(),
+        )
+        return state_entry
+
     def _should_suppress_queued_tool_followup_release(
         self,
         *,
         response_metadata: dict[str, Any],
         blocked_by_response_id: str | None,
-    ) -> bool:
-        suppressible = str(response_metadata.get("tool_followup_suppress_if_parent_covered", "")).strip().lower()
-        if suppressible not in {"true", "1", "yes"}:
-            return False
-        if str(response_metadata.get("tool_result_has_distinct_info", "")).strip().lower() in {"true", "1", "yes"}:
-            return False
-        state_entry = self._canonical_state_for_response_id(response_id=blocked_by_response_id)
+    ) -> tuple[bool, tuple[str, CanonicalResponseState] | None, str]:
+        suppressible = str(response_metadata.get("tool_followup_suppress_if_parent_covered", "")).strip().lower() in {"true", "1", "yes"}
+        tool_name = str(response_metadata.get("tool_name") or "").strip().lower()
+        has_distinct_info = str(response_metadata.get("tool_result_has_distinct_info", "")).strip().lower() in {"true", "1", "yes"}
+        if not suppressible:
+            return False, None, "not_suppressible"
+        if has_distinct_info:
+            return False, None, "distinct_info"
+        if not self._is_low_risk_reversible_gesture_tool(tool_name=tool_name):
+            return False, None, "non_gesture_tool"
+
+        state_entry = self._resolve_parent_state_for_tool_followup(
+            response_metadata=response_metadata,
+            blocked_by_response_id=blocked_by_response_id,
+        )
         if not state_entry:
-            parent_turn_id = str(response_metadata.get("parent_turn_id") or response_metadata.get("turn_id") or "").strip()
-            parent_input_event_key = str(response_metadata.get("parent_input_event_key") or "").strip()
-            if parent_turn_id and parent_input_event_key and not parent_input_event_key.startswith("tool:"):
-                parent_canonical_key = self._canonical_utterance_key(
-                    turn_id=parent_turn_id,
-                    input_event_key=parent_input_event_key,
-                )
-                candidate = self._canonical_response_state_store().get(parent_canonical_key)
-                if isinstance(candidate, CanonicalResponseState):
-                    state_entry = (parent_canonical_key, candidate)
-            if not state_entry and parent_turn_id:
-                for canonical_key, candidate in self._canonical_response_state_store().items():
-                    if not isinstance(candidate, CanonicalResponseState):
-                        continue
-                    if str(candidate.turn_id or "").strip() != parent_turn_id:
-                        continue
-                    candidate_input_event_key = str(candidate.input_event_key or "").strip()
-                    if not candidate_input_event_key or candidate_input_event_key.startswith("tool:"):
-                        continue
-                    candidate_origin = str(candidate.origin or "").strip().lower()
-                    if candidate_origin in {"", "micro_ack", "tool_output"}:
-                        continue
-                    state_entry = (canonical_key, candidate)
-                    break
-        if not state_entry:
-            return False
+            return False, None, "parent_unresolved"
         _, parent_state = state_entry
         parent_origin = str(parent_state.origin or "").strip().lower()
         if parent_origin in {"micro_ack", "tool_output"}:
-            return False
+            return False, state_entry, "parent_origin_excluded"
         if not bool(parent_state.done):
-            return False
+            return False, state_entry, "parent_not_done"
         deliverable_class = str(getattr(parent_state, "deliverable_class", "") or "").strip().lower()
         deliverable_observed = bool(getattr(parent_state, "deliverable_observed", False))
-        return bool(parent_state.done) and (
-            deliverable_observed or deliverable_class in {"progress", "final"}
-        )
+        if not (deliverable_observed or deliverable_class in {"progress", "final"}):
+            return False, state_entry, "parent_not_deliverable"
+        return True, state_entry, "parent_covered_tool_result"
 
     def _should_drop_tool_followup_at_create_seam(
         self,
@@ -6098,10 +6218,30 @@ class RealtimeAPI:
         if not is_tool_followup:
             return False
         blocked_by_response_id = str(response_metadata.get("blocked_by_response_id") or "").strip()
-        if not self._should_suppress_queued_tool_followup_release(
+        should_drop, parent_entry, reason = self._should_suppress_queued_tool_followup_release(
             response_metadata=response_metadata,
             blocked_by_response_id=blocked_by_response_id or None,
-        ):
+        )
+        parent_state = parent_entry[1] if parent_entry else None
+        logger.info(
+            "create_seam_parent_coverage_eval run_id=%s turn_id=%s canonical_key=%s tool_call_id=%s drop_decision=%s reason=%s resolved_parent_response_id=%s resolved_parent_origin=%s resolved_parent_deliverable_state=%s",
+            self._current_run_id() or "",
+            turn_id,
+            canonical_key,
+            str(response_metadata.get("tool_call_id") or "").strip() or "unknown",
+            str(should_drop).lower(),
+            reason,
+            str(getattr(parent_state, "response_id", "") or "").strip() or "none",
+            str(getattr(parent_state, "origin", "") or "").strip() or "none",
+            (
+                f"done={str(bool(getattr(parent_state, 'done', False))).lower()},"
+                f"deliverable_observed={str(bool(getattr(parent_state, 'deliverable_observed', False))).lower()},"
+                f"deliverable_class={str(getattr(parent_state, 'deliverable_class', 'unknown') or 'unknown').strip().lower()}"
+            )
+            if parent_state is not None
+            else "none",
+        )
+        if not should_drop:
             return False
         self._set_tool_followup_state(
             canonical_key=canonical_key,
@@ -6252,10 +6392,30 @@ class RealtimeAPI:
                 continue
             if self._tool_followup_state(canonical_key=canonical_key) != "blocked_active_response":
                 continue
-            if self._should_suppress_queued_tool_followup_release(
+            should_drop, parent_entry, reason = self._should_suppress_queued_tool_followup_release(
                 response_metadata=response_metadata,
                 blocked_by_response_id=normalized_response_id,
-            ):
+            )
+            parent_state = parent_entry[1] if parent_entry else None
+            logger.info(
+                "queue_release_parent_eval run_id=%s turn_id=%s canonical_key=%s tool_call_id=%s release_decision=%s reason=%s resolved_parent_response_id=%s resolved_parent_origin=%s resolved_parent_deliverable_state=%s",
+                self._current_run_id() or "",
+                turn_id,
+                canonical_key,
+                str(response_metadata.get("tool_call_id") or "").strip() or "unknown",
+                "drop" if should_drop else "release",
+                reason,
+                str(getattr(parent_state, "response_id", "") or "").strip() or "none",
+                str(getattr(parent_state, "origin", "") or "").strip() or "none",
+                (
+                    f"done={str(bool(getattr(parent_state, 'done', False))).lower()},"
+                    f"deliverable_observed={str(bool(getattr(parent_state, 'deliverable_observed', False))).lower()},"
+                    f"deliverable_class={str(getattr(parent_state, 'deliverable_class', 'unknown') or 'unknown').strip().lower()}"
+                )
+                if parent_state is not None
+                else "none",
+            )
+            if should_drop:
                 self._set_tool_followup_state(
                     canonical_key=canonical_key,
                     state="dropped",
@@ -10907,8 +11067,19 @@ class RealtimeAPI:
         self._bind_active_input_event_key_for_turn(
             turn_id=turn_id,
             input_event_key=self._active_response_input_event_key,
+            cause="response_created",
+            response_id=self._active_response_id,
+            origin=origin,
         )
         self._active_response_canonical_key = lifecycle_canonical_key
+        self._log_parent_binding_snapshot(
+            turn_id=turn_id,
+            response_id=self._active_response_id,
+            origin=origin,
+            input_event_key=str(resolved_input_event_key or ""),
+            response_key=str(resolved_input_event_key or ""),
+            response_metadata=response_metadata,
+        )
         if self._active_response_id:
             self._record_response_trace_context(
                 self._active_response_id,
