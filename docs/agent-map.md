@@ -5,7 +5,18 @@ flows between them. It mirrors the wiring in `main.py` and the thread loops in
 the controllers/monitors. The realtime agent thread is the primary agentic
 flow, coordinating audio in/out, tool execution, and event injections.
 
+> **Architecture context:** This map focuses on runtime/lifecycle orchestration.
+> For layer ownership and roadmap context (runtime vs perception/memory vs
+> arbitration/governance), see
+> [`docs/architecture/theo_cognitive_stack.md`](architecture/theo_cognitive_stack.md)
+> and the architecture index at
+> [`docs/architecture/README.md`](architecture/README.md).
+
 ## Top-Level Runtime Orchestration
+
+This section describes runtime plumbing, not higher-order decision policy.
+Cross-check proposed changes against the cognitive stack roadmap before moving
+logic between lifecycle and upper cognition layers.
 
 The entrypoint in `main.py` builds and launches the following components:
 
