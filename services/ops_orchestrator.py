@@ -93,7 +93,7 @@ class OpsOrchestrator:
         self._warmup_active = True
         self._warmup_exit_reason: str | None = None
         self._warmup_tolerated_probe_states: dict[str, set[HealthStatus]] = {
-            "realtime": {HealthStatus.DEGRADED},
+            "realtime": {HealthStatus.DEGRADED, HealthStatus.WARMUP},
             "audio": {HealthStatus.DEGRADED},
         }
         OpsOrchestrator._instance = self
@@ -644,6 +644,8 @@ class OpsOrchestrator:
             return HealthStatus.FAILING
         if any(status == HealthStatus.DEGRADED for status in states):
             return HealthStatus.DEGRADED
+        if any(status == HealthStatus.WARMUP for status in states):
+            return HealthStatus.WARMUP
         return HealthStatus.OK
 
     def _compute_warmup_state(
@@ -742,6 +744,8 @@ class OpsOrchestrator:
     ) -> str:
         if status == HealthStatus.OK:
             return "All systems nominal"
+        if status == HealthStatus.WARMUP:
+            return self._summarize_warmup(results)
         impacted = [result for result in results if result.status != HealthStatus.OK]
         if not impacted:
             return "System health pending"
