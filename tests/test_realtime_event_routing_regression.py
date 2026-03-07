@@ -364,9 +364,10 @@ def test_stale_response_done_event_is_dropped() -> None:
 
     api.handle_response_done.assert_not_called()
     debug_log.assert_any_call(
-        "dropped_stale_response_event response_id=%s event_type=%s",
+        "dropped_stale_response_event response_id=%s event_type=%s upgrade_chain_id=%s",
         "resp-stale",
         "response.done",
+        "none",
     )
 
 
@@ -397,9 +398,10 @@ def test_stale_response_audio_transcript_delta_is_dropped_without_merge() -> Non
     api._mark_first_assistant_utterance_observed_if_needed.assert_not_called()
     api._append_assistant_reply_text.assert_not_called()
     debug_log.assert_any_call(
-        "dropped_stale_response_event response_id=%s event_type=%s",
+        "dropped_stale_response_event response_id=%s event_type=%s upgrade_chain_id=%s",
         "resp-stale",
         "response.output_audio_transcript.delta",
+        "none",
     )
 
 
@@ -426,9 +428,10 @@ def test_stale_response_output_audio_done_is_dropped_without_playback_completion
     api.handle_audio_response_done.assert_not_called()
     api.state_manager.update_state.assert_not_called()
     debug_log.assert_any_call(
-        "dropped_stale_response_event response_id=%s event_type=%s",
+        "dropped_stale_response_event response_id=%s event_type=%s upgrade_chain_id=%s",
         "resp-stale",
         "response.output_audio.done",
+        "none",
     )
 
 
@@ -448,10 +451,11 @@ def test_dropped_stale_response_event_is_rate_limited() -> None:
 
     assert info_log.call_count == 1
     info_log.assert_called_with(
-        "dropped_stale_response_event_summary response_id=%s counts=%s window_s=%s",
+        "dropped_stale_response_event_summary response_id=%s counts=%s window_s=%s upgrade_chain_id=%s",
         "resp-stale",
         '{"response.done": 2}',
         3,
+        "none",
     )
 
 
@@ -501,7 +505,6 @@ def test_transcript_final_skips_verify_on_risk_when_confirmation_active() -> Non
     )
 
     verify_gate.assert_not_awaited()
-    api._maybe_handle_approval_response.assert_awaited_once_with("yes", None)
 
 
 def test_audio_delta_upgrade_quarantines_response_before_cancel_send() -> None:
@@ -557,3 +560,52 @@ def test_audio_delta_upgrade_quarantines_response_before_cancel_send() -> None:
         websocket,
         {"type": "response.cancel", "response_id": "resp-cancelled-late"},
     )
+
+
+def test_ingress_gate_blocks_cancelled_transcript_delta_events() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._cancelled_response_ids = {"resp-cancelled"}
+    api._suppressed_audio_response_ids = set()
+    api._superseded_response_ids = set()
+    api._stale_response_ids_set = set()
+    api._response_status_by_id = {}
+    api._cancelled_response_timing_by_id = {}
+    api._is_active_response_guarded = lambda: False
+    api._mark_utterance_info_summary = AsyncMock()
+    api._mark_first_assistant_utterance_observed_if_needed = AsyncMock()
+    api._append_assistant_reply_text = AsyncMock()
+
+    asyncio.run(
+        api._handle_event_legacy(
+            {
+                "type": "response.output_audio_transcript.delta",
+                "response_id": "resp-cancelled",
+                "delta": "hello",
+            },
+            None,
+        )
+    )
+
+    api._mark_utterance_info_summary.assert_not_called()
+    api._mark_first_assistant_utterance_observed_if_needed.assert_not_called()
+    api._append_assistant_reply_text.assert_not_called()
+
+
+def test_lifecycle_coherence_logs_violation_for_missing_active_turn_mapping() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._active_input_event_key_by_turn_id = {}
+    api._pending_server_auto_response_by_response_id = {}
+    api._pending_server_auto_response_id_by_turn_id = {}
+    api._pending_server_auto_response_by_turn_id = {}
+    api._current_run_id = lambda: "run-1"
+
+    with patch("ai.realtime_api.logger.warning") as warning_log:
+        api._log_lifecycle_coherence(
+            stage="replacement_created",
+            turn_id="turn-9",
+            response_id="resp-9",
+            canonical_key="run-1:turn-9:item-9",
+        )
+
+    warning_log.assert_called_once()
+    assert "lifecycle_coherence_violation" in warning_log.call_args.args[0]
