@@ -21,6 +21,13 @@ Run this command as part of setup for each environment:
 - Do not introduce new persistence formats outside the storage controller.
 - Favor backward-compatible changes first; only introduce breaking behavior with explicit rationale and migration guidance.
 
+## Cognitive stack roadmap (mandatory)
+- Read `docs/architecture/theo_cognitive_stack.md` before major architecture work.
+- Current plateau: runtime/nervous-system behavior is meaningfully stabilized; perception/memory is partial; decision arbitration and higher cognition are the active frontier.
+- Classify each task by owning layer before editing code.
+- Do not conflate arbitration, idempotency/single-flight, scheduling/queueing, governance/policy gating, and perception/context enrichment.
+- Preserve deterministic runtime behavior while evolving higher-order cognition in upper layers.
+
 ## Verification baseline (minimum commands)
 - Run a targeted pytest pass for the area you touched (or full suite if unsure).
 - If you changed memory retrieval, governance, or logging semantics: add/extend tests that prove the new behavior.
