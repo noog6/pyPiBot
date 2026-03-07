@@ -4027,15 +4027,63 @@ class RealtimeAPI:
         pending: PendingServerAutoResponse,
         turn_id: str,
         mutation: str,
+        expected_response_id: str | None = None,
+        expected_upgrade_chain_id: str | None = None,
     ) -> bool:
+        normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
         active_response_id = str(getattr(self, "_active_response_id", "") or "").strip()
         pending_response_id = str(pending.response_id or "").strip()
+        pending_turn_id = str(getattr(pending, "turn_id", "") or "").strip() or "turn-unknown"
+        expected_response_id_normalized = str(expected_response_id or "").strip()
+        expected_upgrade_chain_id_normalized = str(expected_upgrade_chain_id or "").strip()
+        pending_upgrade_chain_id = str(getattr(pending, "upgrade_chain_id", "") or "").strip()
+
+        lineage_mismatch = False
+        if pending_turn_id != normalized_turn_id:
+            lineage_mismatch = True
+        if expected_response_id_normalized and pending_response_id != expected_response_id_normalized:
+            lineage_mismatch = True
+        if (
+            expected_upgrade_chain_id_normalized
+            and pending_upgrade_chain_id
+            and pending_upgrade_chain_id != expected_upgrade_chain_id_normalized
+        ):
+            lineage_mismatch = True
+        if lineage_mismatch:
+            logger.info(
+                "pending_server_auto_mutation_rejected run_id=%s turn_id=%s mutation=%s reason=lineage_mismatch pending_response_id=%s active_response_id=%s expected_response_id=%s pending_chain_id=%s expected_chain_id=%s",
+                self._current_run_id() or "",
+                normalized_turn_id,
+                mutation,
+                pending_response_id or "none",
+                active_response_id or "none",
+                expected_response_id_normalized or "none",
+                pending_upgrade_chain_id or "none",
+                expected_upgrade_chain_id_normalized or "none",
+            )
+            return False
+
+        if mutation == "replaced" and not pending.active and not pending.cancelled_for_upgrade:
+            logger.info(
+                "pending_server_auto_mutation_ignored run_id=%s turn_id=%s mutation=%s reason=idempotent_duplicate pending_response_id=%s active_response_id=%s",
+                self._current_run_id() or "",
+                normalized_turn_id,
+                mutation,
+                pending_response_id or "none",
+                active_response_id or "none",
+            )
+            return False
+
         if active_response_id and pending_response_id == active_response_id:
             return True
+        if mutation == "replaced":
+            # Replacement cleanups are allowed when lineage still matches even if
+            # active ownership has already moved to the replacement response.
+            return True
         logger.info(
-            "pending_server_auto_mutation_rejected run_id=%s turn_id=%s mutation=%s pending_response_id=%s active_response_id=%s",
+            "pending_server_auto_mutation_rejected run_id=%s turn_id=%s mutation=%s reason=lineage_mismatch pending_response_id=%s active_response_id=%s",
             self._current_run_id() or "",
-            str(turn_id or "").strip() or "turn-unknown",
+            normalized_turn_id,
             mutation,
             pending_response_id or "none",
             active_response_id or "none",
@@ -4553,14 +4601,24 @@ class RealtimeAPI:
     def _mark_pending_server_auto_response_replaced(self, *, turn_id: str) -> None:
         pending = self._pending_server_auto_response_for_turn(turn_id=turn_id)
         if pending is None:
+            logger.info(
+                "pending_server_auto_mutation_ignored run_id=%s turn_id=%s mutation=%s reason=already_cleaned pending_response_id=none active_response_id=%s",
+                self._current_run_id() or "",
+                str(turn_id or "").strip() or "turn-unknown",
+                "replaced",
+                str(getattr(self, "_active_response_id", "") or "").strip() or "none",
+            )
             return
         if not self._pending_server_auto_response_mutation_allowed(
             pending=pending,
             turn_id=turn_id,
             mutation="replaced",
+            expected_response_id=pending.response_id,
+            expected_upgrade_chain_id=getattr(pending, "upgrade_chain_id", ""),
         ):
             return
         pending.active = False
+        pending.cancelled_for_upgrade = False
         self._set_server_auto_pre_audio_hold(
             turn_id=turn_id,
             enabled=False,
