@@ -13,6 +13,8 @@ _STOPWORDS = {
 }
 
 _VISUAL_TERMS = {"pants", "shirt", "hat", "wearing", "wear", "color", "see"}
+_GREETING_TERMS = {"hi", "hello", "hey", "yo", "sup", "howdy"}
+_CLEAR_MOTION_TERMS = {"look", "center", "left", "right", "up", "down", "back"}
 
 
 def extract_topic_anchors(text: str, *, top_k: int = 5) -> list[str]:
@@ -107,10 +109,16 @@ def should_clarify(
     camera_available: bool = False,
     camera_recent: bool = True,
 ) -> tuple[bool, str]:
+    token_set = set(re.findall(r"[a-zA-Z0-9']+", (transcript_text or "").lower()))
+    greeting_only = bool(token_set) and token_set <= _GREETING_TERMS
+    clear_motion_command = {"look", "center"} <= token_set or bool(token_set & _CLEAR_MOTION_TERMS and "look" in token_set)
+
     if snapshot.asr_confidence is not None and snapshot.asr_confidence < min_confidence:
         return True, "low_conf"
     if snapshot.short_utterance and snapshot.very_short_text:
         return True, "short_utterance"
+    if snapshot.very_short_text and not known_domain and not greeting_only and not clear_motion_command:
+        return True, "low_semantic_confidence"
     if snapshot.contains_rare_terms and not known_domain:
         return True, "rare_terms"
     if snapshot.visual_question and (not camera_available or not camera_recent):

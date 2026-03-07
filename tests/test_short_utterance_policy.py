@@ -1,0 +1,161 @@
+from __future__ import annotations
+
+import asyncio
+import sys
+import types
+
+if "audioop" not in sys.modules:
+    sys.modules["audioop"] = types.ModuleType("audioop")
+
+from ai import realtime_api as realtime_api_module
+from ai.realtime.asr_trust import build_utterance_trust_snapshot, should_clarify
+from ai.realtime_api import RealtimeAPI
+
+
+class _Transport:
+    def __init__(self) -> None:
+        self.sent: list[dict[str, object]] = []
+
+    async def send_json(self, _ws, event: dict[str, object]) -> None:
+        self.sent.append(event)
+
+
+def test_one_word_ambiguous_utterance_prefers_clarify() -> None:
+    snapshot = build_utterance_trust_snapshot(
+        run_id="run-526",
+        turn_id="turn-4",
+        input_event_key="item-1",
+        transcript_text="Yoren",
+        utterance_duration_ms=1900,
+        asr_meta={},
+        short_utterance_ms=450,
+    )
+
+    clarify, reason = should_clarify(
+        transcript_text=snapshot.transcript_text,
+        snapshot=snapshot,
+        min_confidence=0.65,
+    )
+
+    assert clarify is True
+    assert reason == "low_semantic_confidence"
+
+
+def test_short_greeting_stays_natural_without_clarify() -> None:
+    snapshot = build_utterance_trust_snapshot(
+        run_id="run-526",
+        turn_id="turn-5",
+        input_event_key="item-2",
+        transcript_text="hey",
+        utterance_duration_ms=1500,
+        asr_meta={},
+        short_utterance_ms=450,
+    )
+
+    clarify, reason = should_clarify(
+        transcript_text=snapshot.transcript_text,
+        snapshot=snapshot,
+        min_confidence=0.65,
+    )
+
+    assert clarify is False
+    assert reason == "none"
+
+
+def test_short_clear_command_not_blocked() -> None:
+    snapshot = build_utterance_trust_snapshot(
+        run_id="run-526",
+        turn_id="turn-6",
+        input_event_key="item-3",
+        transcript_text="look center",
+        utterance_duration_ms=1700,
+        asr_meta={},
+        short_utterance_ms=450,
+    )
+
+    clarify, reason = should_clarify(
+        transcript_text=snapshot.transcript_text,
+        snapshot=snapshot,
+        min_confidence=0.65,
+    )
+
+    assert clarify is False
+    assert reason == "none"
+
+
+def test_preference_recall_query_not_treated_as_ambiguous() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._asr_verify_on_risk_enabled = True
+    api._asr_clarify_asked_input_event_keys = set()
+    api._asr_clarify_count_by_turn = {}
+    api._asr_verify_max_clarify_per_turn = 2
+    api._asr_verify_short_utterance_ms = 450
+    api._asr_verify_min_confidence = 0.65
+    api._is_memory_intent = lambda _text: False
+    api.get_vision_state = lambda: {"available": False, "can_capture": False}
+    api._set_response_gating_verdict = lambda **_kwargs: None
+    api._pending_server_auto_response_for_turn = lambda **_kwargs: None
+
+    clarified = asyncio.run(
+        api._maybe_verify_on_risk_clarify(
+            transcript="favorite editor",
+            websocket=object(),
+            turn_id="turn-7",
+            input_event_key="item-4",
+            snapshot={"run_id": "run-526", "utterance_duration_ms": 1800},
+        )
+    )
+
+    assert clarified is False
+
+
+def test_context_enrichment_suppressed_for_ambiguous_input(monkeypatch) -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._asr_verify_on_risk_enabled = True
+    api._asr_clarify_asked_input_event_keys = set()
+    api._asr_clarify_count_by_turn = {}
+    api._asr_verify_max_clarify_per_turn = 2
+    api._asr_verify_short_utterance_ms = 450
+    api._asr_verify_min_confidence = 0.65
+    api._is_memory_intent = lambda _text: False
+    api._set_response_gating_verdict = lambda **_kwargs: None
+    api._pending_server_auto_response_for_turn = lambda **_kwargs: None
+    api._current_run_id = lambda: "run-526"
+    api._stale_response_ids = lambda: set()
+    api._record_cancel_issued_timing = lambda *_args, **_kwargs: None
+    api._mark_pending_server_auto_response_cancelled = lambda **_kwargs: None
+    api._suppress_cancelled_response_audio = lambda *_args, **_kwargs: None
+    api._get_or_create_transport = lambda: _Transport()
+    api.get_vision_state = lambda: {"available": True, "can_capture": True}
+    api.assistant_reply = ""
+    api._assistant_reply_accum = ""
+    api._assistant_reply_response_id = None
+
+    sent_messages: list[tuple[str, dict[str, str]]] = []
+
+    async def _send_assistant_message(msg: str, _ws, *, response_metadata=None, **_kwargs):
+        sent_messages.append((msg, response_metadata or {}))
+
+    api.send_assistant_message = _send_assistant_message
+
+    info_logs: list[str] = []
+
+    def _capture_info(message: str, *args, **_kwargs) -> None:
+        info_logs.append(message % args if args else message)
+
+    monkeypatch.setattr(realtime_api_module.logger, "info", _capture_info)
+
+    clarified = asyncio.run(api._maybe_verify_on_risk_clarify(
+        transcript="Yoren",
+        websocket=object(),
+        turn_id="turn-8",
+        input_event_key="item-5",
+        snapshot={"run_id": "run-526", "utterance_duration_ms": 1800},
+    ))
+
+    assert clarified is True
+    assert sent_messages
+    text, _metadata = sent_messages[0]
+    assert "board games" not in text.lower()
+    assert "not sure what you mean" in text.lower()
+    assert any("context_enrichment_suppressed" in entry for entry in info_logs)
