@@ -7355,7 +7355,12 @@ class RealtimeAPI:
         await self.send_assistant_message(
             clarify_text,
             websocket,
-            response_metadata={"trigger": "asr_verify_on_risk", "reason": reason, "input_event_key": clarify_key},
+            response_metadata={
+                "trigger": "asr_verify_on_risk",
+                "reason": reason,
+                "input_event_key": clarify_key,
+                "clarify_mode": "bounded",
+            },
         )
         logger.info(
             "asr_verify_on_risk_clarify run_id=%s turn_id=%s input_event_key=%s reason=%s",
@@ -7410,6 +7415,27 @@ class RealtimeAPI:
         if self._has_camera_tool_result_for_turn(turn_id):
             return message
         return "I can’t see right now. Want me to take a quick look with the camera?"
+
+    def _is_bounded_clarify_mode(self, metadata: dict[str, Any]) -> bool:
+        trigger = str(metadata.get("trigger") or "").strip().lower()
+        reason = str(metadata.get("reason") or "").strip().lower()
+        return trigger == "asr_verify_on_risk" and reason in {"low_semantic_confidence", "short_utterance"}
+
+    def _bounded_clarify_response_create_event(
+        self,
+        *,
+        message: str,
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        response_create_event = {"type": "response.create", "response": {"metadata": metadata}}
+        if not self._is_bounded_clarify_mode(metadata):
+            return response_create_event
+        response_payload = response_create_event.setdefault("response", {})
+        response_payload["instructions"] = (
+            "You are in bounded clarify mode. Speak exactly this one sentence and nothing else: "
+            f"{message!r}. Do not add scene, IMU, memory, or environment commentary."
+        )
+        return response_create_event
 
     def _maybe_enqueue_reflection(self, trigger: str) -> None:
         if self._reflection_enqueued:
@@ -12670,7 +12696,7 @@ class RealtimeAPI:
         )
         await self._send_response_create(
             websocket,
-            {"type": "response.create", "response": {"metadata": metadata}},
+            self._bounded_clarify_response_create_event(message=message, metadata=metadata),
             origin="assistant_message",
             utterance_context=trace_context,
         )
