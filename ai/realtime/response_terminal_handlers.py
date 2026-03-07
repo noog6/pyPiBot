@@ -279,6 +279,35 @@ class ResponseTerminalHandlers:
             active_response_was_provisional=active_response_was_provisional,
             done_canonical_key=done_canonical_key,
         )
+        transcript_linked_input_event_key = str(api._active_input_event_key_for_turn(turn_id) or "").strip()
+        transcript_final_linked = bool(transcript_linked_input_event_key and transcript_linked_input_event_key.startswith("item_"))
+        obligations_map = getattr(api, "_response_obligations", {})
+        obligation_open = bool(
+            isinstance(obligations_map, dict)
+            and any(str(key).startswith(f"{turn_id}:") for key in obligations_map)
+        )
+        logger.info(
+            "provisional_completion_eval run_id=%s turn_id=%s response_id=%s synthetic_key=%s canonical_key=%s transcript_linked=%s action=%s reason=%s",
+            api._current_run_id() or "",
+            turn_id,
+            str(active_response_id_before_clear or "none"),
+            str(done_input_event_key or "none"),
+            done_canonical_key,
+            str(transcript_final_linked).lower(),
+            "allow",
+            "response_done_received",
+        )
+        logger.info(
+            "turn_terminal_close_eval run_id=%s turn_id=%s response_id=%s origin=%s transcript_final_seen=%s obligation_open=%s action=%s reason=%s",
+            api._current_run_id() or "",
+            turn_id,
+            str(active_response_id_before_clear or "none"),
+            str(active_response_origin_before_clear or "unknown"),
+            str(transcript_final_linked).lower(),
+            str(obligation_open).lower(),
+            "allow",
+            "response_done_received",
+        )
         if selection_reason == "cancelled":
             api._log_cancelled_deliverable_once(
                 active_response_id,
