@@ -202,6 +202,45 @@ async def _maybe_handle_preference_recall_intent(controller, text: str, websocke
         turn_timestamps["preference_recall_start"] = time.monotonic()
         controller._mark_preference_recall_candidate(text, source=source)
 
+        normalized_text = str(text or "").strip().lower()
+        mixed_intent_gesture_tool = ""
+        if "look around" in normalized_text:
+            mixed_intent_gesture_tool = "gesture_look_around"
+        elif "look back" in normalized_text or "look center" in normalized_text or "return to neutral" in normalized_text:
+            mixed_intent_gesture_tool = "gesture_look_center"
+        if mixed_intent_gesture_tool:
+            gesture_fn = function_map.get(mixed_intent_gesture_tool)
+            if callable(gesture_fn):
+                try:
+                    gesture_result = await gesture_fn()
+                    tool_call_records = getattr(controller, "_tool_call_records", None)
+                    if isinstance(tool_call_records, list):
+                        tool_call_records.append(
+                            {
+                                "name": mixed_intent_gesture_tool,
+                                "source": "preference_recall_mixed_intent",
+                                "turn_id": resolved_turn_id,
+                                "query": normalized_text,
+                                "result": gesture_result,
+                            }
+                        )
+                    logger.info(
+                        "mixed_intent_action_executed run_id=%s turn_id=%s source=%s tool=%s",
+                        controller._current_run_id() or "",
+                        resolved_turn_id,
+                        source,
+                        mixed_intent_gesture_tool,
+                    )
+                except Exception:
+                    logger.warning(
+                        "mixed_intent_action_failed run_id=%s turn_id=%s source=%s tool=%s",
+                        controller._current_run_id() or "",
+                        resolved_turn_id,
+                        source,
+                        mixed_intent_gesture_tool,
+                        exc_info=True,
+                    )
+
         query = controller._build_preference_recall_query(text.lower(), keywords=keywords)
         now = time.monotonic()
         cooldown_s = max(0.0, float(getattr(controller, "_preference_recall_cooldown_s", 0.0)))

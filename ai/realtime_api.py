@@ -5898,6 +5898,24 @@ class RealtimeAPI:
                 dropped_queue,
             )
 
+    def _is_low_risk_reversible_gesture_tool(self, *, tool_name: str | None) -> bool:
+        normalized_tool_name = str(tool_name or "").strip().lower()
+        if not normalized_tool_name.startswith("gesture_"):
+            return False
+        return normalized_tool_name in {
+            "gesture_idle",
+            "gesture_nod",
+            "gesture_no",
+            "gesture_look_around",
+            "gesture_look_up",
+            "gesture_look_left",
+            "gesture_look_right",
+            "gesture_look_down",
+            "gesture_look_center",
+            "gesture_curious_tilt",
+            "gesture_attention_snap",
+        }
+
     def _build_tool_followup_response_create_event(
         self,
         *,
@@ -5926,9 +5944,11 @@ class RealtimeAPI:
             metadata["parent_input_event_key"] = parent_input_event_key
         metadata["tool_followup"] = "true"
         metadata["tool_call_id"] = tool_call_id
-        metadata["tool_followup_suppress_if_parent_covered"] = "true"
-        if tool_name:
-            metadata["tool_name"] = str(tool_name).strip().lower()
+        normalized_tool_name = str(tool_name or "").strip().lower()
+        if normalized_tool_name:
+            metadata["tool_name"] = normalized_tool_name
+        if self._is_low_risk_reversible_gesture_tool(tool_name=normalized_tool_name):
+            metadata["tool_followup_suppress_if_parent_covered"] = "true"
         if tool_result_has_distinct_info:
             metadata["tool_result_has_distinct_info"] = "true"
         canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_input_event_key)
@@ -6020,7 +6040,8 @@ class RealtimeAPI:
         if not state_entry:
             return False
         _, parent_state = state_entry
-        if str(parent_state.origin or "").strip().lower() != "upgraded_response":
+        parent_origin = str(parent_state.origin or "").strip().lower()
+        if parent_origin in {"micro_ack", "tool_output"}:
             return False
         if not bool(parent_state.done):
             return False

@@ -670,3 +670,50 @@ def test_preference_recall_run453_divergence_parity_with_direct_domain_recall(mo
     domain_hit_succeeded = any("query=editor" in line and "empty_reason=none" in line for line in rendered_lines)
     assert direct_payload["memories"]
     assert payload["memories"] or payload["memory_cards"] or domain_hit_succeeded
+
+
+def test_preference_recall_mixed_intent_executes_gesture_action(monkeypatch) -> None:
+    api = _base_api()
+    api._is_preference_recall_intent = RealtimeAPI._is_preference_recall_intent.__get__(api, RealtimeAPI)
+    api._build_preference_recall_query = RealtimeAPI._build_preference_recall_query.__get__(api, RealtimeAPI)
+    api._mark_preference_recall_candidate = RealtimeAPI._mark_preference_recall_candidate.__get__(api, RealtimeAPI)
+    api._clear_preference_recall_candidate = RealtimeAPI._clear_preference_recall_candidate.__get__(api, RealtimeAPI)
+    api._current_input_event_key = "item_turn_2"
+    api._preference_recall_followup_enabled = False
+    api._set_pending_preference_memory_context = Mock()
+    api._run_preference_recall_with_fallbacks = AsyncMock(
+        return_value=(
+            {
+                "memories": [{"content": "Your favorite editor is Vim."}],
+                "memory_cards": [],
+                "memory_cards_text": 'Relevant memory:\n- "Your favorite editor is Vim."',
+                "returned_count": 1,
+            },
+            "favorite editor",
+        )
+    )
+
+    gesture_calls: list[str] = []
+
+    async def _fake_gesture() -> dict[str, str]:
+        gesture_calls.append("gesture_look_around")
+        return {"status": "queued"}
+
+    monkeypatch.setitem(ai_tools.function_map, "gesture_look_around", _fake_gesture)
+
+    result = asyncio.run(
+        RealtimeAPI._maybe_handle_preference_recall_intent(
+            api,
+            "Hey Theo, can you look around and tell me what my favorite editor is?",
+            object(),
+            source="input_audio_transcription",
+        )
+    )
+
+    assert result is False
+    assert gesture_calls == ["gesture_look_around"]
+    assert any(
+        record.get("name") == "gesture_look_around"
+        for record in api._tool_call_records
+        if isinstance(record, dict)
+    )
