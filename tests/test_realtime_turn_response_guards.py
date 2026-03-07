@@ -311,6 +311,7 @@ def test_audio_playback_busy_retry_enqueues_once_before_delivery() -> None:
 def test_run_411_watchdog_skips_audio_busy_retry_after_delivered_answer(monkeypatch) -> None:
     api = _make_api()
     info_logs: list[str] = []
+    debug_logs: list[str] = []
     emitted_response_creates: list[dict[str, object]] = []
     scheduled_micro_acks: list[dict[str, object]] = []
 
@@ -329,6 +330,7 @@ def test_run_411_watchdog_skips_audio_busy_retry_after_delivered_answer(monkeypa
     api._send_response_create = _capture_send_response_create
 
     monkeypatch.setattr(logger, "info", lambda msg, *args, **kwargs: info_logs.append(msg % args if args else msg))
+    monkeypatch.setattr(logger, "debug", lambda msg, *args, **kwargs: debug_logs.append(msg % args if args else msg))
 
     asyncio.run(
         api._watch_transcript_response_outcome(
@@ -340,11 +342,17 @@ def test_run_411_watchdog_skips_audio_busy_retry_after_delivered_answer(monkeypa
 
     assert emitted_response_creates == []
     assert scheduled_micro_acks == []
-    assert any(
+    assert not any(
         "response_not_scheduled" in entry
         and "input_event_key=input_evt_1" in entry
         and "reason=already_handled" in entry
         for entry in info_logs
+    )
+    assert any(
+        "response_not_scheduled" in entry
+        and "input_event_key=input_evt_1" in entry
+        and "reason=already_handled" in entry
+        for entry in debug_logs
     )
     assert not any(
         "response_create_scheduled" in entry and "reason=audio_playback_busy" in entry
@@ -355,6 +363,7 @@ def test_run_411_watchdog_skips_audio_busy_retry_after_delivered_answer(monkeypa
 def test_watchdog_audio_busy_after_done_does_not_emit_duplicate_create_or_micro_ack(monkeypatch) -> None:
     api = _make_api()
     info_logs: list[str] = []
+    debug_logs: list[str] = []
     emitted_response_creates: list[dict[str, object]] = []
     scheduled_micro_acks: list[dict[str, object]] = []
 
@@ -377,6 +386,7 @@ def test_watchdog_audio_busy_after_done_does_not_emit_duplicate_create_or_micro_
     api._send_response_create = _capture_send_response_create
 
     monkeypatch.setattr(logger, "info", lambda msg, *args, **kwargs: info_logs.append(msg % args if args else msg))
+    monkeypatch.setattr(logger, "debug", lambda msg, *args, **kwargs: debug_logs.append(msg % args if args else msg))
 
     asyncio.run(
         api._watch_transcript_response_outcome(
@@ -390,17 +400,24 @@ def test_watchdog_audio_busy_after_done_does_not_emit_duplicate_create_or_micro_
     assert scheduled_micro_acks == []
     assert not any("micro_ack_emitted" in entry for entry in info_logs)
     assert len(api._response_created_canonical_keys) == initial_assistant_response_count
-    assert any(
+    assert not any(
         "response_not_scheduled" in entry
         and "reason=already_handled" in entry
         and "input_event_key=input_evt_done" in entry
         for entry in info_logs
+    )
+    assert any(
+        "response_not_scheduled" in entry
+        and "reason=already_handled" in entry
+        and "input_event_key=input_evt_done" in entry
+        for entry in debug_logs
     )
 
 
 def test_watchdog_audio_busy_terminal_state_ignores_pending_for_other_canonical_key(monkeypatch) -> None:
     api = _make_api()
     info_logs: list[str] = []
+    debug_logs: list[str] = []
     emitted_response_creates: list[dict[str, object]] = []
     scheduled_micro_acks: list[dict[str, object]] = []
 
@@ -427,6 +444,7 @@ def test_watchdog_audio_busy_terminal_state_ignores_pending_for_other_canonical_
     api._send_response_create = _capture_send_response_create
 
     monkeypatch.setattr(logger, "info", lambda msg, *args, **kwargs: info_logs.append(msg % args if args else msg))
+    monkeypatch.setattr(logger, "debug", lambda msg, *args, **kwargs: debug_logs.append(msg % args if args else msg))
 
     asyncio.run(
         api._watch_transcript_response_outcome(
@@ -439,11 +457,17 @@ def test_watchdog_audio_busy_terminal_state_ignores_pending_for_other_canonical_
     assert emitted_response_creates == []
     assert scheduled_micro_acks == []
     assert api._pending_response_create is not None
-    assert any(
+    assert not any(
         "response_not_scheduled" in entry
         and "reason=already_handled" in entry
         and "input_event_key=input_evt_target" in entry
         for entry in info_logs
+    )
+    assert any(
+        "response_not_scheduled" in entry
+        and "reason=already_handled" in entry
+        and "input_event_key=input_evt_target" in entry
+        for entry in debug_logs
     )
 
 
@@ -859,11 +883,14 @@ def test_playback_complete_drain_drops_same_turn_empty_retry_after_final_deliver
 def test_mark_transcript_response_outcome_demotes_intentional_non_action_reasons(monkeypatch) -> None:
     api = _make_api()
     info_logs: list[str] = []
+    debug_logs: list[str] = []
 
     api._transcript_response_outcome_logged_keys = set()
+    api._mark_transcript_response_outcome = RealtimeAPI._mark_transcript_response_outcome.__get__(api, RealtimeAPI)
     api._log_response_site_debug = lambda **_kwargs: None
 
     monkeypatch.setattr(logger, "info", lambda msg, *args, **kwargs: info_logs.append(msg % args if args else msg))
+    monkeypatch.setattr(logger, "debug", lambda msg, *args, **kwargs: debug_logs.append(msg % args if args else msg))
 
     api._mark_transcript_response_outcome(
         input_event_key="input_evt_same_turn",
@@ -889,3 +916,7 @@ def test_mark_transcript_response_outcome_demotes_intentional_non_action_reasons
 
     assert not any("reason=same_turn_already_owned" in entry for entry in info_logs)
     assert not any("reason=active_response_in_flight" in entry for entry in info_logs)
+    assert not any("reason=already_handled" in entry for entry in info_logs)
+    assert any("reason=same_turn_already_owned" in entry for entry in debug_logs)
+    assert any("reason=active_response_in_flight" in entry for entry in debug_logs)
+    assert any("reason=already_handled" in entry for entry in debug_logs)

@@ -2530,6 +2530,15 @@ class RealtimeAPI:
         log_method = logger.info
         if normalized_reason in {"same_turn_already_owned", "active_response_in_flight"}:
             log_method = logger.debug
+        if (
+            normalized_reason == "already_handled"
+            and isinstance(details, str)
+            and (
+                details.strip() == "canonical delivery terminal state"
+                or details.strip().startswith("canonical_delivery_state=")
+            )
+        ):
+            log_method = logger.debug
         log_method(
             "response_not_scheduled run_id=%s turn_id=%s input_event_key=%s reason=%s details=%s",
             self._current_run_id() or "",
