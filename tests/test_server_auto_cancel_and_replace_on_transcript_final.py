@@ -591,3 +591,40 @@ def test_mark_pending_server_auto_response_cancelled_logs_empty_transcript_label
     api._mark_pending_server_auto_response_cancelled(turn_id="turn_9", reason="empty_transcript")
 
     assert any("server_auto_cancelled_for_empty_transcript" in line for line in captured)
+    assert any("pending_owner_response_id=resp-server-auto" in line for line in captured)
+
+
+def test_upgrade_flow_snapshot_log_includes_pending_owner_response_id(monkeypatch) -> None:
+    api = _build_api_stub()
+    api._pending_server_auto_response_by_turn_id["turn_42"] = PendingServerAutoResponse(
+        turn_id="turn_42",
+        response_id="resp-42",
+        canonical_key="run-464:turn_42:synthetic_server_auto_1",
+        created_at_ms=1,
+        active=True,
+    )
+    api._peek_pending_preference_memory_context_payload = lambda **_kwargs: None
+    api._get_or_create_transport = lambda: _Transport()
+    captured: list[str] = []
+
+    def _capture(message, *args):
+        captured.append(message % args)
+
+    monkeypatch.setattr("ai.realtime_api.logger.info", _capture)
+
+    async def _fake_send_response_create(_websocket, _event, **_kwargs):
+        return True
+
+    api._send_response_create = _fake_send_response_create
+
+    replaced = asyncio.run(
+        api._cancel_and_replace_pending_server_auto_on_transcript_final(
+            websocket=object(),
+            turn_id="turn_42",
+            input_event_key="item_42",
+            origin_label="upgraded_response",
+        )
+    )
+
+    assert replaced is True
+    assert any("upgrade_flow_snapshot" in line and "pending_owner_response_id=resp-42" in line for line in captured)

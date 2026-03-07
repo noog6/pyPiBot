@@ -963,6 +963,8 @@ class RealtimeAPI:
         self._preference_recall_followup_enabled = bool(preference_recall_cfg.get("followup_enabled", False))
         self._pending_preference_memory_context_by_canonical_key: dict[str, dict[str, Any]] = {}
         self._pending_preference_memory_context_by_turn_id: dict[str, dict[str, Any]] = {}
+        self._pending_preference_memory_context_by_response_id: dict[str, dict[str, Any]] = {}
+        self._pending_preference_memory_context_response_id_by_turn_id: dict[str, str] = {}
         self._pending_server_auto_input_event_keys: deque[str] = deque(maxlen=64)
         self._pending_server_auto_response_by_turn_id: dict[str, PendingServerAutoResponse] = {}
         self._cancelled_response_ids: set[str] = set()
@@ -4165,10 +4167,11 @@ class RealtimeAPI:
             else "server_auto_cancelled_for_upgrade"
         )
         logger.info(
-            "%s run_id=%s turn_id=%s response_id=%s reason=%s",
+            "%s run_id=%s turn_id=%s response_id=%s pending_owner_response_id=%s reason=%s",
             log_label,
             self._current_run_id() or "",
             str(turn_id or "").strip() or "turn-unknown",
+            pending.response_id,
             pending.response_id,
             reason,
         )
@@ -6051,6 +6054,10 @@ class RealtimeAPI:
     ) -> None:
         normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
         canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+        response_id = self._resolve_pending_preference_memory_context_response_id(
+            turn_id=normalized_turn_id,
+            canonical_key=canonical_key,
+        )
         store = getattr(self, "_pending_preference_memory_context_by_canonical_key", None)
         if not isinstance(store, dict):
             store = {}
@@ -6059,9 +6066,27 @@ class RealtimeAPI:
         if not isinstance(turn_store, dict):
             turn_store = {}
             self._pending_preference_memory_context_by_turn_id = turn_store
+        response_store = getattr(self, "_pending_preference_memory_context_by_response_id", None)
+        if not isinstance(response_store, dict):
+            response_store = {}
+            self._pending_preference_memory_context_by_response_id = response_store
+        response_pointer_store = getattr(self, "_pending_preference_memory_context_response_id_by_turn_id", None)
+        if not isinstance(response_pointer_store, dict):
+            response_pointer_store = {}
+            self._pending_preference_memory_context_response_id_by_turn_id = response_pointer_store
+
         payload = dict(memory_context)
-        store[canonical_key] = payload
-        turn_store[normalized_turn_id] = payload
+        record = {
+            "payload": payload,
+            "owner_turn_id": normalized_turn_id,
+            "owner_canonical_key": canonical_key,
+            "owner_response_id": response_id,
+        }
+        store[canonical_key] = record
+        turn_store[normalized_turn_id] = record
+        if response_id:
+            response_store[response_id] = record
+            response_pointer_store[normalized_turn_id] = response_id
         prompt_note = str(payload.get("prompt_note") or "").strip()
         logger.debug(
             "pref_recall_context_attached key=%s len=%s hit=%s",
@@ -6074,11 +6099,68 @@ class RealtimeAPI:
             self._current_run_id() or "",
             normalized_turn_id,
             canonical_key,
-            "turn+key",
+            "turn+key+response",
             len(prompt_note),
             str(bool(payload.get("hit", False))).lower(),
             int(payload.get("returned_count") or 0),
         )
+
+    def _resolve_pending_preference_memory_context_response_id(
+        self,
+        *,
+        turn_id: str,
+        canonical_key: str,
+    ) -> str:
+        response_pointer_store = getattr(self, "_pending_preference_memory_context_response_id_by_turn_id", None)
+        if not isinstance(response_pointer_store, dict):
+            response_pointer_store = {}
+            self._pending_preference_memory_context_response_id_by_turn_id = response_pointer_store
+        by_canonical_key = getattr(self, "_response_id_by_canonical_key", None)
+        mapped_response_id = ""
+        if isinstance(by_canonical_key, dict):
+            mapped_response_id = str(by_canonical_key.get(canonical_key) or "").strip()
+        pointer_response_id = str(response_pointer_store.get(turn_id) or "").strip()
+        return mapped_response_id or pointer_response_id
+
+    def _coerce_pending_preference_memory_context_record(
+        self,
+        *,
+        raw: dict[str, Any],
+        fallback_turn_id: str,
+        fallback_canonical_key: str,
+        fallback_response_id: str,
+    ) -> dict[str, Any]:
+        payload = raw.get("payload") if isinstance(raw.get("payload"), dict) else raw
+        owner_turn_id = str(raw.get("owner_turn_id") or fallback_turn_id or "").strip() or fallback_turn_id
+        owner_canonical_key = (
+            str(raw.get("owner_canonical_key") or fallback_canonical_key or "").strip() or fallback_canonical_key
+        )
+        owner_response_id = str(raw.get("owner_response_id") or fallback_response_id or "").strip()
+        return {
+            "payload": dict(payload) if isinstance(payload, dict) else {},
+            "owner_turn_id": owner_turn_id,
+            "owner_canonical_key": owner_canonical_key,
+            "owner_response_id": owner_response_id,
+        }
+
+    def _record_matches_pending_preference_memory_context_owner(
+        self,
+        *,
+        record: dict[str, Any],
+        turn_id: str,
+        canonical_key: str,
+        response_id: str,
+    ) -> bool:
+        owner_turn_id = str(record.get("owner_turn_id") or "").strip()
+        owner_canonical_key = str(record.get("owner_canonical_key") or "").strip()
+        owner_response_id = str(record.get("owner_response_id") or "").strip()
+        if owner_turn_id and owner_turn_id != turn_id:
+            return False
+        if owner_canonical_key and owner_canonical_key != canonical_key:
+            return False
+        if response_id and owner_response_id and owner_response_id != response_id:
+            return False
+        return True
 
     def _resolve_pending_preference_memory_context_payload(
         self,
@@ -6096,6 +6178,23 @@ class RealtimeAPI:
         if not isinstance(turn_store, dict):
             turn_store = {}
             self._pending_preference_memory_context_by_turn_id = turn_store
+        response_store = getattr(self, "_pending_preference_memory_context_by_response_id", None)
+        if not isinstance(response_store, dict):
+            response_store = {}
+            self._pending_preference_memory_context_by_response_id = response_store
+        response_pointer_store = getattr(self, "_pending_preference_memory_context_response_id_by_turn_id", None)
+        if not isinstance(response_pointer_store, dict):
+            response_pointer_store = {}
+            self._pending_preference_memory_context_response_id_by_turn_id = response_pointer_store
+
+        base_canonical_key = self._canonical_utterance_key(
+            turn_id=normalized_turn_id,
+            input_event_key=input_event_key,
+        )
+        response_id = self._resolve_pending_preference_memory_context_response_id(
+            turn_id=normalized_turn_id,
+            canonical_key=base_canonical_key,
+        )
 
         candidate_keys: list[str] = []
 
@@ -6110,6 +6209,16 @@ class RealtimeAPI:
         _add_candidate(str(getattr(self, "_current_input_event_key", "") or "").strip())
 
         payload_candidates: list[tuple[str, dict[str, Any], str]] = []
+        response_candidate_ids = [response_id]
+        pointer_response_id = str(response_pointer_store.get(normalized_turn_id) or "").strip()
+        if pointer_response_id and pointer_response_id not in response_candidate_ids:
+            response_candidate_ids.append(pointer_response_id)
+        for candidate_response_id in response_candidate_ids:
+            if not candidate_response_id:
+                continue
+            payload = response_store.get(candidate_response_id)
+            if isinstance(payload, dict):
+                payload_candidates.append((candidate_response_id, payload, "response"))
         for candidate_key in candidate_keys:
             payload = store.get(candidate_key)
             if isinstance(payload, dict):
@@ -6121,19 +6230,53 @@ class RealtimeAPI:
         if not payload_candidates:
             return None, ""
 
-        def _rank(item: tuple[str, dict[str, Any], str]) -> tuple[int, int, int]:
-            payload = item[1]
+        def _rank(item: tuple[str, dict[str, Any], str]) -> tuple[int, int, int, int]:
+            scope = item[2]
+            payload = item[1].get("payload") if isinstance(item[1].get("payload"), dict) else item[1]
             return (
+                1 if scope == "response" else 0,
                 int(bool(payload.get("hit", False))),
                 int(payload.get("returned_count") or 0),
                 len(str(payload.get("prompt_note") or "")),
             )
 
-        chosen_key, chosen_payload, chosen_scope = max(payload_candidates, key=_rank)
+        chosen_key, raw_chosen_payload, chosen_scope = max(payload_candidates, key=_rank)
+        chosen_record = self._coerce_pending_preference_memory_context_record(
+            raw=raw_chosen_payload,
+            fallback_turn_id=normalized_turn_id,
+            fallback_canonical_key=base_canonical_key,
+            fallback_response_id=response_id,
+        )
+        if not self._record_matches_pending_preference_memory_context_owner(
+            record=chosen_record,
+            turn_id=normalized_turn_id,
+            canonical_key=base_canonical_key,
+            response_id=response_id,
+        ):
+            return None, ""
+
+        chosen_payload = chosen_record.get("payload") if isinstance(chosen_record.get("payload"), dict) else {}
+        owner_turn_id = str(chosen_record.get("owner_turn_id") or normalized_turn_id)
+        owner_canonical_key = str(chosen_record.get("owner_canonical_key") or base_canonical_key)
+        owner_response_id = str(chosen_record.get("owner_response_id") or "").strip()
+
+        store[owner_canonical_key] = chosen_record
+        turn_store[owner_turn_id] = chosen_record
+        if owner_response_id:
+            response_store[owner_response_id] = chosen_record
+            response_pointer_store[owner_turn_id] = owner_response_id
+
         if consume:
             for candidate_key in candidate_keys:
                 store.pop(candidate_key, None)
+            store.pop(owner_canonical_key, None)
             turn_store.pop(normalized_turn_id, None)
+            if owner_turn_id != normalized_turn_id:
+                turn_store.pop(owner_turn_id, None)
+            if owner_response_id:
+                response_store.pop(owner_response_id, None)
+                response_pointer_store.pop(owner_turn_id, None)
+            response_pointer_store.pop(normalized_turn_id, None)
         return dict(chosen_payload), f"{chosen_scope}:{chosen_key}"
 
     def _has_pending_preference_memory_context(self, *, turn_id: str, input_event_key: str) -> bool:
@@ -10292,9 +10435,10 @@ class RealtimeAPI:
         elif pending is not None:
             action = "replace_only"
         logger.info(
-            "upgrade_flow_snapshot run_id=%s turn_id=%s old_response_id=%s pending_server_auto_active=%s action=%s",
+            "upgrade_flow_snapshot run_id=%s turn_id=%s old_response_id=%s pending_owner_response_id=%s pending_server_auto_active=%s action=%s",
             self._current_run_id() or "",
             turn_id,
+            old_response_id or "none",
             old_response_id or "none",
             str(pending_active).lower(),
             action,
