@@ -12,6 +12,7 @@ if "audioop" not in sys.modules:
 from ai.governance import ActionPacket
 from ai.realtime.response_create_runtime import ResponseCreateRuntime
 from ai.realtime_api import InteractionState, RealtimeAPI
+from ai.interaction_lifecycle_controller import InteractionLifecycleState
 from core.logging import logger
 
 
@@ -1598,3 +1599,43 @@ def test_rebind_active_response_logs_transition_key_rebound_with_cause() -> None
 
     assert api._active_server_auto_input_event_key == "item_1"
     assert recorded == ["transition_key_rebound:cause=transcript_final_rebind"]
+
+
+def test_rebind_active_response_skips_when_new_key_already_active() -> None:
+    api = _make_api_stub()
+    api._active_response_origin = "server_auto"
+    api._response_in_flight = True
+    api._active_server_auto_input_event_key = "synthetic_server_auto_turn_1_1"
+    api._active_response_input_event_key = "synthetic_server_auto_turn_1_1"
+    api._active_response_id = "resp-server-auto-2"
+
+    old_key = api._canonical_utterance_key(turn_id="turn_1", input_event_key="synthetic_server_auto_turn_1_1")
+    new_key = api._canonical_utterance_key(turn_id="turn_1", input_event_key="item_1")
+    lifecycle = api._lifecycle_controller()
+    lifecycle.on_response_created(old_key, origin="server_auto")
+    lifecycle.on_response_created(new_key, origin="server_auto")
+    lifecycle.on_audio_delta(new_key)
+
+    api._active_response_canonical_key = old_key
+
+    recorded: list[str] = []
+
+    def _capture(**kwargs):
+        recorded.append(str(kwargs.get("decision") or ""))
+
+    api._log_lifecycle_event = _capture
+
+    api._rebind_active_response_correlation_key(
+        turn_id="turn_1",
+        replacement_input_event_key="item_1",
+        cause="transcript_final_rebind",
+    )
+
+    assert api._active_response_input_event_key == "item_1"
+    assert api._active_response_canonical_key == new_key
+    assert api._active_server_auto_input_event_key == "item_1"
+    assert lifecycle.state_for(old_key) == InteractionLifecycleState.NEW
+    assert lifecycle.state_for(new_key) == InteractionLifecycleState.AUDIO_STARTED
+    assert recorded == [
+        "transition_rebind_skipped:new_key_already_active:new_state=audio_started:cause=transcript_final_rebind"
+    ]

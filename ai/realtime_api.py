@@ -4691,6 +4691,45 @@ class RealtimeAPI:
         if old_canonical_key == new_canonical_key:
             return
 
+        def _update_local_active_response_pointers() -> None:
+            if str(getattr(self, "_active_response_input_event_key", "") or "").strip() == active_key:
+                self._active_response_input_event_key = normalized_replacement
+            if str(getattr(self, "_active_response_canonical_key", "") or "").strip() == old_canonical_key:
+                self._active_response_canonical_key = new_canonical_key
+            self._active_server_auto_input_event_key = normalized_replacement
+
+        lifecycle = self._lifecycle_controller()
+        new_lifecycle_state = lifecycle.state_for(new_canonical_key)
+        if new_lifecycle_state in {
+            InteractionLifecycleState.AUDIO_STARTED,
+            InteractionLifecycleState.DONE,
+        }:
+            _update_local_active_response_pointers()
+            self._log_lifecycle_event(
+                turn_id=turn_id,
+                input_event_key=normalized_replacement,
+                canonical_key=new_canonical_key,
+                origin="server_auto",
+                response_id=getattr(self, "_active_response_id", None),
+                decision=(
+                    "transition_rebind_skipped:new_key_already_active"
+                    f":new_state={new_lifecycle_state.value}"
+                    f":cause={str(cause or 'unknown').strip() or 'unknown'}"
+                ),
+            )
+            logger.debug(
+                "[RESPTRACE] response_key_rebind_skipped run_id=%s turn_id=%s old_input_event_key=%s "
+                "new_input_event_key=%s old_canonical_key=%s new_canonical_key=%s new_state=%s",
+                self._current_run_id() or "",
+                turn_id,
+                active_key,
+                normalized_replacement,
+                old_canonical_key,
+                new_canonical_key,
+                new_lifecycle_state.value,
+            )
+            return
+
         state_store = self._canonical_response_state_store()
         old_state = state_store.get(old_canonical_key)
         if isinstance(old_state, CanonicalResponseState):
@@ -4707,7 +4746,6 @@ class RealtimeAPI:
             old_lifecycle = lifecycle_state.pop(old_canonical_key)
             if new_canonical_key not in lifecycle_state:
                 lifecycle_state[new_canonical_key] = old_lifecycle
-        lifecycle = self._lifecycle_controller()
         old_lifecycle_state = lifecycle.state_for(old_canonical_key)
         should_mark_replaced = old_lifecycle_state in {
             InteractionLifecycleState.CANCELLED,
@@ -4728,11 +4766,7 @@ class RealtimeAPI:
             decision=f"{transition_decision}:cause={str(cause or 'unknown').strip() or 'unknown'}",
         )
 
-        if str(getattr(self, "_active_response_input_event_key", "") or "").strip() == active_key:
-            self._active_response_input_event_key = normalized_replacement
-        if str(getattr(self, "_active_response_canonical_key", "") or "").strip() == old_canonical_key:
-            self._active_response_canonical_key = new_canonical_key
-        self._active_server_auto_input_event_key = normalized_replacement
+        _update_local_active_response_pointers()
         logger.debug(
             "[RESPTRACE] response_key_rebound run_id=%s turn_id=%s old_input_event_key=%s new_input_event_key=%s "
             "old_canonical_key=%s new_canonical_key=%s",
