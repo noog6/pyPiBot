@@ -7266,6 +7266,11 @@ class RealtimeAPI:
         if self._asr_clarify_count_by_turn.get(turn_id, 0) >= self._asr_verify_max_clarify_per_turn:
             return False
         vision_state = self.get_vision_state()
+        normalized_transcript = " ".join((transcript or "").lower().split())
+        known_domain = self._is_memory_intent(transcript) or any(
+            marker in normalized_transcript
+            for marker in ("look center", "look left", "look right", "look up", "look down", "favorite", "favourite", "prefer")
+        )
         should_confirm, reason = should_clarify(
             transcript_text=transcript,
             snapshot=build_utterance_trust_snapshot(
@@ -7282,6 +7287,7 @@ class RealtimeAPI:
                 short_utterance_ms=self._asr_verify_short_utterance_ms,
             ),
             min_confidence=self._asr_verify_min_confidence,
+            known_domain=known_domain,
             camera_available=bool(vision_state.get("available", False) or vision_state.get("can_capture", False)),
             camera_recent=bool(vision_state.get("available", False)),
         )
@@ -7317,8 +7323,35 @@ class RealtimeAPI:
         clarify_text = (
             "I can’t see right now. Want me to take a quick look with the camera?"
             if reason == "visual_unavailable"
+            else "I heard you, but I’m not sure what you mean yet. Could you be a bit more specific?"
+            if reason in {"low_semantic_confidence", "short_utterance"}
             else f"Quick check: did you ask \"{snapshot.get('transcript_text') or transcript.strip()}\"?"
         )
+        if reason in {"low_semantic_confidence", "short_utterance"}:
+            logger.info(
+                "short_utterance_policy_applied run_id=%s turn_id=%s input_event_key=%s reason=%s words=%s",
+                self._current_run_id() or "",
+                turn_id,
+                input_event_key,
+                reason,
+                snapshot.get("word_count", "unknown"),
+            )
+            logger.info(
+                "ambiguous_utterance_detected run_id=%s turn_id=%s input_event_key=%s reason=%s asr_conf=%s",
+                self._current_run_id() or "",
+                turn_id,
+                input_event_key,
+                reason,
+                snapshot.get("asr_confidence"),
+            )
+            if bool(vision_state.get("available", False) or vision_state.get("can_capture", False)):
+                logger.info(
+                    "context_enrichment_suppressed run_id=%s turn_id=%s input_event_key=%s reason=%s",
+                    self._current_run_id() or "",
+                    turn_id,
+                    input_event_key,
+                    reason,
+                )
         await self.send_assistant_message(
             clarify_text,
             websocket,
@@ -7331,6 +7364,21 @@ class RealtimeAPI:
             input_event_key,
             reason,
         )
+        logger.info(
+            "clarification_response_selected run_id=%s turn_id=%s input_event_key=%s reason=%s",
+            self._current_run_id() or "",
+            turn_id,
+            input_event_key,
+            reason,
+        )
+        if reason in {"low_semantic_confidence", "short_utterance"}:
+            logger.info(
+                "low_semantic_confidence_fallback run_id=%s turn_id=%s input_event_key=%s reason=%s",
+                self._current_run_id() or "",
+                turn_id,
+                input_event_key,
+                reason,
+            )
         return True
 
     def _has_camera_tool_result_for_turn(self, turn_id: str) -> bool:
