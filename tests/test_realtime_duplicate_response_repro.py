@@ -2265,3 +2265,83 @@ def test_low_risk_gesture_followup_payload_is_status_only() -> None:
     assert metadata.get("tool_followup_status_only") == "true"
     assert "Gesture follow-up only" in instructions
     assert "Do not restate or re-answer semantic memory/preferences content" in instructions
+    assert "Do not narrate environment/vision context" in instructions
+
+
+def test_tool_followup_queue_does_not_rebind_turn_active_key_to_tool_key() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    api._active_input_event_key_by_turn_id["turn_1"] = "item_parent"
+    response_create_event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_owner_queue",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+
+    api._queue_response_origin("tool_output", response_create_event)
+
+    assert api._active_input_event_key_for_turn("turn_1") == "item_parent"
+
+
+def test_tool_followup_response_created_does_not_rebind_parent_active_key_to_tool_key() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._active_input_event_key_by_turn_id["turn_2"] = "item_parent_2"
+    api._current_response_turn_id = "turn_2"
+
+    event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_owner_created",
+        response_create_event={"type": "response.create", "response": {"metadata": {"turn_id": "turn_2"}}},
+        tool_name="gesture_look_center",
+    )
+
+    asyncio.run(
+        api._handle_response_created_event(
+            {"type": "response.created", "response": {"id": "resp-tool-created", "metadata": ((event.get("response") or {}).get("metadata") or {})}},
+            ws,
+        )
+    )
+
+    assert api._active_input_event_key_for_turn("turn_2") == "item_parent_2"
+
+
+def test_tool_followup_parent_resolution_ignores_tool_parent_input_key() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    parent_key = api._canonical_utterance_key(turn_id="turn_3", input_event_key="item_parent_3")
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id="turn_3",
+        input_event_key="item_parent_3",
+        mutator=lambda record: (
+            setattr(record, "origin", "assistant_message"),
+            setattr(record, "response_id", "resp-parent-3"),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "progress"),
+            setattr(record, "done", True),
+        ),
+    )
+
+    event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_parent_resolve",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+    metadata = ((event.get("response") or {}).get("metadata") or {})
+    metadata["turn_id"] = "turn_3"
+    metadata["parent_turn_id"] = "turn_3"
+    metadata["parent_input_event_key"] = "tool:call_parent_resolve"
+
+    should_drop, parent_entry, reason = api._should_suppress_queued_tool_followup_release(
+        response_metadata=metadata,
+        blocked_by_response_id=None,
+    )
+
+    assert should_drop is True
+    assert reason == "parent_covered_tool_result"
+    assert parent_entry is not None
+    assert parent_entry[0] == parent_key

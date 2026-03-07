@@ -717,3 +717,43 @@ def test_preference_recall_mixed_intent_executes_gesture_action(monkeypatch) -> 
         for record in api._tool_call_records
         if isinstance(record, dict)
     )
+
+
+def test_preference_recall_mixed_intent_executes_gesture_action_and_recall_once(monkeypatch) -> None:
+    api = _base_api()
+    api._is_preference_recall_intent = RealtimeAPI._is_preference_recall_intent.__get__(api, RealtimeAPI)
+    api._build_preference_recall_query = RealtimeAPI._build_preference_recall_query.__get__(api, RealtimeAPI)
+    api._mark_preference_recall_candidate = RealtimeAPI._mark_preference_recall_candidate.__get__(api, RealtimeAPI)
+    api._clear_preference_recall_candidate = RealtimeAPI._clear_preference_recall_candidate.__get__(api, RealtimeAPI)
+    api._current_input_event_key = "item_turn_once"
+    api._preference_recall_followup_enabled = False
+    api._set_pending_preference_memory_context = Mock()
+
+    recall_calls: list[str] = []
+
+    async def _fake_recall(**_kwargs):
+        recall_calls.append("recall")
+        return ({"memories": [{"content": "Your favorite editor is Vim."}], "memory_cards": [], "memory_cards_text": "", "returned_count": 1}, "editor")
+
+    api._run_preference_recall_with_fallbacks = AsyncMock(side_effect=_fake_recall)
+
+    gesture_calls: list[str] = []
+
+    async def _fake_gesture() -> dict[str, str]:
+        gesture_calls.append("gesture_look_center")
+        return {"status": "queued"}
+
+    monkeypatch.setitem(ai_tools.function_map, "gesture_look_center", _fake_gesture)
+
+    result = asyncio.run(
+        RealtimeAPI._maybe_handle_preference_recall_intent(
+            api,
+            "Hey Theo, can you look back at center and tell me what my favorite editor is?",
+            object(),
+            source="input_audio_transcription",
+        )
+    )
+
+    assert result is False
+    assert gesture_calls == ["gesture_look_center"]
+    assert recall_calls == ["recall"]
