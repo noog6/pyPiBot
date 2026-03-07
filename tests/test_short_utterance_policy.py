@@ -159,3 +159,38 @@ def test_context_enrichment_suppressed_for_ambiguous_input(monkeypatch) -> None:
     assert "board games" not in text.lower()
     assert "not sure what you mean" in text.lower()
     assert any("context_enrichment_suppressed" in entry for entry in info_logs)
+
+
+def test_bounded_clarify_adds_response_instruction_guardrail() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+
+    event = api._bounded_clarify_response_create_event(
+        message="I heard you, but I’m not sure what you mean yet. Could you be a bit more specific?",
+        metadata={
+            "origin": "assistant_message",
+            "trigger": "asr_verify_on_risk",
+            "reason": "low_semantic_confidence",
+            "input_event_key": "item-6:clarify",
+        },
+    )
+
+    instructions = event["response"].get("instructions", "")
+    assert "bounded clarify mode" in instructions.lower()
+    assert "nothing else" in instructions.lower()
+    assert "imu" in instructions.lower()
+
+
+def test_visual_unavailable_clarify_does_not_use_bounded_instruction_guardrail() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+
+    event = api._bounded_clarify_response_create_event(
+        message="I can’t see right now. Want me to take a quick look with the camera?",
+        metadata={
+            "origin": "assistant_message",
+            "trigger": "asr_verify_on_risk",
+            "reason": "visual_unavailable",
+            "input_event_key": "item-7:clarify",
+        },
+    )
+
+    assert "instructions" not in event["response"]

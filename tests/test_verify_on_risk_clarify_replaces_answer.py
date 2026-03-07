@@ -72,6 +72,7 @@ def test_clarify_replaces_answer_no_mixed_output() -> None:
     assert "Actually, I can see" not in msg
     assert "gray" not in msg.lower()
     assert metadata["input_event_key"] == "evt-1:clarify"
+    assert metadata["clarify_mode"] == "bounded"
 
 
 def test_visual_unavailable_message_normalizer_blocks_vision_claims_without_camera_tool_result() -> None:
