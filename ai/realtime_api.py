@@ -966,6 +966,9 @@ class RealtimeAPI:
         self._pending_preference_memory_context_by_response_id: dict[str, dict[str, Any]] = {}
         self._pending_preference_memory_context_response_id_by_turn_id: dict[str, str] = {}
         self._pending_server_auto_input_event_keys: deque[str] = deque(maxlen=64)
+        self._pending_server_auto_response_by_response_id: dict[str, PendingServerAutoResponse] = {}
+        self._pending_server_auto_response_id_by_turn_id: dict[str, str] = {}
+        # Legacy mirror kept for compatibility with tests and older call sites.
         self._pending_server_auto_response_by_turn_id: dict[str, PendingServerAutoResponse] = {}
         self._cancelled_response_ids: set[str] = set()
         self._suppressed_audio_response_ids: set[str] = set()
@@ -3968,18 +3971,79 @@ class RealtimeAPI:
         normalized_response_id = str(response_id or "").strip()
         if not normalized_response_id:
             return
-        store = getattr(self, "_pending_server_auto_response_by_turn_id", None)
-        if not isinstance(store, dict):
-            store = {}
-            self._pending_server_auto_response_by_turn_id = store
-        store[normalized_turn_id] = PendingServerAutoResponse(
-            turn_id=normalized_turn_id,
-            response_id=normalized_response_id,
-            canonical_key=str(canonical_key or "").strip(),
-            created_at_ms=int(time.time() * 1000),
-            active=True,
-            pre_audio_hold=False,
+        by_response_id, response_id_by_turn_id, legacy_by_turn_id = self._pending_server_auto_response_stores()
+        prior_response_id = str(response_id_by_turn_id.get(normalized_turn_id) or "").strip()
+        if prior_response_id and prior_response_id != normalized_response_id:
+            prior_pending = by_response_id.get(prior_response_id)
+            if isinstance(prior_pending, PendingServerAutoResponse):
+                prior_pending.active = False
+        pending = by_response_id.get(normalized_response_id)
+        if not isinstance(pending, PendingServerAutoResponse):
+            pending = PendingServerAutoResponse(
+                turn_id=normalized_turn_id,
+                response_id=normalized_response_id,
+                canonical_key=str(canonical_key or "").strip(),
+                created_at_ms=int(time.time() * 1000),
+                active=True,
+                pre_audio_hold=False,
+            )
+            by_response_id[normalized_response_id] = pending
+        else:
+            pending.turn_id = normalized_turn_id
+            pending.canonical_key = str(canonical_key or "").strip()
+            pending.active = True
+            pending.cancelled_for_upgrade = False
+            pending.pre_audio_hold = False
+        response_id_by_turn_id[normalized_turn_id] = normalized_response_id
+        legacy_by_turn_id[normalized_turn_id] = pending
+
+    def _pending_server_auto_response_stores(
+        self,
+    ) -> tuple[dict[str, PendingServerAutoResponse], dict[str, str], dict[str, PendingServerAutoResponse]]:
+        by_response_id = getattr(self, "_pending_server_auto_response_by_response_id", None)
+        if not isinstance(by_response_id, dict):
+            by_response_id = {}
+            self._pending_server_auto_response_by_response_id = by_response_id
+        response_id_by_turn_id = getattr(self, "_pending_server_auto_response_id_by_turn_id", None)
+        if not isinstance(response_id_by_turn_id, dict):
+            response_id_by_turn_id = {}
+            self._pending_server_auto_response_id_by_turn_id = response_id_by_turn_id
+        legacy_by_turn_id = getattr(self, "_pending_server_auto_response_by_turn_id", None)
+        if not isinstance(legacy_by_turn_id, dict):
+            legacy_by_turn_id = {}
+            self._pending_server_auto_response_by_turn_id = legacy_by_turn_id
+        for legacy_turn_id, legacy_pending in tuple(legacy_by_turn_id.items()):
+            if not isinstance(legacy_pending, PendingServerAutoResponse):
+                continue
+            legacy_response_id = str(legacy_pending.response_id or "").strip()
+            normalized_turn_id = str(legacy_turn_id or "").strip() or str(legacy_pending.turn_id or "").strip() or "turn-unknown"
+            if not legacy_response_id:
+                continue
+            by_response_id.setdefault(legacy_response_id, legacy_pending)
+            response_id_by_turn_id.setdefault(normalized_turn_id, legacy_response_id)
+            legacy_by_turn_id[normalized_turn_id] = by_response_id[legacy_response_id]
+        return by_response_id, response_id_by_turn_id, legacy_by_turn_id
+
+    def _pending_server_auto_response_mutation_allowed(
+        self,
+        *,
+        pending: PendingServerAutoResponse,
+        turn_id: str,
+        mutation: str,
+    ) -> bool:
+        active_response_id = str(getattr(self, "_active_response_id", "") or "").strip()
+        pending_response_id = str(pending.response_id or "").strip()
+        if active_response_id and pending_response_id == active_response_id:
+            return True
+        logger.info(
+            "pending_server_auto_mutation_rejected run_id=%s turn_id=%s mutation=%s pending_response_id=%s active_response_id=%s",
+            self._current_run_id() or "",
+            str(turn_id or "").strip() or "turn-unknown",
+            mutation,
+            pending_response_id or "none",
+            active_response_id or "none",
         )
+        return False
 
     def _mark_response_provisional(self, *, response_id: str | None) -> None:
         normalized_response_id = str(response_id or "").strip()
@@ -4117,13 +4181,21 @@ class RealtimeAPI:
         return False
 
     def _pending_server_auto_response_for_turn(self, *, turn_id: str) -> PendingServerAutoResponse | None:
-        store = getattr(self, "_pending_server_auto_response_by_turn_id", None)
-        if not isinstance(store, dict):
-            store = {}
-            self._pending_server_auto_response_by_turn_id = store
-        pending = store.get(str(turn_id or "").strip() or "turn-unknown")
+        normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
+        by_response_id, response_id_by_turn_id, legacy_by_turn_id = self._pending_server_auto_response_stores()
+        response_id = str(response_id_by_turn_id.get(normalized_turn_id) or "").strip()
+        pending = by_response_id.get(response_id) if response_id else None
+        if pending is None:
+            legacy_pending = legacy_by_turn_id.get(normalized_turn_id)
+            if isinstance(legacy_pending, PendingServerAutoResponse):
+                legacy_response_id = str(legacy_pending.response_id or "").strip()
+                if legacy_response_id:
+                    by_response_id.setdefault(legacy_response_id, legacy_pending)
+                    response_id_by_turn_id[normalized_turn_id] = legacy_response_id
+                    pending = by_response_id.get(legacy_response_id)
         if not isinstance(pending, PendingServerAutoResponse):
             return None
+        legacy_by_turn_id[normalized_turn_id] = pending
         return pending
 
     def _mark_pending_server_auto_response_cancelled(
@@ -4134,6 +4206,12 @@ class RealtimeAPI:
     ) -> PendingServerAutoResponse | None:
         pending = self._pending_server_auto_response_for_turn(turn_id=turn_id)
         if pending is None:
+            return None
+        if not self._pending_server_auto_response_mutation_allowed(
+            pending=pending,
+            turn_id=turn_id,
+            mutation="cancelled",
+        ):
             return None
         pending.active = False
         pending.cancelled_for_upgrade = True
@@ -4414,6 +4492,12 @@ class RealtimeAPI:
     def _mark_pending_server_auto_response_replaced(self, *, turn_id: str) -> None:
         pending = self._pending_server_auto_response_for_turn(turn_id=turn_id)
         if pending is None:
+            return
+        if not self._pending_server_auto_response_mutation_allowed(
+            pending=pending,
+            turn_id=turn_id,
+            mutation="replaced",
+        ):
             return
         pending.active = False
         self._set_server_auto_pre_audio_hold(
@@ -10462,6 +10546,12 @@ class RealtimeAPI:
         self._cancel_micro_ack(turn_id=turn_id, reason="upgrade_selected")
         pending = self._pending_server_auto_response_for_turn(turn_id=turn_id)
         pending_active = bool(isinstance(pending, PendingServerAutoResponse) and pending.active)
+        if pending_active and pending is not None:
+            pending_active = self._pending_server_auto_response_mutation_allowed(
+                pending=pending,
+                turn_id=turn_id,
+                mutation="cancel_and_replace",
+            )
         old_response_id = pending.response_id if pending_active and pending is not None else ""
         action = "no_pending"
         if pending_active and old_response_id:
