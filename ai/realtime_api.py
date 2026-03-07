@@ -3069,6 +3069,14 @@ class RealtimeAPI:
         if not self.loop:
             logger.debug("Unable to send message; event loop unavailable.")
             return
+
+        coordinator = self._shutdown_coordinator()
+        if coordinator.is_shutdown_requested():
+            logger.info(
+                "queued_message_dropped_during_shutdown reason=shutdown_requested websocket_state=unknown"
+            )
+            return
+
         future = asyncio.run_coroutine_threadsafe(
             self.send_text_message_to_conversation(
                 message,
@@ -3084,7 +3092,32 @@ class RealtimeAPI:
             try:
                 task.result()
             except Exception as exc:
-                logger.warning("Failed to send queued message: %s", exc)
+                try:
+                    websocket_state = asyncio.run_coroutine_threadsafe(
+                        coordinator.websocket_close_state(),
+                        self.loop,
+                    ).result(timeout=0.2)
+                except Exception:
+                    websocket_state = "unknown"
+
+                is_shutdown = coordinator.is_shutdown_requested()
+                if is_shutdown or websocket_state in {"closing", "closed"}:
+                    logger.info(
+                        "queued_message_dropped_during_shutdown reason=websocket_%s "
+                        "shutdown_requested=%s exception=%s",
+                        websocket_state,
+                        is_shutdown,
+                        type(exc).__name__,
+                    )
+                    return
+
+                logger.warning(
+                    "queued_message_send_failed reason=unexpected_send_error "
+                    "shutdown_requested=%s websocket_state=%s exception=%s",
+                    is_shutdown,
+                    websocket_state,
+                    type(exc).__name__,
+                )
 
         future.add_done_callback(_on_complete)
 

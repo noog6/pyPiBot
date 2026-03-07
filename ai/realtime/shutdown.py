@@ -33,6 +33,20 @@ class ShutdownCoordinator:
     def begin_shutdown(self) -> bool:
         return self.request_shutdown()
 
+    def is_shutdown_requested(self) -> bool:
+        """Return whether shutdown has been requested."""
+        with self._shutdown_lock:
+            return self._shutdown_requested
+
+    async def websocket_close_state(self) -> str:
+        """Return websocket close lifecycle state for structured logging."""
+        async with self._ws_close_lock:
+            if self._ws_close_done:
+                return "closed"
+            if self._ws_close_started:
+                return "closing"
+        return "open"
+
     def cancel_tasks(
         self,
         tasks: Iterable[asyncio.Task[Any]],

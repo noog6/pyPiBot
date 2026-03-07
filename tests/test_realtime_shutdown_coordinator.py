@@ -83,3 +83,26 @@ def test_cancel_tasks_uses_stable_order_and_excludes_finished_tasks() -> None:
                 pass
 
     asyncio.run(_run())
+
+
+def test_websocket_close_state_transitions() -> None:
+    shutdown_module = _load_shutdown_module()
+
+    async def _run() -> None:
+        ws = _WebSocketStub()
+        coordinator = shutdown_module.ShutdownCoordinator(close_timeout_s=0.1)
+
+        assert await coordinator.websocket_close_state() == "open"
+        await coordinator.close_websocket(ws, reason="signal")
+        assert await coordinator.websocket_close_state() == "closed"
+
+    asyncio.run(_run())
+
+
+def test_is_shutdown_requested_reflects_request_state() -> None:
+    shutdown_module = _load_shutdown_module()
+    coordinator = shutdown_module.ShutdownCoordinator()
+
+    assert coordinator.is_shutdown_requested() is False
+    coordinator.request_shutdown()
+    assert coordinator.is_shutdown_requested() is True
