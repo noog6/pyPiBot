@@ -854,3 +854,38 @@ def test_playback_complete_drain_drops_same_turn_empty_retry_after_final_deliver
 
     assert sent == []
     assert api._pending_response_create is None
+
+
+def test_mark_transcript_response_outcome_demotes_intentional_non_action_reasons(monkeypatch) -> None:
+    api = _make_api()
+    info_logs: list[str] = []
+
+    api._transcript_response_outcome_logged_keys = set()
+    api._log_response_site_debug = lambda **_kwargs: None
+
+    monkeypatch.setattr(logger, "info", lambda msg, *args, **kwargs: info_logs.append(msg % args if args else msg))
+
+    api._mark_transcript_response_outcome(
+        input_event_key="input_evt_same_turn",
+        turn_id="turn_1",
+        outcome="response_not_scheduled",
+        reason="same_turn_already_owned",
+        details="owner=tool_followup_owned",
+    )
+    api._mark_transcript_response_outcome(
+        input_event_key="input_evt_active",
+        turn_id="turn_1",
+        outcome="response_not_scheduled",
+        reason="active_response_in_flight",
+        details="active_origin=tool_output",
+    )
+    api._mark_transcript_response_outcome(
+        input_event_key="input_evt_anomaly",
+        turn_id="turn_1",
+        outcome="response_not_scheduled",
+        reason="already_handled",
+        details="canonical_delivery_state=done",
+    )
+
+    assert not any("reason=same_turn_already_owned" in entry for entry in info_logs)
+    assert not any("reason=active_response_in_flight" in entry for entry in info_logs)

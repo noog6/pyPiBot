@@ -2526,12 +2526,16 @@ class RealtimeAPI:
         if normalized_key in logged_keys:
             return
         logged_keys.add(normalized_key)
-        logger.info(
+        normalized_reason = str(reason or "unknown").strip() or "unknown"
+        log_method = logger.info
+        if normalized_reason in {"same_turn_already_owned", "active_response_in_flight"}:
+            log_method = logger.debug
+        log_method(
             "response_not_scheduled run_id=%s turn_id=%s input_event_key=%s reason=%s details=%s",
             self._current_run_id() or "",
             turn_id,
             normalized_key,
-            reason or "unknown",
+            normalized_reason,
             details or "",
         )
         self._log_response_site_debug(
@@ -2540,7 +2544,7 @@ class RealtimeAPI:
             input_event_key=normalized_key,
             canonical_key=self._canonical_utterance_key(turn_id=turn_id, input_event_key=normalized_key),
             origin=str(getattr(self, "_active_response_origin", "") or "unknown").strip() or "unknown",
-            trigger=reason or "unknown",
+            trigger=normalized_reason,
         )
 
     async def _watch_transcript_response_outcome(
@@ -5791,8 +5795,11 @@ class RealtimeAPI:
             state_store = {}
             self._tool_followup_state_by_canonical_key = state_store
         prior_state = str(state_store.get(normalized_canonical_key) or "new").strip().lower() or "new"
+        log_method = logger.info
+        if normalized_state == "blocked_active_response":
+            log_method = logger.debug
         if prior_state == normalized_state:
-            logger.info(
+            log_method(
                 "tool_followup_state canonical_key=%s state=%s reason=%s",
                 normalized_canonical_key,
                 normalized_state,
@@ -5800,7 +5807,7 @@ class RealtimeAPI:
             )
             return
         state_store[normalized_canonical_key] = normalized_state
-        logger.info(
+        log_method(
             "tool_followup_state canonical_key=%s state=%s reason=%s prior_state=%s",
             normalized_canonical_key,
             normalized_state,
