@@ -1120,12 +1120,30 @@ class ResponseCreateRuntime:
             )
             return
 
+        pending_canonical_key = api._canonical_utterance_key(
+            turn_id=pending.turn_id,
+            input_event_key=pending_input_event_key,
+        )
+        if api._should_drop_tool_followup_at_create_seam(
+            turn_id=pending.turn_id,
+            response_metadata=response_metadata,
+            canonical_key=pending_canonical_key,
+            drain_trigger=normalized_source_trigger,
+        ):
+            api._pending_response_create = None
+            if pending.reason != "legacy_queue_hydration":
+                api._sync_pending_response_create_queue()
+            drain_result = "dropped_parent_covered"
+            skipped_reason = "parent_covered_tool_result"
+            _emit_drain_trace(
+                stage="post",
+                queue_len_before_value=queue_len_before,
+                queue_len_after_value=len(getattr(api, "_response_create_queue", deque()) or ()),
+            )
+            return
+
         api._pending_response_create = None
         if pending.reason != "legacy_queue_hydration":
-            pending_canonical_key = api._canonical_utterance_key(
-                turn_id=pending.turn_id,
-                input_event_key=pending_input_event_key,
-            )
             queue = getattr(api, "_response_create_queue", None)
             if isinstance(queue, deque):
                 removed = False

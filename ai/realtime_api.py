@@ -5998,7 +5998,7 @@ class RealtimeAPI:
         self,
         *,
         response_metadata: dict[str, Any],
-        blocked_by_response_id: str,
+        blocked_by_response_id: str | None,
     ) -> bool:
         suppressible = str(response_metadata.get("tool_followup_suppress_if_parent_covered", "")).strip().lower()
         if suppressible not in {"true", "1", "yes"}:
@@ -6006,6 +6006,17 @@ class RealtimeAPI:
         if str(response_metadata.get("tool_result_has_distinct_info", "")).strip().lower() in {"true", "1", "yes"}:
             return False
         state_entry = self._canonical_state_for_response_id(response_id=blocked_by_response_id)
+        if not state_entry:
+            parent_turn_id = str(response_metadata.get("parent_turn_id") or response_metadata.get("turn_id") or "").strip()
+            parent_input_event_key = str(response_metadata.get("parent_input_event_key") or "").strip()
+            if parent_turn_id and parent_input_event_key:
+                parent_canonical_key = self._canonical_utterance_key(
+                    turn_id=parent_turn_id,
+                    input_event_key=parent_input_event_key,
+                )
+                candidate = self._canonical_response_state_store().get(parent_canonical_key)
+                if isinstance(candidate, CanonicalResponseState):
+                    state_entry = (parent_canonical_key, candidate)
         if not state_entry:
             return False
         _, parent_state = state_entry
@@ -6016,6 +6027,36 @@ class RealtimeAPI:
         deliverable_class = str(getattr(parent_state, "deliverable_class", "") or "").strip().lower()
         deliverable_observed = bool(getattr(parent_state, "deliverable_observed", False))
         return deliverable_observed or deliverable_class in {"progress", "final"}
+
+    def _should_drop_tool_followup_at_create_seam(
+        self,
+        *,
+        turn_id: str,
+        response_metadata: dict[str, Any],
+        canonical_key: str,
+        drain_trigger: str,
+    ) -> bool:
+        is_tool_followup = str(response_metadata.get("tool_followup", "")).strip().lower() in {"true", "1", "yes"}
+        if not is_tool_followup:
+            return False
+        blocked_by_response_id = str(response_metadata.get("blocked_by_response_id") or "").strip()
+        if not self._should_suppress_queued_tool_followup_release(
+            response_metadata=response_metadata,
+            blocked_by_response_id=blocked_by_response_id or None,
+        ):
+            return False
+        self._set_tool_followup_state(
+            canonical_key=canonical_key,
+            state="dropped",
+            reason=f"parent_covered_tool_result seam={drain_trigger}",
+        )
+        logger.info(
+            "tool_followup_create_suppressed turn_id=%s canonical_key=%s reason=parent_covered_tool_result seam=%s",
+            turn_id,
+            canonical_key,
+            drain_trigger,
+        )
+        return True
 
     def _turn_has_pending_tool_followup(self, *, turn_id: str) -> bool:
         normalized_turn_id = str(turn_id or "").strip()
