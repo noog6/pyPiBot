@@ -429,7 +429,7 @@ def test_cancel_and_replace_conversation_item_added_uses_output_item_response_ma
 
 def test_late_cancelled_output_audio_done_is_suppressed_before_lifecycle_trace() -> None:
     api = _build_api_stub()
-    api._active_response_id = None
+    api._active_response_id = "resp-server-auto"
     api._active_response_origin = "unknown"
     api._active_response_input_event_key = None
     api._active_response_canonical_key = None
@@ -450,6 +450,7 @@ def test_late_cancelled_output_audio_done_is_suppressed_before_lifecycle_trace()
     api._active_input_event_key_by_turn_id = {"turn_2": "item_abc"}
 
     api._mark_pending_server_auto_response_cancelled(turn_id="turn_2", reason="transcript_final_upgrade")
+    api._active_response_id = None
 
     observed: list[tuple[str, str]] = []
     api._record_cancelled_audio_race_transition = (
@@ -469,7 +470,7 @@ def test_late_cancelled_output_audio_done_is_suppressed_before_lifecycle_trace()
 
 def test_empty_transcript_cancelled_response_late_audio_done_is_suppressed() -> None:
     api = _build_api_stub()
-    api._active_response_id = None
+    api._active_response_id = "resp-empty"
     api._pending_server_auto_response_by_turn_id["turn_3"] = PendingServerAutoResponse(
         turn_id="turn_3",
         response_id="resp-empty",
@@ -479,6 +480,7 @@ def test_empty_transcript_cancelled_response_late_audio_done_is_suppressed() -> 
     )
     api._active_input_event_key_by_turn_id = {"turn_3": "item_empty"}
     api._mark_pending_server_auto_response_cancelled(turn_id="turn_3", reason="empty_transcript")
+    api._active_response_id = None
 
     observed: list[str] = []
     api._record_cancelled_audio_race_transition = lambda **_kwargs: observed.append("race")
@@ -596,6 +598,7 @@ def test_mark_pending_server_auto_response_cancelled_logs_empty_transcript_label
 
 def test_upgrade_flow_snapshot_log_includes_pending_owner_response_id(monkeypatch) -> None:
     api = _build_api_stub()
+    api._active_response_id = "resp-42"
     api._pending_server_auto_response_by_turn_id["turn_42"] = PendingServerAutoResponse(
         turn_id="turn_42",
         response_id="resp-42",
