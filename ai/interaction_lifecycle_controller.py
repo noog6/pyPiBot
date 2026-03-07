@@ -79,7 +79,7 @@ class InteractionLifecycleController:
             return allow
         record = self._record_for(canonical_key)
         record.state = InteractionLifecycleState.SERVER_AUTO_CREATED
-        return LifecycleDecision(LifecycleDecisionAction.ALLOW, "transitioned=server_auto_created")
+        return LifecycleDecision(LifecycleDecisionAction.ALLOW, "transitioned=response_created")
 
     def on_audio_delta(self, canonical_key: str) -> LifecycleDecision:
         record = self._record_for(canonical_key)

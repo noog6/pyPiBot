@@ -685,6 +685,15 @@ class ResponseCreateRuntime:
             normalized_origin=normalized_origin,
             awaiting_transcript_final=awaiting_transcript_final,
         )
+        if decision is not None:
+            logger.info(
+                "arbitration_decision surface=response_create action=%s reason_code=%s selected_candidate_id=%s turn_id=%s canonical_key=%s",
+                decision.action.value,
+                decision.reason_code,
+                decision.selected_candidate_id,
+                turn_id,
+                canonical_key,
+            )
         if tool_followup and decision is not None:
             arbitration_outcome = "deny" if decision.action is ResponseCreateDecisionAction.BLOCK else "allow"
             logger.info(

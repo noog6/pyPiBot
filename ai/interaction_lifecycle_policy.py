@@ -33,6 +33,7 @@ class ServerAutoCreatedDecisionAction(str, Enum):
 class ResponseCreateDecision:
     action: ResponseCreateDecisionAction
     reason_code: str
+    selected_candidate_id: str
     queue_reason: str | None = None
 
 
@@ -40,6 +41,7 @@ class ResponseCreateDecision:
 class ServerAutoCreatedDecision:
     action: ServerAutoCreatedDecisionAction
     reason_code: str
+    selected_candidate_id: str
 
 
 @dataclass(frozen=True)
@@ -166,16 +168,19 @@ class InteractionLifecyclePolicy:
             return ResponseCreateDecision(
                 action=ResponseCreateDecisionAction.SCHEDULE,
                 reason_code=arbitration_decision.reason_code,
+                selected_candidate_id=arbitration_decision.selected_candidate_id,
                 queue_reason=arbitration_decision.reason_code,
             )
         if arbitration_decision.action is ArbitrationAction.REFUSE:
             return ResponseCreateDecision(
                 action=ResponseCreateDecisionAction.BLOCK,
                 reason_code=arbitration_decision.reason_code,
+                selected_candidate_id=arbitration_decision.selected_candidate_id,
             )
         return ResponseCreateDecision(
             action=ResponseCreateDecisionAction.SEND,
             reason_code=arbitration_decision.reason_code,
+            selected_candidate_id=arbitration_decision.selected_candidate_id,
         )
 
     def decide_server_auto_created(
@@ -241,15 +246,18 @@ class InteractionLifecyclePolicy:
             return ServerAutoCreatedDecision(
                 action=ServerAutoCreatedDecisionAction.DEFER,
                 reason_code=arbitration_decision.reason_code,
+                selected_candidate_id=arbitration_decision.selected_candidate_id,
             )
         if arbitration_decision.action is ArbitrationAction.REFUSE:
             return ServerAutoCreatedDecision(
                 action=ServerAutoCreatedDecisionAction.CANCEL_PRE_AUDIO,
                 reason_code=arbitration_decision.reason_code,
+                selected_candidate_id=arbitration_decision.selected_candidate_id,
             )
         return ServerAutoCreatedDecision(
             action=ServerAutoCreatedDecisionAction.ALLOW,
             reason_code=arbitration_decision.reason_code,
+            selected_candidate_id=arbitration_decision.selected_candidate_id,
         )
 
     def decide_watchdog_timeout(

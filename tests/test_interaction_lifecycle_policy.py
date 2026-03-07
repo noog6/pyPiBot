@@ -116,6 +116,7 @@ def test_decide_response_create_precedence_matrix(
 
     assert decision.action is expected_action
     assert decision.reason_code == expected_reason
+    assert decision.selected_candidate_id
 
 
 def test_decide_response_create_prefers_schedule_for_active_response() -> None:
@@ -140,6 +141,7 @@ def test_decide_response_create_prefers_schedule_for_active_response() -> None:
     assert decision.action is ResponseCreateDecisionAction.SCHEDULE
     assert decision.reason_code == "active_response"
     assert decision.queue_reason == "active_response"
+    assert decision.selected_candidate_id == "active_response"
 
 
 def test_decide_server_auto_created_obligation_replacement_wins() -> None:
@@ -157,6 +159,7 @@ def test_decide_server_auto_created_obligation_replacement_wins() -> None:
 
     assert decision.action is ServerAutoCreatedDecisionAction.CANCEL_PRE_AUDIO
     assert decision.reason_code == "response_obligation_replacement"
+    assert decision.selected_candidate_id == "response_obligation_replacement"
 
 
 def test_decide_watchdog_timeout_default_timeout_schedules_micro_ack() -> None:
@@ -204,6 +207,7 @@ def test_decide_response_create_schedules_server_auto_while_awaiting_transcript_
     assert decision.action is ResponseCreateDecisionAction.SCHEDULE
     assert decision.reason_code == "awaiting_transcript_final"
     assert decision.queue_reason == "awaiting_transcript_final"
+    assert decision.selected_candidate_id == "awaiting_transcript_final"
 
 
 def test_decide_response_create_keeps_non_server_auto_direct_during_transcript_wait() -> None:
@@ -227,3 +231,79 @@ def test_decide_response_create_keeps_non_server_auto_direct_during_transcript_w
 
     assert decision.action is ResponseCreateDecisionAction.SEND
     assert decision.reason_code == "direct_send"
+    assert decision.selected_candidate_id == "direct_send"
+
+
+def test_decide_response_create_precedence_lock_block_beats_awaiting_transcript_final() -> None:
+    policy = InteractionLifecyclePolicy()
+
+    decision = policy.decide_response_create(
+        response_in_flight=False,
+        audio_playback_busy=False,
+        consumes_canonical_slot=True,
+        canonical_audio_started=True,
+        explicit_multipart=False,
+        single_flight_block_reason="",
+        already_delivered=False,
+        preference_recall_lock_blocked=False,
+        canonical_key_already_created=False,
+        has_safety_override=False,
+        suppression_active=False,
+        normalized_origin="server_auto",
+        awaiting_transcript_final=True,
+    )
+
+    assert decision.action is ResponseCreateDecisionAction.BLOCK
+    assert decision.reason_code == "canonical_audio_already_started"
+    assert decision.selected_candidate_id == "canonical_audio_started"
+
+
+def test_decide_response_create_precedence_lock_defer_beats_single_flight_block() -> None:
+    policy = InteractionLifecyclePolicy()
+
+    decision = policy.decide_response_create(
+        response_in_flight=False,
+        audio_playback_busy=True,
+        consumes_canonical_slot=True,
+        canonical_audio_started=False,
+        explicit_multipart=False,
+        single_flight_block_reason="already_created",
+        already_delivered=False,
+        preference_recall_lock_blocked=False,
+        canonical_key_already_created=False,
+        has_safety_override=False,
+        suppression_active=False,
+        normalized_origin="assistant_message",
+        awaiting_transcript_final=False,
+    )
+
+    assert decision.action is ResponseCreateDecisionAction.SCHEDULE
+    assert decision.reason_code == "audio_playback_busy"
+    assert decision.selected_candidate_id == "audio_playback_busy"
+
+
+def test_decide_response_create_precedence_lock_is_deterministic_for_conflict_triplet() -> None:
+    policy = InteractionLifecyclePolicy()
+
+    kwargs = dict(
+        response_in_flight=True,
+        audio_playback_busy=True,
+        consumes_canonical_slot=True,
+        canonical_audio_started=False,
+        explicit_multipart=False,
+        single_flight_block_reason="already_created",
+        already_delivered=False,
+        preference_recall_lock_blocked=False,
+        canonical_key_already_created=False,
+        has_safety_override=False,
+        suppression_active=False,
+        normalized_origin="assistant_message",
+        awaiting_transcript_final=False,
+    )
+
+    first = policy.decide_response_create(**kwargs)
+    second = policy.decide_response_create(**kwargs)
+
+    assert first == second
+    assert first.reason_code == "active_response"
+    assert first.selected_candidate_id == "active_response"
