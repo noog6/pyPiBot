@@ -161,6 +161,7 @@ def test_duplicate_assistant_message_create_single_flight_guard(monkeypatch) -> 
     _wire_runtime(api)
     ws = _RecordingWs()
     api.websocket = ws
+    api._current_response_turn_id = "turn_mix_5"
 
     async def _false(*_args, **_kwargs) -> bool:
         return False
@@ -2087,3 +2088,108 @@ def test_tool_followup_suppressed_release_does_not_regress_queue_drain_idempoten
     assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
     assert api._pending_response_create is None
     assert len(api._response_create_queue) == 0
+
+
+def test_tool_followup_create_seam_suppresses_parent_covered_even_without_blocked_by_response_id() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_response_turn_id = "turn_mix_5"
+
+    parent_key = api._canonical_utterance_key(turn_id="turn_mix_5", input_event_key="item_mix_parent_5")
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id="turn_mix_5",
+        input_event_key="item_mix_parent_5",
+        mutator=lambda record: (
+            setattr(record, "origin", "upgraded_response"),
+            setattr(record, "response_id", "resp-upgraded-5"),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "progress"),
+            setattr(record, "done", True),
+        ),
+    )
+
+    response_create_event, canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_mix_5",
+        response_create_event={"type": "response.create"},
+        tool_name="look_around",
+    )
+    metadata = ((response_create_event.get("response") or {}).get("metadata") or {})
+    metadata.pop("blocked_by_response_id", None)
+    metadata["parent_turn_id"] = "turn_mix_5"
+    metadata["parent_input_event_key"] = "item_mix_parent_5"
+
+    api._pending_response_create = PendingResponseCreate(
+        websocket=ws,
+        event=response_create_event,
+        origin="tool_output",
+        turn_id="turn_mix_5",
+        created_at=0.0,
+        reason="legacy_queue_hydration",
+        record_ai_call=False,
+        debug_context=None,
+        memory_brief_note=None,
+        queued_reminder_key=None,
+        enqueued_done_serial=0,
+        enqueue_seq=1,
+    )
+
+    asyncio.run(api._drain_response_create_queue(source_trigger="playback_complete"))
+
+    assert [event for event in ws.sent if event.get("type") == "response.create"] == []
+    assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
+
+
+def test_tool_followup_create_seam_suppression_applies_to_response_done_and_playback_complete() -> None:
+    for trigger in ("response_done", "playback_complete"):
+        api = _make_api_stub()
+        _wire_runtime(api)
+        ws = _RecordingWs()
+        api.websocket = ws
+        api._current_response_turn_id = f"turn_mix_{trigger}"
+
+        parent_key = api._canonical_utterance_key(turn_id=f"turn_mix_{trigger}", input_event_key="item_parent")
+        api._canonical_response_state_mutate(
+            canonical_key=parent_key,
+            turn_id=f"turn_mix_{trigger}",
+            input_event_key="item_parent",
+            mutator=lambda record: (
+                setattr(record, "origin", "upgraded_response"),
+                setattr(record, "response_id", f"resp-upgraded-{trigger}"),
+                setattr(record, "deliverable_observed", True),
+                setattr(record, "deliverable_class", "progress"),
+                setattr(record, "done", True),
+            ),
+        )
+
+        response_create_event, canonical_key = api._build_tool_followup_response_create_event(
+            call_id=f"call_mix_{trigger}",
+            response_create_event={"type": "response.create"},
+            tool_name="look_around",
+        )
+        metadata = ((response_create_event.get("response") or {}).get("metadata") or {})
+        metadata["blocked_by_response_id"] = f"resp-upgraded-{trigger}"
+        metadata["parent_turn_id"] = f"turn_mix_{trigger}"
+        metadata["parent_input_event_key"] = "item_parent"
+
+        api._pending_response_create = PendingResponseCreate(
+            websocket=ws,
+            event=response_create_event,
+            origin="tool_output",
+            turn_id=f"turn_mix_{trigger}",
+            created_at=0.0,
+            reason="legacy_queue_hydration",
+            record_ai_call=False,
+            debug_context=None,
+            memory_brief_note=None,
+            queued_reminder_key=None,
+            enqueued_done_serial=0,
+            enqueue_seq=1,
+        )
+
+        asyncio.run(api._drain_response_create_queue(source_trigger=trigger))
+
+        assert [event for event in ws.sent if event.get("type") == "response.create"] == []
+        assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
