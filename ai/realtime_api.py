@@ -279,6 +279,15 @@ class PendingServerAutoResponse:
 
 
 @dataclass
+class ServerAutoPreAudioHoldRecord:
+    turn_id: str
+    response_id: str
+    hold_started_at: float
+    hold_released_at: float | None = None
+    last_reason: str = ""
+
+
+@dataclass
 class ResponseGatingVerdict:
     action: str
     reason: str
@@ -1008,7 +1017,7 @@ class RealtimeAPI:
         self._latest_partial_transcript_by_turn_id: dict[str, str] = {}
         self._server_auto_audio_waiters_by_turn_id: dict[str, asyncio.Event] = {}
         self._server_auto_audio_defer_tasks_by_turn_id: dict[str, asyncio.Task[Any]] = {}
-        self._server_auto_pre_audio_hold_by_turn_id: dict[str, bool] = {}
+        self._server_auto_pre_audio_hold_by_turn_id: dict[str, ServerAutoPreAudioHoldRecord] = {}
         self._server_auto_pre_audio_hold_phase_by_key: dict[tuple[str, str], str] = {}
         self._audio_response_started_ids: set[str] = set()
         self._server_auto_audio_deferral_timeout_ms = max(
@@ -4110,6 +4119,20 @@ class RealtimeAPI:
         hold_phase = "held" if enabled else "released"
         hold_key = (normalized_turn_id, normalized_response_id)
         prior_phase = str(phase_store.get(hold_key) or "not_started")
+        duplicate_transition = (
+            (prior_phase == "held" and hold_phase == "held")
+            or (prior_phase == "released" and hold_phase == "released")
+        )
+        if duplicate_transition:
+            logger.debug(
+                "server_auto_pre_audio_hold_transition_duplicate run_id=%s turn_id=%s response_id=%s phase=%s reason=%s",
+                self._current_run_id() or "",
+                normalized_turn_id,
+                normalized_response_id,
+                hold_phase,
+                reason,
+            )
+            return
         transition_allowed = (
             (prior_phase == "not_started" and hold_phase == "held")
             or (prior_phase == "held" and hold_phase == "released")
@@ -4130,20 +4153,56 @@ class RealtimeAPI:
         if not isinstance(hold_store, dict):
             hold_store = {}
             self._server_auto_pre_audio_hold_by_turn_id = hold_store
+        now = time.time()
         pending = self._pending_server_auto_response_for_turn(turn_id=normalized_turn_id)
         if pending is not None and str(pending.response_id or "").strip() == normalized_response_id:
             pending.pre_audio_hold = bool(enabled)
         if hold_phase == "held":
-            hold_store[normalized_turn_id] = True
+            hold_store[normalized_turn_id] = ServerAutoPreAudioHoldRecord(
+                turn_id=normalized_turn_id,
+                response_id=normalized_response_id,
+                hold_started_at=now,
+                hold_released_at=None,
+                last_reason=reason,
+            )
         else:
-            turn_has_hold = any(
+            active_hold_for_turn = any(
                 phase == "held" and hold_turn_id == normalized_turn_id
                 for (hold_turn_id, _hold_response_id), phase in phase_store.items()
             )
-            if turn_has_hold:
-                hold_store[normalized_turn_id] = True
+            existing_record = hold_store.get(normalized_turn_id)
+            if active_hold_for_turn:
+                if isinstance(existing_record, ServerAutoPreAudioHoldRecord):
+                    existing_record.last_reason = reason
+                else:
+                    hold_store[normalized_turn_id] = ServerAutoPreAudioHoldRecord(
+                        turn_id=normalized_turn_id,
+                        response_id=normalized_response_id,
+                        hold_started_at=now,
+                        hold_released_at=None,
+                        last_reason=reason,
+                    )
             else:
-                hold_store.pop(normalized_turn_id, None)
+                prior_hold_started_at = (
+                    existing_record.hold_started_at
+                    if isinstance(existing_record, ServerAutoPreAudioHoldRecord)
+                    and existing_record.response_id == normalized_response_id
+                    else now
+                )
+                hold_store[normalized_turn_id] = ServerAutoPreAudioHoldRecord(
+                    turn_id=normalized_turn_id,
+                    response_id=normalized_response_id,
+                    hold_started_at=prior_hold_started_at,
+                    hold_released_at=now,
+                    last_reason=reason,
+                )
+            existing_record = hold_store.get(normalized_turn_id)
+            if (
+                isinstance(existing_record, ServerAutoPreAudioHoldRecord)
+                and existing_record.response_id == normalized_response_id
+            ):
+                existing_record.hold_released_at = now
+                existing_record.last_reason = reason
         logger.info(
             "server_auto_pre_audio_hold run_id=%s turn_id=%s response_id=%s enabled=%s phase=%s reason=%s",
             self._current_run_id() or "",
@@ -4163,7 +4222,12 @@ class RealtimeAPI:
         hold_store = getattr(self, "_server_auto_pre_audio_hold_by_turn_id", None)
         if not isinstance(hold_store, dict):
             return False
-        return bool(hold_store.get(normalized_turn_id, False))
+        hold_record = hold_store.get(normalized_turn_id)
+        if not isinstance(hold_record, ServerAutoPreAudioHoldRecord):
+            return False
+        if normalized_response_id and hold_record.response_id != normalized_response_id:
+            return False
+        return hold_record.hold_released_at is None
 
     def _server_auto_pre_audio_hold_released_for_other_response(self, *, turn_id: str, response_id: str) -> bool:
         phase_store = getattr(self, "_server_auto_pre_audio_hold_phase_by_key", None)
@@ -6773,6 +6837,17 @@ class RealtimeAPI:
             micro_ack_sent_during_hold = False
             try:
                 while True:
+                    pending = self._pending_server_auto_response_for_turn(turn_id=turn_id)
+                    active_pending_response_id = str(pending.response_id or "").strip() if pending is not None else ""
+                    if not active_pending_response_id or active_pending_response_id != response_id:
+                        logger.debug(
+                            "server_auto_audio_deferral_waiter_stale run_id=%s turn_id=%s response_id=%s active_pending_response_id=%s reason=pending_mismatch",
+                            self._current_run_id() or "",
+                            turn_id,
+                            response_id,
+                            active_pending_response_id or "unknown",
+                        )
+                        break
                     if self._server_auto_pre_audio_hold_released_for_other_response(
                         turn_id=turn_id,
                         response_id=response_id,
