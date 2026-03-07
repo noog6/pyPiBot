@@ -2242,3 +2242,26 @@ def test_gesture_followup_dropped_on_response_done_and_playback_complete_when_pa
 
         assert [event for event in ws.sent if event.get("type") == "response.create"] == []
         assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
+
+
+def test_low_risk_gesture_followup_payload_is_status_only() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    api._current_response_turn_id = "turn_gesture_payload"
+    api._active_input_event_key_by_turn_id["turn_gesture_payload"] = "item_parent_payload"
+
+    response_create_event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_gesture_payload",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+
+    payload = response_create_event.get("response") or {}
+    metadata = payload.get("metadata") or {}
+    instructions = str(payload.get("instructions") or "")
+
+    assert metadata.get("tool_followup") == "true"
+    assert metadata.get("tool_followup_suppress_if_parent_covered") == "true"
+    assert metadata.get("tool_followup_status_only") == "true"
+    assert "Gesture follow-up only" in instructions
+    assert "Do not restate or re-answer semantic memory/preferences content" in instructions

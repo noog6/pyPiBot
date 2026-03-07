@@ -5949,6 +5949,11 @@ class RealtimeAPI:
             metadata["tool_name"] = normalized_tool_name
         if self._is_low_risk_reversible_gesture_tool(tool_name=normalized_tool_name):
             metadata["tool_followup_suppress_if_parent_covered"] = "true"
+            metadata["tool_followup_status_only"] = "true"
+            response_payload["instructions"] = (
+                "Gesture follow-up only: acknowledge gesture completion in one short sentence. "
+                "Do not restate or re-answer semantic memory/preferences content already covered by the parent response."
+            )
         if tool_result_has_distinct_info:
             metadata["tool_result_has_distinct_info"] = "true"
         canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_input_event_key)
@@ -6047,7 +6052,9 @@ class RealtimeAPI:
             return False
         deliverable_class = str(getattr(parent_state, "deliverable_class", "") or "").strip().lower()
         deliverable_observed = bool(getattr(parent_state, "deliverable_observed", False))
-        return deliverable_observed or deliverable_class in {"progress", "final"}
+        return bool(parent_state.done) and (
+            deliverable_observed or deliverable_class in {"progress", "final"}
+        )
 
     def _should_drop_tool_followup_at_create_seam(
         self,
