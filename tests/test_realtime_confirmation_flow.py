@@ -1614,6 +1614,79 @@ def test_handle_function_call_transitions_to_act_when_execution_approved() -> No
     assert transitions == [(OrchestrationPhase.ACT, "function_call perform_research")]
 
 
+
+
+def test_handle_function_call_uses_canonical_active_key_for_provisional_defer_check() -> None:
+    api = _make_api_stub()
+    api._pending_action = None
+    api.function_call = {"name": "gesture_look_center", "call_id": "call_canonical"}
+    api.function_call_args = "{}"
+    api._active_response_origin = "server_auto"
+    api._current_response_turn_id = "turn_2"
+    api._active_response_id = "resp-upgraded"
+    # Simulate post-handoff state: canonical active key is non-synthetic, while
+    # stale legacy server-auto key remains synthetic.
+    api._active_response_input_event_key = "item_DGy7m8CQmgr1DbAn2l9ys"
+    api._active_server_auto_input_event_key = "synthetic_server_auto_2"
+    api._server_auto_pre_audio_hold_active = lambda **_kwargs: True
+
+    async def _noop(*_args, **_kwargs):
+        return None
+
+    api._send_noop_tool_output = _noop
+    api._is_duplicate_tool_call = lambda *args, **kwargs: False
+    api._extract_dry_run_flag = lambda _args: False
+    api._tool_execution_cooldown_remaining = lambda: 0.0
+    api._stage_action = lambda _action: {"valid": True}
+    transitions: list[tuple[object, str | None]] = []
+    api.orchestration_state = type(
+        "S",
+        (),
+        {
+            "phase": OrchestrationPhase.IDLE,
+            "transition": lambda *args, **kwargs: transitions.append((args[1], kwargs.get("reason"))),
+        },
+    )()
+
+    api._governance = type(
+        "Gov",
+        (),
+        {
+            "build_action_packet": lambda *args, **kwargs: type(
+                "Action",
+                (),
+                {
+                    "id": "call_canonical",
+                    "tool_name": "gesture_look_center",
+                    "tool_args": {},
+                    "summary": lambda self: "summary",
+                },
+            )(),
+            "review": lambda *args, **kwargs: type(
+                "Decision",
+                (),
+                {
+                    "approved": True,
+                    "needs_confirmation": False,
+                    "status": "approved",
+                    "reason": "ok",
+                },
+            )(),
+        },
+    )()
+
+    executed: list[str] = []
+
+    async def _execute_action(*args, **kwargs):
+        executed.append("done")
+
+    api._execute_action = _execute_action
+
+    asyncio.run(api.handle_function_call({}, _Ws()))
+
+    assert executed == ["done"]
+    assert transitions == [(OrchestrationPhase.ACT, "function_call gesture_look_center")]
+
 def test_handle_function_call_duplicate_logs_skip_without_execution(caplog, monkeypatch, tmp_path) -> None:
     api = _make_api_stub()
     storage_controller_cls = _wire_real_research_budget(monkeypatch, tmp_path, api)

@@ -4846,8 +4846,11 @@ class RealtimeAPI:
             return False
         turn_id = str(getattr(self, "_current_response_turn_id", "") or "").strip()
         active_response_id = str(getattr(self, "_active_response_id", "") or "").strip()
-        active_input_event_key = str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip() or str(
-            getattr(self, "_active_response_input_event_key", "") or ""
+        # Prefer the currently bound active response key over any legacy server-auto key.
+        # This prevents stale synthetic keys from forcing execution deferment after
+        # transcript-final handoff has already established canonical ownership.
+        active_input_event_key = str(getattr(self, "_active_response_input_event_key", "") or "").strip() or str(
+            getattr(self, "_active_server_auto_input_event_key", "") or ""
         ).strip()
         if not turn_id or not active_response_id or not self._is_synthetic_input_event_key(active_input_event_key):
             return False
