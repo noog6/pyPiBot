@@ -484,6 +484,19 @@ class ResponseTerminalHandlers:
                 "Skipping IDLE transition for response.done while still listening; deferring until speech stop."
             )
         logger.info("Received response.done event.")
+        if str(active_response_origin_before_clear or "").strip().lower() == "prompt":
+            startup_terminal_state = "completed"
+            startup_terminal_reason = "response_done"
+            if str(delivery_state_before_done or "").strip().lower() == "cancelled":
+                startup_terminal_state = "skipped"
+                startup_terminal_reason = "cancelled_before_done"
+            api._emit_startup_prompt_terminal(
+                terminal_state=startup_terminal_state,
+                reason=startup_terminal_reason,
+                turn_id=turn_id,
+                input_event_key=done_input_event_key,
+                canonical_key=done_canonical_key,
+            )
         api._emit_utterance_info_summary(anchor="response.done")
         is_empty_done = api._is_empty_response_done(canonical_key=done_canonical_key)
         if is_empty_done and not active_response_was_provisional:
@@ -587,6 +600,7 @@ class ResponseTerminalHandlers:
         response_id = api._response_id_from_event(event) or str(getattr(api, "_active_response_id", "") or "").strip()
         turn_id = api._current_turn_id_or_unknown()
         done_input_event_key = str(getattr(api, "_active_response_input_event_key", "") or "").strip()
+        active_response_origin_before_clear = str(getattr(api, "_active_response_origin", "") or "").strip().lower()
         api._cancel_micro_ack(turn_id=turn_id, reason="response_completed")
         api.response_in_progress = False
         api._response_in_flight = False
@@ -635,6 +649,19 @@ class ResponseTerminalHandlers:
                 "Skipping IDLE transition for response.completed while still listening; deferring until speech stop."
             )
         logger.info("Received response.completed event.")
+        if active_response_origin_before_clear == "prompt":
+            startup_terminal_state = "completed"
+            startup_terminal_reason = "response_done"
+            if str(api._response_delivery_state(turn_id=turn_id, input_event_key=done_input_event_key) or "").strip().lower() == "cancelled":
+                startup_terminal_state = "skipped"
+                startup_terminal_reason = "cancelled_before_done"
+            api._emit_startup_prompt_terminal(
+                terminal_state=startup_terminal_state,
+                reason=startup_terminal_reason,
+                turn_id=turn_id,
+                input_event_key=done_input_event_key,
+                canonical_key=api._canonical_utterance_key(turn_id=turn_id, input_event_key=done_input_event_key),
+            )
         api._clear_cancelled_response_tracking(response_id)
         if event:
             api._last_response_metadata = {
