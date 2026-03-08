@@ -180,7 +180,21 @@ def test_bounded_clarify_adds_response_instruction_guardrail() -> None:
     assert "imu" in instructions.lower()
 
 
-def test_visual_unavailable_clarify_does_not_use_bounded_instruction_guardrail() -> None:
+def test_is_bounded_clarify_mode_includes_visual_unavailable() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+
+    assert (
+        api._is_bounded_clarify_mode(
+            {
+                "trigger": "asr_verify_on_risk",
+                "reason": "visual_unavailable",
+            }
+        )
+        is True
+    )
+
+
+def test_visual_unavailable_clarify_uses_dedicated_bounded_instruction_guardrail() -> None:
     api = RealtimeAPI.__new__(RealtimeAPI)
 
     event = api._bounded_clarify_response_create_event(
@@ -193,4 +207,49 @@ def test_visual_unavailable_clarify_does_not_use_bounded_instruction_guardrail()
         },
     )
 
-    assert "instructions" not in event["response"]
+    instructions = event["response"].get("instructions", "")
+    assert "bounded clarify mode" in instructions.lower()
+    assert "exactly this clarify sentence" in instructions.lower()
+    assert "do not assert or describe any scene" in instructions.lower()
+    assert "do not add a second sentence" in instructions.lower()
+    assert "short and non-assertive" in instructions.lower()
+
+
+def test_low_semantic_bounded_clarify_instruction_is_unchanged() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+
+    event = api._bounded_clarify_response_create_event(
+        message="I heard you, but I’m not sure what you mean yet. Could you be a bit more specific?",
+        metadata={
+            "origin": "assistant_message",
+            "trigger": "asr_verify_on_risk",
+            "reason": "low_semantic_confidence",
+            "input_event_key": "item-8:clarify",
+        },
+    )
+
+    assert event["response"].get("instructions", "") == (
+        "You are in bounded clarify mode. Speak exactly this one sentence and nothing else: "
+        "'I heard you, but I’m not sure what you mean yet. Could you be a bit more specific?'. "
+        "Do not add scene, IMU, memory, or environment commentary."
+    )
+
+
+def test_short_utterance_bounded_clarify_instruction_is_unchanged() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+
+    event = api._bounded_clarify_response_create_event(
+        message="Sorry, I only caught a tiny bit. Could you repeat that?",
+        metadata={
+            "origin": "assistant_message",
+            "trigger": "asr_verify_on_risk",
+            "reason": "short_utterance",
+            "input_event_key": "item-9:clarify",
+        },
+    )
+
+    assert event["response"].get("instructions", "") == (
+        "You are in bounded clarify mode. Speak exactly this one sentence and nothing else: "
+        "'Sorry, I only caught a tiny bit. Could you repeat that?'. "
+        "Do not add scene, IMU, memory, or environment commentary."
+    )
