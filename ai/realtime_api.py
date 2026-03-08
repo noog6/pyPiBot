@@ -1010,6 +1010,8 @@ class RealtimeAPI:
         self._interaction_lifecycle_controller = InteractionLifecycleController()
         self._interaction_lifecycle_policy = InteractionLifecyclePolicy()
         self._response_obligations: dict[str, dict[str, Any]] = {}
+        self._turn_contracts_by_turn_id: dict[str, dict[str, Any]] = {}
+        self._turn_contract_fallback: dict[str, Any] | None = None
         self._canonical_invariant_logged: set[str] = set()
         self._already_scheduled_for_input_event_key: set[str] = set()
         self._tool_followup_state_by_canonical_key: dict[str, str] = {}
@@ -3255,6 +3257,13 @@ class RealtimeAPI:
         previous_state = self._last_interaction_state
         self._last_interaction_state = state
 
+        if self._turn_contract_blocks_gesture_cues():
+            logger.info(
+                "Gesture cue suppressed by turn contract: state=%s reason=no_gesture_request",
+                state.value,
+            )
+            return
+
         if state == InteractionState.SPEAKING:
             logger.debug("Gesture cue skipped for state: %s", state.value)
             return
@@ -3367,6 +3376,7 @@ class RealtimeAPI:
         clean_text = text.strip()
         if not clean_text:
             return
+        self._update_turn_contract_from_input(clean_text, source=source)
         memory_intent_subtype = self._classify_memory_intent(clean_text)
         memory_intent = memory_intent_subtype != "none"
         self._last_user_input_text = clean_text
@@ -3385,6 +3395,208 @@ class RealtimeAPI:
 
     def _is_memory_intent(self, text: str) -> bool:
         return self._get_memory_runtime().is_memory_intent(text)
+
+    def _parse_turn_contract_from_text(self, text: str) -> dict[str, Any]:
+        normalized_text = str(text or "").strip()
+        lowered = normalized_text.lower()
+        exact_phrase = ""
+        explicit_gesture_tools: set[str] = set()
+        if "attention snap" in lowered or "snap" in lowered:
+            explicit_gesture_tools.add("gesture_attention_snap")
+        if "curious tilt" in lowered or "tilt" in lowered:
+            explicit_gesture_tools.add("gesture_curious_tilt")
+        if "nod" in lowered:
+            explicit_gesture_tools.add("gesture_nod")
+        if "look left" in lowered:
+            explicit_gesture_tools.add("gesture_look_left")
+        if "look right" in lowered:
+            explicit_gesture_tools.add("gesture_look_right")
+        if "look up" in lowered:
+            explicit_gesture_tools.add("gesture_look_up")
+        if "look down" in lowered:
+            explicit_gesture_tools.add("gesture_look_down")
+        say_exactly_match = re.search(
+            r"""(?is)\bsay\s+exactly\b\s*:??\s*(?:\"([^\"]+)\"|'([^']+)'|([^\n.?!]+(?:[.?!](?!\s+do\s+not\b))?))""",
+            normalized_text,
+        )
+        if say_exactly_match:
+            exact_phrase = (
+                say_exactly_match.group(1)
+                or say_exactly_match.group(2)
+                or say_exactly_match.group(3)
+                or ""
+            ).strip()
+            exact_phrase = exact_phrase.lstrip(": ").strip()
+        no_tools = bool(re.search(r"\bdo\s+not\s+(?:call|use|run|invoke)\s+tools?\b", lowered))
+        no_gesture = bool(
+            re.search(r"\bdo\s+not\s+(?:gesture|move|nod|tilt|snap)\b", lowered)
+            or re.search(r"\bdo\s+not\b[^.?!\n]{0,80}\bgesture\b", lowered)
+            or re.search(r"\bno\s+gestures?\b", lowered)
+        )
+        return {
+            "exact_phrase": exact_phrase,
+            "no_tools": no_tools,
+            "no_gesture": no_gesture,
+            "allowed_explicit_action_request": bool(explicit_gesture_tools),
+            "explicit_gesture_tools": sorted(explicit_gesture_tools),
+            "source_text": normalized_text,
+        }
+
+    def _update_turn_contract_from_input(self, text: str, *, source: str) -> None:
+        contract = self._parse_turn_contract_from_text(text)
+        contract["source"] = source
+        contract["updated_at"] = time.monotonic()
+        turn_id = self._current_turn_id_or_unknown()
+        if contract.get("exact_phrase") or contract.get("no_tools") or contract.get("no_gesture"):
+            contracts = getattr(self, "_turn_contracts_by_turn_id", None)
+            if not isinstance(contracts, dict):
+                contracts = {}
+                self._turn_contracts_by_turn_id = contracts
+            contracts[turn_id] = contract
+            self._turn_contract_fallback = contract
+            logger.info(
+                "turn_contract_set run_id=%s turn_id=%s source=%s exact_phrase=%s no_tools=%s no_gesture=%s",
+                self._current_run_id() or "",
+                turn_id,
+                source,
+                "true" if contract.get("exact_phrase") else "false",
+                str(bool(contract.get("no_tools"))).lower(),
+                str(bool(contract.get("no_gesture"))).lower(),
+            )
+            return
+        contracts = getattr(self, "_turn_contracts_by_turn_id", None)
+        if isinstance(contracts, dict):
+            contracts.pop(turn_id, None)
+        self._turn_contract_fallback = None
+
+    def _active_turn_contract(self, *, turn_id: str | None = None) -> dict[str, Any]:
+        resolved_turn_id = str(turn_id or self._current_turn_id_or_unknown() or "").strip()
+        contracts = getattr(self, "_turn_contracts_by_turn_id", None)
+        if isinstance(contracts, dict):
+            contract = contracts.get(resolved_turn_id)
+            if isinstance(contract, dict):
+                return contract
+        fallback = getattr(self, "_turn_contract_fallback", None)
+        if isinstance(fallback, dict):
+            return fallback
+        return {}
+
+    def _turn_contract_blocks_gesture_cues(self, *, turn_id: str | None = None) -> bool:
+        return bool(self._active_turn_contract(turn_id=turn_id).get("no_gesture"))
+
+    def _turn_contract_blocks_tool_call(self, *, tool_name: str | None, turn_id: str | None = None) -> bool:
+        contract = self._active_turn_contract(turn_id=turn_id)
+        normalized_tool_name = str(tool_name or "").strip().lower()
+        explicit_tools = set(contract.get("explicit_gesture_tools") or [])
+        explicit_action_allowed = bool(contract.get("allowed_explicit_action_request"))
+        contract_source = str(contract.get("source") or "").strip().lower()
+        explicitly_requested = bool(normalized_tool_name and normalized_tool_name in explicit_tools)
+        if contract.get("no_tools"):
+            if explicit_action_allowed and explicitly_requested and contract_source != "startup_prompt":
+                return False
+            return True
+        if contract.get("no_gesture") and normalized_tool_name.startswith("gesture_"):
+            if explicit_action_allowed and explicitly_requested:
+                return False
+            return True
+        return False
+
+    def _turn_contract_exact_phrase(self, *, turn_id: str | None = None) -> str:
+        return str(self._active_turn_contract(turn_id=turn_id).get("exact_phrase") or "").strip()
+
+    def _turn_contract_exact_phrase_open(self, *, turn_id: str | None = None) -> bool:
+        exact_phrase = self._turn_contract_exact_phrase(turn_id=turn_id)
+        if not exact_phrase:
+            return False
+        spoken = str(getattr(self, "_assistant_reply_accum", "") or "").strip()
+        if spoken and exact_phrase.lower() in spoken.lower():
+            self._turn_contract_mark_exact_phrase_satisfied(turn_id=turn_id)
+            logger.info(
+                "turn_contract_exact_phrase_satisfied run_id=%s turn_id=%s mode=covered_by_parent",
+                self._current_run_id() or "",
+                str(turn_id or self._current_turn_id_or_unknown()),
+            )
+            return False
+        return True
+
+    def _turn_contract_mark_exact_phrase_satisfied(self, *, turn_id: str | None = None) -> None:
+        resolved_turn_id = str(turn_id or self._current_turn_id_or_unknown() or "").strip()
+        contracts = getattr(self, "_turn_contracts_by_turn_id", None)
+        if not isinstance(contracts, dict):
+            return
+        contract = contracts.get(resolved_turn_id)
+        if not isinstance(contract, dict):
+            return
+        contract["exact_phrase"] = ""
+        if not contract.get("no_tools") and not contract.get("no_gesture"):
+            contracts.pop(resolved_turn_id, None)
+        if isinstance(getattr(self, "_turn_contract_fallback", None), dict):
+            fallback = self._turn_contract_fallback
+            if fallback is contract:
+                if contract.get("no_tools") or contract.get("no_gesture"):
+                    self._turn_contract_fallback = contract
+                else:
+                    self._turn_contract_fallback = None
+
+    async def _schedule_turn_contract_exact_phrase_repair_response(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str,
+        websocket: Any,
+    ) -> bool:
+        contract = self._active_turn_contract(turn_id=turn_id)
+        exact_phrase = str(contract.get("exact_phrase") or "").strip()
+        if not exact_phrase:
+            return False
+        if contract.get("exact_phrase_repair_scheduled"):
+            return False
+        if websocket is None:
+            logger.warning(
+                "turn_contract_exact_phrase_pending run_id=%s turn_id=%s reason=no_websocket",
+                self._current_run_id() or "",
+                turn_id,
+            )
+            return False
+        repair_input_event_key = f"{str(input_event_key or 'unknown').strip()}:exact_phrase_repair"
+        response_event = {
+            "type": "response.create",
+            "response": {
+                "metadata": {
+                    "turn_id": turn_id,
+                    "input_event_key": repair_input_event_key,
+                    "trigger": "turn_contract_exact_phrase_repair",
+                    "turn_contract_exact_phrase": "true",
+                    "turn_contract_exact_phrase_repair": "true",
+                },
+                "instructions": (
+                    "Exact phrase repair mode. Speak exactly this sentence and nothing else: "
+                    f"{exact_phrase!r}."
+                ),
+            },
+        }
+        contract["exact_phrase_repair_scheduled"] = True
+        sent = await self._send_response_create(
+            websocket,
+            response_event,
+            origin="assistant_message",
+            utterance_context=UtteranceContext(
+                turn_id=turn_id,
+                input_event_key=repair_input_event_key,
+                canonical_key=self._canonical_utterance_key(turn_id=turn_id, input_event_key=repair_input_event_key),
+                utterance_seq=self._current_utterance_seq(),
+            ),
+        )
+        if not sent:
+            contract["exact_phrase_repair_scheduled"] = False
+            return False
+        logger.info(
+            "turn_contract_exact_phrase_repair_scheduled run_id=%s turn_id=%s input_event_key=%s",
+            self._current_run_id() or "",
+            turn_id,
+            repair_input_event_key,
+        )
+        return True
 
     def _classify_memory_intent(self, text: str) -> str:
         return self._get_memory_runtime().classify_memory_intent(text)
@@ -6514,6 +6726,8 @@ class RealtimeAPI:
             and self._turn_has_pending_tool_followup(turn_id=turn_id)
         ):
             return False, "tool_followup_precedence"
+        if self._turn_contract_exact_phrase_open(turn_id=turn_id):
+            return False, "exact_phrase_obligation_open"
         return True, "normal"
 
     def _terminal_deliverable_selection_store(self) -> dict[str, dict[str, Any]]:
@@ -6556,7 +6770,12 @@ class RealtimeAPI:
                 record.deliverable_observed = True
                 if str(record.deliverable_class or "unknown").strip().lower() == "unknown":
                     record.deliverable_class = "final"
-            elif normalized_reason in {"micro_ack_non_deliverable", "cancelled", "provisional_empty_non_deliverable"}:
+            elif normalized_reason in {
+                "micro_ack_non_deliverable",
+                "cancelled",
+                "provisional_empty_non_deliverable",
+                "exact_phrase_obligation_open",
+            }:
                 if str(record.deliverable_class or "unknown").strip().lower() == "unknown":
                     record.deliverable_class = "non_deliverable"
 
@@ -12429,6 +12648,24 @@ class RealtimeAPI:
             function_name = self.function_call.get("name")
             call_id = self.function_call.get("call_id")
             suppression_notice_sent = False
+            if self._turn_contract_blocks_tool_call(tool_name=function_name):
+                logger.info(
+                    "Function call blocked by turn contract | tool=%s call_id=%s reason=turn_contract_disallow_tool",
+                    function_name,
+                    call_id,
+                )
+                await self._send_noop_tool_output(
+                    websocket,
+                    call_id=call_id,
+                    status="contract_blocked",
+                    message="No action taken. Tool call blocked by explicit user turn contract.",
+                    tool_name=function_name,
+                    reason="turn_contract_disallow_tool",
+                    category="suppression",
+                )
+                self.function_call = None
+                self.function_call_args = ""
+                return
             try:
                 args = json.loads(self.function_call_args) if self.function_call_args else {}
                 args_parsed = True

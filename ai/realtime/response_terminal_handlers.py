@@ -455,6 +455,12 @@ class ResponseTerminalHandlers:
             origin=active_response_origin_before_clear,
             delivery_state_before_done=delivery_state_before_done,
         )
+        if selection_reason == "exact_phrase_obligation_open":
+            await api._schedule_turn_contract_exact_phrase_repair_response(
+                turn_id=turn_id,
+                input_event_key=done_input_event_key,
+                websocket=api.websocket,
+            )
         if event:
             api._last_response_metadata = {
                 "event_type": event.get("type"),
