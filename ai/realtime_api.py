@@ -1017,6 +1017,14 @@ class RealtimeAPI:
         self._tool_followup_state_by_canonical_key: dict[str, str] = {}
         self._active_response_input_event_key: str | None = None
         self._active_response_canonical_key: str | None = None
+        self._startup_prompt_audit: dict[str, Any] = {
+            "dispatched": False,
+            "bound": False,
+            "terminal": False,
+            "turn_id": None,
+            "input_event_key": None,
+            "canonical_key": None,
+        }
         self._response_gating_verdict_by_input_event_key: dict[str, ResponseGatingVerdict] = {}
         self._latest_partial_transcript_by_turn_id: dict[str, str] = {}
         self._server_auto_audio_waiters_by_turn_id: dict[str, asyncio.Event] = {}
@@ -3425,6 +3433,7 @@ class RealtimeAPI:
         clean_text = text.strip()
         if not clean_text:
             return
+        self._maybe_mark_startup_prompt_superseded(source=source)
         self._update_turn_contract_from_input(clean_text, source=source)
         memory_intent_subtype = self._classify_memory_intent(clean_text)
         memory_intent = memory_intent_subtype != "none"
@@ -11722,6 +11731,13 @@ class RealtimeAPI:
             origin=origin,
         )
         self._active_response_canonical_key = lifecycle_canonical_key
+        if str(origin or "").strip().lower() == "prompt":
+            self._emit_startup_prompt_bound(
+                turn_id=turn_id,
+                input_event_key=self._active_response_input_event_key,
+                canonical_key=lifecycle_canonical_key,
+                reason="response_created",
+            )
         self._log_parent_binding_snapshot(
             turn_id=turn_id,
             response_id=self._active_response_id,
@@ -13913,6 +13929,10 @@ class RealtimeAPI:
                 source="startup_prompt",
             ):
                 self._record_user_input(startup_prompt, source="startup_prompt")
+                self._emit_startup_prompt_terminal(
+                    terminal_state="skipped",
+                    reason="handled_by_research_intent",
+                )
                 return
 
         content = [{"type": "input_text", "text": prompt} for prompt in self.prompts]
@@ -13933,15 +13953,144 @@ class RealtimeAPI:
 
         if not self._allow_ai_call("startup_prompt"):
             logger.info("Skipping startup response: AI call budget exhausted.")
+            self._emit_startup_prompt_terminal(
+                terminal_state="skipped",
+                reason="ai_call_budget_exhausted",
+            )
             return
+        self._emit_startup_prompt_dispatched(
+            turn_id=str(getattr(self, "_current_response_turn_id", "") or "").strip() or None,
+            input_event_key=str(getattr(self, "_current_input_event_key", "") or "").strip() or None,
+        )
         memory_brief_note = self._consume_pending_memory_brief_note()
         response_create_event = {"type": "response.create"}
-        await self._send_response_create(
-            websocket,
-            response_create_event,
-            origin="prompt",
-            record_ai_call=True,
-            memory_brief_note=memory_brief_note,
+        try:
+            startup_prompt_sent = await self._send_response_create(
+                websocket,
+                response_create_event,
+                origin="prompt",
+                record_ai_call=True,
+                memory_brief_note=memory_brief_note,
+            )
+        except Exception:
+            self._emit_startup_prompt_terminal(
+                terminal_state="skipped",
+                reason="cancelled_before_done",
+            )
+            raise
+        if not startup_prompt_sent:
+            self._emit_startup_prompt_terminal(
+                terminal_state="skipped",
+                reason="cancelled_before_done",
+            )
+
+    def _startup_prompt_audit_state(self) -> dict[str, Any]:
+        audit_state = getattr(self, "_startup_prompt_audit", None)
+        if not isinstance(audit_state, dict):
+            audit_state = {
+                "dispatched": False,
+                "bound": False,
+                "terminal": False,
+                "turn_id": None,
+                "input_event_key": None,
+                "canonical_key": None,
+            }
+            self._startup_prompt_audit = audit_state
+        return audit_state
+
+    def _emit_startup_prompt_dispatched(self, *, turn_id: str | None, input_event_key: str | None) -> None:
+        audit_state = self._startup_prompt_audit_state()
+        if audit_state.get("dispatched"):
+            return
+        normalized_turn_id = str(turn_id or "").strip() or self._current_turn_id_or_unknown()
+        normalized_input_key = str(input_event_key or "").strip() or "unknown"
+        audit_state["dispatched"] = True
+        audit_state["turn_id"] = normalized_turn_id
+        audit_state["input_event_key"] = normalized_input_key
+        logger.info(
+            "startup_prompt_dispatched run_id=%s turn_id=%s input_event_key=%s origin=prompt",
+            self._current_run_id() or "",
+            normalized_turn_id,
+            normalized_input_key,
+        )
+
+    def _emit_startup_prompt_bound(
+        self,
+        *,
+        turn_id: str | None,
+        input_event_key: str | None,
+        canonical_key: str | None,
+        reason: str,
+    ) -> None:
+        audit_state = self._startup_prompt_audit_state()
+        if audit_state.get("bound"):
+            return
+        normalized_turn_id = str(turn_id or "").strip() or str(audit_state.get("turn_id") or "").strip() or "unknown"
+        normalized_input_key = str(input_event_key or "").strip() or str(audit_state.get("input_event_key") or "").strip() or "unknown"
+        normalized_canonical_key = str(canonical_key or "").strip() or self._canonical_utterance_key(
+            turn_id=normalized_turn_id,
+            input_event_key=normalized_input_key,
+        )
+        audit_state["bound"] = True
+        audit_state["turn_id"] = normalized_turn_id
+        audit_state["input_event_key"] = normalized_input_key
+        audit_state["canonical_key"] = normalized_canonical_key
+        logger.info(
+            "startup_prompt_bound run_id=%s turn_id=%s input_event_key=%s canonical_key=%s origin=prompt reason=%s",
+            self._current_run_id() or "",
+            normalized_turn_id,
+            normalized_input_key,
+            normalized_canonical_key,
+            str(reason or "none").strip() or "none",
+        )
+
+    def _emit_startup_prompt_terminal(
+        self,
+        *,
+        terminal_state: str,
+        reason: str,
+        turn_id: str | None = None,
+        input_event_key: str | None = None,
+        canonical_key: str | None = None,
+    ) -> None:
+        audit_state = self._startup_prompt_audit_state()
+        if audit_state.get("terminal"):
+            return
+        normalized_terminal_state = str(terminal_state or "").strip().lower()
+        if normalized_terminal_state not in {"completed", "superseded", "skipped"}:
+            normalized_terminal_state = "skipped"
+        normalized_turn_id = str(turn_id or "").strip() or str(audit_state.get("turn_id") or "").strip() or "unknown"
+        normalized_input_key = str(input_event_key or "").strip() or str(audit_state.get("input_event_key") or "").strip() or "unknown"
+        normalized_canonical_key = str(canonical_key or "").strip() or str(audit_state.get("canonical_key") or "").strip()
+        if not normalized_canonical_key and normalized_turn_id != "unknown":
+            normalized_canonical_key = self._canonical_utterance_key(
+                turn_id=normalized_turn_id,
+                input_event_key=normalized_input_key,
+            )
+        audit_state["terminal"] = True
+        audit_state["turn_id"] = normalized_turn_id
+        audit_state["input_event_key"] = normalized_input_key
+        audit_state["canonical_key"] = normalized_canonical_key or None
+        logger.info(
+            "startup_prompt_terminal run_id=%s turn_id=%s input_event_key=%s canonical_key=%s origin=prompt terminal_state=%s reason=%s",
+            self._current_run_id() or "",
+            normalized_turn_id,
+            normalized_input_key,
+            normalized_canonical_key or "unknown",
+            normalized_terminal_state,
+            str(reason or "none").strip() or "none",
+        )
+
+    def _maybe_mark_startup_prompt_superseded(self, *, source: str) -> None:
+        normalized_source = str(source or "").strip().lower()
+        if normalized_source in {"", "startup_prompt"}:
+            return
+        audit_state = self._startup_prompt_audit_state()
+        if not audit_state.get("dispatched"):
+            return
+        self._emit_startup_prompt_terminal(
+            terminal_state="superseded",
+            reason=f"first_live_user_turn_source={normalized_source}",
         )
 
     async def send_text_message_to_conversation(
