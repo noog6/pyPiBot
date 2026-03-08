@@ -11526,6 +11526,7 @@ class RealtimeAPI:
         turn_id: str,
         input_event_key: str,
         origin_label: str = "upgraded_response",
+        memory_intent_subtype: str = "none",
     ) -> bool:
         cancel_replace_started_at = time.monotonic()
         self._cancel_micro_ack(turn_id=turn_id, reason="upgrade_selected")
@@ -11610,6 +11611,9 @@ class RealtimeAPI:
         metadata["input_event_key"] = str(input_event_key or "").strip()
         metadata["safety_override"] = "true"
         metadata["transcript_upgrade_replacement"] = "true"
+        normalized_memory_intent_subtype = str(memory_intent_subtype or "none").strip().lower() or "none"
+        if normalized_memory_intent_subtype != "none":
+            metadata["memory_intent_subtype"] = normalized_memory_intent_subtype
         if upgrade_chain_id:
             metadata["upgrade_chain_id"] = upgrade_chain_id
         self._clear_canonical_terminal_delivery_state(canonical_key=replacement_canonical_key)
@@ -11974,6 +11978,7 @@ class RealtimeAPI:
                     turn_id=resolved_turn_id,
                     input_event_key=input_event_key,
                     origin_label="upgraded_response",
+                    memory_intent_subtype=memory_intent_subtype,
                 ):
                     return
             if await self._maybe_process_research_intent(
