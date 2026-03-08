@@ -23,6 +23,28 @@ class ResponseCreateRuntimeAPI(Protocol):
 class ResponseCreateRuntime:
     api: ResponseCreateRuntimeAPI
 
+    def _apply_memory_intent_instruction_guardrail(
+        self,
+        *,
+        response_create_event: dict[str, Any],
+        response_metadata: dict[str, Any],
+    ) -> None:
+        memory_intent_subtype = str(response_metadata.get("memory_intent_subtype") or "").strip().lower()
+        if memory_intent_subtype not in {"preference_recall", "general_memory", "topic_recall"}:
+            return
+        response_payload = response_create_event.setdefault("response", {})
+        if not isinstance(response_payload, dict):
+            return
+        existing_instructions = str(response_payload.get("instructions") or "").strip()
+        guardrail = (
+            "Memory-intent response mode: answer the user's memory question directly and prioritize memory/tool "
+            "results for this turn. Do not add passive scene or environment narration unless the user explicitly "
+            "asks a visual question."
+        )
+        if guardrail in existing_instructions:
+            return
+        response_payload["instructions"] = f"{existing_instructions}\n\n{guardrail}" if existing_instructions else guardrail
+
     def _note_response_create_blocked(self, *, canonical_key: str, reason: str) -> None:
         api = self.api
         api._response_create_queued_creates_total = int(getattr(api, "_response_create_queued_creates_total", 0) or 0) + 1
@@ -87,6 +109,10 @@ class ResponseCreateRuntime:
             current_input_event_key = resolved_context.input_event_key
             canonical_key = resolved_context.canonical_key
         response_metadata = api._extract_response_create_metadata(response_create_event)
+        self._apply_memory_intent_instruction_guardrail(
+            response_create_event=response_create_event,
+            response_metadata=response_metadata,
+        )
         normalized_origin = str(origin or "").strip().lower()
         tool_followup = str(response_metadata.get("tool_followup", "")).strip().lower() in {"true", "1", "yes"}
         tool_call_id = str(response_metadata.get("tool_call_id") or "").strip()
@@ -578,6 +604,10 @@ class ResponseCreateRuntime:
             )
 
         response_metadata = api._extract_response_create_metadata(response_create_event)
+        self._apply_memory_intent_instruction_guardrail(
+            response_create_event=response_create_event,
+            response_metadata=response_metadata,
+        )
         normalized_origin = str(origin or "").strip().lower()
         tool_followup = str(response_metadata.get("tool_followup", "")).strip().lower() in {"true", "1", "yes"}
         tool_call_id = str(response_metadata.get("tool_call_id") or "").strip()
