@@ -1032,6 +1032,7 @@ class RealtimeAPI:
         self._load_topic_suppression_preferences()
         self._pending_alternate_intent_override: dict[str, Any] | None = None
         self._last_executed_tool_call: dict[str, Any] | None = None
+        self._mixed_intent_local_actions_by_turn: dict[str, set[str]] = {}
         self._intent_ledger: dict[str, IntentLedgerEntry] = {}
         self._intent_state_ttl_s = float(research_cfg.get("intent_state_ttl_s", 300.0))
         self._intent_execution_cooldown_s = float(
@@ -8802,6 +8803,32 @@ class RealtimeAPI:
             "timestamp": time.monotonic(),
         }
 
+    def _record_mixed_intent_local_action(self, *, turn_id: str, tool_name: str, source: str) -> None:
+        normalized_turn_id = str(turn_id or "").strip() or self._current_turn_id_or_unknown()
+        normalized_tool_name = str(tool_name or "").strip()
+        if not normalized_tool_name:
+            return
+        actions = self._mixed_intent_local_actions_by_turn.setdefault(normalized_turn_id, set())
+        actions.add(normalized_tool_name)
+        logger.info(
+            "mixed_intent_action_recorded run_id=%s turn_id=%s source=%s tool=%s",
+            self._current_run_id() or "",
+            normalized_turn_id,
+            source,
+            normalized_tool_name,
+        )
+
+    def _local_mixed_intent_action_already_executed(self, *, turn_id: str, tool_name: str) -> bool:
+        normalized_turn_id = str(turn_id or "").strip() or self._current_turn_id_or_unknown()
+        normalized_tool_name = str(tool_name or "").strip()
+        if not normalized_tool_name:
+            return False
+        actions = self._mixed_intent_local_actions_by_turn.get(normalized_turn_id)
+        if not actions:
+            return False
+        return normalized_tool_name in actions
+
+
     def _mark_prior_research_permission_granted(self, request: ResearchRequest) -> None:
         context_value = getattr(request, "context", None)
         context = context_value if isinstance(context_value, dict) else {}
@@ -12620,6 +12647,43 @@ class RealtimeAPI:
                         self.function_call = None
                         self.function_call_args = ""
                         return
+            turn_id_for_call = self._current_turn_id_or_unknown()
+            if self._local_mixed_intent_action_already_executed(
+                turn_id=turn_id_for_call,
+                tool_name=function_name,
+            ):
+                logger.info(
+                    "Function call outcome: suppressed mixed-intent duplicate | tool=%s call_id=%s turn_id=%s",
+                    function_name,
+                    call_id,
+                    turn_id_for_call,
+                )
+                self._log_structured_noop_event(
+                    outcome="redundant",
+                    reason="mixed_intent_local_action_already_executed",
+                    tool_name=function_name,
+                    action_id=str(call_id) if call_id is not None else None,
+                    token_id=getattr(token, "id", None),
+                    idempotency_key=build_normalized_idempotency_key(function_name, args),
+                )
+                await self._send_noop_tool_output(
+                    websocket,
+                    call_id=call_id,
+                    status="redundant",
+                    message="No action taken. Equivalent mixed-intent action already executed locally for this turn.",
+                    tool_name=function_name,
+                    reason="mixed_intent_local_action_already_executed",
+                    category="suppression",
+                )
+                await self._emit_final_noop_user_text(
+                    websocket,
+                    outcome="redundant",
+                    reason="mixed_intent_local_action_already_executed",
+                )
+                self.function_call = None
+                self.function_call_args = ""
+                return
+
             if self._is_duplicate_tool_call(function_name, args):
                 logger.info(
                     "Function call outcome: skipped duplicate | tool=%s call_id=%s",
