@@ -8352,7 +8352,11 @@ class RealtimeAPI:
     def _is_bounded_clarify_mode(self, metadata: dict[str, Any]) -> bool:
         trigger = str(metadata.get("trigger") or "").strip().lower()
         reason = str(metadata.get("reason") or "").strip().lower()
-        return trigger == "asr_verify_on_risk" and reason in {"low_semantic_confidence", "short_utterance"}
+        return trigger == "asr_verify_on_risk" and reason in {
+            "low_semantic_confidence",
+            "short_utterance",
+            "visual_unavailable",
+        }
 
     def _bounded_clarify_response_create_event(
         self,
@@ -8364,6 +8368,15 @@ class RealtimeAPI:
         if not self._is_bounded_clarify_mode(metadata):
             return response_create_event
         response_payload = response_create_event.setdefault("response", {})
+        reason = str(metadata.get("reason") or "").strip().lower()
+        if reason == "visual_unavailable":
+            response_payload["instructions"] = (
+                "You are in bounded clarify mode for visual_unavailable. Output exactly this clarify sentence and "
+                f"nothing else: {message!r}. Do not assert or describe any scene, objects, camera results, memory, "
+                "or inferred visual details. Do not add a second sentence, follow-on elaboration, or any extra text. "
+                "Keep the response short and non-assertive."
+            )
+            return response_create_event
         response_payload["instructions"] = (
             "You are in bounded clarify mode. Speak exactly this one sentence and nothing else: "
             f"{message!r}. Do not add scene, IMU, memory, or environment commentary."
