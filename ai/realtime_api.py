@@ -1013,7 +1013,6 @@ class RealtimeAPI:
         self._canonical_invariant_logged: set[str] = set()
         self._already_scheduled_for_input_event_key: set[str] = set()
         self._tool_followup_state_by_canonical_key: dict[str, str] = {}
-        self._silent_safe_tool_names: set[str] = set()
         self._active_response_input_event_key: str | None = None
         self._active_response_canonical_key: str | None = None
         self._response_gating_verdict_by_input_event_key: dict[str, ResponseGatingVerdict] = {}
@@ -6148,89 +6147,6 @@ class RealtimeAPI:
             "gesture_curious_tilt",
             "gesture_attention_snap",
         }
-
-    def _is_tool_silent_safe(self, *, tool_name: str | None) -> bool:
-        normalized_tool_name = str(tool_name or "").strip().lower()
-        silent_safe_tools = getattr(self, "_silent_safe_tool_names", None)
-        if not isinstance(silent_safe_tools, set):
-            return False
-        return normalized_tool_name in silent_safe_tools
-
-    def _parent_response_expected_to_carry_tool_result(self, *, call_id: str | None) -> bool:
-        function_call = getattr(self, "function_call", None)
-        if not isinstance(function_call, dict):
-            return False
-        if str(function_call.get("call_id") or "").strip() != str(call_id or "").strip():
-            return False
-        return bool(function_call.get("parent_expected_to_carry_tool_result", False))
-
-    def _evaluate_tool_execution_admissibility(self, *, tool_name: str, call_id: str | None) -> tuple[bool, str]:
-        turn_id = self._current_turn_id_or_unknown()
-        normalized_tool_name = str(tool_name or "").strip().lower()
-        silent_safe = self._is_tool_silent_safe(tool_name=normalized_tool_name)
-        logger.info(
-            "tool_execution_silent_safe_eval run_id=%s turn_id=%s call_id=%s tool=%s silent_safe=%s",
-            self._current_run_id() or "",
-            turn_id,
-            str(call_id or "").strip() or "unknown",
-            normalized_tool_name or "unknown",
-            str(silent_safe).lower(),
-        )
-        if not self._is_low_risk_reversible_gesture_tool(tool_name=normalized_tool_name):
-            logger.info(
-                "tool_execution_admissibility_eval run_id=%s turn_id=%s call_id=%s action=execute reason=non_reversible_gesture_tool",
-                self._current_run_id() or "",
-                turn_id,
-                str(call_id or "").strip() or "unknown",
-            )
-            return True, "non_reversible_gesture_tool"
-        if silent_safe:
-            logger.info(
-                "tool_execution_admissibility_eval run_id=%s turn_id=%s call_id=%s action=execute reason=silent_safe_tool",
-                self._current_run_id() or "",
-                turn_id,
-                str(call_id or "").strip() or "unknown",
-            )
-            return True, "silent_safe_tool"
-
-        parent_contract = self._parent_response_expected_to_carry_tool_result(call_id=call_id)
-        logger.info(
-            "tool_execution_parent_contract_eval turn_id=%s canonical_key=%s parent_response_id=%s expected_to_carry_tool_result=%s",
-            turn_id,
-            self._active_response_canonical_key or "none",
-            str(getattr(self, "_active_response_id", "") or "").strip() or "none",
-            str(parent_contract).lower(),
-        )
-        if parent_contract:
-            logger.info(
-                "tool_execution_admissibility_eval run_id=%s turn_id=%s call_id=%s action=execute reason=parent_contract_declared",
-                self._current_run_id() or "",
-                turn_id,
-                str(call_id or "").strip() or "unknown",
-            )
-            return True, "parent_contract_declared"
-
-        ownership_unresolved = bool(self._response_in_flight or self.response_in_progress)
-        if ownership_unresolved:
-            logger.info(
-                "tool_execution_admissibility_eval run_id=%s turn_id=%s call_id=%s action=defer reason=parent_contract_unresolved",
-                self._current_run_id() or "",
-                turn_id,
-                str(call_id or "").strip() or "unknown",
-            )
-            logger.info(
-                "tool_execution_followup_contract_mismatch call_id=%s reason=tool_followup_eligibility_unresolved_parent_ownership",
-                str(call_id or "").strip() or "unknown",
-            )
-            return False, "parent_contract_unresolved"
-
-        logger.info(
-            "tool_execution_admissibility_eval run_id=%s turn_id=%s call_id=%s action=execute reason=no_active_parent_ownership",
-            self._current_run_id() or "",
-            turn_id,
-            str(call_id or "").strip() or "unknown",
-        )
-        return True, "no_active_parent_ownership"
 
     def _build_tool_followup_response_create_event(
         self,
@@ -12538,32 +12454,6 @@ class RealtimeAPI:
                     ),
                     tool_name=function_name,
                     reason="provisional_server_auto_pre_audio_hold",
-                    category="suppression",
-                    include_response_create=False,
-                )
-                self.function_call = None
-                self.function_call_args = ""
-                return
-            execution_admissible, execution_reason = self._evaluate_tool_execution_admissibility(
-                tool_name=str(function_name or ""),
-                call_id=str(call_id or ""),
-            )
-            if not execution_admissible:
-                logger.info(
-                    "tool_execution_deferred call_id=%s reason=%s",
-                    str(call_id or "").strip() or "unknown",
-                    execution_reason,
-                )
-                await self._send_noop_tool_output(
-                    websocket,
-                    call_id=call_id,
-                    status="deferred",
-                    message=(
-                        "No action taken. Tool execution deferred until response ownership is settled "
-                        "or parent response contract is explicit."
-                    ),
-                    tool_name=function_name,
-                    reason=execution_reason,
                     category="suppression",
                     include_response_create=False,
                 )
