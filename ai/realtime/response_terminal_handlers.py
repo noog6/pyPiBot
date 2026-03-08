@@ -279,6 +279,46 @@ class ResponseTerminalHandlers:
             active_response_was_provisional=active_response_was_provisional,
             done_canonical_key=done_canonical_key,
         )
+        exact_phrase_close_deferred = False
+        if selection_reason == "exact_phrase_obligation_open":
+            contract_before = api._active_turn_contract(turn_id=turn_id)
+            repair_already_scheduled = bool(
+                isinstance(contract_before, dict) and contract_before.get("exact_phrase_repair_scheduled")
+            )
+            repair_scheduled_now = False
+            if not repair_already_scheduled:
+                repair_scheduled_now = await api._schedule_turn_contract_exact_phrase_repair_response(
+                    turn_id=turn_id,
+                    input_event_key=done_input_event_key,
+                    websocket=api.websocket,
+                )
+            contract_after = api._active_turn_contract(turn_id=turn_id)
+            repair_pending = bool(
+                repair_already_scheduled
+                or repair_scheduled_now
+                or (
+                    isinstance(contract_after, dict)
+                    and contract_after.get("exact_phrase_repair_scheduled")
+                )
+            )
+            exact_phrase_close_deferred = repair_pending
+            logger.info(
+                "exact_phrase_close_guard run_id=%s turn_id=%s response_id=%s already_scheduled=%s scheduled_now=%s defer_close=%s",
+                api._current_run_id() or "",
+                turn_id,
+                str(active_response_id_before_clear or "none"),
+                str(repair_already_scheduled).lower(),
+                str(repair_scheduled_now).lower(),
+                str(exact_phrase_close_deferred).lower(),
+            )
+            if not exact_phrase_close_deferred:
+                logger.warning(
+                    "exact_phrase_close_guard_fallback run_id=%s turn_id=%s response_id=%s action=allow reason=repair_not_scheduled",
+                    api._current_run_id() or "",
+                    turn_id,
+                    str(active_response_id_before_clear or "none"),
+                )
+
         api._apply_terminal_deliverable_selection(
             canonical_key=done_canonical_key,
             response_id=str(active_response_id_before_clear or ""),
@@ -305,6 +345,14 @@ class ResponseTerminalHandlers:
             "allow",
             "response_done_received",
         )
+        close_action = "allow"
+        close_reason = "response_done_received"
+        if selection_reason == "exact_phrase_obligation_open":
+            if exact_phrase_close_deferred:
+                close_action = "defer"
+                close_reason = "exact_phrase_obligation_open"
+            else:
+                close_reason = "exact_phrase_repair_not_scheduled"
         logger.info(
             "turn_terminal_close_eval run_id=%s turn_id=%s response_id=%s origin=%s transcript_final_seen=%s obligation_open=%s action=%s reason=%s",
             api._current_run_id() or "",
@@ -313,8 +361,8 @@ class ResponseTerminalHandlers:
             str(active_response_origin_before_clear or "unknown"),
             str(transcript_final_linked).lower(),
             str(obligation_open).lower(),
-            "allow",
-            "response_done_received",
+            close_action,
+            close_reason,
         )
         if selection_reason == "cancelled":
             api._log_cancelled_deliverable_once(
@@ -455,12 +503,6 @@ class ResponseTerminalHandlers:
             origin=active_response_origin_before_clear,
             delivery_state_before_done=delivery_state_before_done,
         )
-        if selection_reason == "exact_phrase_obligation_open":
-            await api._schedule_turn_contract_exact_phrase_repair_response(
-                turn_id=turn_id,
-                input_event_key=done_input_event_key,
-                websocket=api.websocket,
-            )
         if event:
             api._last_response_metadata = {
                 "event_type": event.get("type"),
@@ -468,17 +510,27 @@ class ResponseTerminalHandlers:
                 "rate_limits": api.rate_limits,
             }
         api._emit_preference_recall_skip_trace_if_needed(turn_id=api._current_response_turn_id)
-        api._log_turn_conversation_efficiency(
-            turn_id=turn_id,
-            canonical_key=resolved_canonical_key,
-            close_reason="response_done",
-        )
+        if not exact_phrase_close_deferred:
+            api._log_turn_conversation_efficiency(
+                turn_id=turn_id,
+                canonical_key=resolved_canonical_key,
+                close_reason="response_done",
+            )
         transition = api._build_confirmation_transition_decision(
             reason="response_done",
             include_reminder_gate=True,
             was_confirmation_guarded=was_confirmation_guarded,
         )
         token_active, awaiting_phase, _, phase_is_awaiting_confirmation = api._confirmation_hold_components()
+        if exact_phrase_close_deferred:
+            logger.info(
+                "turn_terminal_close_deferred run_id=%s turn_id=%s response_id=%s reason=exact_phrase_obligation_open",
+                api._current_run_id() or "",
+                turn_id,
+                str(active_response_id_before_clear or "none"),
+            )
+            return
+
         if not transition.allow_response_transition:
             logger.info(
                 "Confirmation state is holding phase progression; skipping REFLECT transition "

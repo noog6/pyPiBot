@@ -145,8 +145,10 @@ def test_handle_response_done_logs_normal_deliverable_selection() -> None:
         asyncio.run(api.handle_response_done({"type": "response.done"}))
 
     info_log.assert_any_call(
-        "deliverable_selected response_id=%s selected=true reason=normal",
+        "deliverable_selected response_id=%s selected=%s reason=%s",
         "resp_1",
+        "true",
+        "normal",
     )
 
 
@@ -194,8 +196,10 @@ def test_handle_response_done_marks_micro_ack_as_non_deliverable() -> None:
         asyncio.run(api.handle_response_done({"type": "response.done"}))
 
     info_log.assert_any_call(
-        "deliverable_selected response_id=%s selected=false reason=micro_ack_non_deliverable",
+        "deliverable_selected response_id=%s selected=%s reason=%s",
         "resp_1",
+        "false",
+        "micro_ack_non_deliverable",
     )
 
 
@@ -245,8 +249,10 @@ def test_handle_response_done_marks_empty_provisional_as_non_deliverable_without
         asyncio.run(api.handle_response_done({"type": "response.done"}))
 
     info_log.assert_any_call(
-        "deliverable_selected response_id=%s selected=false reason=provisional_empty_non_deliverable",
+        "deliverable_selected response_id=%s selected=%s reason=%s",
         "resp_prov_1",
+        "false",
+        "provisional_empty_non_deliverable",
     )
     mark_completed.assert_called_once_with(response_id="resp_prov_1")
     record_silent.assert_not_called()
@@ -276,3 +282,105 @@ def test_handle_response_done_records_silent_incident_for_non_provisional_empty(
 
     record_silent.assert_called_once()
     mark_completed.assert_not_called()
+
+
+def test_handle_response_done_defers_terminal_close_when_exact_phrase_still_open() -> None:
+    api = _make_api()
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    api._response_done_deliverable_decision = Mock(return_value=(False, "exact_phrase_obligation_open"))
+    api._schedule_turn_contract_exact_phrase_repair_response = AsyncMock(return_value=True)
+    api._log_turn_conversation_efficiency = Mock()
+
+    with patch("ai.realtime.response_terminal_handlers.logger.info") as info_log:
+        asyncio.run(api.handle_response_done({"type": "response.done"}))
+
+    api._schedule_turn_contract_exact_phrase_repair_response.assert_awaited_once_with(
+        turn_id="turn_1",
+        input_event_key="input_evt_1",
+        websocket=api.websocket,
+    )
+    api._log_turn_conversation_efficiency.assert_not_called()
+    assert api.orchestration_state.transitions == []
+    info_log.assert_any_call(
+        "turn_terminal_close_eval run_id=%s turn_id=%s response_id=%s origin=%s transcript_final_seen=%s obligation_open=%s action=%s reason=%s",
+        "run-test",
+        "turn_1",
+        "resp_1",
+        "assistant_message",
+        "false",
+        "false",
+        "defer",
+        "exact_phrase_obligation_open",
+    )
+
+
+def test_handle_response_done_allows_close_when_exact_phrase_repair_not_scheduled() -> None:
+    api = _make_api()
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    api._response_done_deliverable_decision = Mock(return_value=(False, "exact_phrase_obligation_open"))
+    api._schedule_turn_contract_exact_phrase_repair_response = AsyncMock(return_value=False)
+    api._log_turn_conversation_efficiency = Mock()
+
+    with patch("ai.realtime.response_terminal_handlers.logger.warning") as warn_log:
+        asyncio.run(api.handle_response_done({"type": "response.done"}))
+
+    api._schedule_turn_contract_exact_phrase_repair_response.assert_awaited_once_with(
+        turn_id="turn_1",
+        input_event_key="input_evt_1",
+        websocket=api.websocket,
+    )
+    api._log_turn_conversation_efficiency.assert_called_once()
+    assert api.orchestration_state.transitions == [
+        (OrchestrationPhase.REFLECT, "response done"),
+        (OrchestrationPhase.IDLE, "response done reflection"),
+    ]
+    warn_log.assert_any_call(
+        "exact_phrase_close_guard_fallback run_id=%s turn_id=%s response_id=%s action=allow reason=repair_not_scheduled",
+        "run-test",
+        "turn_1",
+        "resp_1",
+    )
+
+
+def test_handle_response_done_skips_repair_reschedule_when_already_latched() -> None:
+    api = _make_api()
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    api._response_done_deliverable_decision = Mock(return_value=(False, "exact_phrase_obligation_open"))
+    api._turn_contracts_by_turn_id = {
+        "turn_1": {
+            "exact_phrase": "Sentinel Theo online.",
+            "exact_phrase_repair_scheduled": True,
+        }
+    }
+    api._schedule_turn_contract_exact_phrase_repair_response = AsyncMock(return_value=False)
+    api._log_turn_conversation_efficiency = Mock()
+
+    asyncio.run(api.handle_response_done({"type": "response.done"}))
+
+    api._schedule_turn_contract_exact_phrase_repair_response.assert_not_awaited()
+    api._log_turn_conversation_efficiency.assert_not_called()
+    assert api.orchestration_state.transitions == []
