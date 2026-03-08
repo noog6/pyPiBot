@@ -189,6 +189,63 @@ def test_turn_contract_exact_phrase_repair_schedules_at_most_once() -> None:
     assert len(sent_events) == 1
 
 
+
+
+def test_turn_contract_prompt_contract_adopted_from_unknown_turn() -> None:
+    api = _make_api()
+    api._current_response_turn_id = ""
+
+    api._update_turn_contract_from_input(
+        "Say exactly 'Ready. Run 556 online.' Do not call tools or gesture.",
+        source="startup_prompt",
+    )
+    api._adopt_unknown_turn_contract(turn_id="turn_1")
+
+    assert "turn-unknown" not in api._turn_contracts_by_turn_id
+    assert api._turn_contract_blocks_gesture_cues(turn_id="turn_1") is True
+    assert api._turn_contract_exact_phrase(turn_id="turn_1") == "Ready. Run 556 online."
+
+
+def test_turn_contract_parse_detects_required_phrase_without_exactly() -> None:
+    api = _make_api()
+
+    contract = api._parse_turn_contract_from_text(
+        "Do one attention snap, then say, Sentinel Theo online."
+    )
+
+    assert contract["exact_phrase"] == ""
+    assert contract["required_phrase"] == "Sentinel Theo online."
+
+
+def test_response_done_decision_holds_terminal_selection_when_required_phrase_open() -> None:
+    api = _make_api()
+    api._update_turn_contract_from_input(
+        "Do one attention snap, then say, Sentinel Theo online.",
+        source="input_audio_transcription",
+    )
+    api._assistant_reply_accum = ""
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id="turn_1",
+        origin="server_auto",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id="turn_1", input_event_key="item_1"),
+    )
+
+    assert selected is False
+    assert reason == "exact_phrase_obligation_open"
+
+
+def test_turn_contract_required_phrase_not_open_when_already_spoken() -> None:
+    api = _make_api()
+    api._update_turn_contract_from_input(
+        "Do one attention snap, then say, Sentinel Theo online.",
+        source="input_audio_transcription",
+    )
+    api._assistant_reply_accum = "Sentinel Theo online."
+
+    assert api._turn_contract_exact_phrase_open(turn_id="turn_1") is False
 def test_turn_contract_exact_phrase_not_open_when_already_spoken() -> None:
     api = _make_api()
     api._update_turn_contract_from_input(
