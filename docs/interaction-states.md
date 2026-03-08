@@ -53,9 +53,9 @@ Definitions used in runtime docs:
 
 Precedence rule:
 
-> Ambient gestures may continue unless explicitly forbidden, but they must not cause loss,
-> suppression, delay-based failure, or semantic corruption of the user-requested
-> action/speech contract.
+> Ambient gestures may continue unless explicitly forbidden by the active turn contract
+> or runtime policy, but they must not cause loss, suppression, delay-based failure, or
+> semantic corruption of the user-requested action/speech contract.
 
 In this context, **interference** includes:
 
