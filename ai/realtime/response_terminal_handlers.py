@@ -600,6 +600,7 @@ class ResponseTerminalHandlers:
         response_id = api._response_id_from_event(event) or str(getattr(api, "_active_response_id", "") or "").strip()
         turn_id = api._current_turn_id_or_unknown()
         done_input_event_key = str(getattr(api, "_active_response_input_event_key", "") or "").strip()
+        done_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=done_input_event_key)
         active_response_origin_before_clear = str(getattr(api, "_active_response_origin", "") or "").strip().lower()
         api._cancel_micro_ack(turn_id=turn_id, reason="response_completed")
         api.response_in_progress = False
@@ -660,7 +661,7 @@ class ResponseTerminalHandlers:
                 reason=startup_terminal_reason,
                 turn_id=turn_id,
                 input_event_key=done_input_event_key,
-                canonical_key=api._canonical_utterance_key(turn_id=turn_id, input_event_key=done_input_event_key),
+                canonical_key=done_canonical_key,
             )
         api._clear_cancelled_response_tracking(response_id)
         if event:

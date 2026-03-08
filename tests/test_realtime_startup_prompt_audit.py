@@ -160,3 +160,75 @@ def test_startup_prompt_superseded_reason_vocabulary() -> None:
     api._maybe_mark_startup_prompt_superseded(source="text_message")
 
     assert terminal_calls == [("superseded", "first_live_user_turn_source=text_message")]
+
+
+def test_startup_prompt_terminal_reconciles_superseded_to_completed_once_for_same_identity(monkeypatch) -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._current_turn_id_or_unknown = lambda: "turn-startup"
+    api._current_run_id = lambda: "run-test"
+
+    logs: list[str] = []
+    monkeypatch.setattr("ai.realtime_api.logger.info", lambda message, *args: logs.append(message % args))
+
+    api._emit_startup_prompt_dispatched(turn_id="turn-startup", input_event_key="evt-startup")
+    api._emit_startup_prompt_bound(
+        turn_id="turn-startup",
+        input_event_key="evt-startup",
+        canonical_key="run-test:turn-startup:evt-startup",
+        reason="response_created",
+    )
+    api._emit_startup_prompt_terminal(
+        terminal_state="superseded",
+        reason="first_live_user_turn_source=text_message",
+        turn_id="turn-startup",
+        input_event_key="evt-startup",
+        canonical_key="run-test:turn-startup:evt-startup",
+    )
+    api._emit_startup_prompt_terminal(
+        terminal_state="completed",
+        reason="response_done",
+        turn_id="turn-startup",
+        input_event_key="evt-startup",
+        canonical_key="run-test:turn-startup:evt-startup",
+    )
+    api._emit_startup_prompt_terminal(
+        terminal_state="completed",
+        reason="response_done",
+        turn_id="turn-startup",
+        input_event_key="evt-startup",
+        canonical_key="run-test:turn-startup:evt-startup",
+    )
+
+    audit_state = api._startup_prompt_audit_state()
+    assert audit_state["terminal_state"] == "completed"
+    assert sum(1 for line in logs if line.startswith("startup_prompt_terminal run_id=")) == 1
+    assert sum(1 for line in logs if line.startswith("startup_prompt_terminal_reconciled run_id=")) == 1
+
+
+def test_startup_prompt_terminal_does_not_reconcile_when_identity_mismatched(monkeypatch) -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._current_turn_id_or_unknown = lambda: "turn-startup"
+    api._current_run_id = lambda: "run-test"
+
+    logs: list[str] = []
+    monkeypatch.setattr("ai.realtime_api.logger.info", lambda message, *args: logs.append(message % args))
+
+    api._emit_startup_prompt_terminal(
+        terminal_state="superseded",
+        reason="first_live_user_turn_source=text_message",
+        turn_id="turn-startup",
+        input_event_key="evt-startup",
+        canonical_key="run-test:turn-startup:evt-startup",
+    )
+    api._emit_startup_prompt_terminal(
+        terminal_state="completed",
+        reason="response_done",
+        turn_id="turn-other",
+        input_event_key="evt-startup",
+        canonical_key="run-test:turn-other:evt-startup",
+    )
+
+    audit_state = api._startup_prompt_audit_state()
+    assert audit_state["terminal_state"] == "superseded"
+    assert sum(1 for line in logs if line.startswith("startup_prompt_terminal_reconciled run_id=")) == 0
+    assert sum(1 for line in logs if line.startswith("startup_prompt_terminal run_id=")) == 1

@@ -1021,6 +1021,9 @@ class RealtimeAPI:
             "dispatched": False,
             "bound": False,
             "terminal": False,
+            "terminal_state": None,
+            "terminal_reason": None,
+            "reconciled": False,
             "turn_id": None,
             "input_event_key": None,
             "canonical_key": None,
@@ -13991,6 +13994,9 @@ class RealtimeAPI:
                 "dispatched": False,
                 "bound": False,
                 "terminal": False,
+                "terminal_state": None,
+                "terminal_reason": None,
+                "reconciled": False,
                 "turn_id": None,
                 "input_event_key": None,
                 "canonical_key": None,
@@ -14054,8 +14060,6 @@ class RealtimeAPI:
         canonical_key: str | None = None,
     ) -> None:
         audit_state = self._startup_prompt_audit_state()
-        if audit_state.get("terminal"):
-            return
         normalized_terminal_state = str(terminal_state or "").strip().lower()
         if normalized_terminal_state not in {"completed", "superseded", "skipped"}:
             normalized_terminal_state = "skipped"
@@ -14067,10 +14071,45 @@ class RealtimeAPI:
                 turn_id=normalized_turn_id,
                 input_event_key=normalized_input_key,
             )
+        existing_terminal_state = str(audit_state.get("terminal_state") or "").strip().lower()
+        if audit_state.get("terminal"):
+            stored_turn_id = str(audit_state.get("turn_id") or "").strip()
+            stored_canonical_key = str(audit_state.get("canonical_key") or "").strip()
+            same_identity = (
+                normalized_turn_id != "unknown"
+                and stored_turn_id == normalized_turn_id
+                and bool(stored_canonical_key)
+                and stored_canonical_key == normalized_canonical_key
+            )
+            can_reconcile = (
+                existing_terminal_state == "superseded"
+                and normalized_terminal_state == "completed"
+                and same_identity
+                and not bool(audit_state.get("reconciled"))
+            )
+            if can_reconcile:
+                audit_state["terminal_state"] = "completed"
+                audit_state["terminal_reason"] = str(reason or "none").strip() or "none"
+                audit_state["input_event_key"] = normalized_input_key
+                audit_state["reconciled"] = True
+                logger.info(
+                    "startup_prompt_terminal_reconciled run_id=%s turn_id=%s input_event_key=%s canonical_key=%s prior_terminal_state=%s terminal_state=%s reason=%s",
+                    self._current_run_id() or "",
+                    normalized_turn_id,
+                    normalized_input_key,
+                    normalized_canonical_key or "unknown",
+                    "superseded",
+                    "completed",
+                    str(reason or "none").strip() or "none",
+                )
+            return
         audit_state["terminal"] = True
+        audit_state["terminal_state"] = normalized_terminal_state
+        audit_state["terminal_reason"] = str(reason or "none").strip() or "none"
         audit_state["turn_id"] = normalized_turn_id
         audit_state["input_event_key"] = normalized_input_key
         audit_state["canonical_key"] = normalized_canonical_key or None
+        audit_state["reconciled"] = False
         logger.info(
             "startup_prompt_terminal run_id=%s turn_id=%s input_event_key=%s canonical_key=%s origin=prompt terminal_state=%s reason=%s",
             self._current_run_id() or "",
@@ -14078,7 +14117,7 @@ class RealtimeAPI:
             normalized_input_key,
             normalized_canonical_key or "unknown",
             normalized_terminal_state,
-            str(reason or "none").strip() or "none",
+            audit_state["terminal_reason"],
         )
 
     def _maybe_mark_startup_prompt_superseded(self, *, source: str) -> None:
