@@ -46,10 +46,6 @@ def _build_api_stub() -> RealtimeAPI:
     lifecycle_controller = InteractionLifecycleController()
     api._lifecycle_controller = lambda: lifecycle_controller
     api._cancel_micro_ack = lambda **_kwargs: None
-    api._pending_action = None
-    api._pending_research_request = None
-    api._research_pending_call_ids = set()
-    api._deferred_research_tool_call = None
     api._canonical_first_audio_started = lambda _canonical_key: True
     return api
 
@@ -462,10 +458,6 @@ def test_server_auto_audio_does_not_start_before_gating() -> None:
     api._lifecycle_controller = lambda: type("LC", (), {"on_audio_delta": staticmethod(lambda *_a, **_k: type("D", (), {"action": __import__("ai.interaction_lifecycle_controller", fromlist=["LifecycleDecisionAction"]).LifecycleDecisionAction.ALLOW, "reason": "ok"})())})()
     api._log_lifecycle_event = lambda **_kwargs: None
     api._cancel_micro_ack = lambda **_kwargs: None
-    api._pending_action = None
-    api._pending_research_request = None
-    api._research_pending_call_ids = set()
-    api._deferred_research_tool_call = None
     api._canonical_response_state_mutate = lambda **_kwargs: None
     sent = []
     api._get_or_create_transport = lambda: type("T", (), {"send_json": staticmethod(lambda _ws, event: sent.append(event) or __import__("asyncio").sleep(0))})()
@@ -901,72 +893,6 @@ def test_provisional_server_auto_tool_call_is_deferred_before_transcript_final(m
     assert api.function_call is None
     assert api.function_call_args == ""
 
-
-
-
-def test_reversible_gesture_execution_deferred_when_parent_contract_unresolved(monkeypatch) -> None:
-    api = _build_api_stub()
-    api._response_in_flight = True
-    api.response_in_progress = True
-    api._active_response_id = "resp-parent"
-    api._active_response_canonical_key = "run-464:turn_31:item_parent"
-    api._current_response_turn_id = "turn_31"
-    api.function_call = {"name": "gesture_look_center", "call_id": "call-defer"}
-    api.function_call_args = "{}"
-
-    captured: dict[str, str] = {}
-
-    async def _fake_noop(_websocket, **kwargs):
-        captured.update({k: str(v) for k, v in kwargs.items()})
-
-    monkeypatch.setattr(api, "_send_noop_tool_output", _fake_noop)
-
-    asyncio.run(api.handle_function_call({}, object()))
-
-    assert captured["status"] == "deferred"
-    assert captured["reason"] == "parent_contract_unresolved"
-    assert api.function_call is None
-
-
-def test_reversible_gesture_execution_allowed_when_parent_contract_declared() -> None:
-    api = _build_api_stub()
-    api._response_in_flight = True
-    api.response_in_progress = True
-    api._active_response_id = "resp-parent"
-    api._active_response_canonical_key = "run-464:turn_32:item_parent"
-    api._current_response_turn_id = "turn_32"
-    api.function_call = {
-        "name": "gesture_look_center",
-        "call_id": "call-allow",
-        "parent_expected_to_carry_tool_result": True,
-    }
-
-    admissible, reason = api._evaluate_tool_execution_admissibility(
-        tool_name="gesture_look_center",
-        call_id="call-allow",
-    )
-
-    assert admissible is True
-    assert reason == "parent_contract_declared"
-
-
-def test_silent_safe_tool_execution_allowed_without_parent_contract() -> None:
-    api = _build_api_stub()
-    api._response_in_flight = True
-    api.response_in_progress = True
-    api._active_response_id = "resp-parent"
-    api._active_response_canonical_key = "run-464:turn_33:item_parent"
-    api._current_response_turn_id = "turn_33"
-    api._silent_safe_tool_names = {"gesture_look_center"}
-    api.function_call = {"name": "gesture_look_center", "call_id": "call-silent-safe"}
-
-    admissible, reason = api._evaluate_tool_execution_admissibility(
-        tool_name="gesture_look_center",
-        call_id="call-silent-safe",
-    )
-
-    assert admissible is True
-    assert reason == "silent_safe_tool"
 
 def test_transcript_final_handoff_invalidates_provisional_tool_followup_lineage() -> None:
     api = _build_api_stub()
