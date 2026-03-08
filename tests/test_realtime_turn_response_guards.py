@@ -71,9 +71,154 @@ def _make_api() -> RealtimeAPI:
     api.state_manager = _FakeStateManager()
     api.assistant_reply = ""
     api._assistant_reply_accum = ""
+    api._turn_contracts_by_turn_id = {}
+    api._turn_contract_fallback = None
+    api._last_interaction_state = InteractionState.IDLE
+    api._last_gesture_time = 0.0
+    api._gesture_global_cooldown_s = 0.0
+    api._gesture_last_fired = {}
+    api._gesture_cooldowns_s = {}
     api.rate_limits = {}
     api._last_response_metadata = {}
     return api
+
+
+def test_turn_contract_parse_detects_exact_phrase_and_no_gesture() -> None:
+    api = _make_api()
+
+    contract = api._parse_turn_contract_from_text(
+        'Say exactly "Ready. Run 556 online." Do not call tools or gesture.'
+    )
+
+    assert contract["exact_phrase"] == "Ready. Run 556 online."
+    assert contract["no_tools"] is True
+    assert contract["no_gesture"] is True
+
+
+def test_turn_contract_blocks_state_gesture_cues() -> None:
+    api = _make_api()
+    api._last_interaction_state = InteractionState.SPEAKING
+    api._update_turn_contract_from_input("Say exactly 'Ready.' Do not call tools or gesture.", source="startup_prompt")
+
+    api._handle_state_gesture(InteractionState.IDLE)
+
+    assert api._last_interaction_state == InteractionState.IDLE
+
+
+def test_turn_contract_blocks_gesture_tool_calls() -> None:
+    api = _make_api()
+    api._update_turn_contract_from_input("Do not gesture.", source="input_audio_transcription")
+
+    assert api._turn_contract_blocks_tool_call(tool_name="gesture_attention_snap") is True
+    assert api._turn_contract_blocks_tool_call(tool_name="perform_research") is False
+
+
+def test_turn_contract_allows_explicit_requested_gesture_even_when_no_gesture_present() -> None:
+    api = _make_api()
+    api._update_turn_contract_from_input(
+        "Do one attention snap, then do not gesture.",
+        source="input_audio_transcription",
+    )
+
+    assert api._turn_contract_blocks_tool_call(tool_name="gesture_attention_snap") is False
+    assert api._turn_contract_blocks_tool_call(tool_name="gesture_nod") is True
+
+
+def test_turn_contract_exact_phrase_repair_scheduled_when_parent_missing_phrase() -> None:
+    api = _make_api()
+    api._update_turn_contract_from_input(
+        "Theo, do one attention snap, then say exactly: Sentinel Theo online.",
+        source="input_audio_transcription",
+    )
+    api._assistant_reply_accum = ""
+    sent_events: list[dict[str, object]] = []
+
+    async def _capture_send_response_create(_websocket, event, **kwargs):
+        sent_events.append({"event": event, **kwargs})
+        return True
+
+    api._send_response_create = _capture_send_response_create
+
+    scheduled = asyncio.run(
+        api._schedule_turn_contract_exact_phrase_repair_response(
+            turn_id="turn_1",
+            input_event_key="item_1",
+            websocket=object(),
+        )
+    )
+
+    assert scheduled is True
+    assert len(sent_events) == 1
+    metadata = sent_events[0]["event"]["response"]["metadata"]
+    assert metadata["turn_contract_exact_phrase_repair"] == "true"
+    assert metadata["input_event_key"] == "item_1:exact_phrase_repair"
+
+
+def test_turn_contract_exact_phrase_repair_schedules_at_most_once() -> None:
+    api = _make_api()
+    api._update_turn_contract_from_input(
+        "Say exactly: Sentinel Theo online.",
+        source="input_audio_transcription",
+    )
+    api._assistant_reply_accum = ""
+    sent_events: list[dict[str, object]] = []
+
+    async def _capture_send_response_create(_websocket, event, **kwargs):
+        sent_events.append({"event": event, **kwargs})
+        return True
+
+    api._send_response_create = _capture_send_response_create
+
+    first = asyncio.run(
+        api._schedule_turn_contract_exact_phrase_repair_response(
+            turn_id="turn_1",
+            input_event_key="item_1",
+            websocket=object(),
+        )
+    )
+    second = asyncio.run(
+        api._schedule_turn_contract_exact_phrase_repair_response(
+            turn_id="turn_1",
+            input_event_key="item_1",
+            websocket=object(),
+        )
+    )
+
+    assert first is True
+    assert second is False
+    assert len(sent_events) == 1
+
+
+def test_turn_contract_exact_phrase_not_open_when_already_spoken() -> None:
+    api = _make_api()
+    api._update_turn_contract_from_input(
+        "Say exactly: Sentinel Theo online.",
+        source="input_audio_transcription",
+    )
+    api._assistant_reply_accum = "Sentinel Theo online."
+
+    assert api._turn_contract_exact_phrase_open(turn_id="turn_1") is False
+    assert api._turn_contract_exact_phrase(turn_id="turn_1") == ""
+
+
+def test_response_done_decision_holds_terminal_selection_when_exact_phrase_open() -> None:
+    api = _make_api()
+    api._update_turn_contract_from_input(
+        "Do one attention snap, then say exactly: Sentinel Theo online.",
+        source="input_audio_transcription",
+    )
+    api._assistant_reply_accum = ""
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id="turn_1",
+        origin="server_auto",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id="turn_1", input_event_key="item_1"),
+    )
+
+    assert selected is False
+    assert reason == "exact_phrase_obligation_open"
 
 
 def test_empty_response_done_schedules_single_retry_for_prompt_origin() -> None:
