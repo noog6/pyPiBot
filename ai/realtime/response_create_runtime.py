@@ -101,6 +101,11 @@ class ResponseCreateRuntime:
             origin=origin,
             turn_id=turn_id,
         )
+        response_metadata = api._extract_response_create_metadata(response_create_event)
+        canonical_origin = api._canonical_response_create_origin(
+            origin=origin,
+            response_metadata=response_metadata,
+        )
         with api._utterance_context_scope(
             turn_id=turn_id,
             input_event_key=current_input_event_key,
@@ -108,12 +113,11 @@ class ResponseCreateRuntime:
             turn_id = resolved_context.turn_id
             current_input_event_key = resolved_context.input_event_key
             canonical_key = resolved_context.canonical_key
-        response_metadata = api._extract_response_create_metadata(response_create_event)
         self._apply_memory_intent_instruction_guardrail(
             response_create_event=response_create_event,
             response_metadata=response_metadata,
         )
-        normalized_origin = str(origin or "").strip().lower()
+        normalized_origin = canonical_origin
         lineage_guard = getattr(api, "_evaluate_tool_lineage_guard", None)
         if callable(lineage_guard):
             lineage_allowed, _lineage_reason, _lineage_canonical_key, _lineage_parent_state, _lineage_call_id = lineage_guard(
@@ -527,6 +531,11 @@ class ResponseCreateRuntime:
             origin=origin,
             turn_id=turn_id,
         )
+        response_metadata = api._extract_response_create_metadata(response_create_event)
+        canonical_origin = api._canonical_response_create_origin(
+            origin=origin,
+            response_metadata=response_metadata,
+        )
 
         preference_payload = None
         if hasattr(api, "_peek_pending_preference_memory_context_payload"):
@@ -545,7 +554,7 @@ class ResponseCreateRuntime:
             turn_id=turn_id,
             input_event_key=current_input_event_key,
             cause="prepare_response_create",
-            origin=origin,
+            origin=canonical_origin,
         )
         with api._utterance_context_scope(turn_id=turn_id, input_event_key=current_input_event_key) as resolved_context:
             turn_id = resolved_context.turn_id
@@ -613,12 +622,11 @@ class ResponseCreateRuntime:
                 canonical_key,
             )
 
-        response_metadata = api._extract_response_create_metadata(response_create_event)
         self._apply_memory_intent_instruction_guardrail(
             response_create_event=response_create_event,
             response_metadata=response_metadata,
         )
-        normalized_origin = str(origin or "").strip().lower()
+        normalized_origin = canonical_origin
         lineage_guard = getattr(api, "_evaluate_tool_lineage_guard", None)
         if callable(lineage_guard):
             lineage_allowed, _lineage_reason, _lineage_canonical_key, _lineage_parent_state, _lineage_call_id = lineage_guard(

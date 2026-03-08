@@ -2502,6 +2502,18 @@ def test_dropped_tool_followup_lineage_blocks_micro_ack_non_consuming_create(mon
     assert [event for event in ws.sent if event.get("type") == "response.create"] == []
     assert any("micro_ack_lineage_guard outcome=deny reason=tool_followup_state_dropped" in entry for entry in captured_logs)
     assert any(
+        "active_key_transition" in entry
+        and "cause=prepare_response_create" in entry
+        and "origin=micro_ack" in entry
+        for entry in captured_logs
+    )
+    assert any(
+        "derived_response_lineage_eval origin=micro_ack" in entry
+        and f"canonical_key={canonical_key}" in entry
+        and "allowed=false" in entry
+        for entry in captured_logs
+    )
+    assert any(
         "suppressed_tool_lineage_block origin=micro_ack" in entry
         and f"canonical_key={canonical_key}" in entry
         for entry in captured_logs
@@ -2579,3 +2591,27 @@ def test_suppressed_tool_followup_lineage_is_idempotent_across_repeated_queue_dr
 
     assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
     assert [event for event in ws.sent if event.get("type") == "response.create"] == []
+
+
+def test_assistant_message_non_tool_lineage_path_still_allowed() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+
+    turn_id = "turn_assistant_normal"
+    response_create_event = {
+        "type": "response.create",
+        "response": {
+            "metadata": {
+                "turn_id": turn_id,
+                "input_event_key": "item_assistant_normal",
+            }
+        },
+    }
+
+    sent = asyncio.run(api._send_response_create(ws, response_create_event, origin="assistant_message"))
+
+    assert sent is True
+    response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert len(response_create_events) == 1
