@@ -6079,10 +6079,11 @@ class RealtimeAPI:
         normalized_input_event_key = str(input_event_key or "").strip()
         if not normalized_input_event_key.startswith("tool:"):
             return True, "not_tool_lineage", "", "not_applicable", ""
-        normalized_origin = str(origin or "unknown").strip().lower() or "unknown"
         metadata = response_metadata if isinstance(response_metadata, dict) else {}
-        is_micro_ack = str(metadata.get("micro_ack", "")).strip().lower() in {"1", "true", "yes"}
-        lineage_origin = "micro_ack" if is_micro_ack else normalized_origin
+        lineage_origin = self._canonical_response_create_origin(
+            origin=origin,
+            response_metadata=metadata,
+        )
         canonical_key = self._canonical_utterance_key(
             turn_id=turn_id,
             input_event_key=normalized_input_event_key,
@@ -9217,6 +9218,19 @@ class RealtimeAPI:
         if not isinstance(metadata, dict):
             return {}
         return metadata
+
+    def _canonical_response_create_origin(
+        self,
+        *,
+        origin: str | None,
+        response_metadata: dict[str, Any] | None = None,
+    ) -> str:
+        normalized_origin = str(origin or "unknown").strip().lower() or "unknown"
+        metadata = response_metadata if isinstance(response_metadata, dict) else {}
+        is_micro_ack = str(metadata.get("micro_ack", "")).strip().lower() in {"1", "true", "yes"}
+        if is_micro_ack:
+            return "micro_ack"
+        return normalized_origin
 
     def _extract_response_create_trigger(self, metadata: dict[str, Any]) -> str:
         trigger = metadata.get("trigger") if isinstance(metadata, dict) else None
