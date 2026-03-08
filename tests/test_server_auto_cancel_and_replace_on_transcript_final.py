@@ -24,7 +24,6 @@ class _Transport:
 def _build_api_stub() -> RealtimeAPI:
     api = RealtimeAPI.__new__(RealtimeAPI)
     api._pending_server_auto_response_by_turn_id = {}
-    api._mixed_intent_local_actions_by_turn = {}
     api._cancelled_response_ids = set()
     api._suppressed_audio_response_ids = set()
     api._cancelled_response_timing_by_id = {}
@@ -999,33 +998,3 @@ def test_distinct_info_tool_followup_not_suppressed_after_canonical_ownership() 
 
     assert should_drop is False
     assert reason == "distinct_info"
-
-
-def test_mixed_intent_local_action_suppresses_equivalent_tool_call(monkeypatch) -> None:
-    api = _build_api_stub()
-    api._active_response_origin = "upgraded_response"
-    api._current_response_turn_id = "turn_2"
-    api._current_turn_id_or_unknown = lambda: "turn_2"
-    api._mixed_intent_local_actions_by_turn = {"turn_2": {"gesture_look_center"}}
-    api.function_call = {"name": "gesture_look_center", "call_id": "call-mixed-dup"}
-    api.function_call_args = "{}"
-    api._pending_action = None
-
-    captured: dict[str, str] = {}
-
-    async def _fake_noop(_websocket, **kwargs):
-        captured.update({k: str(v) for k, v in kwargs.items()})
-
-    monkeypatch.setattr(api, "_send_noop_tool_output", _fake_noop)
-
-    async def _fake_emit(*_args, **_kwargs):
-        return True
-
-    monkeypatch.setattr(api, "_emit_final_noop_user_text", _fake_emit)
-
-    asyncio.run(api.handle_function_call({}, object()))
-
-    assert captured["reason"] == "mixed_intent_local_action_already_executed"
-    assert captured["status"] == "redundant"
-    assert api.function_call is None
-    assert api.function_call_args == ""

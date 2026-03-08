@@ -231,12 +231,6 @@ async def _maybe_handle_preference_recall_intent(controller, text: str, websocke
                         source,
                         mixed_intent_gesture_tool,
                     )
-                    if hasattr(controller, "_record_mixed_intent_local_action"):
-                        controller._record_mixed_intent_local_action(
-                            turn_id=resolved_turn_id,
-                            tool_name=mixed_intent_gesture_tool,
-                            source=source,
-                        )
                 except Exception:
                     logger.warning(
                         "mixed_intent_action_failed run_id=%s turn_id=%s source=%s tool=%s",
