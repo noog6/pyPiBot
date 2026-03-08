@@ -6656,7 +6656,7 @@ class RealtimeAPI:
                 parent_covered, coverage_source, deliverable_observed, deliverable_class, terminal_selected, terminal_reason = self._parent_response_coverage_state(
                     parent_state=state_entry[1],
                 )
-                logger.info(
+                logger.debug(
                     "parent_coverage_source_of_truth run_id=%s parent_response_id=%s covered=%s source=%s canonical_observed=%s canonical_class=%s terminal_selected=%s terminal_reason=%s",
                     self._current_run_id() or "",
                     resolved_parent_response_id,
@@ -6712,7 +6712,7 @@ class RealtimeAPI:
         parent_covered, coverage_source, deliverable_observed, deliverable_class, terminal_selected, terminal_reason = self._parent_response_coverage_state(
             parent_state=parent_state,
         )
-        logger.info(
+        logger.debug(
             "parent_coverage_source_of_truth run_id=%s parent_response_id=%s covered=%s source=%s canonical_observed=%s canonical_class=%s terminal_selected=%s terminal_reason=%s",
             self._current_run_id() or "",
             str(getattr(parent_state, "response_id", "") or "").strip() or "none",

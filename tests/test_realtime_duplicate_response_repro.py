@@ -2522,6 +2522,91 @@ def test_tool_followup_parent_resolution_ignores_tool_parent_input_key() -> None
     assert parent_entry[0] == parent_key
 
 
+def test_create_seam_parent_coverage_emits_single_info_source_of_truth(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    parent_key = api._canonical_utterance_key(turn_id="turn_cov", input_event_key="item_parent_cov")
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id="turn_cov",
+        input_event_key="item_parent_cov",
+        mutator=lambda record: (
+            setattr(record, "origin", "assistant_message"),
+            setattr(record, "response_id", "resp-parent-cov"),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "final"),
+            setattr(record, "done", True),
+        ),
+    )
+
+    event, canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_cov",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+    metadata = ((event.get("response") or {}).get("metadata") or {})
+    metadata["turn_id"] = "turn_cov"
+    metadata["parent_turn_id"] = "turn_cov"
+    metadata["parent_input_event_key"] = "item_parent_cov"
+    metadata["blocked_by_response_id"] = "resp-parent-cov"
+
+    captured_info: list[str] = []
+    captured_debug: list[str] = []
+    original_info = logger.info
+    original_debug = logger.debug
+
+    def _capture_info(message: str, *args, **kwargs):
+        rendered = str(message)
+        if args:
+            rendered = rendered % args
+        captured_info.append(rendered)
+        return original_info(message, *args, **kwargs)
+
+    def _capture_debug(message: str, *args, **kwargs):
+        rendered = str(message)
+        if args:
+            rendered = rendered % args
+        captured_debug.append(rendered)
+        return original_debug(message, *args, **kwargs)
+
+    monkeypatch.setattr(logger, "info", _capture_info)
+    monkeypatch.setattr(logger, "debug", _capture_debug)
+
+    should_suppress, _, reason = api._should_suppress_queued_tool_followup_release(
+        response_metadata=metadata,
+        blocked_by_response_id="resp-parent-cov",
+    )
+
+    assert should_suppress is True
+    assert reason == "parent_covered_tool_result"
+    assert not any("parent_coverage_source_of_truth" in entry for entry in captured_info)
+
+    should_drop = api._should_drop_tool_followup_at_create_seam(
+        turn_id="turn_cov",
+        response_metadata=metadata,
+        canonical_key=canonical_key,
+        drain_trigger="test",
+    )
+
+    assert should_drop is True
+
+    info_parent_coverage = [
+        entry for entry in captured_info if "parent_coverage_source_of_truth" in entry
+    ]
+    debug_parent_coverage = [
+        entry for entry in captured_debug if "parent_coverage_source_of_truth" in entry
+    ]
+
+    assert len(info_parent_coverage) == 1
+    assert all("canonical_class=final" in entry for entry in info_parent_coverage)
+    assert all("terminal_selected=" in entry for entry in info_parent_coverage)
+    assert all("terminal_reason=" in entry for entry in info_parent_coverage)
+    assert len(debug_parent_coverage) >= 1
+    assert any("create_seam_parent_coverage_eval" in entry for entry in captured_info)
+
+
+
 def test_dropped_tool_followup_lineage_blocks_assistant_message_create(monkeypatch) -> None:
     api = _make_api_stub()
     _wire_runtime(api)
