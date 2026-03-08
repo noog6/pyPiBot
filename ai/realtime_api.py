@@ -4088,6 +4088,85 @@ class RealtimeAPI:
             reason=reason,
         )
 
+    def _invalidate_provisional_tool_followups_for_turn(
+        self,
+        *,
+        turn_id: str,
+        provisional_parent_input_event_key: str,
+        reason: str,
+    ) -> None:
+        normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
+        normalized_parent_key = str(provisional_parent_input_event_key or "").strip()
+        if not normalized_parent_key or not self._is_synthetic_input_event_key(normalized_parent_key):
+            return
+
+        def _is_provisional_tool_followup(event: dict[str, Any], *, fallback_turn_id: str) -> tuple[bool, str]:
+            metadata = self._extract_response_create_metadata(event)
+            if str(metadata.get("tool_followup", "")).strip().lower() not in {"true", "1", "yes"}:
+                return False, ""
+            event_turn_id = str(metadata.get("parent_turn_id") or metadata.get("turn_id") or fallback_turn_id or "").strip() or fallback_turn_id
+            parent_input_event_key = str(metadata.get("parent_input_event_key") or "").strip()
+            if event_turn_id != normalized_turn_id or parent_input_event_key != normalized_parent_key:
+                return False, ""
+            canonical_key = self._canonical_utterance_key(
+                turn_id=str(metadata.get("turn_id") or fallback_turn_id or "").strip() or fallback_turn_id,
+                input_event_key=str(metadata.get("input_event_key") or "").strip(),
+            )
+            return True, canonical_key
+
+        dropped_pending = 0
+        pending = getattr(self, "_pending_response_create", None)
+        if pending is not None and isinstance(getattr(pending, "event", None), dict):
+            is_match, canonical_key = _is_provisional_tool_followup(
+                pending.event,
+                fallback_turn_id=str(getattr(pending, "turn_id", "") or normalized_turn_id),
+            )
+            if is_match:
+                if canonical_key:
+                    self._set_tool_followup_state(
+                        canonical_key=canonical_key,
+                        state="dropped",
+                        reason=f"transcript_final_handoff_provisional_lineage:{reason}",
+                    )
+                self._pending_response_create = None
+                dropped_pending = 1
+
+        dropped_queue = 0
+        queue = getattr(self, "_response_create_queue", None)
+        if isinstance(queue, deque) and queue:
+            retained: deque[dict[str, Any]] = deque()
+            for queued in queue:
+                if not isinstance(queued, dict) or not isinstance(queued.get("event"), dict):
+                    retained.append(queued)
+                    continue
+                is_match, canonical_key = _is_provisional_tool_followup(
+                    queued["event"],
+                    fallback_turn_id=str(queued.get("turn_id") or normalized_turn_id),
+                )
+                if not is_match:
+                    retained.append(queued)
+                    continue
+                if canonical_key:
+                    self._set_tool_followup_state(
+                        canonical_key=canonical_key,
+                        state="dropped",
+                        reason=f"transcript_final_handoff_provisional_lineage:{reason}",
+                    )
+                dropped_queue += 1
+            self._response_create_queue = retained
+
+        if dropped_pending or dropped_queue:
+            self._sync_pending_response_create_queue()
+            logger.info(
+                "provisional_tool_followup_invalidated run_id=%s turn_id=%s parent_input_event_key=%s reason=%s dropped_pending=%s dropped_queue=%s",
+                self._current_run_id() or "",
+                normalized_turn_id,
+                normalized_parent_key,
+                str(reason or "unknown").strip() or "unknown",
+                dropped_pending,
+                dropped_queue,
+            )
+
     def _record_pending_server_auto_response(
         self,
         *,
@@ -4210,9 +4289,10 @@ class RealtimeAPI:
 
         if active_response_id and pending_response_id == active_response_id:
             return True
-        if mutation == "replaced":
-            # Replacement cleanups are allowed when lineage still matches even if
-            # active ownership has already moved to the replacement response.
+        if mutation in {"replaced", "cancel_and_replace", "cancelled"}:
+            # Transcript-final replacement cleanups are allowed when lineage still
+            # matches even if active ownership has already moved or response.done
+            # has cleared active ownership.
             return True
         logger.info(
             "pending_server_auto_mutation_rejected run_id=%s turn_id=%s mutation=%s reason=lineage_mismatch pending_response_id=%s active_response_id=%s",
@@ -4759,6 +4839,19 @@ class RealtimeAPI:
             reason="pending_replaced",
             response_id=pending.response_id,
         )
+
+    def _should_defer_provisional_server_auto_tool_call(self) -> bool:
+        active_origin = str(getattr(self, "_active_response_origin", "") or "").strip().lower()
+        if active_origin != "server_auto":
+            return False
+        turn_id = str(getattr(self, "_current_response_turn_id", "") or "").strip()
+        active_response_id = str(getattr(self, "_active_response_id", "") or "").strip()
+        active_input_event_key = str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip() or str(
+            getattr(self, "_active_response_input_event_key", "") or ""
+        ).strip()
+        if not turn_id or not active_response_id or not self._is_synthetic_input_event_key(active_input_event_key):
+            return False
+        return self._server_auto_pre_audio_hold_active(turn_id=turn_id, response_id=active_response_id)
 
     def _is_cancelled_response_event(self, event: dict[str, Any]) -> bool:
         response_id = self._response_id_from_event(event)
@@ -11719,6 +11812,23 @@ class RealtimeAPI:
             active_input_event_key=input_event_key,
             reason="new_transcript_final",
         )
+        pending_server_auto_input_event_key = ""
+        pending_server_auto_response_id = str(getattr(pending_server_auto, "response_id", "") or "").strip()
+        if pending_server_auto_response_id:
+            trace = self._response_trace_by_id().get(pending_server_auto_response_id, {})
+            pending_server_auto_input_event_key = str(trace.get("input_event_key") or "").strip()
+        if not pending_server_auto_input_event_key:
+            pending_server_auto_input_event_key = str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip()
+        if not pending_server_auto_input_event_key:
+            pending_server_auto_input_event_key = str(getattr(pending_server_auto, "canonical_key", "") or "").strip()
+            if pending_server_auto_input_event_key and ":" in pending_server_auto_input_event_key:
+                pending_server_auto_input_event_key = pending_server_auto_input_event_key.split(":")[-1]
+        if pending_server_auto_input_event_key:
+            self._invalidate_provisional_tool_followups_for_turn(
+                turn_id=resolved_turn_id,
+                provisional_parent_input_event_key=pending_server_auto_input_event_key,
+                reason="transcript_final_handoff",
+            )
         memory_intent_subtype = self._classify_memory_intent(transcript or "")
         memory_intent = memory_intent_subtype != "none"
         logger.info(
@@ -12246,6 +12356,28 @@ class RealtimeAPI:
                 call_id,
                 args_parsed,
             )
+            if self._should_defer_provisional_server_auto_tool_call():
+                logger.info(
+                    "Function call deferred | tool=%s call_id=%s reason=provisional_server_auto_pre_audio_hold",
+                    function_name,
+                    call_id,
+                )
+                await self._send_noop_tool_output(
+                    websocket,
+                    call_id=call_id,
+                    status="deferred",
+                    message=(
+                        "No action taken. Tool call deferred while transcript-final ownership is still provisional; "
+                        "retry after transcript-final handoff."
+                    ),
+                    tool_name=function_name,
+                    reason="provisional_server_auto_pre_audio_hold",
+                    category="suppression",
+                    include_response_create=False,
+                )
+                self.function_call = None
+                self.function_call_args = ""
+                return
             token = getattr(self, "_pending_confirmation_token", None)
             research_fingerprint = (
                 self._build_research_args_fingerprint(args)

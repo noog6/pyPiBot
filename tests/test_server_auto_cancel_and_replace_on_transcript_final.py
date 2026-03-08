@@ -866,3 +866,135 @@ def test_mark_pending_server_auto_response_replaced_rejects_lineage_mismatch(mon
         "pending_server_auto_mutation_rejected" in line and "reason=lineage_mismatch" in line
         for line in captured
     )
+
+
+def test_provisional_server_auto_tool_call_is_deferred_before_transcript_final(monkeypatch) -> None:
+    api = _build_api_stub()
+    api._active_response_origin = "server_auto"
+    api._current_response_turn_id = "turn_3"
+    api._active_response_id = "resp-server-auto"
+    api._active_server_auto_input_event_key = "synthetic_server_auto_3"
+    api.function_call = {"name": "gesture_look_around", "call_id": "call-provisional"}
+    api.function_call_args = "{}"
+
+    captured: dict[str, str] = {}
+
+    async def _fake_noop(_websocket, **kwargs):
+        captured.update({k: str(v) for k, v in kwargs.items()})
+
+    monkeypatch.setattr(api, "_send_noop_tool_output", _fake_noop)
+
+    api._server_auto_pre_audio_hold_active = lambda **_kwargs: True
+
+    asyncio.run(api.handle_function_call({}, object()))
+
+    assert captured["reason"] == "provisional_server_auto_pre_audio_hold"
+    assert captured["status"] == "deferred"
+    assert api.function_call is None
+    assert api.function_call_args == ""
+
+
+def test_transcript_final_handoff_invalidates_provisional_tool_followup_lineage() -> None:
+    api = _build_api_stub()
+    api._pending_response_create = types.SimpleNamespace(
+        event={
+            "type": "response.create",
+            "response": {
+                "metadata": {
+                    "turn_id": "turn_3",
+                    "parent_turn_id": "turn_3",
+                    "input_event_key": "tool:call_pending",
+                    "parent_input_event_key": "synthetic_server_auto_3",
+                    "tool_followup": "true",
+                }
+            },
+        },
+        turn_id="turn_3",
+    )
+    api._response_create_queue = deque(
+        [
+            {
+                "turn_id": "turn_3",
+                "event": {
+                    "type": "response.create",
+                    "response": {
+                        "metadata": {
+                            "turn_id": "turn_3",
+                            "parent_turn_id": "turn_3",
+                            "input_event_key": "tool:call_queued",
+                            "parent_input_event_key": "synthetic_server_auto_3",
+                            "tool_followup": "true",
+                        }
+                    },
+                },
+            }
+        ]
+    )
+    api._sync_pending_response_create_queue = lambda: None
+
+    api._invalidate_provisional_tool_followups_for_turn(
+        turn_id="turn_3",
+        provisional_parent_input_event_key="synthetic_server_auto_3",
+        reason="transcript_final_handoff",
+    )
+
+    assert api._pending_response_create is None
+    assert list(api._response_create_queue) == []
+    assert api._tool_followup_state(canonical_key="run-464:turn_3:tool:call_pending") == "dropped"
+    assert api._tool_followup_state(canonical_key="run-464:turn_3:tool:call_queued") == "dropped"
+
+
+def test_cancel_and_replace_allows_post_done_lineage_when_active_response_cleared(monkeypatch) -> None:
+    api = _build_api_stub()
+    transport = _Transport()
+    captured: list[str] = []
+
+    def _capture(message, *args):
+        captured.append(message % args)
+
+    monkeypatch.setattr("ai.realtime_api.logger.info", _capture)
+
+    api._active_response_id = None
+    api._pending_server_auto_response_by_turn_id["turn_30"] = PendingServerAutoResponse(
+        turn_id="turn_30",
+        response_id="resp-server-auto",
+        canonical_key="run-464:turn_30:synthetic_server_auto_30",
+        created_at_ms=1,
+        active=True,
+        upgrade_chain_id="run-464:turn_30:synthetic_server_auto_30",
+    )
+    api._peek_pending_preference_memory_context_payload = lambda **_kwargs: None
+    api._get_or_create_transport = lambda: transport
+
+    async def _fake_send_response_create(_websocket, _event, **_kwargs):
+        return True
+
+    api._send_response_create = _fake_send_response_create
+
+    replaced = asyncio.run(
+        api._cancel_and_replace_pending_server_auto_on_transcript_final(
+            websocket=object(),
+            turn_id="turn_30",
+            input_event_key="item_30",
+            origin_label="upgraded_response",
+        )
+    )
+
+    assert replaced is True
+    assert any("upgrade_flow_snapshot" in line and "action=cancel_and_replace" in line for line in captured)
+    assert not any("pending_server_auto_mutation_rejected" in line for line in captured)
+
+
+def test_distinct_info_tool_followup_not_suppressed_after_canonical_ownership() -> None:
+    api = _build_api_stub()
+    should_drop, _parent_entry, reason = api._should_suppress_queued_tool_followup_release(
+        response_metadata={
+            "tool_followup_suppress_if_parent_covered": "true",
+            "tool_name": "gesture_look_around",
+            "tool_result_has_distinct_info": "true",
+        },
+        blocked_by_response_id="resp-parent",
+    )
+
+    assert should_drop is False
+    assert reason == "distinct_info"
