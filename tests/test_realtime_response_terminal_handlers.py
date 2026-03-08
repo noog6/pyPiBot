@@ -51,6 +51,7 @@ def _make_api() -> RealtimeAPI:
     api._active_response_consumes_canonical_slot = True
     api._response_done_serial = 0
     api.response_in_progress = True
+    api._apply_terminal_deliverable_selection = lambda **_kwargs: None
     api._response_in_flight = True
     api._response_obligations = {}
     api._response_create_queue = []
@@ -149,6 +150,32 @@ def test_handle_response_done_logs_normal_deliverable_selection() -> None:
     )
 
 
+
+
+def test_handle_response_done_applies_terminal_selection_to_canonical_state() -> None:
+    api = _make_api()
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    apply_selection = Mock()
+    api._apply_terminal_deliverable_selection = apply_selection
+
+    asyncio.run(api.handle_response_done({"type": "response.done"}))
+
+    apply_selection.assert_called_once_with(
+        canonical_key="turn_1::input_evt_1",
+        response_id="resp_1",
+        turn_id="turn_1",
+        input_event_key="input_evt_1",
+        selected=True,
+        selection_reason="normal",
+    )
 
 def test_handle_response_done_marks_micro_ack_as_non_deliverable() -> None:
     api = _make_api()
