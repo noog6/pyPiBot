@@ -1192,6 +1192,21 @@ class ResponseCreateRuntime:
         ):
             api._pending_response_create = None
             if pending.reason != "legacy_queue_hydration":
+                queue = getattr(api, "_response_create_queue", None)
+                if isinstance(queue, deque):
+                    removed = False
+                    kept: deque[dict[str, Any]] = deque()
+                    for queued in queue:
+                        metadata = api._extract_response_create_metadata(queued.get("event") or {})
+                        queued_canonical_key = api._canonical_utterance_key(
+                            turn_id=str(queued.get("turn_id") or "").strip(),
+                            input_event_key=str(metadata.get("input_event_key") or "").strip(),
+                        )
+                        if not removed and queued_canonical_key == pending_canonical_key:
+                            removed = True
+                            continue
+                        kept.append(queued)
+                    api._response_create_queue = kept
                 api._sync_pending_response_create_queue()
             drain_result = "dropped_parent_covered"
             skipped_reason = "parent_covered_tool_result"
