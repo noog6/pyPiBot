@@ -37,6 +37,51 @@ state_manager.set_earcon_handler(my_earcon_handler)
 The handlers receive the new `InteractionState`, so they can dispatch different cues per
 state.
 
+## Ambient vs Requested Gestures (Turn-Contract Precedence)
+
+Theo may emit **ambient gestures** (also called innate/background/expressive gestures)
+from state cues while a turn is active. These cues are allowed by default unless a caller
+explicitly forbids gesture output for that turn.
+
+Definitions used in runtime docs:
+
+- **Ambient gesture**: state-driven embodiment motion emitted for presence or expressiveness
+  (for example, thinking/listening tilt or idle nod).
+- **User-requested action/gesture**: an explicit action the user asked Theo to perform.
+- **Speech obligation / turn contract**: required speech or phrase obligations attached to
+  the turn outcome (including exact/inclusion phrase repairs when required).
+
+Precedence rule:
+
+> Ambient gestures may continue unless explicitly forbidden, but they must not cause loss,
+> suppression, delay-based failure, or semantic corruption of the user-requested
+> action/speech contract.
+
+In this context, **interference** includes:
+
+- Replacing the requested action with ambient motion.
+- Preventing or dropping required speech output.
+- Collapsing “do action + say phrase” into only one half.
+- Suppressing a required repair/follow-up response that is needed to satisfy the turn.
+- Materially corrupting timing/ordering so the requested contract is not fulfilled.
+
+Allowed coexistence example:
+
+- Theo performs a subtle thinking tilt while still completing: “Do one attention snap, then
+  say ‘Sentinel Theo online.’”
+
+Not allowed examples:
+
+- Ambient motion replaces the requested attention snap.
+- Ambient behavior causes the required phrase obligation to be dropped.
+- Theo closes the turn after a micro-ack without delivering the requested phrase.
+
+Current limitation:
+
+- Ambient gesture emitters can operate somewhat independently from upper intent/arbitration
+  layers. The current guarantee is therefore **outcome-based** (requested contract must still
+  be fulfilled), not “total gesture subsystem silence” during a turn.
+
 ## Configuration
 
 State cues and timing thresholds are configured in `config/default.yaml` under
