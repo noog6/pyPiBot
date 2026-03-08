@@ -2401,6 +2401,55 @@ class RealtimeAPI:
                     )
                 )
 
+    def _reconcile_terminal_substantive_response(
+        self,
+        *,
+        turn_id: str,
+        canonical_key: str,
+        response_id: str,
+        selected: bool,
+        selection_reason: str,
+    ) -> None:
+        normalized_reason = str(selection_reason or "").strip().lower()
+        # Reconcile only terminal user-deliverable substantive output
+        # (selected + normal), not all response activity.
+        if not selected or normalized_reason != "normal":
+            return
+
+        normalized_canonical_key = str(canonical_key or "").strip() or "canonical-unknown"
+        state = self._conversation_efficiency_state(turn_id=turn_id)
+        counts = state.substantive_count_by_canonical or {}
+        existing_count = int(counts.get(normalized_canonical_key, 0))
+        # Idempotency guard: keying this reconciliation to (turn_id, canonical_key)
+        # is stable across repaired/rebound terminal paths where response_id can differ
+        # while still representing one user-facing canonical deliverable.
+        if existing_count > 0:
+            logger.debug(
+                "terminal_substantive_reconcile_skipped run_id=%s turn_id=%s canonical_key=%s response_id=%s selected=%s reason=%s existing_count=%s",
+                self._current_run_id() or "",
+                str(turn_id or "").strip() or "turn-unknown",
+                normalized_canonical_key,
+                str(response_id or "").strip() or "none",
+                str(bool(selected)).lower(),
+                normalized_reason,
+                existing_count,
+            )
+            return
+
+        self._record_substantive_response(
+            turn_id=turn_id,
+            canonical_key=normalized_canonical_key,
+        )
+        logger.info(
+            "terminal_substantive_reconcile_applied run_id=%s turn_id=%s canonical_key=%s response_id=%s selected=%s reason=%s",
+            self._current_run_id() or "",
+            str(turn_id or "").strip() or "turn-unknown",
+            normalized_canonical_key,
+            str(response_id or "").strip() or "none",
+            str(bool(selected)).lower(),
+            normalized_reason,
+        )
+
     def _recent_silent_turn_lifecycle_markers(self, *, canonical_key: str) -> str:
         normalized_canonical_key = str(canonical_key or "").strip()
         if not normalized_canonical_key:

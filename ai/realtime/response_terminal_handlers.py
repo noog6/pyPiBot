@@ -319,11 +319,19 @@ class ResponseTerminalHandlers:
                     str(active_response_id_before_clear or "none"),
                 )
 
+        resolved_response_id = str(active_response_id_before_clear or "")
         api._apply_terminal_deliverable_selection(
             canonical_key=done_canonical_key,
-            response_id=str(active_response_id_before_clear or ""),
+            response_id=resolved_response_id,
             turn_id=turn_id,
             input_event_key=done_input_event_key,
+            selected=selected,
+            selection_reason=selection_reason,
+        )
+        api._reconcile_terminal_substantive_response(
+            turn_id=turn_id,
+            canonical_key=done_canonical_key,
+            response_id=resolved_response_id,
             selected=selected,
             selection_reason=selection_reason,
         )
