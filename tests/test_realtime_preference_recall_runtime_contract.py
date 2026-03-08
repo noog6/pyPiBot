@@ -672,6 +672,89 @@ def test_preference_recall_run453_divergence_parity_with_direct_domain_recall(mo
     assert payload["memories"] or payload["memory_cards"] or domain_hit_succeeded
 
 
+
+
+def test_topic_recall_bridge_attaches_preference_context_for_value_lookup(monkeypatch) -> None:
+    api = _base_api()
+    api._is_preference_recall_intent = RealtimeAPI._is_preference_recall_intent.__get__(api, RealtimeAPI)
+    api._classify_memory_intent = RealtimeAPI._classify_memory_intent.__get__(api, RealtimeAPI)
+    api._get_memory_runtime = RealtimeAPI._get_memory_runtime.__get__(api, RealtimeAPI)
+    api._build_preference_recall_query = RealtimeAPI._build_preference_recall_query.__get__(api, RealtimeAPI)
+    api._mark_preference_recall_candidate = RealtimeAPI._mark_preference_recall_candidate.__get__(api, RealtimeAPI)
+    api._clear_preference_recall_candidate = RealtimeAPI._clear_preference_recall_candidate.__get__(api, RealtimeAPI)
+    api._current_input_event_key = "evt_bridge_hit"
+    api._preference_recall_followup_enabled = False
+    api._preference_recall_locked_input_event_keys = set()
+
+    captured_contexts: list[dict[str, object]] = []
+
+    def _capture_context(**kwargs):
+        captured_contexts.append(kwargs)
+
+    api._set_pending_preference_memory_context = _capture_context
+    api.send_assistant_message = AsyncMock()
+
+    async def _fake_recall(**kwargs):
+        assert kwargs["query"] == "vim"
+        return {
+            "memories": [{"content": "User's favorite editor is Vim."}],
+            "memory_cards": [{"memory": "User's favorite editor is Vim.", "confidence": "High"}],
+            "memory_cards_text": 'Relevant memory:\n- "User\'s favorite editor is Vim."',
+        }
+
+    monkeypatch.setitem(ai_tools.function_map, "recall_memories", _fake_recall)
+
+    handled = asyncio.run(
+        RealtimeAPI._maybe_handle_preference_recall_intent(
+            api,
+            "Tell me what you remember about Vim",
+            object(),
+            source="input_audio_transcription",
+        )
+    )
+
+    assert handled is False
+    assert captured_contexts
+    memory_context = captured_contexts[0]["memory_context"]
+    assert memory_context["hit"] is True
+    assert "favorite editor is Vim" in str(memory_context["prompt_note"])
+
+
+def test_topic_recall_bridge_no_hit_for_non_preference_topic(monkeypatch) -> None:
+    api = _base_api()
+    api._is_preference_recall_intent = RealtimeAPI._is_preference_recall_intent.__get__(api, RealtimeAPI)
+    api._classify_memory_intent = RealtimeAPI._classify_memory_intent.__get__(api, RealtimeAPI)
+    api._get_memory_runtime = RealtimeAPI._get_memory_runtime.__get__(api, RealtimeAPI)
+    api._build_preference_recall_query = RealtimeAPI._build_preference_recall_query.__get__(api, RealtimeAPI)
+    api._mark_preference_recall_candidate = RealtimeAPI._mark_preference_recall_candidate.__get__(api, RealtimeAPI)
+    api._clear_preference_recall_candidate = RealtimeAPI._clear_preference_recall_candidate.__get__(api, RealtimeAPI)
+    api._current_input_event_key = "evt_bridge_miss"
+    api._preference_recall_followup_enabled = False
+    api._preference_recall_locked_input_event_keys = set()
+    api._set_pending_preference_memory_context = Mock()
+
+    async def _fake_recall(**kwargs):
+        assert kwargs["query"] == "dogs"
+        return {
+            "memories": [{"content": "User asked about dogs yesterday."}],
+            "memory_cards": [],
+            "memory_cards_text": 'Relevant memory:\n- "User asked about dogs yesterday."',
+        }
+
+    monkeypatch.setitem(ai_tools.function_map, "recall_memories", _fake_recall)
+
+    handled = asyncio.run(
+        RealtimeAPI._maybe_handle_preference_recall_intent(
+            api,
+            "Tell me what you remember about dogs",
+            object(),
+            source="input_audio_transcription",
+        )
+    )
+
+    assert handled is False
+    api._set_pending_preference_memory_context.assert_not_called()
+
 def test_preference_recall_mixed_intent_executes_gesture_action(monkeypatch) -> None:
     api = _base_api()
     api._is_preference_recall_intent = RealtimeAPI._is_preference_recall_intent.__get__(api, RealtimeAPI)

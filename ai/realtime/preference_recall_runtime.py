@@ -10,6 +10,10 @@ from core.logging import logger, log_ws_event
 from ai.tools import function_map
 
 
+_PREFERENCE_VALUE_MARKERS = ("favorite", "favourite", "preferred", "preference")
+_PREFERENCE_VALUE_DOMAINS = ("editor", "ide", "tool", "workflow", "language", "theme", "music", "drink", "food")
+
+
 def _build_preference_recall_reply(*, hit: bool, memory_cards_text: str, memories: list[dict[str, Any]], cards: list[dict[str, Any]]) -> str:
         if hit:
             memory_line = ""
@@ -57,6 +61,32 @@ def _build_preference_memory_context(*, hit: bool, returned_count: int, memory_c
             "recalled_value": recalled_value if hit else "",
             "prompt_note": prompt_note,
         }
+
+
+def _topic_recall_bridge_hit(*, topic_query: str, memories: list[dict[str, Any]], cards: list[dict[str, Any]]) -> bool:
+        normalized_topic = str(topic_query or "").strip().lower()
+        if not normalized_topic:
+            return False
+        topic_tokens = [token for token in re.findall(r"[a-z0-9_+-]+", normalized_topic) if token]
+        if not topic_tokens:
+            return False
+
+        def _matches(text: str) -> bool:
+            normalized = " ".join(str(text or "").lower().split())
+            if not normalized:
+                return False
+            has_value_marker = any(marker in normalized for marker in _PREFERENCE_VALUE_MARKERS)
+            has_domain_marker = any(domain in normalized for domain in _PREFERENCE_VALUE_DOMAINS)
+            has_topic_token = any(token in normalized for token in topic_tokens)
+            return has_value_marker and has_domain_marker and has_topic_token
+
+        for memory in memories:
+            if _matches(str(memory.get("content", ""))):
+                return True
+        for card in cards:
+            if _matches(str(card.get("memory", ""))):
+                return True
+        return False
 
 async def _suppress_preference_recall_server_auto_response(controller, websocket: Any) -> None:
         turn_id = controller._current_turn_id_or_unknown()
@@ -190,7 +220,8 @@ def _emit_preference_recall_skip_trace_if_needed(controller, *, turn_id: str | N
 async def _maybe_handle_preference_recall_intent(controller, text: str, websocket: Any, *, source: str) -> bool:
         _ = websocket
         matched, keywords = controller._is_preference_recall_intent(text)
-        if not matched:
+        memory_intent_subtype = controller._classify_memory_intent(text)
+        if not matched and memory_intent_subtype != "topic_recall":
             return False
 
         resolved_turn_id = controller._current_turn_id_or_unknown()
@@ -242,6 +273,13 @@ async def _maybe_handle_preference_recall_intent(controller, text: str, websocke
                     )
 
         query = controller._build_preference_recall_query(text.lower(), keywords=keywords)
+        topic_bridge_query = ""
+        if not matched and memory_intent_subtype == "topic_recall":
+            topic_bridge_query = controller._get_memory_runtime().build_memory_retrieval_query(
+                text,
+                memory_intent_subtype="topic_recall",
+            )
+            query = " ".join(topic_bridge_query.split())
         now = time.monotonic()
         cooldown_s = max(0.0, float(getattr(controller, "_preference_recall_cooldown_s", 0.0)))
         cached = controller._preference_recall_cache.get(query)
@@ -278,15 +316,22 @@ async def _maybe_handle_preference_recall_intent(controller, text: str, websocke
                         "query": query,
                     }
                 )
-            if isinstance(controller._pending_preference_recall_trace, dict):
-                controller._pending_preference_recall_trace["decision"] = "invoked_tool"
-                controller._pending_preference_recall_trace["reason"] = "preference_intent_matched"
-            result_payload, _ = await controller._run_preference_recall_with_fallbacks(
-                recall_fn=recall_fn,
-                source=source,
-                resolved_turn_id=resolved_turn_id,
-                query=query,
-            )
+            if matched:
+                if isinstance(controller._pending_preference_recall_trace, dict):
+                    controller._pending_preference_recall_trace["decision"] = "invoked_tool"
+                    controller._pending_preference_recall_trace["reason"] = "preference_intent_matched"
+                result_payload, _ = await controller._run_preference_recall_with_fallbacks(
+                    recall_fn=recall_fn,
+                    source=source,
+                    resolved_turn_id=resolved_turn_id,
+                    query=query,
+                )
+            else:
+                result_payload = await recall_fn(
+                    query=query,
+                    limit=3,
+                    scope=str(getattr(controller, "_memory_retrieval_scope", "user_global")),
+                )
             logger.info(
                 "Preference recall executed source=%s query=%s keywords=%s",
                 source,
@@ -316,6 +361,22 @@ async def _maybe_handle_preference_recall_intent(controller, text: str, websocke
         result_payload["hit"] = hit
         result_payload["returned_count"] = returned_count
         result_payload["empty_reason"] = "none" if hit else str(result_payload.get("empty_reason", "no_ranked_matches") or "no_ranked_matches")
+
+        if not matched:
+            bridge_hit = _topic_recall_bridge_hit(topic_query=query, memories=memories, cards=cards)
+            logger.info(
+                "topic_recall_preference_bridge_result run_id=%s turn_id=%s source=%s query=%s hit=%s",
+                controller._current_run_id() or "",
+                resolved_turn_id,
+                source,
+                query,
+                str(bridge_hit).lower(),
+            )
+            if not bridge_hit:
+                controller._clear_preference_recall_candidate()
+                return False
+            result_payload["source"] = "topic_recall_preference_bridge"
+
         input_event_key = str(getattr(controller, "_current_input_event_key", "") or "").strip()
         logger.info(
             "pref_recall_completed run_id=%s turn_id=%s input_event_key=%s hit=%s returned_count=%s",

@@ -116,6 +116,7 @@ def test_memory_intent_classifier_distinguishes_preference_and_topic_recall() ->
 
     assert api._classify_memory_intent("What's my favorite editor?") == "preference_recall"
     assert api._classify_memory_intent("What do you remember about dogs?") == "topic_recall"
+    assert api._classify_memory_intent("Tell me what you remember about Vim") == "topic_recall"
 
 
 def test_prepare_turn_memory_brief_shapes_topic_query_for_recall(monkeypatch) -> None:
