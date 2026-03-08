@@ -279,6 +279,14 @@ class ResponseTerminalHandlers:
             active_response_was_provisional=active_response_was_provisional,
             done_canonical_key=done_canonical_key,
         )
+        api._apply_terminal_deliverable_selection(
+            canonical_key=done_canonical_key,
+            response_id=str(active_response_id_before_clear or ""),
+            turn_id=turn_id,
+            input_event_key=done_input_event_key,
+            selected=selected,
+            selection_reason=selection_reason,
+        )
         transcript_linked_input_event_key = str(api._active_input_event_key_for_turn(turn_id) or "").strip()
         transcript_final_linked = bool(transcript_linked_input_event_key and transcript_linked_input_event_key.startswith("item_"))
         obligations_map = getattr(api, "_response_obligations", {})

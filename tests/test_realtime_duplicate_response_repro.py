@@ -2191,6 +2191,80 @@ def test_tool_followup_create_seam_suppresses_parent_covered_even_without_blocke
     assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
 
 
+
+def test_tool_followup_create_seam_uses_terminal_selection_when_parent_canonical_coverage_lags() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_response_turn_id = "turn_mix_terminal_store"
+
+    parent_turn_id = "turn_mix_terminal_store"
+    parent_input_event_key = "item_mix_parent_terminal_store"
+    parent_response_id = "resp-parent-terminal-store"
+    parent_key = api._canonical_utterance_key(turn_id=parent_turn_id, input_event_key=parent_input_event_key)
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id=parent_turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "upgraded_response"),
+            setattr(record, "response_id", parent_response_id),
+            setattr(record, "done", True),
+            setattr(record, "deliverable_observed", False),
+            setattr(record, "deliverable_class", "unknown"),
+        ),
+    )
+    api._apply_terminal_deliverable_selection(
+        canonical_key=parent_key,
+        response_id=parent_response_id,
+        turn_id=parent_turn_id,
+        input_event_key=parent_input_event_key,
+        selected=True,
+        selection_reason="normal",
+    )
+    # Simulate stale canonical coverage fields lagging behind terminal selection state.
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id=parent_turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "deliverable_observed", False),
+            setattr(record, "deliverable_class", "unknown"),
+        ),
+    )
+
+    response_create_event, canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_mix_terminal_store",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+    metadata = ((response_create_event.get("response") or {}).get("metadata") or {})
+    metadata["blocked_by_response_id"] = parent_response_id
+    metadata["parent_turn_id"] = parent_turn_id
+    metadata["parent_input_event_key"] = parent_input_event_key
+
+    api._pending_response_create = PendingResponseCreate(
+        websocket=ws,
+        event=response_create_event,
+        origin="tool_output",
+        turn_id=parent_turn_id,
+        created_at=0.0,
+        reason="legacy_queue_hydration",
+        record_ai_call=False,
+        debug_context=None,
+        memory_brief_note=None,
+        queued_reminder_key=None,
+        enqueued_done_serial=0,
+        enqueue_seq=1,
+    )
+
+    asyncio.run(api._drain_response_create_queue(source_trigger="playback_complete"))
+
+    assert [event for event in ws.sent if event.get("type") == "response.create"] == []
+    assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
+
+
 def test_gesture_followup_dropped_on_response_done_and_playback_complete_when_parent_already_spoke_action() -> None:
     for trigger in ("response_done", "playback_complete"):
         api = _make_api_stub()

@@ -6155,9 +6155,20 @@ class RealtimeAPI:
             resolved_parent_response_id = str(state_entry[1].response_id or "").strip() or "none"
             parent_origin = str(state_entry[1].origin or "").strip().lower()
             if parent_origin not in {"micro_ack", "tool_output"} and bool(state_entry[1].done):
-                deliverable_class = str(getattr(state_entry[1], "deliverable_class", "") or "").strip().lower()
-                deliverable_observed = bool(getattr(state_entry[1], "deliverable_observed", False))
-                parent_covered = deliverable_observed or deliverable_class in {"progress", "final"}
+                parent_covered, coverage_source, deliverable_observed, deliverable_class, terminal_selected, terminal_reason = self._parent_response_coverage_state(
+                    parent_state=state_entry[1],
+                )
+                logger.info(
+                    "parent_coverage_source_of_truth run_id=%s parent_response_id=%s covered=%s source=%s canonical_observed=%s canonical_class=%s terminal_selected=%s terminal_reason=%s",
+                    self._current_run_id() or "",
+                    resolved_parent_response_id,
+                    str(parent_covered).lower(),
+                    coverage_source,
+                    str(deliverable_observed).lower(),
+                    deliverable_class or "unknown",
+                    str(terminal_selected).lower(),
+                    terminal_reason,
+                )
         logger.info(
             "tool_followup_parent_resolution run_id=%s turn_id=%s tool_call_id=%s parent_input_event_key=%s blocked_by_response_id=%s resolved_parent_response_id=%s resolved_parent_canonical_key=%s resolved_from=%s parent_covered=%s",
             self._current_run_id() or "",
@@ -6200,9 +6211,21 @@ class RealtimeAPI:
             return False, state_entry, "parent_origin_excluded"
         if not bool(parent_state.done):
             return False, state_entry, "parent_not_done"
-        deliverable_class = str(getattr(parent_state, "deliverable_class", "") or "").strip().lower()
-        deliverable_observed = bool(getattr(parent_state, "deliverable_observed", False))
-        if not (deliverable_observed or deliverable_class in {"progress", "final"}):
+        parent_covered, coverage_source, deliverable_observed, deliverable_class, terminal_selected, terminal_reason = self._parent_response_coverage_state(
+            parent_state=parent_state,
+        )
+        logger.info(
+            "parent_coverage_source_of_truth run_id=%s parent_response_id=%s covered=%s source=%s canonical_observed=%s canonical_class=%s terminal_selected=%s terminal_reason=%s",
+            self._current_run_id() or "",
+            str(getattr(parent_state, "response_id", "") or "").strip() or "none",
+            str(parent_covered).lower(),
+            coverage_source,
+            str(deliverable_observed).lower(),
+            deliverable_class or "unknown",
+            str(terminal_selected).lower(),
+            terminal_reason,
+        )
+        if not parent_covered:
             return False, state_entry, "parent_not_deliverable"
         return True, state_entry, "parent_covered_tool_result"
 
@@ -6223,8 +6246,35 @@ class RealtimeAPI:
             blocked_by_response_id=blocked_by_response_id or None,
         )
         parent_state = parent_entry[1] if parent_entry else None
+        canonical_deliverable_state = "none"
+        terminal_deliverable_state = "none"
+        coverage_source = "none"
+        if parent_state is not None:
+            parent_covered, coverage_source, deliverable_observed, deliverable_class, terminal_selected, terminal_reason = self._parent_response_coverage_state(
+                parent_state=parent_state,
+            )
+            canonical_deliverable_state = (
+                f"done={str(bool(getattr(parent_state, 'done', False))).lower()},"
+                f"deliverable_observed={str(deliverable_observed).lower()},"
+                f"deliverable_class={deliverable_class or 'unknown'}"
+            )
+            terminal_deliverable_state = (
+                f"selected={str(terminal_selected).lower()},"
+                f"reason={terminal_reason}"
+            )
+            logger.info(
+                "parent_coverage_source_of_truth run_id=%s parent_response_id=%s covered=%s source=%s canonical_observed=%s canonical_class=%s terminal_selected=%s terminal_reason=%s",
+                self._current_run_id() or "",
+                str(getattr(parent_state, "response_id", "") or "").strip() or "none",
+                str(parent_covered).lower(),
+                coverage_source,
+                str(deliverable_observed).lower(),
+                deliverable_class or "unknown",
+                str(terminal_selected).lower(),
+                terminal_reason,
+            )
         logger.info(
-            "create_seam_parent_coverage_eval run_id=%s turn_id=%s canonical_key=%s tool_call_id=%s drop_decision=%s reason=%s resolved_parent_response_id=%s resolved_parent_origin=%s resolved_parent_deliverable_state=%s",
+            "create_seam_parent_coverage_eval run_id=%s turn_id=%s canonical_key=%s tool_call_id=%s drop_decision=%s reason=%s resolved_parent_response_id=%s resolved_parent_origin=%s resolved_parent_canonical_deliverable_state=%s resolved_parent_terminal_deliverable_state=%s coverage_source=%s",
             self._current_run_id() or "",
             turn_id,
             canonical_key,
@@ -6233,13 +6283,9 @@ class RealtimeAPI:
             reason,
             str(getattr(parent_state, "response_id", "") or "").strip() or "none",
             str(getattr(parent_state, "origin", "") or "").strip() or "none",
-            (
-                f"done={str(bool(getattr(parent_state, 'done', False))).lower()},"
-                f"deliverable_observed={str(bool(getattr(parent_state, 'deliverable_observed', False))).lower()},"
-                f"deliverable_class={str(getattr(parent_state, 'deliverable_class', 'unknown') or 'unknown').strip().lower()}"
-            )
-            if parent_state is not None
-            else "none",
+            canonical_deliverable_state,
+            terminal_deliverable_state,
+            coverage_source,
         )
         if not should_drop:
             return False
@@ -6304,6 +6350,91 @@ class RealtimeAPI:
         ):
             return False, "tool_followup_precedence"
         return True, "normal"
+
+    def _terminal_deliverable_selection_store(self) -> dict[str, dict[str, Any]]:
+        store = getattr(self, "_terminal_deliverable_selection_by_response_id", None)
+        if not isinstance(store, dict):
+            store = {}
+            self._terminal_deliverable_selection_by_response_id = store
+        return store
+
+    def _apply_terminal_deliverable_selection(
+        self,
+        *,
+        canonical_key: str,
+        response_id: str,
+        turn_id: str,
+        input_event_key: str | None,
+        selected: bool,
+        selection_reason: str,
+    ) -> None:
+        normalized_response_id = str(response_id or "").strip()
+        normalized_canonical_key = str(canonical_key or "").strip()
+        if normalized_response_id:
+            self._terminal_deliverable_selection_store()[normalized_response_id] = {
+                "selected": bool(selected),
+                "reason": str(selection_reason or "unknown").strip().lower() or "unknown",
+                "canonical_key": normalized_canonical_key,
+            }
+
+        if not normalized_canonical_key:
+            return
+
+        normalized_reason = str(selection_reason or "").strip().lower()
+
+        def _mutator(record: CanonicalResponseState) -> None:
+            record.done = True
+            if normalized_response_id:
+                record.response_id = normalized_response_id
+            if selected:
+                record.created = True
+                record.deliverable_observed = True
+                if str(record.deliverable_class or "unknown").strip().lower() == "unknown":
+                    record.deliverable_class = "final"
+            elif normalized_reason in {"micro_ack_non_deliverable", "cancelled", "provisional_empty_non_deliverable"}:
+                if str(record.deliverable_class or "unknown").strip().lower() == "unknown":
+                    record.deliverable_class = "non_deliverable"
+
+        self._canonical_response_state_mutate(
+            canonical_key=normalized_canonical_key,
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            mutator=_mutator,
+        )
+        logger.info(
+            "terminal_deliverable_selection_applied run_id=%s turn_id=%s canonical_key=%s response_id=%s selected=%s reason=%s",
+            self._current_run_id() or "",
+            turn_id,
+            normalized_canonical_key,
+            normalized_response_id or "none",
+            str(bool(selected)).lower(),
+            normalized_reason or "unknown",
+        )
+
+    def _parent_response_coverage_state(
+        self,
+        *,
+        parent_state: CanonicalResponseState,
+    ) -> tuple[bool, str, bool, str, bool, str]:
+        deliverable_class = str(getattr(parent_state, "deliverable_class", "") or "").strip().lower()
+        deliverable_observed = bool(getattr(parent_state, "deliverable_observed", False))
+        canonical_covered = deliverable_observed or deliverable_class in {"progress", "final"}
+        normalized_response_id = str(getattr(parent_state, "response_id", "") or "").strip()
+        terminal_selected = False
+        terminal_reason = "unknown"
+        if normalized_response_id:
+            selection_entry = self._terminal_deliverable_selection_store().get(normalized_response_id)
+            if isinstance(selection_entry, dict):
+                terminal_selected = bool(selection_entry.get("selected", False))
+                terminal_reason = str(selection_entry.get("reason") or "unknown").strip().lower() or "unknown"
+        covered = canonical_covered or terminal_selected
+        if canonical_covered:
+            source = "canonical"
+        elif terminal_selected:
+            source = "terminal_selection"
+        else:
+            source = "none"
+        return covered, source, deliverable_observed, deliverable_class, terminal_selected, terminal_reason
 
     def _turn_has_final_deliverable(self, *, turn_id: str) -> bool:
         normalized_turn_id = str(turn_id or "").strip()
