@@ -1375,7 +1375,7 @@ def test_tool_followup_suppressed_after_parent_deliverable(monkeypatch) -> None:
         input_event_key="item_parent",
         mutator=lambda record: (
             setattr(record, "origin", "assistant_message"),
-            setattr(record, "deliverable_class", "final"),
+            setattr(record, "deliverable_class", "progress"),
         ),
     )
 
@@ -1548,7 +1548,7 @@ def test_tool_followup_suppressed_when_parent_deliverable_is_final(monkeypatch) 
         mutator=lambda record: (
             setattr(record, "origin", "assistant_message"),
             setattr(record, "deliverable_observed", True),
-            setattr(record, "deliverable_class", "final"),
+            setattr(record, "deliverable_class", "progress"),
         ),
     )
 
@@ -2085,6 +2085,107 @@ def test_tool_followup_release_suppressed_for_server_auto_parent_covering_gestur
     asyncio.run(_run())
 
     assert [event for event in ws.sent if event.get("type") == "response.create"] == []
+    assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
+
+
+def test_tool_followup_create_seam_drop_removes_single_matching_queue_entry_without_resuppressing(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+
+    suppressed_logs: list[str] = []
+
+    def _capture_info(msg, *args, **kwargs) -> None:
+        rendered = msg % args if args else msg
+        if "tool_followup_create_suppressed" in rendered:
+            suppressed_logs.append(rendered)
+
+    monkeypatch.setattr(logger, "info", _capture_info)
+
+    turn_id = "turn_drop_once"
+    parent_input_event_key = "item_parent_drop_once"
+    parent_response_id = "resp-parent-drop-once"
+    api._current_response_turn_id = turn_id
+    api._active_input_event_key_by_turn_id[turn_id] = parent_input_event_key
+    api._active_response_id = parent_response_id
+    api._active_response_origin = "upgraded_response"
+    api._response_in_flight = True
+    api.response_in_progress = True
+
+    parent_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "upgraded_response"),
+            setattr(record, "response_id", parent_response_id),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "progress"),
+            setattr(record, "done", True),
+        ),
+    )
+
+    response_create_event, canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_drop_once",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_around",
+    )
+
+    async def _run() -> None:
+        queued = await api._send_response_create(ws, response_create_event, origin="tool_output")
+        assert queued is False
+        assert len(api._response_create_queue) == 1
+
+        api._response_create_queue.append(
+            {
+                "websocket": ws,
+                "event": {
+                    "type": "response.create",
+                    "response": {
+                        "metadata": {
+                            "turn_id": turn_id,
+                            "input_event_key": "item_unrelated_queue_entry",
+                            "origin": "assistant_message",
+                        }
+                    },
+                },
+                "origin": "assistant_message",
+                "turn_id": turn_id,
+                "record_ai_call": False,
+                "debug_context": None,
+                "memory_brief_note": None,
+                "enqueued_done_serial": 0,
+                "enqueue_seq": 99,
+            }
+        )
+
+        queue_depth_before = len(api._response_create_queue)
+
+        api._response_in_flight = False
+        api.response_in_progress = False
+        api._active_response_id = None
+        await api._drain_response_create_queue(source_trigger="playback_complete")
+
+        assert len(api._response_create_queue) == queue_depth_before - 1
+        remaining_input_keys = {
+            str((((entry.get("event") or {}).get("response") or {}).get("metadata") or {}).get("input_event_key") or "")
+            for entry in api._response_create_queue
+        }
+        assert "item_unrelated_queue_entry" in remaining_input_keys
+
+        api._audio_playback_busy = True
+        await api._drain_response_create_queue(source_trigger="playback_complete")
+
+    asyncio.run(_run())
+
+    suppressed_for_key = [
+        entry
+        for entry in suppressed_logs
+        if f"canonical_key={canonical_key}" in entry and "reason=parent_covered_tool_result" in entry
+    ]
+    assert len(suppressed_for_key) == 1
     assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
 
 
