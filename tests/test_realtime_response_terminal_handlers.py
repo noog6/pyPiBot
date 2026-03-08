@@ -52,6 +52,7 @@ def _make_api() -> RealtimeAPI:
     api._response_done_serial = 0
     api.response_in_progress = True
     api._apply_terminal_deliverable_selection = lambda **_kwargs: None
+    api._reconcile_terminal_substantive_response = lambda **_kwargs: None
     api._response_in_flight = True
     api._response_obligations = {}
     api._response_create_queue = []
@@ -175,6 +176,31 @@ def test_handle_response_done_applies_terminal_selection_to_canonical_state() ->
         response_id="resp_1",
         turn_id="turn_1",
         input_event_key="input_evt_1",
+        selected=True,
+        selection_reason="normal",
+    )
+
+
+def test_handle_response_done_reconciles_terminal_substantive_count() -> None:
+    api = _make_api()
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    reconcile = Mock()
+    api._reconcile_terminal_substantive_response = reconcile
+
+    asyncio.run(api.handle_response_done({"type": "response.done"}))
+
+    reconcile.assert_called_once_with(
+        turn_id="turn_1",
+        canonical_key="turn_1::input_evt_1",
+        response_id="resp_1",
         selected=True,
         selection_reason="normal",
     )
@@ -384,3 +410,89 @@ def test_handle_response_done_skips_repair_reschedule_when_already_latched() -> 
     api._schedule_turn_contract_exact_phrase_repair_response.assert_not_awaited()
     api._log_turn_conversation_efficiency.assert_not_called()
     assert api.orchestration_state.transitions == []
+
+
+def test_terminal_substantive_reconcile_skips_when_create_time_already_counted() -> None:
+    api = _make_api()
+    api._reconcile_terminal_substantive_response = RealtimeAPI._reconcile_terminal_substantive_response.__get__(api, RealtimeAPI)
+    api._record_substantive_response(turn_id="turn_1", canonical_key="turn_1::input_evt_1")
+
+    api._reconcile_terminal_substantive_response(
+        turn_id="turn_1",
+        canonical_key="turn_1::input_evt_1",
+        response_id="resp_1",
+        selected=True,
+        selection_reason="normal",
+    )
+
+    state = api._conversation_efficiency_state(turn_id="turn_1")
+    assert state.substantive_count == 1
+
+
+def test_terminal_substantive_reconcile_repairs_missed_create_time_once() -> None:
+    api = _make_api()
+    api._reconcile_terminal_substantive_response = RealtimeAPI._reconcile_terminal_substantive_response.__get__(api, RealtimeAPI)
+
+    api._reconcile_terminal_substantive_response(
+        turn_id="turn_1",
+        canonical_key="turn_1::input_evt_1",
+        response_id="resp_1",
+        selected=True,
+        selection_reason="normal",
+    )
+    api._reconcile_terminal_substantive_response(
+        turn_id="turn_1",
+        canonical_key="turn_1::input_evt_1",
+        response_id="resp_2",
+        selected=True,
+        selection_reason="normal",
+    )
+
+    state = api._conversation_efficiency_state(turn_id="turn_1")
+    assert state.substantive_count == 1
+
+
+def test_terminal_substantive_reconcile_excludes_non_deliverable_reasons() -> None:
+    api = _make_api()
+    api._reconcile_terminal_substantive_response = RealtimeAPI._reconcile_terminal_substantive_response.__get__(api, RealtimeAPI)
+
+    for reason in (
+        "micro_ack_non_deliverable",
+        "cancelled",
+        "provisional_empty_non_deliverable",
+        "exact_phrase_obligation_open",
+        "tool_followup_precedence",
+    ):
+        api._reconcile_terminal_substantive_response(
+            turn_id="turn_1",
+            canonical_key="turn_1::input_evt_1",
+            response_id=f"resp_{reason}",
+            selected=False,
+            selection_reason=reason,
+        )
+
+    state = api._conversation_efficiency_state(turn_id="turn_1")
+    assert state.substantive_count == 0
+
+
+def test_terminal_substantive_reconcile_exact_phrase_repair_path_totals_one() -> None:
+    api = _make_api()
+    api._reconcile_terminal_substantive_response = RealtimeAPI._reconcile_terminal_substantive_response.__get__(api, RealtimeAPI)
+
+    api._reconcile_terminal_substantive_response(
+        turn_id="turn_1",
+        canonical_key="turn_1::input_evt_1",
+        response_id="resp_parent",
+        selected=False,
+        selection_reason="exact_phrase_obligation_open",
+    )
+    api._reconcile_terminal_substantive_response(
+        turn_id="turn_1",
+        canonical_key="turn_1::input_evt_1",
+        response_id="resp_repair",
+        selected=True,
+        selection_reason="normal",
+    )
+
+    state = api._conversation_efficiency_state(turn_id="turn_1")
+    assert state.substantive_count == 1
