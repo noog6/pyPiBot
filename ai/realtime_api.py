@@ -6061,6 +6061,74 @@ class RealtimeAPI:
                 dropped_queue,
             )
 
+    @staticmethod
+    def _tool_call_id_from_input_event_key(input_event_key: str | None) -> str:
+        normalized_input_event_key = str(input_event_key or "").strip()
+        if not normalized_input_event_key.startswith("tool:"):
+            return ""
+        return normalized_input_event_key.partition("tool:")[2].strip()
+
+    def _evaluate_tool_lineage_guard(
+        self,
+        *,
+        origin: str,
+        turn_id: str,
+        input_event_key: str,
+        response_metadata: dict[str, Any] | None = None,
+    ) -> tuple[bool, str, str, str, str]:
+        normalized_input_event_key = str(input_event_key or "").strip()
+        if not normalized_input_event_key.startswith("tool:"):
+            return True, "not_tool_lineage", "", "not_applicable", ""
+        normalized_origin = str(origin or "unknown").strip().lower() or "unknown"
+        metadata = response_metadata if isinstance(response_metadata, dict) else {}
+        is_micro_ack = str(metadata.get("micro_ack", "")).strip().lower() in {"1", "true", "yes"}
+        lineage_origin = "micro_ack" if is_micro_ack else normalized_origin
+        canonical_key = self._canonical_utterance_key(
+            turn_id=turn_id,
+            input_event_key=normalized_input_event_key,
+        )
+        parent_state = self._tool_followup_state(canonical_key=canonical_key)
+        call_id = (
+            str(metadata.get("tool_call_id") or "").strip()
+            or self._tool_call_id_from_input_event_key(normalized_input_event_key)
+            or "unknown"
+        )
+        allow_suppressed = str(metadata.get("tool_lineage_allow_suppressed", "")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        allowed = allow_suppressed or parent_state != "dropped"
+        reason = "explicit_allowlist" if allow_suppressed else f"tool_followup_state_{parent_state}"
+        logger.info(
+            "derived_response_lineage_eval origin=%s canonical_key=%s parent_state=%s allowed=%s",
+            lineage_origin,
+            canonical_key,
+            parent_state,
+            str(allowed).lower(),
+        )
+        if lineage_origin == "micro_ack":
+            logger.info(
+                "micro_ack_lineage_guard outcome=%s reason=%s",
+                "allow" if allowed else "deny",
+                reason,
+            )
+        elif lineage_origin == "assistant_message":
+            logger.info(
+                "assistant_message_lineage_guard outcome=%s reason=%s",
+                "allow" if allowed else "deny",
+                reason,
+            )
+        if not allowed:
+            logger.info(
+                "suppressed_tool_lineage_block origin=%s canonical_key=%s call_id=%s reason=%s",
+                lineage_origin,
+                canonical_key,
+                call_id,
+                reason,
+            )
+        return allowed, reason, canonical_key, parent_state, call_id
+
     def _is_low_risk_reversible_gesture_tool(self, *, tool_name: str | None) -> bool:
         normalized_tool_name = str(tool_name or "").strip().lower()
         if not normalized_tool_name.startswith("gesture_"):

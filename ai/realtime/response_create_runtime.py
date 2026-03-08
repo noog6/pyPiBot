@@ -114,6 +114,16 @@ class ResponseCreateRuntime:
             response_metadata=response_metadata,
         )
         normalized_origin = str(origin or "").strip().lower()
+        lineage_guard = getattr(api, "_evaluate_tool_lineage_guard", None)
+        if callable(lineage_guard):
+            lineage_allowed, _lineage_reason, _lineage_canonical_key, _lineage_parent_state, _lineage_call_id = lineage_guard(
+                origin=normalized_origin,
+                turn_id=turn_id,
+                input_event_key=current_input_event_key,
+                response_metadata=response_metadata,
+            )
+            if not lineage_allowed:
+                return False
         tool_followup = str(response_metadata.get("tool_followup", "")).strip().lower() in {"true", "1", "yes"}
         tool_call_id = str(response_metadata.get("tool_call_id") or "").strip()
         if tool_followup:
@@ -609,6 +619,16 @@ class ResponseCreateRuntime:
             response_metadata=response_metadata,
         )
         normalized_origin = str(origin or "").strip().lower()
+        lineage_guard = getattr(api, "_evaluate_tool_lineage_guard", None)
+        if callable(lineage_guard):
+            lineage_allowed, _lineage_reason, _lineage_canonical_key, _lineage_parent_state, _lineage_call_id = lineage_guard(
+                origin=normalized_origin,
+                turn_id=turn_id,
+                input_event_key=current_input_event_key,
+                response_metadata=response_metadata,
+            )
+            if not lineage_allowed:
+                return False
         tool_followup = str(response_metadata.get("tool_followup", "")).strip().lower() in {"true", "1", "yes"}
         tool_call_id = str(response_metadata.get("tool_call_id") or "").strip()
         tool_followup_release = str(response_metadata.get("tool_followup_release", "")).strip().lower() in {"true", "1", "yes"}
