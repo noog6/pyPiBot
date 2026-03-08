@@ -2419,3 +2419,163 @@ def test_tool_followup_parent_resolution_ignores_tool_parent_input_key() -> None
     assert reason == "parent_covered_tool_result"
     assert parent_entry is not None
     assert parent_entry[0] == parent_key
+
+
+def test_dropped_tool_followup_lineage_blocks_assistant_message_create(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+
+    turn_id = "turn_tool_lineage"
+    tool_input_event_key = "tool:call_lineage_1"
+    canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_input_event_key)
+    api._set_tool_followup_state(canonical_key=canonical_key, state="dropped", reason="test_seed")
+
+    captured_logs: list[str] = []
+    original_info = logger.info
+
+    def _capture_info(message: str, *args, **kwargs):
+        rendered = str(message)
+        if args:
+            rendered = rendered % args
+        captured_logs.append(rendered)
+        return original_info(message, *args, **kwargs)
+
+    monkeypatch.setattr(logger, "info", _capture_info)
+
+    response_create_event = {
+        "type": "response.create",
+        "response": {"metadata": {"turn_id": turn_id, "input_event_key": tool_input_event_key}},
+    }
+
+    sent = asyncio.run(api._send_response_create(ws, response_create_event, origin="assistant_message"))
+
+    assert sent is False
+    assert [event for event in ws.sent if event.get("type") == "response.create"] == []
+    assert any(
+        "suppressed_tool_lineage_block origin=assistant_message" in entry
+        and f"canonical_key={canonical_key}" in entry
+        and "reason=tool_followup_state_dropped" in entry
+        for entry in captured_logs
+    )
+
+
+def test_dropped_tool_followup_lineage_blocks_micro_ack_non_consuming_create(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+
+    turn_id = "turn_tool_lineage_ack"
+    tool_input_event_key = "tool:call_lineage_2"
+    canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_input_event_key)
+    api._set_tool_followup_state(canonical_key=canonical_key, state="dropped", reason="test_seed")
+
+    captured_logs: list[str] = []
+    original_info = logger.info
+
+    def _capture_info(message: str, *args, **kwargs):
+        rendered = str(message)
+        if args:
+            rendered = rendered % args
+        captured_logs.append(rendered)
+        return original_info(message, *args, **kwargs)
+
+    monkeypatch.setattr(logger, "info", _capture_info)
+
+    response_create_event = {
+        "type": "response.create",
+        "response": {
+            "metadata": {
+                "turn_id": turn_id,
+                "input_event_key": tool_input_event_key,
+                "micro_ack": "true",
+                "consumes_canonical_slot": "false",
+            }
+        },
+    }
+
+    sent = asyncio.run(api._send_response_create(ws, response_create_event, origin="assistant_message"))
+
+    assert sent is False
+    assert [event for event in ws.sent if event.get("type") == "response.create"] == []
+    assert any("micro_ack_lineage_guard outcome=deny reason=tool_followup_state_dropped" in entry for entry in captured_logs)
+    assert any(
+        "suppressed_tool_lineage_block origin=micro_ack" in entry
+        and f"canonical_key={canonical_key}" in entry
+        for entry in captured_logs
+    )
+
+
+def test_unrelated_micro_ack_for_user_turn_still_allowed() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+
+    turn_id = "turn_normal_ack"
+    response_create_event = {
+        "type": "response.create",
+        "response": {
+            "metadata": {
+                "turn_id": turn_id,
+                "input_event_key": "item_turn_normal_ack",
+                "micro_ack": "true",
+                "consumes_canonical_slot": "false",
+            }
+        },
+    }
+
+    sent = asyncio.run(api._send_response_create(ws, response_create_event, origin="assistant_message"))
+
+    assert sent is True
+    response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert len(response_create_events) == 1
+
+
+def test_distinct_info_followup_remains_unsuppressed_where_intended() -> None:
+    api = _make_api_stub()
+
+    should_drop, _parent_entry, reason = api._should_suppress_queued_tool_followup_release(
+        response_metadata={
+            "tool_followup_suppress_if_parent_covered": "true",
+            "tool_name": "gesture_look_around",
+            "tool_result_has_distinct_info": "true",
+        },
+        blocked_by_response_id=None,
+    )
+
+    assert should_drop is False
+    assert reason == "distinct_info"
+
+
+def test_suppressed_tool_followup_lineage_is_idempotent_across_repeated_queue_drains() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._response_in_flight = True
+    api.response_in_progress = True
+    api._active_response_id = "resp-active-drop"
+    api._current_response_turn_id = "turn_tool_repeat_drop"
+
+    response_create_event, canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_repeat_drop",
+        response_create_event={"type": "response.create"},
+    )
+
+    async def _run() -> None:
+        queued = await api._send_response_create(ws, response_create_event, origin="tool_output")
+        assert queued is False
+        assert api._tool_followup_state(canonical_key=canonical_key) == "blocked_active_response"
+        api._set_tool_followup_state(canonical_key=canonical_key, state="dropped", reason="manual_test_drop")
+        api._response_in_flight = False
+        api.response_in_progress = False
+        await api._drain_response_create_queue(source_trigger="response_done")
+        await api._drain_response_create_queue(source_trigger="response_done")
+
+    asyncio.run(_run())
+
+    assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
+    assert [event for event in ws.sent if event.get("type") == "response.create"] == []
