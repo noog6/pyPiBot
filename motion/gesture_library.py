@@ -315,6 +315,42 @@ DEFAULT_GESTURES = (
             ),
         ),
     ),
+    GestureDefinition(
+        name="gesture_speaking_posture",
+        priority=1,
+        frames=(
+            GestureFrameSpec(
+                name="speaking-posture-acquire",
+                pan_offset=0.0,
+                tilt_offset=2.5,
+                duration_ms=280,
+            ),
+            GestureFrameSpec(
+                name="speaking-posture-hold",
+                pan_offset=0.0,
+                tilt_offset=2.5,
+                duration_ms=520,
+            ),
+        ),
+    ),
+    GestureDefinition(
+        name="gesture_speaking_settle",
+        priority=1,
+        frames=(
+            GestureFrameSpec(
+                name="speaking-settle-release",
+                pan_offset=0.0,
+                tilt_offset=-1.5,
+                duration_ms=220,
+            ),
+            GestureFrameSpec(
+                name="speaking-settle-neutral",
+                pan_offset=0.0,
+                tilt_offset=0.0,
+                duration_ms=260,
+            ),
+        ),
+    ),
 )
 
 

@@ -85,6 +85,19 @@ def gesture_curious_tilt(delay_ms: int = 0, intensity: float = 1.0) -> Action:
 
 
 
+def gesture_speaking_posture(delay_ms: int = 0, intensity: float = 1.0) -> Action:
+    """Build a restrained speaking posture gesture action."""
+
+    library = GestureLibrary.get_instance()
+    return library.build_action("gesture_speaking_posture", delay_ms=delay_ms, intensity=intensity)
+
+
+def gesture_speaking_settle(delay_ms: int = 0, intensity: float = 1.0) -> Action:
+    """Build a restrained settle gesture action after speaking."""
+
+    library = GestureLibrary.get_instance()
+    return library.build_action("gesture_speaking_settle", delay_ms=delay_ms, intensity=intensity)
+
 
 def gesture_attention_hold(delay_ms: int = 0, intensity: float = 1.0) -> Action:
     """Build a sustained attention hold gesture action."""

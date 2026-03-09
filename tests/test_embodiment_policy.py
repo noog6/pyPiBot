@@ -124,3 +124,24 @@ def test_decide_state_cue_suppresses_thinking_gesture_when_attention_is_held() -
 
     assert decision.action == EmbodimentActionType.NONE
     assert decision.reason == "attention_continuity_hold"
+
+
+def test_decide_state_cue_emits_speaking_posture() -> None:
+    policy = EmbodimentPolicy()
+
+    decision = policy.decide_state_cue(
+        state=InteractionState.SPEAKING,
+        previous_state=InteractionState.THINKING,
+        turn_contract_blocks_gestures=False,
+        now_monotonic_s=100.0,
+        last_gesture_time_s=0.0,
+        gesture_global_cooldown_s=10.0,
+        gesture_name_last_fired_s={},
+        gesture_cooldowns_s={"gesture_speaking_posture": 3.0},
+        random_delay_ms=lambda _low, _high: 222,
+        attention=_attention(),
+    )
+
+    assert decision.action == EmbodimentActionType.EMIT_CUE
+    assert decision.cue_name == "gesture_speaking_posture"
+    assert decision.delay_ms == 0

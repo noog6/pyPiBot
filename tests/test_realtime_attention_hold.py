@@ -23,6 +23,7 @@ def _make_api() -> RealtimeAPI:
     api._gesture_global_cooldown_s = 0.0
     api._gesture_cooldowns_s = {}
     api._listening_attention_hold_active = False
+    api._speaking_posture_episode_active = False
     api._embodiment_policy = EmbodimentPolicy()
     api._turn_contract_blocks_gesture_cues = lambda: False
     return api
@@ -203,3 +204,87 @@ def test_deferred_release_attempts_once_per_transition_when_motion_busy(monkeypa
     assert any("reason=state_speaking" in m for m in deferred)
     assert any("reason=state_idle" in m for m in deferred)
     assert api._listening_attention_hold_active is True
+
+
+def test_speaking_posture_emits_once_per_episode(monkeypatch) -> None:
+    api = _make_api()
+    messages: list[str] = []
+    monkeypatch.setattr("ai.realtime_api.logger.info", lambda msg, *args: messages.append(msg % args if args else msg))
+
+    api._embodiment_policy.decide_state_cue = lambda **_: EmbodimentDecision(
+        action=EmbodimentActionType.EMIT_CUE,
+        reason="state_cue_emission",
+        cue_name="gesture_speaking_posture",
+    )
+    emitted: list[str] = []
+    api._enqueue_gesture_cue = lambda **kwargs: emitted.append(kwargs["gesture_name"]) or True
+
+    api._handle_state_gesture(InteractionState.SPEAKING)
+    api._handle_state_gesture(InteractionState.SPEAKING)
+
+    assert emitted == ["gesture_speaking_posture"]
+    assert api._speaking_posture_episode_active is True
+    assert any("speaking_posture_started" in msg for msg in messages)
+    assert any("speaking_posture_start_skipped reason=already_started" in msg for msg in messages)
+
+
+def test_speaking_to_idle_emits_single_settle_when_episode_active(monkeypatch) -> None:
+    api = _make_api()
+    messages: list[str] = []
+    monkeypatch.setattr("ai.realtime_api.logger.info", lambda msg, *args: messages.append(msg % args if args else msg))
+
+    api._embodiment_policy.decide_state_cue = lambda **_: EmbodimentDecision(
+        action=EmbodimentActionType.NONE,
+        reason="no_state_cue",
+    )
+    emitted: list[str] = []
+    api._enqueue_gesture_cue = lambda **kwargs: emitted.append(kwargs["gesture_name"]) or True
+
+    api._speaking_posture_episode_active = True
+    api._last_interaction_state = InteractionState.SPEAKING
+
+    api._handle_state_gesture(InteractionState.IDLE)
+    api._handle_state_gesture(InteractionState.IDLE)
+
+    assert emitted == ["gesture_speaking_settle"]
+    assert any("speaking_settle_emitted" in msg for msg in messages)
+
+
+def test_speaking_to_idle_skips_settle_without_active_episode(monkeypatch) -> None:
+    api = _make_api()
+    messages: list[str] = []
+    monkeypatch.setattr("ai.realtime_api.logger.info", lambda msg, *args: messages.append(msg % args if args else msg))
+
+    api._embodiment_policy.decide_state_cue = lambda **_: EmbodimentDecision(
+        action=EmbodimentActionType.NONE,
+        reason="no_state_cue",
+    )
+    emitted: list[str] = []
+    api._enqueue_gesture_cue = lambda **kwargs: emitted.append(kwargs["gesture_name"]) or True
+
+    api._last_interaction_state = InteractionState.SPEAKING
+    api._handle_state_gesture(InteractionState.IDLE)
+
+    assert emitted == []
+    assert any("speaking_settle_skipped reason=no_active_speaking_episode" in msg for msg in messages)
+
+
+def test_speaking_posture_and_settle_skip_when_motion_busy(monkeypatch) -> None:
+    api = _make_api()
+    messages: list[str] = []
+    monkeypatch.setattr("ai.realtime_api.logger.info", lambda msg, *args: messages.append(msg % args if args else msg))
+
+    api._embodiment_policy.decide_state_cue = lambda **_: EmbodimentDecision(
+        action=EmbodimentActionType.EMIT_CUE,
+        reason="state_cue_emission",
+        cue_name="gesture_speaking_posture",
+    )
+    api._enqueue_gesture_cue = lambda **kwargs: False
+
+    api._handle_state_gesture(InteractionState.SPEAKING)
+    api._speaking_posture_episode_active = True
+    api._last_interaction_state = InteractionState.SPEAKING
+    api._handle_state_gesture(InteractionState.IDLE)
+
+    assert any("speaking_posture_start_skipped reason=motion_busy_or_unavailable" in msg for msg in messages)
+    assert any("speaking_settle_skipped reason=motion_busy_or_unavailable" in msg for msg in messages)
