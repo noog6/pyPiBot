@@ -23,6 +23,7 @@ from ai.decision_arbitration import (
 # - Server auto-created arbitration allows non-server_auto passthrough first,
 #   then canonical readiness defer, then refusal gates.
 _RC_PRIORITY_ACTIVE_RESPONSE = 100
+_RC_PRIORITY_MICRO_ACK_ACTIVE_RESPONSE_NON_COMPETING = 110
 _RC_PRIORITY_AUDIO_PLAYBACK_BUSY = 90
 _RC_PRIORITY_CANONICAL_AUDIO_STARTED = 80
 _RC_PRIORITY_SINGLE_FLIGHT_BLOCK = 70
@@ -95,6 +96,15 @@ class InteractionLifecyclePolicy:
         awaiting_transcript_final: bool,
     ) -> ResponseCreateDecision:
         candidates: list[ArbitrationCandidate] = []
+        if response_in_flight and normalized_origin == "micro_ack":
+            candidates.append(
+                ArbitrationCandidate(
+                    candidate_id="micro_ack_non_competing_active_response",
+                    action=ArbitrationAction.REFUSE,
+                    reason_code="micro_ack_non_competing_active_response",
+                    priority=_RC_PRIORITY_MICRO_ACK_ACTIVE_RESPONSE_NON_COMPETING,
+                )
+            )
         if response_in_flight:
             candidates.append(
                 ArbitrationCandidate(

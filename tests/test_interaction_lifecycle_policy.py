@@ -144,6 +144,30 @@ def test_decide_response_create_prefers_schedule_for_active_response() -> None:
     assert decision.selected_candidate_id == "active_response"
 
 
+def test_decide_response_create_blocks_micro_ack_when_substantive_response_in_flight() -> None:
+    policy = InteractionLifecyclePolicy()
+
+    decision = policy.decide_response_create(
+        response_in_flight=True,
+        audio_playback_busy=False,
+        consumes_canonical_slot=False,
+        canonical_audio_started=False,
+        explicit_multipart=False,
+        single_flight_block_reason="",
+        already_delivered=False,
+        preference_recall_lock_blocked=False,
+        canonical_key_already_created=False,
+        has_safety_override=False,
+        suppression_active=False,
+        normalized_origin="micro_ack",
+        awaiting_transcript_final=False,
+    )
+
+    assert decision.action is ResponseCreateDecisionAction.BLOCK
+    assert decision.reason_code == "micro_ack_non_competing_active_response"
+    assert decision.selected_candidate_id == "micro_ack_non_competing_active_response"
+
+
 def test_decide_server_auto_created_obligation_replacement_wins() -> None:
     policy = InteractionLifecyclePolicy()
 
