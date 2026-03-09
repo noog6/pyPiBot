@@ -11480,6 +11480,15 @@ class RealtimeAPI:
                 queued_key = str(pending_server_auto_keys.popleft() or "").strip()
                 if not queued_key:
                     continue
+                if not expected_input_event_key and not self._is_synthetic_input_event_key(queued_key):
+                    logger.info(
+                        "server_auto_response_stale_ignored run_id=%s turn_id=%s active_key=%s response_id=%s",
+                        self._current_run_id() or "",
+                        turn_id,
+                        "none",
+                        self._active_response_id or "unknown",
+                    )
+                    continue
                 if expected_input_event_key and queued_key != expected_input_event_key:
                     logger.info(
                         "server_auto_response_mismatch_discard run_id=%s turn_id=%s active_key=%s response_key=%s",
@@ -11501,7 +11510,7 @@ class RealtimeAPI:
                         expected_input_event_key,
                         current_input_event_key,
                     )
-                elif current_input_event_key:
+                elif current_input_event_key and self._is_synthetic_input_event_key(current_input_event_key):
                     input_event_key = current_input_event_key
             if expected_input_event_key and input_event_key and input_event_key != expected_input_event_key:
                 logger.info(
