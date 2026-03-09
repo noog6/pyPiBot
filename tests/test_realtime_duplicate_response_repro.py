@@ -111,7 +111,16 @@ def _make_api_stub() -> RealtimeAPI:
     api._last_outgoing_event_type = None
     api.rate_limits = {}
     api.audio_player = None
-    api.mic = type("_Mic", (), {"is_receiving": False, "start_receiving": lambda self: None})()
+    api.mic = type(
+        "_Mic",
+        (),
+        {
+            "is_receiving": False,
+            "is_recording": False,
+            "start_receiving": lambda self: None,
+            "start_recording": lambda self: setattr(self, "is_recording", True),
+        },
+    )()
     api.websocket = None
     api.orchestration_state = type(
         "_Orch",
@@ -575,6 +584,78 @@ def test_realtime_empty_transcript_blocks_speech(monkeypatch) -> None:
     task = watchdog_tasks.get("item_empty")
     assert task is None or task.done()
 
+
+def test_empty_transcript_rearms_recording_when_not_playing_audio() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+
+    class _Mic:
+        def __init__(self) -> None:
+            self.is_recording = False
+            self.start_calls = 0
+
+        def start_recording(self) -> None:
+            self.start_calls += 1
+            self.is_recording = True
+
+    class _State:
+        def __init__(self) -> None:
+            self.state = InteractionState.THINKING
+            self.transitions: list[tuple[InteractionState, str]] = []
+
+        def update_state(self, state: InteractionState, reason: str) -> None:
+            self.state = state
+            self.transitions.append((state, reason))
+
+    api.mic = _Mic()
+    api.state_manager = _State()
+    api._audio_playback_busy = False
+
+    async def _false(*_args, **_kwargs) -> bool:
+        return False
+
+    api._maybe_handle_confirmation_decision_timeout = _false
+    api._maybe_handle_approval_response = _false
+    api._handle_stop_word = _false
+    api._maybe_handle_research_permission_response = _false
+    api._maybe_handle_research_budget_response = _false
+    api._maybe_apply_late_confirmation_decision = _false
+    api._maybe_process_research_intent = _false
+    api._has_active_confirmation_token = lambda: False
+    api._is_awaiting_confirmation_phase = lambda: False
+    api._asr_verify_short_utterance_ms = 1200
+    api._vad_turn_detection = {}
+    api._utterance_trust_snapshot_by_input_event_key = {}
+
+    async def _run() -> None:
+        api._active_response_origin = "server_auto"
+        api._active_response_id = "resp-server-auto-empty-2"
+        api._active_server_auto_input_event_key = "item_empty_2"
+        api._record_pending_server_auto_response(
+            turn_id="turn_2",
+            response_id="resp-server-auto-empty-2",
+            canonical_key=api._canonical_utterance_key(turn_id="turn_2", input_event_key="item_empty_2"),
+        )
+        await api._handle_input_audio_transcription_completed_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "item_empty_2",
+                "transcript": "...",
+            },
+            ws,
+        )
+
+    asyncio.run(_run())
+
+    assert api.mic.start_calls == 1
+    assert api.mic.is_recording is True
+    assert api.state_manager.state == InteractionState.LISTENING
+    assert api.state_manager.transitions[-1] == (
+        InteractionState.LISTENING,
+        "empty transcript blocked",
+    )
 
 
 def test_preference_recall_preserves_parent_input_event_key_during_active_response() -> None:
