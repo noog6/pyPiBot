@@ -273,6 +273,48 @@ DEFAULT_GESTURES = (
             ),
         ),
     ),
+    GestureDefinition(
+        name="gesture_attention_hold",
+        priority=2,
+        frames=(
+            GestureFrameSpec(
+                name="attention-hold-acquire",
+                pan_offset=6.0,
+                tilt_offset=1.5,
+                duration_ms=260,
+            ),
+            GestureFrameSpec(
+                name="attention-hold",
+                pan_offset=6.0,
+                tilt_offset=1.5,
+                duration_ms=900,
+            ),
+        ),
+    ),
+    GestureDefinition(
+        name="gesture_attention_release",
+        priority=2,
+        frames=(
+            GestureFrameSpec(
+                name="attention-release-center",
+                pan_offset=0.0,
+                tilt_offset=0.0,
+                duration_ms=320,
+            ),
+            GestureFrameSpec(
+                name="attention-release-settle",
+                pan_offset=1.0,
+                tilt_offset=-0.5,
+                duration_ms=180,
+            ),
+            GestureFrameSpec(
+                name="attention-release-neutral",
+                pan_offset=0.0,
+                tilt_offset=0.0,
+                duration_ms=220,
+            ),
+        ),
+    ),
 )
 
 

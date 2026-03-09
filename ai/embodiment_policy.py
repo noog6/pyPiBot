@@ -61,7 +61,7 @@ class EmbodimentPolicy:
         gesture_name: str | None = None
         delay_ms = 0
         if state == InteractionState.LISTENING:
-            gesture_name = "gesture_attention_snap"
+            gesture_name = "gesture_attention_hold"
         elif state == InteractionState.THINKING:
             gesture_name = "gesture_curious_tilt"
             delay_ms = random_delay_ms(150, 300)
