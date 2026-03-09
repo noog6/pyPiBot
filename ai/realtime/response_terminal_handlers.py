@@ -355,12 +355,22 @@ class ResponseTerminalHandlers:
         )
         close_action = "allow"
         close_reason = "response_done_received"
+        provisional_server_auto_close_deferred = False
         if selection_reason == "exact_phrase_obligation_open":
             if exact_phrase_close_deferred:
                 close_action = "defer"
                 close_reason = "exact_phrase_obligation_open"
             else:
                 close_reason = "exact_phrase_repair_not_scheduled"
+        if (
+            close_action == "allow"
+            and active_response_was_provisional
+            and str(active_response_origin_before_clear or "").strip().lower() == "server_auto"
+            and not transcript_final_linked
+        ):
+            close_action = "defer"
+            close_reason = "provisional_server_auto_awaiting_transcript_final"
+            provisional_server_auto_close_deferred = True
         logger.info(
             "turn_terminal_close_eval run_id=%s turn_id=%s response_id=%s origin=%s transcript_final_seen=%s obligation_open=%s action=%s reason=%s",
             api._current_run_id() or "",
@@ -546,6 +556,14 @@ class ResponseTerminalHandlers:
         if exact_phrase_close_deferred:
             logger.info(
                 "turn_terminal_close_deferred run_id=%s turn_id=%s response_id=%s reason=exact_phrase_obligation_open",
+                api._current_run_id() or "",
+                turn_id,
+                str(active_response_id_before_clear or "none"),
+            )
+            return
+        if provisional_server_auto_close_deferred:
+            logger.info(
+                "turn_terminal_close_deferred run_id=%s turn_id=%s response_id=%s reason=provisional_server_auto_awaiting_transcript_final",
                 api._current_run_id() or "",
                 turn_id,
                 str(active_response_id_before_clear or "none"),

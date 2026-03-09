@@ -12736,14 +12736,13 @@ class RealtimeAPI:
                 reason="transcript_final",
             )
         if transcript:
-            decision_path = "canonical_transcript"
+            transcript_upgrade_candidate = bool(
+                pending_server_auto is not None
+                and pending_server_auto_key
+                and pending_server_auto_key != transcript_canonical_key
+            )
+            decision_path = "upgraded_response" if transcript_upgrade_candidate else "canonical_transcript"
             if memory_intent:
-                transcript_upgrade_candidate = bool(
-                    pending_server_auto is not None
-                    and pending_server_auto_key
-                    and pending_server_auto_key != transcript_canonical_key
-                )
-                decision_path = "upgraded_response" if transcript_upgrade_candidate else "canonical_transcript"
                 logger.info(
                     "memory_intent_decision_path run_id=%s turn_id=%s input_event_key=%s decision_path=%s",
                     self._current_run_id() or "",
