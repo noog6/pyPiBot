@@ -2030,6 +2030,22 @@ class RealtimeAPI:
                 reason=near_ready_reason,
             )
             return
+        if category == MicroAckCategory.LATENCY_MASK:
+            allow_latency_mask_ack, allow_reason_code = self._should_allow_latency_mask_micro_ack(
+                turn_id=turn_id,
+                input_event_key=active_input_event_key,
+            )
+            if not allow_latency_mask_ack:
+                logger.info(
+                    "micro_ack_suppressed reason=clarify_imminent run_id=%s turn_id=%s response_id=%s canonical_key=%s input_event_key=%s reason_code=%s",
+                    self._current_run_id() or "",
+                    turn_id,
+                    str(getattr(self, "_active_response_id", "") or "").strip() or "none",
+                    canonical_key,
+                    active_input_event_key,
+                    allow_reason_code,
+                )
+                return
         markers = getattr(self, "_pending_micro_ack_by_turn_channel", None)
         if not isinstance(markers, dict):
             markers = {}
@@ -2073,6 +2089,117 @@ class RealtimeAPI:
             )
         finally:
             self._pending_micro_ack_reason = None
+
+    def _should_allow_latency_mask_micro_ack(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str,
+    ) -> tuple[bool, str]:
+        verdict = self._get_response_gating_verdict(turn_id=turn_id, input_event_key=input_event_key)
+        if isinstance(verdict, ResponseGatingVerdict):
+            verdict_action = str(verdict.action or "").strip().upper()
+            if verdict_action == "CLARIFY":
+                return False, "gating_verdict_clarify"
+            if verdict_action == "UPGRADE":
+                return False, "gating_verdict_upgrade"
+
+        def _iter_response_create_candidates() -> Iterator[tuple[dict[str, Any], str, str]]:
+            pending = getattr(self, "_pending_response_create", None)
+            if isinstance(pending, PendingResponseCreate) and isinstance(getattr(pending, "event", None), dict):
+                yield pending.event, "pending", str(getattr(pending, "origin", "") or "").strip().lower()
+            for queued in list(getattr(self, "_response_create_queue", deque()) or ()):
+                if not isinstance(queued, dict) or not isinstance(queued.get("event"), dict):
+                    continue
+                yield queued["event"], "queued", str(queued.get("origin") or "").strip().lower()
+
+        for response_create_event, queue_state, candidate_origin in _iter_response_create_candidates():
+            metadata = self._extract_response_create_metadata(response_create_event)
+            candidate_turn_id = str(metadata.get("turn_id") or "").strip()
+            parent_turn_id = str(metadata.get("parent_turn_id") or "").strip()
+            if candidate_turn_id != turn_id and parent_turn_id != turn_id:
+                continue
+            parent_input_event_key = str(metadata.get("parent_input_event_key") or "").strip()
+            if parent_input_event_key and input_event_key and parent_input_event_key != input_event_key:
+                continue
+            candidate_input_event_key = str(metadata.get("input_event_key") or "").strip()
+            if candidate_input_event_key and input_event_key and candidate_input_event_key != input_event_key:
+                continue
+            trigger = str(metadata.get("trigger") or "").strip().lower()
+            clarify_mode = str(metadata.get("clarify_mode") or "").strip().lower()
+            replacement = str(metadata.get("transcript_upgrade_replacement") or "").strip().lower()
+
+            clarify_imminent = bool(clarify_mode) or trigger == "verify_clarify" or candidate_origin == "clarify"
+            upgrade_imminent = replacement in {"true", "1", "yes"} or trigger == "transcript_upgrade"
+            if clarify_imminent:
+                return False, f"{queue_state}_clarify_response_create"
+            if upgrade_imminent:
+                return False, f"{queue_state}_upgrade_response_create"
+        return True, "allowed"
+
+    def _cancel_latency_mask_micro_ack_for_clarify_imminent(self, *, turn_id: str, input_event_key: str) -> None:
+        canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+        manager = getattr(self, "_micro_ack_manager", None)
+        markers = getattr(self, "_pending_micro_ack_by_turn_channel", None)
+        canceled = False
+
+        def _scheduled_latency_mask_keys_for_turn() -> set[str]:
+            scheduled = getattr(manager, "_scheduled", None)
+            if not isinstance(scheduled, dict):
+                return set()
+            matching: set[str] = set()
+            for dedupe_key, scheduled_item in scheduled.items():
+                context = getattr(scheduled_item, "context", None)
+                if context is None:
+                    continue
+                if str(getattr(context, "turn_id", "") or "").strip() != turn_id:
+                    continue
+                category_value = getattr(context, "category", "")
+                normalized_category = (
+                    category_value.value
+                    if isinstance(category_value, MicroAckCategory)
+                    else str(category_value or "").strip().lower()
+                )
+                if normalized_category == MicroAckCategory.LATENCY_MASK.value:
+                    matching.add(str(dedupe_key))
+            return matching
+
+        if hasattr(manager, "cancel_matching"):
+            before_cancel_keys = _scheduled_latency_mask_keys_for_turn()
+            manager.cancel_matching(
+                turn_id=turn_id,
+                reason="clarify_imminent",
+                matcher=lambda context: (
+                    context.category == MicroAckCategory.LATENCY_MASK
+                    or str(context.category or "").strip().lower() == MicroAckCategory.LATENCY_MASK.value
+                ),
+            )
+            if before_cancel_keys:
+                after_cancel_keys = _scheduled_latency_mask_keys_for_turn()
+                canceled = bool(before_cancel_keys - after_cancel_keys) or canceled
+        if isinstance(markers, dict):
+            for marker_key, marker in list(markers.items()):
+                marker_turn_id, _channel = marker_key
+                if marker_turn_id != turn_id or not isinstance(marker, PendingMicroAckMarker):
+                    continue
+                marker_category = (
+                    marker.category.value
+                    if isinstance(marker.category, MicroAckCategory)
+                    else str(marker.category or "").strip().lower()
+                )
+                if marker_category != MicroAckCategory.LATENCY_MASK.value:
+                    continue
+                markers.pop(marker_key, None)
+                canceled = True
+        if canceled:
+            logger.info(
+                "micro_ack_canceled reason=clarify_imminent run_id=%s turn_id=%s response_id=%s canonical_key=%s input_event_key=%s",
+                self._current_run_id() or "",
+                turn_id,
+                str(getattr(self, "_active_response_id", "") or "").strip() or "none",
+                canonical_key,
+                input_event_key,
+            )
 
     def _should_suppress_micro_ack_for_tool_followup(
         self,
@@ -8114,6 +8241,8 @@ class RealtimeAPI:
             return existing
         verdict = ResponseGatingVerdict(action=action, reason=reason, decided_at=time.monotonic())
         store[key] = verdict
+        if str(action or "").strip().upper() in {"CLARIFY", "UPGRADE"}:
+            self._cancel_latency_mask_micro_ack_for_clarify_imminent(turn_id=turn_id, input_event_key=input_event_key)
         return verdict
 
     def _pending_tool_followup_likely(self) -> bool:

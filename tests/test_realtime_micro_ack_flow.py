@@ -509,6 +509,224 @@ def test_maybe_schedule_micro_ack_suppressed_during_pending_confirmation() -> No
     api.loop.close()
 
 
+def test_latency_mask_micro_ack_pre_schedule_suppressed_when_clarify_selected(monkeypatch) -> None:
+    api = _api_stub()
+    api.state_manager.state = InteractionState.THINKING
+    turn_id = "turn-clarify"
+    input_event_key = "input-clarify"
+    api._active_input_event_key_by_turn_id = {turn_id: input_event_key}
+    api._set_response_gating_verdict(
+        turn_id=turn_id,
+        input_event_key=input_event_key,
+        action="CLARIFY",
+        reason="verify_on_risk",
+    )
+
+    info_messages: list[str] = []
+
+    def _capture_info(message, *args, **kwargs):
+        _ = kwargs
+        info_messages.append(message % args)
+        return None
+
+    monkeypatch.setattr("ai.realtime_api.logger.info", _capture_info)
+
+    api._maybe_schedule_micro_ack(
+        turn_id=turn_id,
+        category=MicroAckCategory.LATENCY_MASK,
+        channel="voice",
+        reason="transcript_finalized",
+        expected_delay_ms=700,
+    )
+
+    assert api._micro_ack_manager.scheduled == []
+    assert any("micro_ack_suppressed reason=clarify_imminent" in msg for msg in info_messages)
+    api.loop.close()
+
+
+def test_latency_mask_micro_ack_post_schedule_cancelled_when_upgrade_wins(monkeypatch) -> None:
+    api = _api_stub()
+    api.state_manager.state = InteractionState.THINKING
+    turn_id = "turn-upgrade"
+    input_event_key = "input-upgrade"
+    api._active_input_event_key_by_turn_id = {turn_id: input_event_key}
+
+    info_messages: list[str] = []
+
+    def _capture_info(message, *args, **kwargs):
+        _ = kwargs
+        info_messages.append(message % args)
+        return None
+
+    monkeypatch.setattr("ai.realtime_api.logger.info", _capture_info)
+
+    api._maybe_schedule_micro_ack(
+        turn_id=turn_id,
+        category=MicroAckCategory.LATENCY_MASK,
+        channel="voice",
+        reason="transcript_finalized",
+        expected_delay_ms=700,
+    )
+    assert api._micro_ack_manager.scheduled == [(turn_id, "latency_mask", "transcript_finalized", 700)]
+
+    api._set_response_gating_verdict(
+        turn_id=turn_id,
+        input_event_key=input_event_key,
+        action="UPGRADE",
+        reason="transcript_upgrade",
+    )
+
+    assert (turn_id, "clarify_imminent") in api._micro_ack_manager.cancelled
+    assert any("micro_ack_canceled reason=clarify_imminent" in msg for msg in info_messages)
+    api.loop.close()
+
+
+def test_latency_mask_micro_ack_cancel_does_not_log_without_actual_cancellation(monkeypatch) -> None:
+    api = _api_stub()
+    turn_id = "turn-no-cancel"
+    input_event_key = "input-no-cancel"
+    api._active_input_event_key_by_turn_id = {turn_id: input_event_key}
+
+    info_messages: list[str] = []
+
+    def _capture_info(message, *args, **kwargs):
+        _ = kwargs
+        info_messages.append(message % args)
+        return None
+
+    monkeypatch.setattr("ai.realtime_api.logger.info", _capture_info)
+
+    api._cancel_latency_mask_micro_ack_for_clarify_imminent(turn_id=turn_id, input_event_key=input_event_key)
+
+    assert not any("micro_ack_canceled reason=clarify_imminent" in msg for msg in info_messages)
+    api.loop.close()
+
+
+def test_latency_mask_micro_ack_still_allowed_in_normal_wait_window() -> None:
+    api = _api_stub()
+    api.state_manager.state = InteractionState.THINKING
+    api._active_input_event_key_by_turn_id = {"turn-1": "input-1"}
+
+    api._maybe_schedule_micro_ack(
+        turn_id="turn-1",
+        category=MicroAckCategory.LATENCY_MASK,
+        channel="voice",
+        reason="transcript_finalized",
+        expected_delay_ms=700,
+    )
+
+    assert ("turn-1", "latency_mask", "transcript_finalized", 700) in api._micro_ack_manager.scheduled
+    api.loop.close()
+
+
+def test_latency_mask_micro_ack_not_over_suppressed_for_transcript_final_defer_only() -> None:
+    api = _api_stub()
+    api.state_manager.state = InteractionState.THINKING
+    turn_id = "turn-defer"
+    input_event_key = "input-defer"
+    api._active_input_event_key_by_turn_id = {turn_id: input_event_key}
+    api._set_response_gating_verdict(
+        turn_id=turn_id,
+        input_event_key=input_event_key,
+        action="ANSWER",
+        reason="awaiting_transcript_final",
+    )
+
+    api._maybe_schedule_micro_ack(
+        turn_id=turn_id,
+        category=MicroAckCategory.LATENCY_MASK,
+        channel="voice",
+        reason="transcript_finalized",
+        expected_delay_ms=700,
+    )
+
+    assert (turn_id, "latency_mask", "transcript_finalized", 700) in api._micro_ack_manager.scheduled
+    api.loop.close()
+
+
+
+
+def test_latency_mask_micro_ack_suppression_reason_codes_distinguish_pending_clarify_and_upgrade() -> None:
+    api = _api_stub()
+    turn_id = "turn-reason-codes"
+    input_event_key = "input-reason-codes"
+
+    api._extract_response_create_metadata = lambda event: (((event or {}).get("response") or {}).get("metadata") or {})
+
+    api._pending_response_create = PendingResponseCreate(
+        websocket=None,
+        event={
+            "type": "response.create",
+            "response": {
+                "metadata": {
+                    "turn_id": turn_id,
+                    "input_event_key": input_event_key,
+                    "clarify_mode": "bounded",
+                }
+            },
+        },
+        origin="clarify",
+        turn_id=turn_id,
+        created_at=time.monotonic(),
+        reason="queued",
+    )
+
+    allow, reason_code = api._should_allow_latency_mask_micro_ack(turn_id=turn_id, input_event_key=input_event_key)
+    assert allow is False
+    assert reason_code == "pending_clarify_response_create"
+
+    api._pending_response_create = PendingResponseCreate(
+        websocket=None,
+        event={
+            "type": "response.create",
+            "response": {
+                "metadata": {
+                    "turn_id": turn_id,
+                    "input_event_key": input_event_key,
+                    "transcript_upgrade_replacement": "true",
+                }
+            },
+        },
+        origin="assistant_message",
+        turn_id=turn_id,
+        created_at=time.monotonic(),
+        reason="queued",
+    )
+
+    allow, reason_code = api._should_allow_latency_mask_micro_ack(turn_id=turn_id, input_event_key=input_event_key)
+    assert allow is False
+    assert reason_code == "pending_upgrade_response_create"
+    api.loop.close()
+
+
+def test_latency_mask_micro_ack_suppression_reason_code_distinguishes_queued_clarify() -> None:
+    api = _api_stub()
+    turn_id = "turn-queued-clarify"
+    input_event_key = "input-queued-clarify"
+    api._extract_response_create_metadata = lambda event: (((event or {}).get("response") or {}).get("metadata") or {})
+    api._response_create_queue = deque(
+        [
+            {
+                "event": {
+                    "type": "response.create",
+                    "response": {
+                        "metadata": {
+                            "turn_id": turn_id,
+                            "input_event_key": input_event_key,
+                            "clarify_mode": "bounded",
+                        }
+                    },
+                },
+                "origin": "clarify",
+            }
+        ]
+    )
+
+    allow, reason_code = api._should_allow_latency_mask_micro_ack(turn_id=turn_id, input_event_key=input_event_key)
+    assert allow is False
+    assert reason_code == "queued_clarify_response_create"
+    api.loop.close()
+
 def test_micro_ack_suppression_reason_blocks_non_safety_reason_while_confirmation_pending() -> None:
     api = _api_stub()
     api._has_active_confirmation_token = lambda: True
