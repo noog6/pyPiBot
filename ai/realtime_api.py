@@ -12406,6 +12406,21 @@ class RealtimeAPI:
                 reason="empty_transcript_blocked",
                 details="transcript_missing_or_zero_words",
             )
+            if not self._audio_playback_busy:
+                mic = getattr(self, "mic", None)
+                start_recording = getattr(mic, "start_recording", None) if mic is not None else None
+                if (
+                    mic is not None
+                    and not getattr(mic, "is_recording", False)
+                    and callable(start_recording)
+                ):
+                    logger.info(
+                        "empty_transcript_rearm_recording run_id=%s turn_id=%s input_event_key=%s",
+                        self._current_run_id() or "",
+                        resolved_turn_id,
+                        input_event_key,
+                    )
+                    start_recording()
             if hasattr(self, "state_manager") and self.state_manager is not None:
                 self.state_manager.update_state(InteractionState.LISTENING, "empty transcript blocked")
             return
