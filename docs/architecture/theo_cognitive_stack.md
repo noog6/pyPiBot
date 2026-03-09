@@ -49,6 +49,12 @@ YH -.-> D
 
 ## Current Module Anchors
 
+### Embodiment Layer Status (Realtime presence seam)
+
+- `ai/embodiment_policy.py` is the deterministic embodiment policy seam (Phase A complete).
+- `ai/attention_continuity.py` is a minimal continuity helper (Phase B introduced) that keeps listening attention alive through short ASR/transcript-final churn windows.
+- This layer is **not** a gaze planner, camera tracker, or second runtime state machine.
+
 - **Runtime / Nervous System** → `ai/realtime_api.py`,
   `ai/realtime/response_create_runtime.py`.
   Changes that belong here are lifecycle/transport determinism fixes (cancel/

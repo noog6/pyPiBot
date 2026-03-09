@@ -82,6 +82,28 @@ Current limitation:
   layers. The current guarantee is therefore **outcome-based** (requested contract must still
   be fulfilled), not “total gesture subsystem silence” during a turn.
 
+
+## Embodiment Layer (Phase A + B)
+
+The embodiment layer is a narrow seam between interaction state signals and physical cue execution.
+
+- **Phase A (complete):** `EmbodimentPolicy` owns deterministic state-cue selection/suppression reasons.
+- **Phase B (current):** `AttentionContinuity` tracks a tiny embodied-attention hold across speech-stop/transcript-final/defer churn so Theo does not appear to disengage too early.
+- **Phase C (future):** richer continuity and arbitration-aware presence behaviors (without moving lifecycle transport logic into policy).
+
+Ownership boundaries:
+
+- Runtime (`ai/realtime_api.py`) observes speech/state/lifecycle events and updates continuity state.
+- Policy (`ai/embodiment_policy.py`) reads continuity facts and decides whether to emit/suppress a state cue.
+- Runtime executes motion actions after policy decisions.
+
+Anti-patterns to avoid:
+
+- Rebuilding a second lifecycle engine inside embodiment helpers.
+- Moving servo/camera target planning into attention continuity.
+- Burying embodiment policy branches back into raw websocket handlers.
+- Letting continuity helpers create/own response lifecycle decisions.
+
 ## Configuration
 
 State cues and timing thresholds are configured in `config/default.yaml` under
