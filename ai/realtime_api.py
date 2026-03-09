@@ -3606,9 +3606,10 @@ class RealtimeAPI:
         previous_state = self._last_interaction_state
         self._last_interaction_state = state
         now = time.monotonic()
+        if state != InteractionState.LISTENING and bool(getattr(self, "_listening_attention_hold_active", False)):
+            self._emit_attention_hold_release(reason=f"state_{state.value}")
         if state in {InteractionState.IDLE, InteractionState.SPEAKING}:
             self._attention_on_terminal_state(state)
-            self._emit_attention_hold_release(reason=f"state_{state.value}")
         snapshot = self._attention_continuity.snapshot(now_s=now) if getattr(self, "_attention_continuity", None) is not None else AttentionSnapshot(active=False, user_speaking=False, acquired_at_s=None, hold_until_s=None, release_reason="uninitialized")
 
         decision = self._embodiment_policy.decide_state_cue(
