@@ -113,6 +113,8 @@ from motion import (
     gesture_curious_tilt,
     gesture_idle,
     gesture_nod,
+    gesture_speaking_posture,
+    gesture_speaking_settle,
 )
 from motion.gesture_library import DEFAULT_GESTURES
 from services.profile_manager import ProfileManager
@@ -680,6 +682,7 @@ class RealtimeAPI:
         self._last_gesture_time = 0.0
         self._last_interaction_state = self.state_manager.state
         self._listening_attention_hold_active = False
+        self._speaking_posture_episode_active = False
         self._gesture_global_cooldown_s = 10.0
         self._pending_image_stimulus: dict[str, Any] | None = None
         self._pending_image_flush_after_playback = False
@@ -891,6 +894,8 @@ class RealtimeAPI:
             "gesture_curious_tilt": 6.0,
             "gesture_nod": 8.0,
             "gesture_idle": 8.0,
+            "gesture_speaking_posture": 3.0,
+            "gesture_speaking_settle": 2.0,
         }
         self.orchestration_state = OrchestrationState()
         self.event_bus = EventBus()
@@ -3580,6 +3585,10 @@ class RealtimeAPI:
             action = gesture_nod(delay_ms=delay_ms)
         elif gesture_name == "gesture_idle":
             action = gesture_idle(delay_ms=delay_ms)
+        elif gesture_name == "gesture_speaking_posture":
+            action = gesture_speaking_posture(delay_ms=delay_ms)
+        elif gesture_name == "gesture_speaking_settle":
+            action = gesture_speaking_settle(delay_ms=delay_ms)
 
         if action is None:
             logger.warning("Gesture cue skipped: no action built for %s.", gesture_name)
@@ -3610,6 +3619,27 @@ class RealtimeAPI:
             self._emit_attention_hold_release(reason=f"state_{state.value}")
         if state in {InteractionState.IDLE, InteractionState.SPEAKING}:
             self._attention_on_terminal_state(state)
+
+        was_speaking_episode_active = bool(getattr(self, "_speaking_posture_episode_active", False))
+        if state != InteractionState.SPEAKING:
+            self._speaking_posture_episode_active = False
+
+        if state == InteractionState.IDLE and previous_state == InteractionState.SPEAKING:
+            if was_speaking_episode_active:
+                emitted = self._enqueue_gesture_cue(
+                    state=state,
+                    gesture_name="gesture_speaking_settle",
+                    delay_ms=0,
+                    policy_reason="speaking_to_idle_settle",
+                    enforce_motion_guards=True,
+                )
+                if emitted:
+                    logger.info("speaking_settle_emitted from_state=%s to_state=%s", previous_state.value, state.value)
+                else:
+                    logger.info("speaking_settle_skipped reason=motion_busy_or_unavailable from_state=%s to_state=%s", previous_state.value, state.value)
+            else:
+                logger.info("speaking_settle_skipped reason=no_active_speaking_episode from_state=%s to_state=%s", previous_state.value, state.value)
+
         snapshot = self._attention_continuity.snapshot(now_s=now) if getattr(self, "_attention_continuity", None) is not None else AttentionSnapshot(active=False, user_speaking=False, acquired_at_s=None, hold_until_s=None, release_reason="uninitialized")
 
         decision = self._embodiment_policy.decide_state_cue(
@@ -3645,6 +3675,9 @@ class RealtimeAPI:
                 last_fired = self._gesture_last_fired.get(decision.cue_name, 0.0)
                 cooldown_remaining_s = max(0.0, per_cooldown - (now - last_fired))
 
+            if decision.cue_name == "gesture_speaking_posture":
+                logger.info("speaking_posture_start_skipped reason=%s", decision.reason)
+
             if cooldown_remaining_s is None:
                 logger.info(
                     "Gesture cue suppressed: state=%s reason=%s cue=%s",
@@ -3666,6 +3699,9 @@ class RealtimeAPI:
         if gesture_name == "gesture_attention_hold" and bool(getattr(self, "_listening_attention_hold_active", False)):
             logger.debug("attention_hold_start_skipped reason=already_active state=%s", state.value)
             return
+        if gesture_name == "gesture_speaking_posture" and was_speaking_episode_active:
+            logger.info("speaking_posture_start_skipped reason=already_started state=%s", state.value)
+            return
         if not gesture_name:
             logger.warning(
                 "Gesture cue skipped: missing cue for emit decision (state=%s reason=%s).",
@@ -3682,11 +3718,17 @@ class RealtimeAPI:
             enforce_motion_guards=True,
         )
         if not emitted:
+            if gesture_name == "gesture_speaking_posture":
+                logger.info("speaking_posture_start_skipped reason=motion_busy_or_unavailable state=%s", state.value)
             return
 
         if gesture_name == "gesture_attention_hold":
             self._listening_attention_hold_active = True
             logger.info("attention_hold_started state=%s", state.value)
+        elif gesture_name == "gesture_speaking_posture":
+            self._speaking_posture_episode_active = True
+            logger.info("speaking_posture_started state=%s", state.value)
+
 
     def _handle_state_earcon(self, state: InteractionState) -> None:
         """Hook for earcon cues on state transitions."""

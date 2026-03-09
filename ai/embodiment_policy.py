@@ -52,8 +52,6 @@ class EmbodimentPolicy:
                 reason="turn_contract_no_gesture",
             )
 
-        if state == InteractionState.SPEAKING:
-            return EmbodimentDecision(action=EmbodimentActionType.NONE, reason="state_speaking")
 
         if state == InteractionState.THINKING and attention.active:
             return EmbodimentDecision(action=EmbodimentActionType.NONE, reason="attention_continuity_hold")
@@ -65,8 +63,8 @@ class EmbodimentPolicy:
         elif state == InteractionState.THINKING:
             gesture_name = "gesture_curious_tilt"
             delay_ms = random_delay_ms(150, 300)
-        elif state == InteractionState.IDLE and previous_state == InteractionState.SPEAKING:
-            gesture_name = "gesture_nod"
+        elif state == InteractionState.SPEAKING:
+            gesture_name = "gesture_speaking_posture"
 
         if not gesture_name:
             return EmbodimentDecision(action=EmbodimentActionType.NONE, reason="state_no_cue")

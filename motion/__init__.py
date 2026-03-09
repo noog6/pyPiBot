@@ -17,6 +17,8 @@ from motion.gestures import (
     gesture_look_up,
     gesture_no,
     gesture_nod,
+    gesture_speaking_posture,
+    gesture_speaking_settle,
 )
 from motion.motion_controller import MotionController
 
@@ -38,4 +40,6 @@ __all__ = [
     "gesture_look_up",
     "gesture_no",
     "gesture_nod",
+    "gesture_speaking_posture",
+    "gesture_speaking_settle",
 ]
