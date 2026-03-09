@@ -7203,7 +7203,11 @@ class RealtimeAPI:
     ) -> tuple[bool, str, bool, str, bool, str]:
         deliverable_class = str(getattr(parent_state, "deliverable_class", "") or "").strip().lower()
         deliverable_observed = bool(getattr(parent_state, "deliverable_observed", False))
-        canonical_covered = deliverable_observed or deliverable_class in {"progress", "final"}
+        # Treat parent coverage as semantic only when we have a classified deliverable.
+        # `deliverable_observed=True` can be triggered by tool-call scaffolding alone
+        # (for example, function-call argument streaming) and is too weak to suppress
+        # a queued status follow-up by itself.
+        canonical_covered = deliverable_class in {"progress", "final"}
         normalized_response_id = str(getattr(parent_state, "response_id", "") or "").strip()
         terminal_selected = False
         terminal_reason = "unknown"
