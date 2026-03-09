@@ -2500,6 +2500,137 @@ def test_gesture_followup_dropped_on_response_done_and_playback_complete_when_pa
         assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
 
 
+def test_terminal_deliverable_selection_eagerly_drops_queued_tool_followup() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_terminal_drop"
+    parent_input_event_key = "item_parent_terminal_drop"
+    parent_response_id = "resp-parent-terminal-drop"
+    parent_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "upgraded_response"),
+            setattr(record, "response_id", parent_response_id),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "final"),
+            setattr(record, "done", True),
+        ),
+    )
+
+    response_create_event, canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_terminal_drop",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+    metadata = ((response_create_event.get("response") or {}).get("metadata") or {})
+    metadata["turn_id"] = turn_id
+    metadata["parent_turn_id"] = turn_id
+    metadata["parent_input_event_key"] = parent_input_event_key
+    metadata["blocked_by_response_id"] = parent_response_id
+    canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=str(metadata.get("input_event_key") or ""))
+
+    api._pending_response_create = PendingResponseCreate(
+        websocket=_RecordingWs(),
+        event=response_create_event,
+        origin="tool_output",
+        turn_id=turn_id,
+        created_at=0.0,
+        reason="active_response",
+        record_ai_call=False,
+        debug_context=None,
+        memory_brief_note=None,
+        queued_reminder_key=None,
+        enqueued_done_serial=0,
+        enqueue_seq=1,
+    )
+    api._sync_pending_response_create_queue()
+
+    api._apply_terminal_deliverable_selection(
+        canonical_key=parent_key,
+        response_id=parent_response_id,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        selected=True,
+        selection_reason="normal",
+    )
+
+    assert api._pending_response_create is None
+    assert len(api._response_create_queue) == 0
+    assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
+
+
+def test_terminal_deliverable_selection_does_not_drop_legitimate_distinct_info_tool_followup() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_terminal_keep"
+    parent_input_event_key = "item_parent_terminal_keep"
+    parent_response_id = "resp-parent-terminal-keep"
+    parent_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "upgraded_response"),
+            setattr(record, "response_id", parent_response_id),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "final"),
+            setattr(record, "done", True),
+        ),
+    )
+
+    response_create_event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_terminal_keep",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+    metadata = ((response_create_event.get("response") or {}).get("metadata") or {})
+    metadata["turn_id"] = turn_id
+    metadata["parent_turn_id"] = turn_id
+    metadata["parent_input_event_key"] = parent_input_event_key
+    metadata["blocked_by_response_id"] = parent_response_id
+    metadata["tool_result_has_distinct_info"] = "true"
+    canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=str(metadata.get("input_event_key") or ""))
+
+    api._pending_response_create = PendingResponseCreate(
+        websocket=_RecordingWs(),
+        event=response_create_event,
+        origin="tool_output",
+        turn_id=turn_id,
+        created_at=0.0,
+        reason="active_response",
+        record_ai_call=False,
+        debug_context=None,
+        memory_brief_note=None,
+        queued_reminder_key=None,
+        enqueued_done_serial=0,
+        enqueue_seq=1,
+    )
+    api._sync_pending_response_create_queue()
+
+    api._apply_terminal_deliverable_selection(
+        canonical_key=parent_key,
+        response_id=parent_response_id,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        selected=True,
+        selection_reason="normal",
+    )
+
+    assert api._pending_response_create is not None
+    assert any(
+        str(((queued.get("event") or {}).get("response") or {}).get("metadata", {}).get("input_event_key") or "").strip()
+        == str(metadata.get("input_event_key") or "").strip()
+        for queued in api._response_create_queue
+    )
+    assert api._tool_followup_state(canonical_key=canonical_key) == "new"
+
+
 def test_low_risk_gesture_followup_payload_is_status_only() -> None:
     api = _make_api_stub()
     _wire_runtime(api)

@@ -6915,6 +6915,95 @@ class RealtimeAPI:
             str(bool(selected)).lower(),
             normalized_reason or "unknown",
         )
+        if selected:
+            self._drop_dead_tool_followup_creates_after_terminal_selection(
+                turn_id=turn_id,
+                selected_response_id=normalized_response_id,
+            )
+
+    def _drop_dead_tool_followup_creates_after_terminal_selection(
+        self,
+        *,
+        turn_id: str,
+        selected_response_id: str | None,
+    ) -> None:
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return
+        normalized_response_id = str(selected_response_id or "").strip()
+
+        def _should_drop_tool_followup(event: dict[str, Any], *, fallback_turn_id: str) -> tuple[bool, str]:
+            metadata = self._extract_response_create_metadata(event)
+            if str(metadata.get("tool_followup", "")).strip().lower() not in {"true", "1", "yes"}:
+                return False, ""
+            event_turn_id = str(metadata.get("turn_id") or fallback_turn_id or "").strip()
+            if event_turn_id != normalized_turn_id:
+                return False, ""
+            input_event_key = str(metadata.get("input_event_key") or "").strip()
+            canonical_key = self._canonical_utterance_key(
+                turn_id=event_turn_id,
+                input_event_key=input_event_key,
+            )
+            blocked_by_response_id = str(metadata.get("blocked_by_response_id") or "").strip()
+            if normalized_response_id and blocked_by_response_id and blocked_by_response_id != normalized_response_id:
+                return False, canonical_key
+            should_drop, _parent_entry, _reason = self._should_suppress_queued_tool_followup_release(
+                response_metadata=metadata,
+                blocked_by_response_id=normalized_response_id or blocked_by_response_id or None,
+            )
+            return should_drop, canonical_key
+
+        dropped_pending = 0
+        pending = getattr(self, "_pending_response_create", None)
+        if pending is not None and isinstance(getattr(pending, "event", None), dict):
+            should_drop, canonical_key = _should_drop_tool_followup(
+                pending.event,
+                fallback_turn_id=str(getattr(pending, "turn_id", "") or normalized_turn_id),
+            )
+            if should_drop:
+                if canonical_key:
+                    self._set_tool_followup_state(
+                        canonical_key=canonical_key,
+                        state="dropped",
+                        reason="parent_covered_tool_result terminal_deliverable_selected",
+                    )
+                self._pending_response_create = None
+                dropped_pending = 1
+
+        dropped_queue = 0
+        queue = getattr(self, "_response_create_queue", None)
+        if isinstance(queue, deque) and queue:
+            retained: deque[dict[str, Any]] = deque()
+            for queued in queue:
+                if not isinstance(queued, dict) or not isinstance(queued.get("event"), dict):
+                    retained.append(queued)
+                    continue
+                should_drop, canonical_key = _should_drop_tool_followup(
+                    queued["event"],
+                    fallback_turn_id=str(queued.get("turn_id") or normalized_turn_id),
+                )
+                if not should_drop:
+                    retained.append(queued)
+                    continue
+                if canonical_key:
+                    self._set_tool_followup_state(
+                        canonical_key=canonical_key,
+                        state="dropped",
+                        reason="parent_covered_tool_result terminal_deliverable_selected",
+                    )
+                dropped_queue += 1
+            self._response_create_queue = retained
+
+        if dropped_pending or dropped_queue:
+            self._sync_pending_response_create_queue()
+            logger.info(
+                "terminal_deliverable_tool_followup_prune run_id=%s turn_id=%s response_id=%s dropped_pending=%s dropped_queue=%s",
+                self._current_run_id() or "",
+                normalized_turn_id,
+                normalized_response_id or "none",
+                dropped_pending,
+                dropped_queue,
+            )
 
     def _parent_response_coverage_state(
         self,
