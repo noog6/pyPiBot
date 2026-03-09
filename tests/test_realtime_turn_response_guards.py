@@ -13,6 +13,7 @@ from collections import deque
 
 from ai.realtime.response_create_runtime import ResponseCreateRuntime
 from ai.realtime.types import CanonicalResponseState
+from ai.embodiment_policy import EmbodimentPolicy
 from ai.realtime_api import PendingResponseCreate, RealtimeAPI
 from core.logging import logger
 from interaction import InteractionState
@@ -74,6 +75,7 @@ def _make_api() -> RealtimeAPI:
     api._turn_contracts_by_turn_id = {}
     api._turn_contract_fallback = None
     api._last_interaction_state = InteractionState.IDLE
+    api._embodiment_policy = EmbodimentPolicy()
     api._last_gesture_time = 0.0
     api._gesture_global_cooldown_s = 0.0
     api._gesture_last_fired = {}
