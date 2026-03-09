@@ -72,7 +72,7 @@ from ai.realtime.shutdown import ShutdownCoordinator
 from ai.realtime.transport import RealtimeTransport
 from ai.realtime.types import CanonicalResponseState, PendingResponseCreate, UtteranceContext
 from ai.realtime import preference_recall_runtime
-from ai.attention_continuity import AttentionContinuity
+from ai.attention_continuity import AttentionContinuity, AttentionSnapshot
 from ai.embodiment_policy import EmbodimentActionType, EmbodimentPolicy
 from ai.interaction_lifecycle_controller import (
     InteractionLifecycleController,
@@ -107,6 +107,8 @@ from ai.utils import (
 )
 from motion import (
     MotionController,
+    gesture_attention_hold,
+    gesture_attention_release,
     gesture_attention_snap,
     gesture_curious_tilt,
     gesture_idle,
@@ -677,6 +679,7 @@ class RealtimeAPI:
         self._gesture_last_fired: dict[str, float] = {}
         self._last_gesture_time = 0.0
         self._last_interaction_state = self.state_manager.state
+        self._listening_attention_hold_active = False
         self._gesture_global_cooldown_s = 10.0
         self._pending_image_stimulus: dict[str, Any] | None = None
         self._pending_image_flush_after_playback = False
@@ -882,6 +885,8 @@ class RealtimeAPI:
             emit_callback=self.maybe_request_response,
         )
         self._gesture_cooldowns_s = {
+            "gesture_attention_hold": 10.0,
+            "gesture_attention_release": 1.0,
             "gesture_attention_snap": 10.0,
             "gesture_curious_tilt": 6.0,
             "gesture_nod": 8.0,
@@ -3444,9 +3449,12 @@ class RealtimeAPI:
         return self._battery_policy().is_query_context_active()
 
     def _attention_on_listening_started(self) -> None:
+        continuity = getattr(self, "_attention_continuity", None)
+        if continuity is None:
+            return
         now = time.monotonic()
-        snapshot = self._attention_continuity.acquire(now_s=now, reason="speech_started")
-        snapshot = self._attention_continuity.mark_user_speaking(now_s=now, speaking=True)
+        snapshot = continuity.acquire(now_s=now, reason="speech_started")
+        snapshot = continuity.mark_user_speaking(now_s=now, speaking=True)
         logger.info(
             "attention_continuity event=acquire source=speech_started active=%s reason=%s",
             str(snapshot.active).lower(),
@@ -3454,19 +3462,27 @@ class RealtimeAPI:
         )
 
     def _attention_on_speech_stopped(self, *, reason: str = "speech_stopped") -> None:
+        continuity = getattr(self, "_attention_continuity", None)
+        if continuity is None:
+            self._emit_attention_hold_release(reason=reason)
+            return
         now = time.monotonic()
-        snapshot = self._attention_continuity.mark_user_speaking(now_s=now, speaking=False)
-        snapshot = self._attention_continuity.refresh_hold(now_s=now, reason=reason)
+        snapshot = continuity.mark_user_speaking(now_s=now, speaking=False)
+        snapshot = continuity.refresh_hold(now_s=now, reason=reason)
         logger.info(
             "attention_continuity event=hold_refresh source=%s hold_until_s=%.3f reason=%s",
             reason,
             float(snapshot.hold_until_s or 0.0),
             snapshot.release_reason,
         )
+        self._emit_attention_hold_release(reason=reason)
 
     def _attention_on_transcript_finalized(self) -> None:
+        continuity = getattr(self, "_attention_continuity", None)
+        if continuity is None:
+            return
         now = time.monotonic()
-        snapshot = self._attention_continuity.refresh_hold(now_s=now, reason="transcript_finalized")
+        snapshot = continuity.refresh_hold(now_s=now, reason="transcript_finalized")
         if snapshot.active:
             logger.info(
                 "attention_continuity event=hold_refresh source=transcript_finalized hold_until_s=%.3f reason=%s",
@@ -3475,13 +3491,115 @@ class RealtimeAPI:
             )
 
     def _attention_on_terminal_state(self, state: InteractionState) -> None:
+        continuity = getattr(self, "_attention_continuity", None)
+        if continuity is None:
+            return
         now = time.monotonic()
-        snapshot = self._attention_continuity.release(now_s=now, reason=f"state_{state.value}")
+        snapshot = continuity.release(now_s=now, reason=f"state_{state.value}")
         logger.info(
             "attention_continuity event=release state=%s reason=%s",
             state.value,
             snapshot.release_reason,
         )
+
+
+    def _emit_attention_hold_release(self, *, reason: str) -> None:
+        if not bool(getattr(self, "_listening_attention_hold_active", False)):
+            logger.debug("attention_hold_release_skipped reason=%s hold_active=false", reason)
+            return
+        emitted = self._enqueue_gesture_cue(
+            state=InteractionState.THINKING,
+            gesture_name="gesture_attention_release",
+            delay_ms=0,
+            policy_reason="attention_hold_release",
+            enforce_motion_guards=True,
+        )
+        if not emitted:
+            logger.info("attention_hold_released status=deferred reason=%s", reason)
+            return
+        self._listening_attention_hold_active = False
+        logger.info("attention_hold_released reason=%s", reason)
+
+    def _enqueue_gesture_cue(
+        self,
+        *,
+        state: InteractionState,
+        gesture_name: str,
+        delay_ms: int,
+        policy_reason: str,
+        enforce_motion_guards: bool,
+    ) -> bool:
+        now = time.monotonic()
+        try:
+            controller = MotionController.get_instance()
+        except Exception as exc:
+            logger.warning("Gesture cue skipped: motion controller unavailable (%s).", exc)
+            return False
+
+        if not controller.is_control_loop_alive():
+            logger.info(
+                "Gesture cue skipped: motion controller not running (state=%s).",
+                state.value,
+            )
+            return False
+
+        try:
+            servos = controller.servo_registry.get_servos()
+        except Exception as exc:
+            logger.warning("Gesture cue skipped: servo registry unavailable (%s).", exc)
+            return False
+
+        if not servos:
+            logger.warning("Gesture cue skipped: servo registry not ready.")
+            return False
+
+        if enforce_motion_guards and controller.is_moving():
+            logger.debug("Gesture cue skipped: motion active for state %s.", state.value)
+            return False
+
+        with controller._queue_lock:
+            queued_actions = list(controller.action_queue)
+
+        if enforce_motion_guards and queued_actions:
+            logger.debug(
+                "Gesture cue skipped: action queue not empty (%s items).",
+                len(queued_actions),
+            )
+            return False
+
+        action = None
+        if gesture_name == "gesture_attention_hold":
+            action = gesture_attention_hold(delay_ms=delay_ms)
+        elif gesture_name == "gesture_attention_release":
+            action = gesture_attention_release(delay_ms=delay_ms)
+        elif gesture_name == "gesture_attention_snap":
+            action = gesture_attention_snap(delay_ms=delay_ms)
+        elif gesture_name == "gesture_curious_tilt":
+            action = gesture_curious_tilt(delay_ms=delay_ms)
+        elif gesture_name == "gesture_nod":
+            action = gesture_nod(delay_ms=delay_ms)
+        elif gesture_name == "gesture_idle":
+            action = gesture_idle(delay_ms=delay_ms)
+
+        if action is None:
+            logger.warning("Gesture cue skipped: no action built for %s.", gesture_name)
+            return False
+
+        controller.add_action_to_queue(action)
+        self._gesture_last_fired[gesture_name] = now
+        self._last_gesture_time = now
+        per_cooldown = self._gesture_cooldowns_s.get(gesture_name, 0.0)
+        logger.info(
+            "Gesture cue emitted: state=%s gesture=%s delay_ms=%s policy_reason=%s global_cd=%.2fs "
+            "gesture_cd=%.2fs",
+            state.value,
+            gesture_name,
+            delay_ms,
+            policy_reason,
+            self._gesture_global_cooldown_s,
+            per_cooldown,
+        )
+        return True
 
     def _handle_state_gesture(self, state: InteractionState) -> None:
         """Hook for gesture cues on state transitions."""
@@ -3490,7 +3608,8 @@ class RealtimeAPI:
         now = time.monotonic()
         if state in {InteractionState.IDLE, InteractionState.SPEAKING}:
             self._attention_on_terminal_state(state)
-        snapshot = self._attention_continuity.snapshot(now_s=now)
+            self._emit_attention_hold_release(reason=f"state_{state.value}")
+        snapshot = self._attention_continuity.snapshot(now_s=now) if getattr(self, "_attention_continuity", None) is not None else AttentionSnapshot(active=False, user_speaking=False, acquired_at_s=None, hold_until_s=None, release_reason="uninitialized")
 
         decision = self._embodiment_policy.decide_state_cue(
             state=state,
@@ -3543,6 +3662,9 @@ class RealtimeAPI:
             return
 
         gesture_name = decision.cue_name
+        if gesture_name == "gesture_attention_hold" and bool(getattr(self, "_listening_attention_hold_active", False)):
+            logger.debug("attention_hold_start_skipped reason=already_active state=%s", state.value)
+            return
         if not gesture_name:
             logger.warning(
                 "Gesture cue skipped: missing cue for emit decision (state=%s reason=%s).",
@@ -3551,73 +3673,19 @@ class RealtimeAPI:
             )
             return
 
-        try:
-            controller = MotionController.get_instance()
-        except Exception as exc:
-            logger.warning("Gesture cue skipped: motion controller unavailable (%s).", exc)
-            return
-
-        if not controller.is_control_loop_alive():
-            logger.info(
-                "Gesture cue skipped: motion controller not running (state=%s).",
-                state.value,
-            )
-            return
-
-        try:
-            servos = controller.servo_registry.get_servos()
-        except Exception as exc:
-            logger.warning("Gesture cue skipped: servo registry unavailable (%s).", exc)
-            return
-
-        if not servos:
-            logger.warning("Gesture cue skipped: servo registry not ready.")
-            return
-
-        if controller.is_moving():
-            logger.debug("Gesture cue skipped: motion active for state %s.", state.value)
-            return
-
-        with controller._queue_lock:
-            queued_actions = list(controller.action_queue)
-
-        if queued_actions:
-            logger.debug(
-                "Gesture cue skipped: action queue not empty (%s items).",
-                len(queued_actions),
-            )
-            return
-
-        per_cooldown = self._gesture_cooldowns_s.get(gesture_name, 0.0)
-        delay_ms = decision.delay_ms
-
-        action = None
-        if gesture_name == "gesture_attention_snap":
-            action = gesture_attention_snap(delay_ms=delay_ms)
-        elif gesture_name == "gesture_curious_tilt":
-            action = gesture_curious_tilt(delay_ms=delay_ms)
-        elif gesture_name == "gesture_nod":
-            action = gesture_nod(delay_ms=delay_ms)
-        elif gesture_name == "gesture_idle":
-            action = gesture_idle(delay_ms=delay_ms)
-
-        if action is None:
-            logger.warning("Gesture cue skipped: no action built for %s.", gesture_name)
-            return
-
-        controller.add_action_to_queue(action)
-        self._gesture_last_fired[gesture_name] = now
-        self._last_gesture_time = now
-        logger.info(
-            "Gesture cue emitted: state=%s gesture=%s delay_ms=%s policy_reason=%s global_cd=%.2fs "
-            "gesture_cd=%.2fs",
-            state.value,
-            gesture_name,
-            delay_ms,
-            decision.reason,
-            self._gesture_global_cooldown_s,
-            per_cooldown,
+        emitted = self._enqueue_gesture_cue(
+            state=state,
+            gesture_name=gesture_name,
+            delay_ms=decision.delay_ms,
+            policy_reason=decision.reason,
+            enforce_motion_guards=True,
         )
+        if not emitted:
+            return
+
+        if gesture_name == "gesture_attention_hold":
+            self._listening_attention_hold_active = True
+            logger.info("attention_hold_started state=%s", state.value)
 
     def _handle_state_earcon(self, state: InteractionState) -> None:
         """Hook for earcon cues on state transitions."""
@@ -3653,6 +3721,10 @@ class RealtimeAPI:
         lowered = normalized_text.lower()
         exact_phrase = ""
         explicit_gesture_tools: set[str] = set()
+        if "attention hold" in lowered or "listening hold" in lowered:
+            explicit_gesture_tools.add("gesture_attention_hold")
+        if "attention release" in lowered:
+            explicit_gesture_tools.add("gesture_attention_release")
         if "attention snap" in lowered or "snap" in lowered:
             explicit_gesture_tools.add("gesture_attention_snap")
         if "curious tilt" in lowered or "tilt" in lowered:
@@ -6672,6 +6744,8 @@ class RealtimeAPI:
             "gesture_look_down",
             "gesture_look_center",
             "gesture_curious_tilt",
+            "gesture_attention_hold",
+            "gesture_attention_release",
             "gesture_attention_snap",
         }
 

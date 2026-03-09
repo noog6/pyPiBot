@@ -219,6 +219,18 @@ def test_turn_contract_parse_detects_required_phrase_without_exactly() -> None:
     assert contract["required_phrase"] == "Sentinel Theo online."
 
 
+
+
+def test_turn_contract_parse_does_not_map_generic_release_words_to_attention_release() -> None:
+    api = _make_api()
+
+    release_answer = api._parse_turn_contract_from_text("Please release the answer once it's ready.")
+    release_resources = api._parse_turn_contract_from_text("Before shutdown, release resources cleanly.")
+
+    assert "gesture_attention_release" not in release_answer["explicit_gesture_tools"]
+    assert "gesture_attention_release" not in release_resources["explicit_gesture_tools"]
+
+
 def test_response_done_decision_holds_terminal_selection_when_required_phrase_open() -> None:
     api = _make_api()
     api._update_turn_contract_from_input(

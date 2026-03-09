@@ -54,13 +54,13 @@ def test_decide_state_cue_emits_expected_gesture_for_listening() -> None:
         last_gesture_time_s=0.0,
         gesture_global_cooldown_s=10.0,
         gesture_name_last_fired_s={},
-        gesture_cooldowns_s={"gesture_attention_snap": 10.0},
+        gesture_cooldowns_s={"gesture_attention_hold": 10.0},
         random_delay_ms=lambda _low, _high: 200,
         attention=_attention(),
     )
 
     assert decision.action == EmbodimentActionType.EMIT_CUE
-    assert decision.cue_name == "gesture_attention_snap"
+    assert decision.cue_name == "gesture_attention_hold"
     assert decision.delay_ms == 0
 
 
@@ -75,14 +75,14 @@ def test_decide_state_cue_suppresses_when_global_cooldown_active() -> None:
         last_gesture_time_s=100.0,
         gesture_global_cooldown_s=10.0,
         gesture_name_last_fired_s={},
-        gesture_cooldowns_s={"gesture_attention_snap": 10.0},
+        gesture_cooldowns_s={"gesture_attention_hold": 10.0},
         random_delay_ms=lambda _low, _high: 200,
         attention=_attention(),
     )
 
     assert decision.action == EmbodimentActionType.SUPPRESS
     assert decision.reason == "global_cooldown_active"
-    assert decision.cue_name == "gesture_attention_snap"
+    assert decision.cue_name == "gesture_attention_hold"
 
 
 def test_decide_state_cue_uses_delay_for_thinking_cue() -> None:

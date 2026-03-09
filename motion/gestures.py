@@ -84,6 +84,22 @@ def gesture_curious_tilt(delay_ms: int = 0, intensity: float = 1.0) -> Action:
     return library.build_action("gesture_curious_tilt", delay_ms=delay_ms, intensity=intensity)
 
 
+
+
+def gesture_attention_hold(delay_ms: int = 0, intensity: float = 1.0) -> Action:
+    """Build a sustained attention hold gesture action."""
+
+    library = GestureLibrary.get_instance()
+    return library.build_action("gesture_attention_hold", delay_ms=delay_ms, intensity=intensity)
+
+
+def gesture_attention_release(delay_ms: int = 0, intensity: float = 1.0) -> Action:
+    """Build a subtle release back toward neutral after attention hold."""
+
+    library = GestureLibrary.get_instance()
+    return library.build_action("gesture_attention_release", delay_ms=delay_ms, intensity=intensity)
+
+
 def gesture_attention_snap(delay_ms: int = 0, intensity: float = 1.0) -> Action:
     """Build a quick attention snap gesture action."""
 
