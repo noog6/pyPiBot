@@ -72,6 +72,7 @@ from ai.realtime.shutdown import ShutdownCoordinator
 from ai.realtime.transport import RealtimeTransport
 from ai.realtime.types import CanonicalResponseState, PendingResponseCreate, UtteranceContext
 from ai.realtime import preference_recall_runtime
+from ai.attention_continuity import AttentionContinuity
 from ai.embodiment_policy import EmbodimentActionType, EmbodimentPolicy
 from ai.interaction_lifecycle_controller import (
     InteractionLifecycleController,
@@ -672,6 +673,7 @@ class RealtimeAPI:
         self.state_manager.set_earcon_handler(self._handle_state_earcon)
         self._speaking_started = False
         self._embodiment_policy = EmbodimentPolicy()
+        self._attention_continuity = AttentionContinuity(hold_window_s=1.25)
         self._gesture_last_fired: dict[str, float] = {}
         self._last_gesture_time = 0.0
         self._last_interaction_state = self.state_manager.state
@@ -3441,11 +3443,54 @@ class RealtimeAPI:
     def _is_battery_query_context_active(self) -> bool:
         return self._battery_policy().is_query_context_active()
 
+    def _attention_on_listening_started(self) -> None:
+        now = time.monotonic()
+        snapshot = self._attention_continuity.acquire(now_s=now, reason="speech_started")
+        snapshot = self._attention_continuity.mark_user_speaking(now_s=now, speaking=True)
+        logger.info(
+            "attention_continuity event=acquire source=speech_started active=%s reason=%s",
+            str(snapshot.active).lower(),
+            snapshot.release_reason,
+        )
+
+    def _attention_on_speech_stopped(self, *, reason: str = "speech_stopped") -> None:
+        now = time.monotonic()
+        snapshot = self._attention_continuity.mark_user_speaking(now_s=now, speaking=False)
+        snapshot = self._attention_continuity.refresh_hold(now_s=now, reason=reason)
+        logger.info(
+            "attention_continuity event=hold_refresh source=%s hold_until_s=%.3f reason=%s",
+            reason,
+            float(snapshot.hold_until_s or 0.0),
+            snapshot.release_reason,
+        )
+
+    def _attention_on_transcript_finalized(self) -> None:
+        now = time.monotonic()
+        snapshot = self._attention_continuity.refresh_hold(now_s=now, reason="transcript_finalized")
+        if snapshot.active:
+            logger.info(
+                "attention_continuity event=hold_refresh source=transcript_finalized hold_until_s=%.3f reason=%s",
+                float(snapshot.hold_until_s or 0.0),
+                snapshot.release_reason,
+            )
+
+    def _attention_on_terminal_state(self, state: InteractionState) -> None:
+        now = time.monotonic()
+        snapshot = self._attention_continuity.release(now_s=now, reason=f"state_{state.value}")
+        logger.info(
+            "attention_continuity event=release state=%s reason=%s",
+            state.value,
+            snapshot.release_reason,
+        )
+
     def _handle_state_gesture(self, state: InteractionState) -> None:
         """Hook for gesture cues on state transitions."""
         previous_state = self._last_interaction_state
         self._last_interaction_state = state
         now = time.monotonic()
+        if state in {InteractionState.IDLE, InteractionState.SPEAKING}:
+            self._attention_on_terminal_state(state)
+        snapshot = self._attention_continuity.snapshot(now_s=now)
 
         decision = self._embodiment_policy.decide_state_cue(
             state=state,
@@ -3457,6 +3502,7 @@ class RealtimeAPI:
             gesture_name_last_fired_s=self._gesture_last_fired,
             gesture_cooldowns_s=self._gesture_cooldowns_s,
             random_delay_ms=random.randint,
+            attention=snapshot,
         )
 
         if decision.action == EmbodimentActionType.NONE:
@@ -12456,6 +12502,7 @@ class RealtimeAPI:
         transcript = self._extract_transcript(event)
         self._mark_utterance_info_summary(transcript_present=bool(transcript))
         self._log_user_transcript(transcript or "", final=True, event_type=event_type)
+        self._attention_on_transcript_finalized()
         input_event_key = self._resolve_input_event_key(event)
         resolved_turn_id = self._current_turn_id_or_unknown()
         with self._utterance_context_scope(

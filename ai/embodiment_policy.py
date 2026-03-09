@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable
 
+from ai.attention_continuity import AttentionSnapshot
+
 from interaction import InteractionState
 
 
@@ -42,6 +44,7 @@ class EmbodimentPolicy:
         gesture_name_last_fired_s: dict[str, float],
         gesture_cooldowns_s: dict[str, float],
         random_delay_ms: Callable[[int, int], int],
+        attention: AttentionSnapshot,
     ) -> EmbodimentDecision:
         if turn_contract_blocks_gestures:
             return EmbodimentDecision(
@@ -51,6 +54,9 @@ class EmbodimentPolicy:
 
         if state == InteractionState.SPEAKING:
             return EmbodimentDecision(action=EmbodimentActionType.NONE, reason="state_speaking")
+
+        if state == InteractionState.THINKING and attention.active:
+            return EmbodimentDecision(action=EmbodimentActionType.NONE, reason="attention_continuity_hold")
 
         gesture_name: str | None = None
         delay_ms = 0

@@ -103,6 +103,7 @@ class InputAudioEventHandlers:
                 OrchestrationPhase.SENSE,
                 reason="speech started",
             )
+        self._api._attention_on_listening_started()
         self._api.state_manager.update_state(InteractionState.LISTENING, "speech started")
 
     async def handle_input_audio_buffer_speech_stopped(
@@ -137,6 +138,7 @@ class InputAudioEventHandlers:
             reason="speech_stopped",
             expected_delay_ms=700,
         )
+        self._api._attention_on_speech_stopped(reason="speech_stopped")
         self._api.state_manager.update_state(InteractionState.THINKING, "speech stopped")
 
     async def handle_input_audio_buffer_committed(
