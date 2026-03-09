@@ -72,6 +72,7 @@ from ai.realtime.shutdown import ShutdownCoordinator
 from ai.realtime.transport import RealtimeTransport
 from ai.realtime.types import CanonicalResponseState, PendingResponseCreate, UtteranceContext
 from ai.realtime import preference_recall_runtime
+from ai.embodiment_policy import EmbodimentActionType, EmbodimentPolicy
 from ai.interaction_lifecycle_controller import (
     InteractionLifecycleController,
     InteractionLifecycleState,
@@ -670,6 +671,7 @@ class RealtimeAPI:
         self.state_manager.set_gesture_handler(self._handle_state_gesture)
         self.state_manager.set_earcon_handler(self._handle_state_earcon)
         self._speaking_started = False
+        self._embodiment_policy = EmbodimentPolicy()
         self._gesture_last_fired: dict[str, float] = {}
         self._last_gesture_time = 0.0
         self._last_interaction_state = self.state_manager.state
@@ -3443,30 +3445,64 @@ class RealtimeAPI:
         """Hook for gesture cues on state transitions."""
         previous_state = self._last_interaction_state
         self._last_interaction_state = state
+        now = time.monotonic()
 
-        if self._turn_contract_blocks_gesture_cues():
-            logger.info(
-                "Gesture cue suppressed by turn contract: state=%s reason=no_gesture_request",
+        decision = self._embodiment_policy.decide_state_cue(
+            state=state,
+            previous_state=previous_state,
+            turn_contract_blocks_gestures=self._turn_contract_blocks_gesture_cues(),
+            now_monotonic_s=now,
+            last_gesture_time_s=self._last_gesture_time,
+            gesture_global_cooldown_s=self._gesture_global_cooldown_s,
+            gesture_name_last_fired_s=self._gesture_last_fired,
+            gesture_cooldowns_s=self._gesture_cooldowns_s,
+            random_delay_ms=random.randint,
+        )
+
+        if decision.action == EmbodimentActionType.NONE:
+            logger.debug(
+                "Gesture cue ignored: state=%s reason=%s",
                 state.value,
+                decision.reason,
             )
             return
 
-        if state == InteractionState.SPEAKING:
-            logger.debug("Gesture cue skipped for state: %s", state.value)
+        if decision.action == EmbodimentActionType.SUPPRESS:
+            cooldown_remaining_s: float | None = None
+            if decision.cue_name and decision.reason == "global_cooldown_active":
+                cooldown_remaining_s = max(
+                    0.0,
+                    self._gesture_global_cooldown_s - (now - self._last_gesture_time),
+                )
+            elif decision.cue_name and decision.reason == "gesture_cooldown_active":
+                per_cooldown = self._gesture_cooldowns_s.get(decision.cue_name, 0.0)
+                last_fired = self._gesture_last_fired.get(decision.cue_name, 0.0)
+                cooldown_remaining_s = max(0.0, per_cooldown - (now - last_fired))
+
+            if cooldown_remaining_s is None:
+                logger.info(
+                    "Gesture cue suppressed: state=%s reason=%s cue=%s",
+                    state.value,
+                    decision.reason,
+                    decision.cue_name or "none",
+                )
+            else:
+                logger.info(
+                    "Gesture cue suppressed: state=%s reason=%s cue=%s cooldown_remaining_s=%.2f",
+                    state.value,
+                    decision.reason,
+                    decision.cue_name,
+                    cooldown_remaining_s,
+                )
             return
 
-        gesture_name: str | None = None
-        delay_ms = 0
-        if state == InteractionState.LISTENING:
-            gesture_name = "gesture_attention_snap"
-        elif state == InteractionState.THINKING:
-            gesture_name = "gesture_curious_tilt"
-            delay_ms = random.randint(150, 300)
-        elif state == InteractionState.IDLE and previous_state == InteractionState.SPEAKING:
-            gesture_name = "gesture_nod"
-
+        gesture_name = decision.cue_name
         if not gesture_name:
-            logger.debug("Gesture cue ignored for state: %s", state.value)
+            logger.warning(
+                "Gesture cue skipped: missing cue for emit decision (state=%s reason=%s).",
+                state.value,
+                decision.reason,
+            )
             return
 
         try:
@@ -3506,27 +3542,8 @@ class RealtimeAPI:
             )
             return
 
-        now = time.monotonic()
-        global_elapsed = now - self._last_gesture_time
-        if global_elapsed < self._gesture_global_cooldown_s:
-            logger.debug(
-                "Gesture cue skipped: global cooldown %.2fs remaining for %s.",
-                self._gesture_global_cooldown_s - global_elapsed,
-                state.value,
-            )
-            return
-
         per_cooldown = self._gesture_cooldowns_s.get(gesture_name, 0.0)
-        last_fired = self._gesture_last_fired.get(gesture_name, 0.0)
-        per_elapsed = now - last_fired
-        if per_elapsed < per_cooldown:
-            logger.debug(
-                "Gesture cue skipped: %s cooldown %.2fs remaining for %s.",
-                gesture_name,
-                per_cooldown - per_elapsed,
-                state.value,
-            )
-            return
+        delay_ms = decision.delay_ms
 
         action = None
         if gesture_name == "gesture_attention_snap":
@@ -3546,11 +3563,12 @@ class RealtimeAPI:
         self._gesture_last_fired[gesture_name] = now
         self._last_gesture_time = now
         logger.info(
-            "Gesture cue emitted: state=%s gesture=%s delay_ms=%s global_cd=%.2fs "
+            "Gesture cue emitted: state=%s gesture=%s delay_ms=%s policy_reason=%s global_cd=%.2fs "
             "gesture_cd=%.2fs",
             state.value,
             gesture_name,
             delay_ms,
+            decision.reason,
             self._gesture_global_cooldown_s,
             per_cooldown,
         )
