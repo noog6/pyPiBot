@@ -1597,6 +1597,72 @@ def test_server_auto_response_created_binds_to_active_turn_key_after_memory_inte
     assert not any(key == "item-1" and outcome == "response_created" for key, outcome in outcome_calls[1:])
 
 
+def test_server_auto_response_created_uses_synthetic_key_for_new_turn_until_transcript_final(monkeypatch) -> None:
+    api = _make_api_stub()
+    ws = _RecordingWs()
+    outcome_calls: list[tuple[str, str]] = []
+
+    async def _false(*_args, **_kwargs) -> bool:
+        return False
+
+    api._maybe_handle_confirmation_decision_timeout = _false
+    api._maybe_handle_approval_response = _false
+    api._handle_stop_word = _false
+    api._maybe_handle_research_permission_response = _false
+    api._maybe_handle_research_budget_response = _false
+    api._maybe_apply_late_confirmation_decision = _false
+    api._maybe_process_research_intent = _false
+    api._maybe_handle_preference_recall_intent = _false
+    api._has_active_confirmation_token = lambda: False
+    api._is_awaiting_confirmation_phase = lambda: False
+    api._is_user_approved_interrupt_response = lambda _response: False
+    api._log_user_transcript = lambda *_args, **_kwargs: None
+    api._record_user_input = lambda *_args, **_kwargs: None
+    api._track_outgoing_event = lambda *_args, **_kwargs: None
+
+    def _capture_outcome(*, input_event_key: str, outcome: str, **_kwargs) -> None:
+        outcome_calls.append((input_event_key, outcome))
+
+    monkeypatch.setattr(api, "_mark_transcript_response_outcome", _capture_outcome)
+
+    api._current_response_turn_id = "turn_1"
+    asyncio.run(
+        api.handle_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "item-prior",
+                "transcript": "Previous turn transcript.",
+            },
+            ws,
+        )
+    )
+
+    api._current_response_turn_id = "turn_2"
+    api._current_input_event_key = "item-prior"
+    asyncio.run(api.handle_event({"type": "response.created", "response": {"id": "resp-turn-2"}}, ws))
+
+    synthetic_key = api._active_server_auto_input_event_key
+    assert synthetic_key is not None
+    assert synthetic_key.startswith("synthetic_server_auto_")
+    assert synthetic_key != "item-prior"
+    assert api._active_input_event_key_by_turn_id["turn_2"] == synthetic_key
+    assert (synthetic_key, "response_created") in outcome_calls
+
+    asyncio.run(
+        api.handle_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "item-turn-2",
+                "transcript": "Current turn transcript.",
+            },
+            ws,
+        )
+    )
+
+    assert api._active_input_event_key_by_turn_id["turn_2"] == "item-turn-2"
+    assert api._active_input_event_key_by_turn_id["turn_1"] == "item-prior"
+
+
 def test_memory_intent_transcript_final_upgrades_from_pending_server_auto_even_after_done(monkeypatch) -> None:
     api = _make_api_stub()
     ws = _RecordingWs()
