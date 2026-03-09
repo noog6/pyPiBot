@@ -2374,6 +2374,86 @@ def test_tool_followup_create_seam_suppresses_parent_covered_even_without_blocke
 
 
 
+
+
+def test_tool_followup_release_suppressed_when_parent_has_progress_deliverable_class() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_progress_parent"
+    parent_input_event_key = "item_parent_progress"
+    parent_response_id = "resp-parent-progress"
+    parent_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "server_auto"),
+            setattr(record, "response_id", parent_response_id),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "progress"),
+            setattr(record, "done", True),
+        ),
+    )
+
+    response_create_event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_progress_parent",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_around",
+    )
+    metadata = ((response_create_event.get("response") or {}).get("metadata") or {})
+    metadata["blocked_by_response_id"] = parent_response_id
+    metadata["parent_turn_id"] = turn_id
+    metadata["parent_input_event_key"] = parent_input_event_key
+
+    should_drop, _entry, reason = api._should_suppress_queued_tool_followup_release(
+        response_metadata=metadata,
+        blocked_by_response_id=parent_response_id,
+    )
+
+    assert should_drop is True
+    assert reason == "parent_covered_tool_result"
+
+def test_tool_followup_release_not_suppressed_when_parent_only_has_unclassified_deliverable_observed() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_unclassified_parent"
+    parent_input_event_key = "item_parent_unclassified"
+    parent_response_id = "resp-parent-unclassified"
+    parent_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "server_auto"),
+            setattr(record, "response_id", parent_response_id),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "unknown"),
+            setattr(record, "done", True),
+        ),
+    )
+
+    response_create_event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_unclassified_parent",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_around",
+    )
+    metadata = ((response_create_event.get("response") or {}).get("metadata") or {})
+    metadata["blocked_by_response_id"] = parent_response_id
+    metadata["parent_turn_id"] = turn_id
+    metadata["parent_input_event_key"] = parent_input_event_key
+
+    should_drop, _entry, reason = api._should_suppress_queued_tool_followup_release(
+        response_metadata=metadata,
+        blocked_by_response_id=parent_response_id,
+    )
+
+    assert should_drop is False
+    assert reason == "parent_not_deliverable"
+
 def test_tool_followup_create_seam_uses_terminal_selection_when_parent_canonical_coverage_lags() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
