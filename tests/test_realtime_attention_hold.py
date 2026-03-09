@@ -86,3 +86,120 @@ def test_speech_stop_logs_deferred_release_when_enqueue_fails(monkeypatch) -> No
 
     assert api._listening_attention_hold_active is True
     assert any("attention_hold_released status=deferred reason=speech_stopped" in msg for msg in messages)
+
+
+def test_deferred_release_retried_on_non_listening_state_transition(monkeypatch) -> None:
+    api = _make_api()
+    messages: list[str] = []
+    monkeypatch.setattr("ai.realtime_api.logger.info", lambda msg, *args: messages.append(msg % args if args else msg))
+
+    calls: list[tuple[InteractionState, str]] = []
+
+    def _enqueue(**kwargs):
+        calls.append((kwargs["state"], kwargs["gesture_name"]))
+        return len(calls) > 1
+
+    api._embodiment_policy.decide_state_cue = lambda **_: EmbodimentDecision(
+        action=EmbodimentActionType.NONE,
+        reason="no_state_cue",
+    )
+    api._enqueue_gesture_cue = _enqueue
+
+    api._listening_attention_hold_active = True
+    api._attention_on_speech_stopped(reason="speech_stopped")
+    assert api._listening_attention_hold_active is True
+
+    api._handle_state_gesture(InteractionState.THINKING)
+
+    assert calls == [
+        (InteractionState.THINKING, "gesture_attention_release"),
+        (InteractionState.THINKING, "gesture_attention_release"),
+    ]
+    assert api._listening_attention_hold_active is False
+    assert any("attention_hold_released status=deferred reason=speech_stopped" in msg for msg in messages)
+    assert any("attention_hold_released reason=state_thinking" in msg for msg in messages)
+
+
+def test_speaking_state_still_releases_continuity_and_hold(monkeypatch) -> None:
+    api = _make_api()
+    continuity_states: list[InteractionState] = []
+    api._attention_on_terminal_state = lambda state: continuity_states.append(state)
+    api._embodiment_policy.decide_state_cue = lambda **_: EmbodimentDecision(
+        action=EmbodimentActionType.NONE,
+        reason="no_state_cue",
+    )
+
+    calls: list[str] = []
+    api._enqueue_gesture_cue = lambda **kwargs: calls.append(kwargs["gesture_name"]) or True
+    api._listening_attention_hold_active = True
+
+    api._handle_state_gesture(InteractionState.SPEAKING)
+
+    assert continuity_states == [InteractionState.SPEAKING]
+    assert calls == ["gesture_attention_release"]
+    assert api._listening_attention_hold_active is False
+
+
+def test_terminal_state_continuity_runs_without_active_hold() -> None:
+    api = _make_api()
+    continuity_states: list[InteractionState] = []
+    api._attention_on_terminal_state = lambda state: continuity_states.append(state)
+    api._embodiment_policy.decide_state_cue = lambda **_: EmbodimentDecision(
+        action=EmbodimentActionType.NONE,
+        reason="no_state_cue",
+    )
+
+    release_calls: list[str] = []
+    api._emit_attention_hold_release = lambda **kwargs: release_calls.append(kwargs["reason"])
+
+    api._listening_attention_hold_active = False
+    api._handle_state_gesture(InteractionState.IDLE)
+    api._handle_state_gesture(InteractionState.SPEAKING)
+
+    assert continuity_states == [InteractionState.IDLE, InteractionState.SPEAKING]
+    assert release_calls == []
+
+
+def test_deferred_release_retried_on_all_non_listening_terminal_transitions() -> None:
+    api = _make_api()
+    api._embodiment_policy.decide_state_cue = lambda **_: EmbodimentDecision(
+        action=EmbodimentActionType.NONE,
+        reason="no_state_cue",
+    )
+
+    calls: list[InteractionState] = []
+
+    def _emit(*, reason: str) -> None:
+        calls.append(InteractionState(reason.removeprefix("state_")))
+
+    api._emit_attention_hold_release = _emit
+    api._listening_attention_hold_active = True
+
+    api._handle_state_gesture(InteractionState.THINKING)
+    api._handle_state_gesture(InteractionState.SPEAKING)
+    api._handle_state_gesture(InteractionState.IDLE)
+
+    assert calls == [InteractionState.THINKING, InteractionState.SPEAKING, InteractionState.IDLE]
+
+
+def test_deferred_release_attempts_once_per_transition_when_motion_busy(monkeypatch) -> None:
+    api = _make_api()
+    messages: list[str] = []
+    monkeypatch.setattr("ai.realtime_api.logger.info", lambda msg, *args: messages.append(msg % args if args else msg))
+    api._embodiment_policy.decide_state_cue = lambda **_: EmbodimentDecision(
+        action=EmbodimentActionType.NONE,
+        reason="no_state_cue",
+    )
+    api._listening_attention_hold_active = True
+    api._enqueue_gesture_cue = lambda **kwargs: False
+
+    api._handle_state_gesture(InteractionState.THINKING)
+    api._handle_state_gesture(InteractionState.SPEAKING)
+    api._handle_state_gesture(InteractionState.IDLE)
+
+    deferred = [m for m in messages if "attention_hold_released status=deferred" in m]
+    assert len(deferred) == 3
+    assert any("reason=state_thinking" in m for m in deferred)
+    assert any("reason=state_speaking" in m for m in deferred)
+    assert any("reason=state_idle" in m for m in deferred)
+    assert api._listening_attention_hold_active is True
