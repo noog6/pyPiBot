@@ -348,6 +348,69 @@ def test_handle_response_done_defers_terminal_close_when_exact_phrase_still_open
     )
 
 
+
+
+def test_handle_response_done_defers_terminal_close_for_provisional_server_auto_pending_transcript_final() -> None:
+    api = _make_api()
+    api._active_response_origin = "server_auto"
+    api._active_response_input_event_key = "synthetic_server_auto_2"
+    api._active_response_id = "resp_server_auto_2"
+    api._is_provisional_response = lambda **_kwargs: True
+    api._active_input_event_key_for_turn = lambda _turn_id: "synthetic_server_auto_2"
+    api._response_done_deliverable_decision = Mock(return_value=(True, "normal"))
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+
+    with patch("ai.realtime.response_terminal_handlers.logger.info") as info_log:
+        asyncio.run(api.handle_response_done({"type": "response.done"}))
+
+    api._drain_response_create_queue.assert_not_awaited()
+    assert api.orchestration_state.transitions == []
+    info_log.assert_any_call(
+        "turn_terminal_close_eval run_id=%s turn_id=%s response_id=%s origin=%s transcript_final_seen=%s obligation_open=%s action=%s reason=%s",
+        "run-test",
+        "turn_1",
+        "resp_server_auto_2",
+        "server_auto",
+        "false",
+        "false",
+        "defer",
+        "provisional_server_auto_awaiting_transcript_final",
+    )
+
+
+def test_handle_response_done_allows_close_for_server_auto_with_transcript_final_linked() -> None:
+    api = _make_api()
+    api._active_response_origin = "server_auto"
+    api._active_response_input_event_key = "item_linked_2"
+    api._active_response_id = "resp_server_auto_2"
+    api._is_provisional_response = lambda **_kwargs: True
+    api._active_input_event_key_for_turn = lambda _turn_id: "item_linked_2"
+    api._response_done_deliverable_decision = Mock(return_value=(True, "normal"))
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+
+    asyncio.run(api.handle_response_done({"type": "response.done"}))
+
+    api._build_confirmation_transition_decision.assert_called_once()
+    assert api.orchestration_state.transitions == [
+        (OrchestrationPhase.REFLECT, "response done"),
+        (OrchestrationPhase.IDLE, "response done reflection"),
+    ]
 def test_handle_response_done_allows_close_when_exact_phrase_repair_not_scheduled() -> None:
     api = _make_api()
     api._maybe_schedule_empty_response_retry = AsyncMock()

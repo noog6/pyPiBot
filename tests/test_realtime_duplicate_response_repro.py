@@ -3093,3 +3093,82 @@ def test_assistant_message_non_tool_lineage_path_still_allowed() -> None:
     assert sent is True
     response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
     assert len(response_create_events) == 1
+
+
+def test_transcript_final_recovery_schedules_upgrade_after_provisional_server_auto_done() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._attention_continuity = type(
+        "_Attention",
+        (),
+        {"refresh_hold": lambda self, **_kwargs: type("_Snapshot", (), {"active": False})()},
+    )()
+
+    api._current_response_turn_id = "turn_2"
+    api._active_response_origin = "unknown"
+    api._active_response_id = None
+    api._active_server_auto_input_event_key = "synthetic_server_auto_2"
+    api._record_pending_server_auto_response(
+        turn_id="turn_2",
+        response_id="resp-server-auto-2",
+        canonical_key="run-405-repro:turn_2:synthetic_server_auto_2",
+    )
+    pending = api._pending_server_auto_response_for_turn(turn_id="turn_2")
+    assert pending is not None
+    pending.pre_audio_hold = True
+    api._canonical_first_audio_started = lambda _canonical_key: False
+
+    async def _false(*_args, **_kwargs) -> bool:
+        return False
+
+    api._maybe_handle_confirmation_decision_timeout = _false
+    api._maybe_handle_approval_response = _false
+    api._handle_stop_word = _false
+    api._maybe_handle_research_permission_response = _false
+    api._maybe_handle_research_budget_response = _false
+    api._maybe_apply_late_confirmation_decision = _false
+    api._maybe_handle_preference_recall_intent = _false
+    api._maybe_process_research_intent = _false
+    api._maybe_verify_on_risk_clarify = _false
+    api._has_active_confirmation_token = lambda: False
+    api._is_awaiting_confirmation_phase = lambda: False
+    api._log_utterance_trust_snapshot = lambda **_kwargs: {"word_count": 9}
+    api._asr_verify_short_utterance_ms = 1200
+    api._vad_turn_detection = {}
+
+    captured: dict[str, str] = {}
+
+    async def _capture_replace(*, websocket, turn_id, input_event_key, origin_label, memory_intent_subtype="none"):
+        captured.update(
+            {
+                "turn_id": turn_id,
+                "input_event_key": input_event_key,
+                "origin_label": origin_label,
+                "memory_intent_subtype": memory_intent_subtype,
+                "websocket": "set" if websocket is ws else "other",
+            }
+        )
+        return True
+
+    api._cancel_and_replace_pending_server_auto_on_transcript_final = _capture_replace
+
+    asyncio.run(
+        api._handle_input_audio_transcription_completed_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "item_user_2",
+                "transcript": "Can you look center and then snap to attention?",
+            },
+            ws,
+        )
+    )
+
+    assert captured == {
+        "turn_id": "turn_2",
+        "input_event_key": "item_user_2",
+        "origin_label": "upgraded_response",
+        "memory_intent_subtype": "none",
+        "websocket": "set",
+    }
