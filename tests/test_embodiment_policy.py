@@ -145,3 +145,24 @@ def test_decide_state_cue_emits_speaking_posture() -> None:
     assert decision.action == EmbodimentActionType.EMIT_CUE
     assert decision.cue_name == "gesture_speaking_posture"
     assert decision.delay_ms == 0
+
+
+def test_decide_state_cue_speaking_posture_ignores_global_cooldown() -> None:
+    policy = EmbodimentPolicy()
+
+    decision = policy.decide_state_cue(
+        state=InteractionState.SPEAKING,
+        previous_state=InteractionState.THINKING,
+        turn_contract_blocks_gestures=False,
+        now_monotonic_s=105.0,
+        last_gesture_time_s=104.5,
+        gesture_global_cooldown_s=2.0,
+        gesture_name_last_fired_s={"gesture_curious_tilt": 104.5},
+        gesture_cooldowns_s={"gesture_speaking_posture": 3.0},
+        random_delay_ms=lambda _low, _high: 222,
+        attention=_attention(),
+    )
+
+    assert decision.action == EmbodimentActionType.EMIT_CUE
+    assert decision.reason == "state_cue_emission"
+    assert decision.cue_name == "gesture_speaking_posture"

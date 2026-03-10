@@ -228,6 +228,28 @@ def test_speaking_posture_emits_once_per_episode(monkeypatch) -> None:
     assert any("speaking_posture_start_skipped reason=already_started" in msg for msg in messages)
 
 
+def test_thinking_to_speaking_emits_posture_even_when_global_cooldown_active(monkeypatch) -> None:
+    api = _make_api()
+    api._gesture_global_cooldown_s = 10.0
+    api._gesture_cooldowns_s = {
+        "gesture_curious_tilt": 6.0,
+        "gesture_speaking_posture": 3.0,
+    }
+
+    now_values = iter([100.0, 100.2, 100.2])
+    monkeypatch.setattr("ai.realtime_api.time.monotonic", lambda: next(now_values))
+    monkeypatch.setattr("ai.realtime_api.random.randint", lambda _low, _high: 200)
+
+    emitted: list[str] = []
+    api._enqueue_gesture_cue = lambda **kwargs: emitted.append(kwargs["gesture_name"]) or True
+
+    api._handle_state_gesture(InteractionState.THINKING)
+    api._handle_state_gesture(InteractionState.SPEAKING)
+
+    assert emitted == ["gesture_curious_tilt", "gesture_speaking_posture"]
+    assert api._speaking_posture_episode_active is True
+
+
 def test_speaking_to_idle_emits_single_settle_when_episode_active(monkeypatch) -> None:
     api = _make_api()
     messages: list[str] = []

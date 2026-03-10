@@ -32,6 +32,11 @@ class EmbodimentDecision:
 class EmbodimentPolicy:
     """Owns deterministic policy for state-driven embodiment cues."""
 
+    _GLOBAL_COOLDOWN_EXEMPT_GESTURES = {
+        "gesture_speaking_posture",
+        "gesture_speaking_settle",
+    }
+
     def decide_state_cue(
         self,
         *,
@@ -70,7 +75,10 @@ class EmbodimentPolicy:
             return EmbodimentDecision(action=EmbodimentActionType.NONE, reason="state_no_cue")
 
         global_elapsed = now_monotonic_s - last_gesture_time_s
-        if global_elapsed < gesture_global_cooldown_s:
+        if (
+            gesture_name not in self._GLOBAL_COOLDOWN_EXEMPT_GESTURES
+            and global_elapsed < gesture_global_cooldown_s
+        ):
             return EmbodimentDecision(
                 action=EmbodimentActionType.SUPPRESS,
                 reason="global_cooldown_active",
