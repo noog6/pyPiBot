@@ -54,8 +54,16 @@ def _make_api() -> RealtimeAPI:
     api._preference_recall_locked_input_event_keys = set()
     api._active_response_confirmation_guarded = False
     api._active_response_preference_guarded = False
+    api._pending_confirmation_token = None
+    api._pending_action = None
+    api.orchestration_state = types.SimpleNamespace(phase=None)
     api._active_server_auto_input_event_key = None
     api._active_input_event_key_by_turn_id = {}
+    api._curiosity_anchor_decay_window_s = 10.0
+    api._curiosity_anchor_max_entries = 3
+    api._curiosity_anchor_stats_by_anchor = {}
+    api._curiosity_surface_max_turns = 2
+    api._curiosity_surface_candidate_by_turn_id = {}
     api._response_create_runtime = ResponseCreateRuntime(api)
     api._current_run_id = lambda: "run-395"
     api._extract_confirmation_reminder_dedupe_key = lambda event: None
@@ -1136,3 +1144,61 @@ def test_mark_transcript_response_outcome_demotes_intentional_non_action_reasons
     assert any("reason=same_turn_already_owned" in entry for entry in debug_logs)
     assert any("reason=active_response_in_flight" in entry for entry in debug_logs)
     assert any("reason=already_handled" in entry for entry in debug_logs)
+
+
+def test_curiosity_surface_block_reason_prefers_confirmation_and_obligation() -> None:
+    api = _make_api()
+    api._response_obligations = {"k": {"state": "open"}}
+    api._pending_confirmation_token = object()
+
+    reason = api._curiosity_surface_block_reason()
+
+    assert reason == "confirmation_pending"
+
+
+def test_curiosity_surface_block_reason_listening_suppresses() -> None:
+    api = _make_api()
+    api.state_manager.state = InteractionState.LISTENING
+
+    reason = api._curiosity_surface_block_reason()
+
+    assert reason == "suppressed_listening"
+
+
+def test_curiosity_surface_block_reason_priority_obligation_over_busy() -> None:
+    api = _make_api()
+    api._response_obligations = {"k": {"state": "open"}}
+    api._response_in_flight = True
+
+    reason = api._curiosity_surface_block_reason()
+
+    assert reason == "obligation_open"
+
+
+def test_curiosity_anchor_repetition_count_decays_and_is_bounded() -> None:
+    api = _make_api()
+
+    assert api._curiosity_anchor_repetition_count(topic_anchor="battery", now=1.0) == 1
+    assert api._curiosity_anchor_repetition_count(topic_anchor="battery", now=5.0) == 2
+    assert api._curiosity_anchor_repetition_count(topic_anchor="battery", now=20.5) == 1
+
+    api._curiosity_anchor_repetition_count(topic_anchor="a", now=21.0)
+    api._curiosity_anchor_repetition_count(topic_anchor="b", now=22.0)
+    api._curiosity_anchor_repetition_count(topic_anchor="c", now=23.0)
+    api._curiosity_anchor_repetition_count(topic_anchor="d", now=24.0)
+
+    assert len(api._curiosity_anchor_stats_by_anchor) <= api._curiosity_anchor_max_entries
+
+
+def test_curiosity_surface_candidate_pruned_on_turn_complete_and_max_size() -> None:
+    api = _make_api()
+    api._curiosity_surface_candidate_by_turn_id = {
+        "turn_1": {"created_at": 1.0},
+        "turn_2": {"created_at": 2.0},
+        "turn_3": {"created_at": 3.0},
+    }
+
+    api._prune_curiosity_surface_candidates(completed_turn_id="turn_2")
+
+    assert "turn_2" not in api._curiosity_surface_candidate_by_turn_id
+    assert len(api._curiosity_surface_candidate_by_turn_id) <= api._curiosity_surface_max_turns

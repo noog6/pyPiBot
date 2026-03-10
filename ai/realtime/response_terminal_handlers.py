@@ -508,6 +508,7 @@ class ResponseTerminalHandlers:
                 canonical_key=done_canonical_key,
             )
         api._emit_utterance_info_summary(anchor="response.done")
+        api._prune_curiosity_surface_candidates(completed_turn_id=turn_id)
         is_empty_done = api._is_empty_response_done(canonical_key=done_canonical_key)
         if is_empty_done and not active_response_was_provisional:
             api._record_silent_turn_incident(
