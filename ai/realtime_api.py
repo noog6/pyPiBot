@@ -67,6 +67,7 @@ from ai.realtime.response_create_runtime import ResponseCreateRuntime
 from ai.realtime.response_lifecycle import ResponseLifecycleTracker
 from ai.realtime.response_terminal_handlers import ResponseTerminalHandlers
 from ai.realtime.asr_trust import build_utterance_trust_snapshot, should_clarify
+from ai.curiosity_engine import CuriosityEngine
 from ai.realtime.runtime_tasks import RuntimeTaskRegistry
 from ai.realtime.shutdown import ShutdownCoordinator
 from ai.realtime.transport import RealtimeTransport
@@ -1139,6 +1140,30 @@ class RealtimeAPI:
         self._asr_clarify_count_by_turn: dict[str, int] = {}
         self._asr_clarify_asked_input_event_keys: set[str] = set()
         self._utterance_trust_snapshot_by_input_event_key: dict[str, dict[str, Any]] = {}
+        curiosity_cfg = realtime_cfg.get("curiosity") or {}
+        self._curiosity_engine = CuriosityEngine(
+            enabled=bool(curiosity_cfg.get("enabled", True)),
+            max_recent_candidates=int(curiosity_cfg.get("max_recent_candidates", 24)),
+            dedupe_window_s=float(curiosity_cfg.get("dedupe_window_s", 30.0)),
+            candidate_ttl_s=float(curiosity_cfg.get("candidate_ttl_s", 120.0)),
+            record_threshold=float(curiosity_cfg.get("record_threshold", 0.40)),
+            surface_threshold=float(curiosity_cfg.get("surface_threshold", 0.60)),
+            surface_cooldown_s=float(curiosity_cfg.get("surface_cooldown_s", 90.0)),
+        )
+        self._curiosity_anchor_max_entries = max(
+            8,
+            int(curiosity_cfg.get("anchor_max_entries", 64)),
+        )
+        self._curiosity_anchor_decay_window_s = max(
+            5.0,
+            float(curiosity_cfg.get("anchor_decay_window_s", 300.0)),
+        )
+        self._curiosity_anchor_stats_by_anchor: dict[str, dict[str, float | int]] = {}
+        self._curiosity_surface_max_turns = max(
+            4,
+            int(curiosity_cfg.get("surface_max_turns", 32)),
+        )
+        self._curiosity_surface_candidate_by_turn_id: dict[str, dict[str, Any]] = {}
         self._micro_ack_channel_mode = str(realtime_cfg.get("micro_ack_channel_mode", "text_and_audio")).strip().lower()
         if self._micro_ack_channel_mode not in {"text_only", "text_and_audio"}:
             self._micro_ack_channel_mode = "text_and_audio"
@@ -10046,6 +10071,158 @@ class RealtimeAPI:
         _, awaiting_phase, _, _ = self._confirmation_hold_components()
         return awaiting_phase
 
+    def _curiosity_surface_block_reason(self) -> str | None:
+        state = getattr(getattr(self, "state_manager", None), "state", None)
+        if state == InteractionState.LISTENING:
+            return "suppressed_listening"
+        if self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase():
+            return "confirmation_pending"
+        obligations = getattr(self, "_response_obligations", {})
+        if isinstance(obligations, dict) and obligations:
+            return "obligation_open"
+        if bool(getattr(self, "_response_in_flight", False)):
+            return "busy_turn"
+        return None
+
+    def _prune_curiosity_anchor_stats(self, *, now: float | None = None) -> None:
+        ts = float(now if now is not None else time.monotonic())
+        anchor_stats = getattr(self, "_curiosity_anchor_stats_by_anchor", None)
+        if not isinstance(anchor_stats, dict):
+            return
+        decay_window_s = float(getattr(self, "_curiosity_anchor_decay_window_s", 300.0) or 300.0)
+        max_entries = int(getattr(self, "_curiosity_anchor_max_entries", 64) or 64)
+        expired_keys = [
+            anchor
+            for anchor, stats in anchor_stats.items()
+            if (ts - float((stats or {}).get("last_seen", 0.0) or 0.0)) > decay_window_s
+        ]
+        for anchor in expired_keys:
+            anchor_stats.pop(anchor, None)
+        if len(anchor_stats) <= max_entries:
+            return
+        ranked = sorted(
+            anchor_stats.items(),
+            key=lambda item: float((item[1] or {}).get("last_seen", 0.0) or 0.0),
+        )
+        for anchor, _ in ranked[: max(0, len(anchor_stats) - max_entries)]:
+            anchor_stats.pop(anchor, None)
+
+    def _curiosity_anchor_repetition_count(self, *, topic_anchor: str, now: float | None = None) -> int:
+        ts = float(now if now is not None else time.monotonic())
+        self._prune_curiosity_anchor_stats(now=ts)
+        normalized_anchor = str(topic_anchor or "").strip().lower()
+        if not normalized_anchor:
+            return 0
+        anchor_stats = getattr(self, "_curiosity_anchor_stats_by_anchor", None)
+        if not isinstance(anchor_stats, dict):
+            anchor_stats = {}
+            self._curiosity_anchor_stats_by_anchor = anchor_stats
+        decay_window_s = float(getattr(self, "_curiosity_anchor_decay_window_s", 300.0) or 300.0)
+        prior = anchor_stats.get(normalized_anchor, {})
+        prior_last_seen = float(prior.get("last_seen", 0.0) or 0.0)
+        prior_count = int(prior.get("count", 0) or 0)
+        if prior_last_seen <= 0.0 or (ts - prior_last_seen) > decay_window_s:
+            next_count = 1
+        else:
+            next_count = prior_count + 1
+        anchor_stats[normalized_anchor] = {"count": next_count, "last_seen": ts}
+        self._prune_curiosity_anchor_stats(now=ts)
+        return next_count
+
+    def _prune_curiosity_surface_candidates(
+        self,
+        *,
+        completed_turn_id: str | None = None,
+    ) -> None:
+        surface_candidates = getattr(self, "_curiosity_surface_candidate_by_turn_id", None)
+        if not isinstance(surface_candidates, dict):
+            return
+        normalized_turn_id = str(completed_turn_id or "").strip()
+        if normalized_turn_id:
+            surface_candidates.pop(normalized_turn_id, None)
+        max_turns = int(getattr(self, "_curiosity_surface_max_turns", 32) or 32)
+        if len(surface_candidates) <= max_turns:
+            return
+        ranked = sorted(
+            surface_candidates.items(),
+            key=lambda item: float((item[1] or {}).get("created_at", 0.0) or 0.0),
+        )
+        for turn_id, _ in ranked[: max(0, len(surface_candidates) - max_turns)]:
+            surface_candidates.pop(turn_id, None)
+
+    def _evaluate_curiosity_from_trust_snapshot(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str,
+        snapshot: dict[str, Any],
+    ) -> None:
+        engine = getattr(self, "_curiosity_engine", None)
+        if engine is None:
+            return
+        source = "conversation"
+        topic_anchors = snapshot.get("topic_anchors") or []
+        if not isinstance(topic_anchors, list):
+            return
+        for anchor in topic_anchors[:2]:
+            normalized_anchor = str(anchor or "").strip().lower()
+            if not normalized_anchor:
+                continue
+            repetition_count = self._curiosity_anchor_repetition_count(topic_anchor=normalized_anchor)
+            candidate = engine.build_conversation_candidate(
+                topic_anchor=normalized_anchor,
+                repetition_count=repetition_count,
+            )
+            logger.info(
+                "curiosity_candidate_detected source=%s reason=%s score=%.2f dedupe_key=%s",
+                source,
+                candidate.reason_code,
+                candidate.score,
+                candidate.dedupe_key,
+            )
+            decision = engine.evaluate(
+                candidate=candidate,
+                arbitration_block_reason=self._curiosity_surface_block_reason(),
+                suppress_surface=bool(getattr(self, "_response_in_flight", False)),
+            )
+            if decision.outcome == "ignore":
+                logger.info(
+                    "curiosity_candidate_suppressed reason=%s source=%s",
+                    decision.reason,
+                    source,
+                )
+                continue
+            logger.info(
+                "curiosity_candidate_recorded source=%s reason=%s score=%.2f",
+                source,
+                candidate.reason_code,
+                candidate.score,
+            )
+            if decision.outcome == "surface":
+                self._curiosity_surface_candidate_by_turn_id[turn_id] = {
+                    "turn_id": turn_id,
+                    "input_event_key": input_event_key,
+                    "source": candidate.source,
+                    "reason_code": candidate.reason_code,
+                    "score": candidate.score,
+                    "dedupe_key": candidate.dedupe_key,
+                    "suggested_followup": candidate.suggested_followup,
+                    "created_at": candidate.created_at,
+                }
+                self._prune_curiosity_surface_candidates()
+                logger.info(
+                    "curiosity_suggestion_surface_eligible source=%s reason=%s score=%.2f",
+                    source,
+                    candidate.reason_code,
+                    candidate.score,
+                )
+            else:
+                logger.info(
+                    "curiosity_suggestion_surface_suppressed reason=%s source=%s",
+                    decision.reason,
+                    source,
+                )
+
     def _is_user_confirmation_trigger(self, trigger: str, metadata: dict[str, Any]) -> bool:
         return self._lifecycle_state_coordinator().is_user_confirmation_trigger(trigger, metadata)
 
@@ -12769,6 +12946,11 @@ class RealtimeAPI:
             event=event,
             turn_id=resolved_turn_id,
             input_event_key=input_event_key,
+        )
+        self._evaluate_curiosity_from_trust_snapshot(
+            turn_id=resolved_turn_id,
+            input_event_key=input_event_key,
+            snapshot=trust_snapshot,
         )
         transcript_word_count = int(trust_snapshot.get("word_count") or 0)
         if not transcript or transcript_word_count <= 0:

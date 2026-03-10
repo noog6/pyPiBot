@@ -179,6 +179,17 @@ realtime:
     strict: false
     regression_warning_threshold: 3
     debug_samples: false
+  curiosity:
+    enabled: true
+    max_recent_candidates: 24
+    dedupe_window_s: 30.0
+    candidate_ttl_s: 120.0
+    record_threshold: 0.40
+    surface_threshold: 0.60
+    surface_cooldown_s: 90.0
+    anchor_max_entries: 64
+    anchor_decay_window_s: 300.0
+    surface_max_turns: 32
   vad_profiles:
     default:
       threshold: 0.20
