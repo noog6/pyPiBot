@@ -25,7 +25,10 @@ def _make_api() -> RealtimeAPI:
     api._listening_attention_hold_active = False
     api._speaking_posture_episode_active = False
     api._speaking_settle_deferred = False
+    api._speaking_settle_deferred_at = None
     api._embodiment_policy = EmbodimentPolicy()
+    api._pending_image_flush_after_playback = False
+    api._pending_image_stimulus = None
     api._turn_contract_blocks_gesture_cues = lambda: False
     return api
 
@@ -357,7 +360,9 @@ def test_speaking_settle_emits_at_most_once_per_episode_with_retry(monkeypatch) 
     api._enqueue_gesture_cue = lambda **kwargs: calls.append(kwargs["gesture_name"]) or True
 
     api._speaking_settle_deferred = True
+    api._speaking_settle_deferred_at = 10.0
     api._last_interaction_state = InteractionState.IDLE
+    monkeypatch.setattr("ai.realtime_api.time.monotonic", lambda: 11.0)
 
     api._handle_state_gesture(InteractionState.THINKING)
     api._handle_state_gesture(InteractionState.IDLE)
@@ -391,6 +396,8 @@ def test_speaking_settle_retry_helper_emits_from_safe_seam(monkeypatch) -> None:
     emitted: list[tuple[InteractionState, str]] = []
     api._enqueue_gesture_cue = lambda **kwargs: emitted.append((kwargs["state"], kwargs["policy_reason"])) or True
     api._speaking_settle_deferred = True
+    api._speaking_settle_deferred_at = 10.0
+    monkeypatch.setattr("ai.realtime_api.time.monotonic", lambda: 11.0)
 
     retried = api._retry_deferred_speaking_settle(
         state=InteractionState.IDLE,
@@ -425,6 +432,8 @@ def test_speaking_settle_retry_helper_logs_when_retry_still_deferred(monkeypatch
     monkeypatch.setattr("ai.realtime_api.logger.info", lambda msg, *args: messages.append(msg % args if args else msg))
     api._enqueue_gesture_cue = lambda **kwargs: False
     api._speaking_settle_deferred = True
+    api._speaking_settle_deferred_at = 10.0
+    monkeypatch.setattr("ai.realtime_api.time.monotonic", lambda: 11.0)
 
     retried = api._retry_deferred_speaking_settle(
         state=InteractionState.IDLE,
@@ -438,3 +447,72 @@ def test_speaking_settle_retry_helper_logs_when_retry_still_deferred(monkeypatch
         "speaking_settle_retry_deferred source=playback_complete state=idle reason=motion_busy_or_unavailable" in msg
         for msg in messages
     )
+
+
+def test_speaking_settle_retry_helper_drops_stale_deferred_settle(monkeypatch) -> None:
+    api = _make_api()
+    messages: list[str] = []
+    monkeypatch.setattr("ai.realtime_api.logger.info", lambda msg, *args: messages.append(msg % args if args else msg))
+    monkeypatch.setattr("ai.realtime_api.time.monotonic", lambda: 20.0)
+
+    calls: list[str] = []
+    api._enqueue_gesture_cue = lambda **kwargs: calls.append(kwargs["gesture_name"]) or True
+    api._speaking_settle_deferred = True
+    api._speaking_settle_deferred_at = 17.0
+
+    retried = api._retry_deferred_speaking_settle(
+        state=InteractionState.IDLE,
+        source="playback_complete",
+    )
+
+    assert retried is False
+    assert calls == []
+    assert api._speaking_settle_deferred is False
+    assert api._speaking_settle_deferred_at is None
+    assert any("speaking_settle_dropped reason=stale_deferred_settle source=playback_complete" in msg for msg in messages)
+
+
+def test_playback_complete_retry_respects_speaking_settle_freshness_gate(monkeypatch) -> None:
+    api = _make_api()
+    messages: list[str] = []
+    monkeypatch.setattr("ai.realtime_api.logger.info", lambda msg, *args: messages.append(msg % args if args else msg))
+    monkeypatch.setattr("ai.realtime_api.time.monotonic", lambda: 20.0)
+
+    api.exit_event = types.SimpleNamespace(is_set=lambda: False)
+    api.state_manager = types.SimpleNamespace(state=InteractionState.IDLE)
+    api.mic = types.SimpleNamespace(stop_receiving=lambda: None, start_recording=lambda: None)
+    api.websocket = None
+    api._response_create_queue = []
+    api._runtime_task_registry = lambda: types.SimpleNamespace(spawn=lambda *args, **kwargs: None)
+
+    calls: list[str] = []
+    api._enqueue_gesture_cue = lambda **kwargs: calls.append(kwargs["gesture_name"]) or True
+    api._speaking_settle_deferred = True
+    api._speaking_settle_deferred_at = 17.0
+
+    api._on_playback_complete()
+
+    assert calls == []
+    assert api._speaking_settle_deferred is False
+    assert api._speaking_settle_deferred_at is None
+    assert any("speaking_settle_dropped reason=stale_deferred_settle source=playback_complete" in msg for msg in messages)
+
+
+def test_new_speaking_episode_clears_older_deferred_settle_timestamp(monkeypatch) -> None:
+    api = _make_api()
+    messages: list[str] = []
+    monkeypatch.setattr("ai.realtime_api.logger.info", lambda msg, *args: messages.append(msg % args if args else msg))
+    api._embodiment_policy.decide_state_cue = lambda **_: EmbodimentDecision(
+        action=EmbodimentActionType.NONE,
+        reason="no_state_cue",
+    )
+    api._enqueue_gesture_cue = lambda **kwargs: True
+    api._last_interaction_state = InteractionState.IDLE
+    api._speaking_settle_deferred = True
+    api._speaking_settle_deferred_at = 5.0
+
+    api._handle_state_gesture(InteractionState.SPEAKING)
+
+    assert api._speaking_settle_deferred is False
+    assert api._speaking_settle_deferred_at is None
+    assert any("speaking_settle_dropped reason=new_speaking_episode_started" in msg for msg in messages)

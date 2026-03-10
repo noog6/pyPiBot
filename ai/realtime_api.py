@@ -249,6 +249,7 @@ _PREFERENCE_RECALL_VARIANT_NOISE_TOKENS = _PREFERENCE_QUERY_NOISE_TOKENS | {
     "you",
     "your",
 }
+_SPEAKING_SETTLE_RETRY_MAX_AGE_S = 2.0
 
 
 @dataclass
@@ -685,6 +686,7 @@ class RealtimeAPI:
         self._listening_attention_hold_active = False
         self._speaking_posture_episode_active = False
         self._speaking_settle_deferred = False
+        self._speaking_settle_deferred_at: float | None = None
         self._gesture_global_cooldown_s = 10.0
         self._pending_image_stimulus: dict[str, Any] | None = None
         self._pending_image_flush_after_playback = False
@@ -3649,6 +3651,7 @@ class RealtimeAPI:
         if state == InteractionState.SPEAKING and previous_state != InteractionState.SPEAKING:
             if bool(getattr(self, "_speaking_settle_deferred", False)):
                 self._speaking_settle_deferred = False
+                self._speaking_settle_deferred_at = None
                 logger.info(
                     "speaking_settle_dropped reason=new_speaking_episode_started from_state=%s to_state=%s",
                     previous_state.value,
@@ -3675,6 +3678,7 @@ class RealtimeAPI:
                     logger.info("speaking_settle_emitted from_state=%s to_state=%s", previous_state.value, state.value)
                 else:
                     self._speaking_settle_deferred = True
+                    self._speaking_settle_deferred_at = now
                     logger.info("speaking_settle_deferred reason=motion_busy_or_unavailable from_state=%s to_state=%s", previous_state.value, state.value)
             else:
                 logger.info("speaking_settle_skipped reason=no_active_speaking_episode from_state=%s to_state=%s", previous_state.value, state.value)
@@ -11692,6 +11696,18 @@ class RealtimeAPI:
             return False
         if state == InteractionState.SPEAKING:
             return False
+        now = time.monotonic()
+        deferred_at = getattr(self, "_speaking_settle_deferred_at", None)
+        deferred_age_s = float("inf") if deferred_at is None else max(0.0, now - deferred_at)
+        if deferred_age_s > _SPEAKING_SETTLE_RETRY_MAX_AGE_S:
+            self._speaking_settle_deferred = False
+            self._speaking_settle_deferred_at = None
+            logger.info(
+                "speaking_settle_dropped reason=stale_deferred_settle source=%s age_s=%.3f",
+                source,
+                deferred_age_s,
+            )
+            return False
         logger.info("speaking_settle_retry source=%s state=%s", source, state.value)
         emitted = self._enqueue_gesture_cue(
             state=state,
@@ -11708,6 +11724,7 @@ class RealtimeAPI:
             )
             return False
         self._speaking_settle_deferred = False
+        self._speaking_settle_deferred_at = None
         logger.info("speaking_settle_emitted source=%s state=%s", source, state.value)
         return True
 
