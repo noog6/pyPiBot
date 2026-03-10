@@ -684,6 +684,7 @@ class RealtimeAPI:
         self._last_interaction_state = self.state_manager.state
         self._listening_attention_hold_active = False
         self._speaking_posture_episode_active = False
+        self._speaking_settle_deferred = False
         self._gesture_global_cooldown_s = 10.0
         self._pending_image_stimulus: dict[str, Any] | None = None
         self._pending_image_flush_after_playback = False
@@ -3645,6 +3646,18 @@ class RealtimeAPI:
         if state in {InteractionState.IDLE, InteractionState.SPEAKING}:
             self._attention_on_terminal_state(state)
 
+        if state == InteractionState.SPEAKING and previous_state != InteractionState.SPEAKING:
+            if bool(getattr(self, "_speaking_settle_deferred", False)):
+                self._speaking_settle_deferred = False
+                logger.info(
+                    "speaking_settle_dropped reason=new_speaking_episode_started from_state=%s to_state=%s",
+                    previous_state.value,
+                    state.value,
+                )
+
+        if state != InteractionState.SPEAKING:
+            self._retry_deferred_speaking_settle(state=state, source="state_transition")
+
         was_speaking_episode_active = bool(getattr(self, "_speaking_posture_episode_active", False))
         if state != InteractionState.SPEAKING:
             self._speaking_posture_episode_active = False
@@ -3661,7 +3674,8 @@ class RealtimeAPI:
                 if emitted:
                     logger.info("speaking_settle_emitted from_state=%s to_state=%s", previous_state.value, state.value)
                 else:
-                    logger.info("speaking_settle_skipped reason=motion_busy_or_unavailable from_state=%s to_state=%s", previous_state.value, state.value)
+                    self._speaking_settle_deferred = True
+                    logger.info("speaking_settle_deferred reason=motion_busy_or_unavailable from_state=%s to_state=%s", previous_state.value, state.value)
             else:
                 logger.info("speaking_settle_skipped reason=no_active_speaking_episode from_state=%s to_state=%s", previous_state.value, state.value)
 
@@ -11673,12 +11687,40 @@ class RealtimeAPI:
 
         self._response_done_reflection_task = asyncio.create_task(_runner())
 
+    def _retry_deferred_speaking_settle(self, *, state: InteractionState, source: str) -> bool:
+        if not bool(getattr(self, "_speaking_settle_deferred", False)):
+            return False
+        if state == InteractionState.SPEAKING:
+            return False
+        logger.info("speaking_settle_retry source=%s state=%s", source, state.value)
+        emitted = self._enqueue_gesture_cue(
+            state=state,
+            gesture_name="gesture_speaking_settle",
+            delay_ms=0,
+            policy_reason=f"speaking_settle_retry_{source}",
+            enforce_motion_guards=True,
+        )
+        if not emitted:
+            logger.info(
+                "speaking_settle_retry_deferred source=%s state=%s reason=motion_busy_or_unavailable",
+                source,
+                state.value,
+            )
+            return False
+        self._speaking_settle_deferred = False
+        logger.info("speaking_settle_emitted source=%s state=%s", source, state.value)
+        return True
+
     def _on_playback_complete(self) -> None:
         if self.exit_event.is_set():
             logger.info("Playback complete during shutdown -> skipping mic restart")
             return
         logger.info("Playback complete -> restarting mic")
         self._audio_playback_busy = False
+        self._retry_deferred_speaking_settle(
+            state=self.state_manager.state,
+            source="playback_complete",
+        )
 
         self.mic.stop_receiving()
         self.mic_send_suppress_until = time.monotonic() + 1.2

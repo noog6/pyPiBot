@@ -24,6 +24,7 @@ def _make_api() -> RealtimeAPI:
     api._gesture_cooldowns_s = {}
     api._listening_attention_hold_active = False
     api._speaking_posture_episode_active = False
+    api._speaking_settle_deferred = False
     api._embodiment_policy = EmbodimentPolicy()
     api._turn_contract_blocks_gesture_cues = lambda: False
     return api
@@ -291,7 +292,7 @@ def test_speaking_to_idle_skips_settle_without_active_episode(monkeypatch) -> No
     assert any("speaking_settle_skipped reason=no_active_speaking_episode" in msg for msg in messages)
 
 
-def test_speaking_posture_and_settle_skip_when_motion_busy(monkeypatch) -> None:
+def test_speaking_settle_deferred_when_motion_busy_on_speaking_to_idle(monkeypatch) -> None:
     api = _make_api()
     messages: list[str] = []
     monkeypatch.setattr("ai.realtime_api.logger.info", lambda msg, *args: messages.append(msg % args if args else msg))
@@ -309,4 +310,131 @@ def test_speaking_posture_and_settle_skip_when_motion_busy(monkeypatch) -> None:
     api._handle_state_gesture(InteractionState.IDLE)
 
     assert any("speaking_posture_start_skipped reason=motion_busy_or_unavailable" in msg for msg in messages)
-    assert any("speaking_settle_skipped reason=motion_busy_or_unavailable" in msg for msg in messages)
+    assert any("speaking_settle_deferred reason=motion_busy_or_unavailable" in msg for msg in messages)
+    assert api._speaking_settle_deferred is True
+
+
+def test_speaking_settle_retry_emits_when_motion_becomes_available(monkeypatch) -> None:
+    api = _make_api()
+    messages: list[str] = []
+    monkeypatch.setattr("ai.realtime_api.logger.info", lambda msg, *args: messages.append(msg % args if args else msg))
+
+    api._embodiment_policy.decide_state_cue = lambda **_: EmbodimentDecision(
+        action=EmbodimentActionType.NONE,
+        reason="no_state_cue",
+    )
+
+    calls: list[tuple[InteractionState, str]] = []
+
+    def _enqueue(**kwargs):
+        calls.append((kwargs["state"], kwargs["gesture_name"]))
+        return len(calls) > 1
+
+    api._enqueue_gesture_cue = _enqueue
+    api._speaking_posture_episode_active = True
+    api._last_interaction_state = InteractionState.SPEAKING
+
+    api._handle_state_gesture(InteractionState.IDLE)
+    api._handle_state_gesture(InteractionState.THINKING)
+
+    assert calls == [
+        (InteractionState.IDLE, "gesture_speaking_settle"),
+        (InteractionState.THINKING, "gesture_speaking_settle"),
+    ]
+    assert api._speaking_settle_deferred is False
+    assert any("speaking_settle_deferred reason=motion_busy_or_unavailable" in msg for msg in messages)
+    assert any("speaking_settle_retry" in msg for msg in messages)
+    assert any("speaking_settle_emitted" in msg for msg in messages)
+
+
+def test_speaking_settle_emits_at_most_once_per_episode_with_retry(monkeypatch) -> None:
+    api = _make_api()
+    api._embodiment_policy.decide_state_cue = lambda **_: EmbodimentDecision(
+        action=EmbodimentActionType.NONE,
+        reason="no_state_cue",
+    )
+    calls: list[str] = []
+    api._enqueue_gesture_cue = lambda **kwargs: calls.append(kwargs["gesture_name"]) or True
+
+    api._speaking_settle_deferred = True
+    api._last_interaction_state = InteractionState.IDLE
+
+    api._handle_state_gesture(InteractionState.THINKING)
+    api._handle_state_gesture(InteractionState.IDLE)
+
+    assert calls == ["gesture_speaking_settle"]
+    assert api._speaking_settle_deferred is False
+
+
+def test_speaking_settle_retry_not_attempted_without_deferred_episode(monkeypatch) -> None:
+    api = _make_api()
+    api._embodiment_policy.decide_state_cue = lambda **_: EmbodimentDecision(
+        action=EmbodimentActionType.NONE,
+        reason="no_state_cue",
+    )
+    calls: list[str] = []
+    api._enqueue_gesture_cue = lambda **kwargs: calls.append(kwargs["gesture_name"]) or True
+
+    api._speaking_settle_deferred = False
+    api._last_interaction_state = InteractionState.IDLE
+
+    api._handle_state_gesture(InteractionState.THINKING)
+
+    assert calls == []
+
+
+def test_speaking_settle_retry_helper_emits_from_safe_seam(monkeypatch) -> None:
+    api = _make_api()
+    messages: list[str] = []
+    monkeypatch.setattr("ai.realtime_api.logger.info", lambda msg, *args: messages.append(msg % args if args else msg))
+
+    emitted: list[tuple[InteractionState, str]] = []
+    api._enqueue_gesture_cue = lambda **kwargs: emitted.append((kwargs["state"], kwargs["policy_reason"])) or True
+    api._speaking_settle_deferred = True
+
+    retried = api._retry_deferred_speaking_settle(
+        state=InteractionState.IDLE,
+        source="playback_complete",
+    )
+
+    assert retried is True
+    assert emitted == [(InteractionState.IDLE, "speaking_settle_retry_playback_complete")]
+    assert api._speaking_settle_deferred is False
+    assert any("speaking_settle_retry source=playback_complete state=idle" in msg for msg in messages)
+    assert any("speaking_settle_emitted source=playback_complete state=idle" in msg for msg in messages)
+
+
+def test_speaking_settle_retry_helper_noop_without_deferred_episode() -> None:
+    api = _make_api()
+    calls: list[str] = []
+    api._enqueue_gesture_cue = lambda **kwargs: calls.append(kwargs["gesture_name"]) or True
+    api._speaking_settle_deferred = False
+
+    retried = api._retry_deferred_speaking_settle(
+        state=InteractionState.IDLE,
+        source="playback_complete",
+    )
+
+    assert retried is False
+    assert calls == []
+
+
+def test_speaking_settle_retry_helper_logs_when_retry_still_deferred(monkeypatch) -> None:
+    api = _make_api()
+    messages: list[str] = []
+    monkeypatch.setattr("ai.realtime_api.logger.info", lambda msg, *args: messages.append(msg % args if args else msg))
+    api._enqueue_gesture_cue = lambda **kwargs: False
+    api._speaking_settle_deferred = True
+
+    retried = api._retry_deferred_speaking_settle(
+        state=InteractionState.IDLE,
+        source="playback_complete",
+    )
+
+    assert retried is False
+    assert api._speaking_settle_deferred is True
+    assert any("speaking_settle_retry source=playback_complete state=idle" in msg for msg in messages)
+    assert any(
+        "speaking_settle_retry_deferred source=playback_complete state=idle reason=motion_busy_or_unavailable" in msg
+        for msg in messages
+    )
