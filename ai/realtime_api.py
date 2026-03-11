@@ -92,6 +92,7 @@ from ai.governance import (
     GovernanceLayer,
     build_normalized_idempotency_key,
     build_tool_specs,
+    normalize_governance_reason,
     normalize_tool_arguments,
     normalized_decision_payload,
 )
@@ -13976,6 +13977,155 @@ class RealtimeAPI:
                 approved_via_prior_permission,
                 final_execution_decision,
             )
+
+    async def _submit_mixed_intent_tool_request(
+        self,
+        *,
+        tool_name: str,
+        tool_args: dict[str, Any],
+        websocket: Any,
+        source: str,
+        turn_id: str,
+        query: str,
+    ) -> dict[str, Any]:
+        call_id = f"mixed_intent_{uuid.uuid4().hex}"
+        action = self._governance.build_action_packet(
+            tool_name,
+            call_id,
+            tool_args,
+            reason=f"mixed_intent {source} turn={turn_id}",
+        )
+        staging = self._stage_action(action)
+        if not staging.get("valid", True):
+            reason = "invalid_arguments"
+            self._record_intent_state(tool_name, tool_args, "denied")
+            return {"outcome": "suppress", "reason": reason, "executed": False}
+
+        runtime_context = self._build_tool_runtime_context(action)
+        if hasattr(self._governance, "decide_tool_call"):
+            governance_decision = self._governance.decide_tool_call(
+                action,
+                dry_run_requested=False,
+                runtime_cooldown_seconds=self._tool_execution_cooldown_remaining(),
+                runtime_context=runtime_context,
+            )
+        else:
+            governance_decision = self._governance.review(action)
+        confirmation_decision = self._normalize_confirmation_decision(
+            tool_name,
+            tool_args,
+            governance_decision,
+            runtime_context,
+        )
+
+        if confirmation_decision.approved:
+            blocked, blocked_status, _ = self._evaluate_intent_guard(
+                action.tool_name,
+                action.tool_args,
+                phase="execution",
+                idempotency_key=confirmation_decision.idempotency_key,
+            )
+            if blocked:
+                status = str(blocked_status or "intent_guard")
+                outcome = "defer" if status == "deferred" else "suppress"
+                state = "deferred" if outcome == "defer" else "denied"
+                self._record_intent_state(
+                    tool_name,
+                    tool_args,
+                    state,
+                    idempotency_key=confirmation_decision.idempotency_key,
+                )
+                return {"outcome": outcome, "reason": normalize_governance_reason(status), "executed": False}
+            await self._execute_action(
+                action,
+                staging,
+                websocket,
+                idempotency_key=confirmation_decision.idempotency_key,
+                force_no_tools_followup=True,
+                inject_no_tools_instruction=False,
+            )
+            return {
+                "outcome": "allow",
+                "reason": normalize_governance_reason(confirmation_decision.reason),
+                "executed": True,
+                "call_id": call_id,
+            }
+
+        if confirmation_decision.needs_confirmation:
+            action.requires_confirmation = True
+            action.expiry_ts = time.monotonic() + self._approval_timeout_s
+            pending_action = PendingAction(
+                action=action,
+                staging=staging,
+                original_intent=self._last_user_input_text or query,
+                created_at=time.monotonic(),
+                idempotency_key=confirmation_decision.idempotency_key,
+            )
+            self._record_intent_state(
+                action.tool_name,
+                action.tool_args,
+                "pending",
+                idempotency_key=confirmation_decision.idempotency_key,
+            )
+            self._create_confirmation_token(
+                kind="tool_governance",
+                tool_name=action.tool_name,
+                pending_action=pending_action,
+                expiry_ts=action.expiry_ts,
+                max_retries=pending_action.max_retries,
+                metadata={
+                    "approval_flow": True,
+                    "max_reminders": confirmation_decision.max_reminders,
+                    "reminder_schedule_seconds": list(confirmation_decision.reminder_schedule_seconds),
+                    "action_summary": confirmation_decision.action_summary,
+                    "source": source,
+                    "turn_id": turn_id,
+                    "mixed_intent": True,
+                },
+            )
+            self._pending_action = pending_action
+            self._sync_confirmation_legacy_fields()
+            await self._request_tool_confirmation(
+                action,
+                str(confirmation_decision.confirm_reason or confirmation_decision.reason),
+                websocket,
+                staging,
+                action_summary=confirmation_decision.action_summary,
+                confirm_prompt=(
+                    str(confirmation_decision.confirm_prompt)
+                    if confirmation_decision.confirm_prompt is not None
+                    else None
+                ),
+                confirm_reason=(
+                    str(confirmation_decision.confirm_reason)
+                    if confirmation_decision.confirm_reason is not None
+                    else None
+                ),
+            )
+            return {
+                "outcome": "confirm",
+                "reason": normalize_governance_reason(
+                    str(confirmation_decision.confirm_reason or confirmation_decision.reason)
+                ),
+                "executed": False,
+                "call_id": call_id,
+            }
+
+        status = str(confirmation_decision.status or "denied").strip().lower()
+        outcome = "defer" if status == "deferred" else "suppress"
+        terminal_state = "deferred" if outcome == "defer" else "denied"
+        self._record_intent_state(
+            action.tool_name,
+            action.tool_args,
+            terminal_state,
+            idempotency_key=confirmation_decision.idempotency_key,
+        )
+        return {
+            "outcome": outcome,
+            "reason": normalize_governance_reason(str(confirmation_decision.reason or status)),
+            "executed": False,
+            "call_id": call_id,
+        }
 
     async def execute_function_call(
         self,

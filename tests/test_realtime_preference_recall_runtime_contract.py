@@ -573,6 +573,7 @@ def test_deliverable_seen_true_for_tool_output_turn() -> None:
     api._mark_utterance_info_summary = RealtimeAPI._mark_utterance_info_summary.__get__(api, RealtimeAPI)
     api._extract_assistant_text_from_content = RealtimeAPI._extract_assistant_text_from_content.__get__(api, RealtimeAPI)
     api._is_active_response_guarded = lambda: False
+    api._allow_text_output_state_transition = lambda **_kwargs: True
     api._cancel_micro_ack = lambda **_kwargs: None
     api._mark_first_assistant_utterance_observed_if_needed = lambda _text: None
     api.state_manager = SimpleNamespace(update_state=lambda *_args, **_kwargs: None)
@@ -755,7 +756,7 @@ def test_topic_recall_bridge_no_hit_for_non_preference_topic(monkeypatch) -> Non
     assert handled is False
     api._set_pending_preference_memory_context.assert_not_called()
 
-def test_preference_recall_mixed_intent_executes_gesture_action(monkeypatch) -> None:
+def test_preference_recall_mixed_intent_routes_to_governed_tool_path(monkeypatch) -> None:
     api = _base_api()
     api._is_preference_recall_intent = RealtimeAPI._is_preference_recall_intent.__get__(api, RealtimeAPI)
     api._build_preference_recall_query = RealtimeAPI._build_preference_recall_query.__get__(api, RealtimeAPI)
@@ -774,6 +775,9 @@ def test_preference_recall_mixed_intent_executes_gesture_action(monkeypatch) -> 
             },
             "favorite editor",
         )
+    )
+    api._submit_mixed_intent_tool_request = AsyncMock(
+        return_value={"outcome": "allow", "reason": "within_bounds", "executed": True}
     )
 
     gesture_calls: list[str] = []
@@ -794,15 +798,12 @@ def test_preference_recall_mixed_intent_executes_gesture_action(monkeypatch) -> 
     )
 
     assert result is False
-    assert gesture_calls == ["gesture_look_around"]
-    assert any(
-        record.get("name") == "gesture_look_around"
-        for record in api._tool_call_records
-        if isinstance(record, dict)
-    )
+    assert gesture_calls == []
+    api._submit_mixed_intent_tool_request.assert_awaited_once()
+    assert api._run_preference_recall_with_fallbacks.await_count == 1
 
 
-def test_preference_recall_mixed_intent_executes_gesture_action_and_recall_once(monkeypatch) -> None:
+def test_preference_recall_mixed_intent_governed_request_does_not_break_recall_flow() -> None:
     api = _base_api()
     api._is_preference_recall_intent = RealtimeAPI._is_preference_recall_intent.__get__(api, RealtimeAPI)
     api._build_preference_recall_query = RealtimeAPI._build_preference_recall_query.__get__(api, RealtimeAPI)
@@ -819,14 +820,9 @@ def test_preference_recall_mixed_intent_executes_gesture_action_and_recall_once(
         return ({"memories": [{"content": "Your favorite editor is Vim."}], "memory_cards": [], "memory_cards_text": "", "returned_count": 1}, "editor")
 
     api._run_preference_recall_with_fallbacks = AsyncMock(side_effect=_fake_recall)
-
-    gesture_calls: list[str] = []
-
-    async def _fake_gesture() -> dict[str, str]:
-        gesture_calls.append("gesture_look_center")
-        return {"status": "queued"}
-
-    monkeypatch.setitem(ai_tools.function_map, "gesture_look_center", _fake_gesture)
+    api._submit_mixed_intent_tool_request = AsyncMock(
+        return_value={"outcome": "suppress", "reason": "risk_threshold_exceeded", "executed": False}
+    )
 
     result = asyncio.run(
         RealtimeAPI._maybe_handle_preference_recall_intent(
@@ -838,5 +834,5 @@ def test_preference_recall_mixed_intent_executes_gesture_action_and_recall_once(
     )
 
     assert result is False
-    assert gesture_calls == ["gesture_look_center"]
     assert recall_calls == ["recall"]
+    api._submit_mixed_intent_tool_request.assert_awaited_once()
