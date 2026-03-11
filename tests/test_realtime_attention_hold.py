@@ -33,6 +33,29 @@ def _make_api() -> RealtimeAPI:
     return api
 
 
+
+
+def test_embodiment_governance_logs_noop_result_class_for_none(monkeypatch) -> None:
+    api = _make_api()
+    debug_messages: list[str] = []
+    monkeypatch.setattr("ai.realtime_api.logger.debug", lambda msg, *args: debug_messages.append(msg % args if args else msg))
+
+    api._embodiment_policy.decide_state_cue = lambda **_: EmbodimentDecision(
+        action=EmbodimentActionType.NONE,
+        reason="attention_continuity_hold",
+    )
+
+    api._handle_state_gesture(InteractionState.THINKING)
+
+    assert any(
+        "embodiment_governance result_class=noop decision=expire reason=attention_continuity_hold" in msg
+        for msg in debug_messages
+    )
+    assert any(
+        "Gesture cue ignored: result_class=noop state=thinking reason=attention_continuity_hold" in msg
+        for msg in debug_messages
+    )
+
 def test_listening_hold_starts_once_and_duplicate_is_suppressed(monkeypatch) -> None:
     api = _make_api()
 

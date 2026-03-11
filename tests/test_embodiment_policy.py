@@ -196,9 +196,47 @@ def test_embodiment_decision_adapter_returns_governance_envelope() -> None:
     assert envelope.metadata["cue_name"] == "gesture_attention_hold"
 
 
-def test_embodiment_adapter_normalizes_reason_code() -> None:
+def test_embodiment_adapter_maps_none_to_noop_semantics() -> None:
     envelope = embodiment_decision_to_governance(
         EmbodimentDecision(action=EmbodimentActionType.NONE, reason="Attention Continuity Hold")
     )
 
+    assert envelope.decision == "expire"
     assert envelope.reason_code == "attention_continuity_hold"
+    assert envelope.metadata["result_class"] == "noop"
+
+
+def test_embodiment_adapter_keeps_emit_and_suppress_mappings_stable() -> None:
+    emitted = embodiment_decision_to_governance(
+        EmbodimentDecision(
+            action=EmbodimentActionType.EMIT_CUE,
+            reason="state_cue_emission",
+            cue_name="gesture_attention_hold",
+        )
+    )
+    suppressed = embodiment_decision_to_governance(
+        EmbodimentDecision(
+            action=EmbodimentActionType.SUPPRESS,
+            reason="global_cooldown_active",
+            cue_name="gesture_attention_hold",
+        )
+    )
+
+    assert emitted.decision == "allow"
+    assert emitted.metadata["result_class"] == "allow"
+    assert suppressed.decision == "suppress"
+    assert suppressed.metadata["result_class"] == "suppress"
+
+
+def test_embodiment_adapter_raises_for_unsupported_action() -> None:
+    class _UnsupportedAction:
+        value = "unsupported"
+
+    try:
+        embodiment_decision_to_governance(
+            EmbodimentDecision(action=_UnsupportedAction(), reason="unexpected_action")  # type: ignore[arg-type]
+        )
+    except ValueError as exc:
+        assert "Unsupported embodiment action" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError for unsupported embodiment action")

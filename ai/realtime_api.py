@@ -3720,8 +3720,10 @@ class RealtimeAPI:
             attention=snapshot,
         )
         governance_decision = embodiment_decision_to_governance(decision)
+        result_class = str(governance_decision.metadata.get("result_class") or governance_decision.decision)
         logger.debug(
-            "embodiment_governance decision=%s reason=%s subsystem=%s priority=%d cue=%s",
+            "embodiment_governance result_class=%s decision=%s reason=%s subsystem=%s priority=%d cue=%s",
+            result_class,
             governance_decision.decision,
             governance_decision.reason_code,
             governance_decision.subsystem,
@@ -3731,7 +3733,8 @@ class RealtimeAPI:
 
         if decision.action == EmbodimentActionType.NONE:
             logger.debug(
-                "Gesture cue ignored: state=%s reason=%s",
+                "Gesture cue ignored: result_class=%s state=%s reason=%s",
+                result_class,
                 state.value,
                 decision.reason,
             )
