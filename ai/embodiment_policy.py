@@ -7,8 +7,14 @@ from enum import Enum
 from typing import Callable
 
 from ai.attention_continuity import AttentionSnapshot
+from ai.governance_spine import GovernanceDecision
 
 from interaction import InteractionState
+
+
+EMBODIMENT_PRIORITY_ALLOW = 30
+EMBODIMENT_PRIORITY_DEFER = 50
+EMBODIMENT_PRIORITY_SUPPRESS = 70
 
 
 class EmbodimentActionType(str, Enum):
@@ -27,6 +33,39 @@ class EmbodimentDecision:
     reason: str
     cue_name: str | None = None
     delay_ms: int = 0
+
+
+def embodiment_decision_to_governance(decision: EmbodimentDecision) -> GovernanceDecision:
+    """Translate embodiment cue outcomes into the shared governance envelope."""
+
+    # Adapter mapping is intentionally seam-local:
+    # - emit cue -> allow (eligible to execute now)
+    # - suppress -> suppress (actively blocked by policy/cooldown)
+    # - none -> defer (non-emission without a hard block)
+    if decision.action == EmbodimentActionType.EMIT_CUE:
+        envelope_decision = "allow"
+        priority = EMBODIMENT_PRIORITY_ALLOW
+    elif decision.action == EmbodimentActionType.SUPPRESS:
+        envelope_decision = "suppress"
+        priority = EMBODIMENT_PRIORITY_SUPPRESS
+    else:
+        envelope_decision = "defer"
+        priority = EMBODIMENT_PRIORITY_DEFER
+
+    metadata = {
+        "action": decision.action.value,
+        "cue_name": decision.cue_name,
+        "delay_ms": decision.delay_ms,
+    }
+    return GovernanceDecision(
+        decision=envelope_decision,
+        reason_code=decision.reason,
+        subsystem="embodiment",
+        priority=priority,
+        expires_at=None,
+        ttl_s=None,
+        metadata=metadata,
+    )
 
 
 class EmbodimentPolicy:
@@ -56,7 +95,6 @@ class EmbodimentPolicy:
                 action=EmbodimentActionType.SUPPRESS,
                 reason="turn_contract_no_gesture",
             )
-
 
         if state == InteractionState.THINKING and attention.active:
             return EmbodimentDecision(action=EmbodimentActionType.NONE, reason="attention_continuity_hold")

@@ -1175,6 +1175,18 @@ def test_curiosity_surface_block_reason_priority_obligation_over_busy() -> None:
     assert reason == "obligation_open"
 
 
+def test_curiosity_surface_block_decision_returns_envelope() -> None:
+    api = _make_api()
+    api._response_obligations = {"k": {"state": "open"}}
+
+    decision = api._curiosity_surface_block_decision()
+
+    assert decision is not None
+    assert decision.decision == "defer"
+    assert decision.reason_code == "obligation_open"
+    assert decision.subsystem == "curiosity"
+
+
 def test_curiosity_anchor_repetition_count_decays_and_is_bounded() -> None:
     api = _make_api()
 
