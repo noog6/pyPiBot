@@ -69,6 +69,11 @@ from ai.realtime.response_lifecycle import ResponseLifecycleTracker
 from ai.realtime.response_terminal_handlers import ResponseTerminalHandlers
 from ai.realtime.asr_trust import build_utterance_trust_snapshot, should_clarify
 from ai.curiosity_engine import CuriosityEngine
+from ai.opportunistic_arbitration import (
+    OpportunisticActionCandidate,
+    OpportunisticArbitrationResult,
+    arbitrate_opportunistic_actions,
+)
 from ai.realtime.runtime_tasks import RuntimeTaskRegistry
 from ai.realtime.shutdown import ShutdownCoordinator
 from ai.realtime.transport import RealtimeTransport
@@ -10158,6 +10163,71 @@ class RealtimeAPI:
         decision = self._curiosity_surface_block_decision()
         return decision.reason_code if decision else None
 
+    def _arbitrate_opportunistic_surface(
+        self,
+        *,
+        user_turn_priority_active: bool = False,
+        response_obligation_priority_active: bool = False,
+        candidate_curiosity: OpportunisticActionCandidate | None = None,
+        candidate_low_priority_injection: OpportunisticActionCandidate | None = None,
+        candidate_embodiment_flourish: OpportunisticActionCandidate | None = None,
+    ) -> OpportunisticArbitrationResult:
+        confirmation_pending = self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase()
+        obligations = getattr(self, "_response_obligations", {})
+        obligation_open = isinstance(obligations, dict) and bool(obligations)
+        busy_turn = bool(getattr(self, "_response_in_flight", False))
+        result = arbitrate_opportunistic_actions(
+            user_turn_priority_active=user_turn_priority_active,
+            response_obligation_priority_active=response_obligation_priority_active,
+            confirmation_pending=confirmation_pending,
+            busy_turn=busy_turn,
+            candidate_curiosity=candidate_curiosity,
+            candidate_low_priority_injection=candidate_low_priority_injection,
+            candidate_embodiment_flourish=candidate_embodiment_flourish,
+        )
+        candidate_summary: list[dict[str, Any]] = []
+        for candidate in (
+            candidate_curiosity,
+            candidate_low_priority_injection,
+            candidate_embodiment_flourish,
+        ):
+            if isinstance(candidate, OpportunisticActionCandidate):
+                candidate_summary.append(
+                    {
+                        "kind": candidate.action_kind,
+                        "source": candidate.source,
+                        "priority": int(candidate.priority),
+                        "reason_code": candidate.reason_code,
+                        "opportunistic": bool(candidate.opportunistic),
+                        "ttl_s": candidate.ttl_s,
+                    }
+                )
+        suppressed_summary = [
+            {
+                "kind": suppressed.action_kind,
+                "source": suppressed.source,
+                "result": suppressed.result,
+                "reason_code": suppressed.reason_code,
+            }
+            for suppressed in result.suppressed_or_deferred
+        ]
+        logger.info(
+            "opportunistic_arbitration_seam user_turn_priority_active=%s response_obligation_priority_active=%s confirmation_pending=%s obligation_open=%s busy_turn=%s selected_kind=%s selected_source=%s selected_reason=%s selected_native_reason=%s selected_is_opportunistic=%s candidates=%s suppressed=%s",
+            str(bool(user_turn_priority_active)).lower(),
+            str(bool(response_obligation_priority_active)).lower(),
+            str(bool(confirmation_pending)).lower(),
+            str(bool(obligation_open)).lower(),
+            str(bool(busy_turn)).lower(),
+            result.selected_action_kind,
+            result.selected_source,
+            result.reason_code,
+            result.selected_native_reason_code or "none",
+            str(bool(result.is_opportunistic)).lower(),
+            json.dumps(candidate_summary, sort_keys=True),
+            json.dumps(suppressed_summary, sort_keys=True),
+        )
+        return result
+
     def _prune_curiosity_anchor_stats(self, *, now: float | None = None) -> None:
         ts = float(now if now is not None else time.monotonic())
         anchor_stats = getattr(self, "_curiosity_anchor_stats_by_anchor", None)
@@ -10282,6 +10352,27 @@ class RealtimeAPI:
                 candidate.score,
             )
             if decision.outcome == "surface":
+                arbitration = self._arbitrate_opportunistic_surface(
+                    response_obligation_priority_active=(
+                        self._response_obligation_key(turn_id=turn_id, input_event_key=input_event_key)
+                        in getattr(self, "_response_obligations", {})
+                    ),
+                    candidate_curiosity=OpportunisticActionCandidate(
+                        action_kind="curiosity_surface",
+                        source="curiosity_engine",
+                        priority=60,
+                        reason_code=candidate.reason_code,
+                        opportunistic=True,
+                        ttl_s=float(getattr(self._curiosity_engine, "candidate_ttl_s", 0.0) or 0.0),
+                    ),
+                )
+                if arbitration.selected_action_kind != "curiosity_surface":
+                    logger.info(
+                        "curiosity_suggestion_surface_suppressed reason=%s source=%s",
+                        arbitration.reason_code,
+                        source,
+                    )
+                    continue
                 self._curiosity_surface_candidate_by_turn_id[turn_id] = {
                     "turn_id": turn_id,
                     "input_event_key": input_event_key,
