@@ -1214,3 +1214,79 @@ def test_curiosity_surface_candidate_pruned_on_turn_complete_and_max_size() -> N
 
     assert "turn_2" not in api._curiosity_surface_candidate_by_turn_id
     assert len(api._curiosity_surface_candidate_by_turn_id) <= api._curiosity_surface_max_turns
+
+
+def test_curiosity_surface_path_runs_seam_arbitration_and_suppresses_when_obligation_open() -> None:
+    api = _make_api()
+    api._response_obligations = {
+        api._response_obligation_key(turn_id="turn_1", input_event_key="item_1"): {"state": "open"}
+    }
+
+    class _Candidate:
+        source = "conversation"
+        reason_code = "curiosity_repeat_topic"
+        score = 0.8
+        dedupe_key = "topic:battery"
+        suggested_followup = "Ask about battery trend"
+        created_at = 10.0
+
+    class _Decision:
+        outcome = "surface"
+        reason = "surface_threshold"
+
+    class _Engine:
+        candidate_ttl_s = 120.0
+
+        def build_conversation_candidate(self, **_kwargs):
+            return _Candidate()
+
+        def evaluate(self, **_kwargs):
+            return _Decision()
+
+    api._curiosity_engine = _Engine()
+
+    api._evaluate_curiosity_from_trust_snapshot(
+        turn_id="turn_1",
+        input_event_key="item_1",
+        snapshot={"topic_anchors": ["battery"], "word_count": 4},
+    )
+
+    assert api._curiosity_surface_candidate_by_turn_id == {}
+
+
+def test_curiosity_surface_seam_ignores_unrelated_obligation_on_other_turn() -> None:
+    api = _make_api()
+    api._response_obligations = {
+        api._response_obligation_key(turn_id="turn_9", input_event_key="item_9"): {"state": "open"}
+    }
+
+    class _Candidate:
+        source = "conversation"
+        reason_code = "curiosity_repeat_topic"
+        score = 0.8
+        dedupe_key = "topic:battery"
+        suggested_followup = "Ask about battery trend"
+        created_at = 10.0
+
+    class _Decision:
+        outcome = "surface"
+        reason = "surface_threshold"
+
+    class _Engine:
+        candidate_ttl_s = 120.0
+
+        def build_conversation_candidate(self, **_kwargs):
+            return _Candidate()
+
+        def evaluate(self, **_kwargs):
+            return _Decision()
+
+    api._curiosity_engine = _Engine()
+
+    api._evaluate_curiosity_from_trust_snapshot(
+        turn_id="turn_1",
+        input_event_key="item_1",
+        snapshot={"topic_anchors": ["battery"], "word_count": 4},
+    )
+
+    assert "turn_1" in api._curiosity_surface_candidate_by_turn_id
