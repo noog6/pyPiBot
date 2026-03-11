@@ -9,7 +9,12 @@ if "audioop" not in sys.modules:
     sys.modules["audioop"] = types.ModuleType("audioop")
 
 from ai.attention_continuity import AttentionSnapshot
-from ai.embodiment_policy import EmbodimentActionType, EmbodimentPolicy
+from ai.embodiment_policy import (
+    EmbodimentActionType,
+    EmbodimentDecision,
+    EmbodimentPolicy,
+    embodiment_decision_to_governance,
+)
 from interaction import InteractionState
 
 
@@ -166,3 +171,34 @@ def test_decide_state_cue_speaking_posture_ignores_global_cooldown() -> None:
     assert decision.action == EmbodimentActionType.EMIT_CUE
     assert decision.reason == "state_cue_emission"
     assert decision.cue_name == "gesture_speaking_posture"
+
+
+def test_embodiment_decision_adapter_returns_governance_envelope() -> None:
+    policy = EmbodimentPolicy()
+    decision = policy.decide_state_cue(
+        state=InteractionState.LISTENING,
+        previous_state=InteractionState.IDLE,
+        turn_contract_blocks_gestures=False,
+        now_monotonic_s=100.0,
+        last_gesture_time_s=0.0,
+        gesture_global_cooldown_s=10.0,
+        gesture_name_last_fired_s={},
+        gesture_cooldowns_s={"gesture_attention_hold": 10.0},
+        random_delay_ms=lambda _low, _high: 200,
+        attention=_attention(),
+    )
+
+    envelope = embodiment_decision_to_governance(decision)
+
+    assert envelope.decision == "allow"
+    assert envelope.reason_code == "state_cue_emission"
+    assert envelope.subsystem == "embodiment"
+    assert envelope.metadata["cue_name"] == "gesture_attention_hold"
+
+
+def test_embodiment_adapter_normalizes_reason_code() -> None:
+    envelope = embodiment_decision_to_governance(
+        EmbodimentDecision(action=EmbodimentActionType.NONE, reason="Attention Continuity Hold")
+    )
+
+    assert envelope.reason_code == "attention_continuity_hold"

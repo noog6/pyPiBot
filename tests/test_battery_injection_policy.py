@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import sys
 import time
+import types
+
+if "audioop" not in sys.modules:
+    sys.modules["audioop"] = types.ModuleType("audioop")
 
 from ai.event_bus import Event
 from ai.realtime_api import RealtimeAPI
@@ -137,16 +142,23 @@ def test_battery_topic_suppression_blocks_non_redline_alerts() -> None:
 
 def test_send_text_message_battery_bypass_sets_metadata() -> None:
     api = _make_api_stub()
+
     async def _false(*args, **kwargs):
         return False
 
     api._handle_stop_word = _false
     api._maybe_handle_approval_response = _false
+    api._maybe_apply_late_confirmation_decision = _false
     api.orchestration_state = type("S", (), {"transition": lambda *args, **kwargs: None})()
     api._track_outgoing_event = lambda *args, **kwargs: None
     api._get_injection_priority = lambda trigger: 0
     api._stimuli_coordinator = _StimuliRecorder()
     api.websocket = _FakeWs()
+    api._get_or_create_transport = lambda: type(
+        "T",
+        (),
+        {"send_json": staticmethod(lambda *_args, **_kwargs: __import__("asyncio").sleep(0))},
+    )()
 
     import asyncio
 
@@ -159,3 +171,32 @@ def test_send_text_message_battery_bypass_sets_metadata() -> None:
     assert api._stimuli_coordinator.calls
     metadata = api._stimuli_coordinator.calls[0]["metadata"]
     assert metadata["bypass_limits"] is True
+
+
+def test_battery_response_decision_returns_governance_envelope() -> None:
+    api = _make_api_stub()
+
+    enter_warning = Event(
+        source="battery",
+        kind="status",
+        metadata={"severity": "warning", "event_type": "status", "transition": "enter_warning"},
+    )
+
+    decision = api._battery_response_decision(enter_warning, fallback=False)
+
+    assert decision.decision == "allow"
+    assert decision.reason_code == "warning_transition_allowed"
+    assert decision.subsystem == "battery"
+    assert decision.metadata["transition"] == "enter_warning"
+
+
+def test_battery_response_decision_reason_code_is_normalized() -> None:
+    api = _make_api_stub()
+
+    api._suppressed_topics.add("battery")
+    decision = api._battery_response_decision(
+        Event(source="battery", kind="status", metadata={"severity": "warning"}),
+        fallback=False,
+    )
+
+    assert decision.reason_code == "topic_suppression"

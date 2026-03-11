@@ -57,6 +57,7 @@ from ai.realtime.confirmation import (
 from ai.realtime.confirmation_service import ConfirmationService
 from ai.realtime.confirmation_runtime import ConfirmationRuntime
 from ai.realtime.battery_injection_policy import BatteryInjectionPolicy
+from ai.governance_spine import GovernanceDecision
 from ai.realtime.injection_bus import InjectionBus
 from ai.realtime.injections import InjectionCoordinator
 from ai.realtime.input_audio_events import InputAudioEventHandlers
@@ -74,7 +75,7 @@ from ai.realtime.transport import RealtimeTransport
 from ai.realtime.types import CanonicalResponseState, PendingResponseCreate, UtteranceContext
 from ai.realtime import preference_recall_runtime
 from ai.attention_continuity import AttentionContinuity, AttentionSnapshot
-from ai.embodiment_policy import EmbodimentActionType, EmbodimentPolicy
+from ai.embodiment_policy import EmbodimentActionType, EmbodimentPolicy, embodiment_decision_to_governance
 from ai.interaction_lifecycle_controller import (
     InteractionLifecycleController,
     InteractionLifecycleState,
@@ -208,6 +209,10 @@ _MICRO_ACK_CONFIRMATION_ALLOWLIST: frozenset[str] = frozenset(
     }
 )
 _MICRO_ACK_CONFIRMATION_DECLINE_GUARD_S = 5.0
+CURIOSITY_PRIORITY_BUSY = 70
+CURIOSITY_PRIORITY_LISTENING = 80
+CURIOSITY_PRIORITY_OBLIGATION_OPEN = 85
+CURIOSITY_PRIORITY_CONFIRMATION_PENDING = 90
 _PREFERENCE_KEYWORD_STOPWORDS = {
     "which",
     "what",
@@ -3473,8 +3478,19 @@ class RealtimeAPI:
         return f"{event.source} event: {event.metadata}", default_response
 
 
+    def _battery_response_decision(self, event: Event, *, fallback: bool = False) -> GovernanceDecision:
+        return self._battery_policy().response_decision(event, fallback=fallback)
+
     def _should_request_battery_response(self, event: Event, *, fallback: bool = False) -> bool:
-        return self._battery_policy().should_request_response(event, fallback=fallback)
+        decision = self._battery_response_decision(event, fallback=fallback)
+        logger.info(
+            "battery_response_governance decision=%s reason=%s subsystem=%s priority=%d",
+            decision.decision,
+            decision.reason_code,
+            decision.subsystem,
+            decision.priority,
+        )
+        return decision.decision == "allow"
 
     def _is_battery_status_query(self, text: str) -> bool:
         return self._battery_policy().is_battery_status_query(text)
@@ -3697,6 +3713,15 @@ class RealtimeAPI:
             gesture_cooldowns_s=self._gesture_cooldowns_s,
             random_delay_ms=random.randint,
             attention=snapshot,
+        )
+        governance_decision = embodiment_decision_to_governance(decision)
+        logger.debug(
+            "embodiment_governance decision=%s reason=%s subsystem=%s priority=%d cue=%s",
+            governance_decision.decision,
+            governance_decision.reason_code,
+            governance_decision.subsystem,
+            governance_decision.priority,
+            decision.cue_name or "none",
         )
 
         if decision.action == EmbodimentActionType.NONE:
@@ -10090,18 +10115,48 @@ class RealtimeAPI:
         _, awaiting_phase, _, _ = self._confirmation_hold_components()
         return awaiting_phase
 
-    def _curiosity_surface_block_reason(self) -> str | None:
+    def _curiosity_surface_block_decision(self) -> GovernanceDecision | None:
+        # Adapter precedence is intentional: listening/confirmation/obligation are
+        # treated as stronger arbitration constraints than busy-turn soft deferral.
         state = getattr(getattr(self, "state_manager", None), "state", None)
         if state == InteractionState.LISTENING:
-            return "suppressed_listening"
+            return GovernanceDecision(
+                decision="suppress",
+                reason_code="suppressed_listening",
+                subsystem="curiosity",
+                priority=CURIOSITY_PRIORITY_LISTENING,
+                metadata={"state": state.value},
+            )
         if self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase():
-            return "confirmation_pending"
+            return GovernanceDecision(
+                decision="defer",
+                reason_code="confirmation_pending",
+                subsystem="curiosity",
+                priority=CURIOSITY_PRIORITY_CONFIRMATION_PENDING,
+                metadata={"awaiting_confirmation": True},
+            )
         obligations = getattr(self, "_response_obligations", {})
         if isinstance(obligations, dict) and obligations:
-            return "obligation_open"
+            return GovernanceDecision(
+                decision="defer",
+                reason_code="obligation_open",
+                subsystem="curiosity",
+                priority=CURIOSITY_PRIORITY_OBLIGATION_OPEN,
+                metadata={"obligation_count": len(obligations)},
+            )
         if bool(getattr(self, "_response_in_flight", False)):
-            return "busy_turn"
+            return GovernanceDecision(
+                decision="defer",
+                reason_code="busy_turn",
+                subsystem="curiosity",
+                priority=CURIOSITY_PRIORITY_BUSY,
+                metadata={"response_in_flight": True},
+            )
         return None
+
+    def _curiosity_surface_block_reason(self) -> str | None:
+        decision = self._curiosity_surface_block_decision()
+        return decision.reason_code if decision else None
 
     def _prune_curiosity_anchor_stats(self, *, now: float | None = None) -> None:
         ts = float(now if now is not None else time.monotonic())
@@ -10199,9 +10254,18 @@ class RealtimeAPI:
                 candidate.score,
                 candidate.dedupe_key,
             )
+            block_decision = self._curiosity_surface_block_decision()
+            if block_decision is not None:
+                logger.debug(
+                    "curiosity_surface_governance decision=%s reason=%s subsystem=%s priority=%d",
+                    block_decision.decision,
+                    block_decision.reason_code,
+                    block_decision.subsystem,
+                    block_decision.priority,
+                )
             decision = engine.evaluate(
                 candidate=candidate,
-                arbitration_block_reason=self._curiosity_surface_block_reason(),
+                arbitration_block_reason=block_decision.reason_code if block_decision else None,
                 suppress_surface=bool(getattr(self, "_response_in_flight", False)),
             )
             if decision.outcome == "ignore":
