@@ -7,6 +7,7 @@ import time
 from typing import Any
 
 from core.logging import logger, log_ws_event
+from ai.governance import normalize_governance_reason
 from ai.tools import function_map
 
 
@@ -240,36 +241,61 @@ async def _maybe_handle_preference_recall_intent(controller, text: str, websocke
         elif "look back" in normalized_text or "look center" in normalized_text or "return to neutral" in normalized_text:
             mixed_intent_gesture_tool = "gesture_look_center"
         if mixed_intent_gesture_tool:
-            gesture_fn = function_map.get(mixed_intent_gesture_tool)
-            if callable(gesture_fn):
+            logger.info(
+                "mixed_intent_detected run_id=%s turn_id=%s source=%s tool=%s",
+                controller._current_run_id() or "",
+                resolved_turn_id,
+                source,
+                mixed_intent_gesture_tool,
+            )
+            request_fn = getattr(controller, "_submit_mixed_intent_tool_request", None)
+            if callable(request_fn):
+                logger.info(
+                    "mixed_intent_tool_request_created run_id=%s turn_id=%s source=%s tool=%s",
+                    controller._current_run_id() or "",
+                    resolved_turn_id,
+                    source,
+                    mixed_intent_gesture_tool,
+                )
+                request_result: dict[str, Any] | None = None
                 try:
-                    gesture_result = await gesture_fn()
-                    tool_call_records = getattr(controller, "_tool_call_records", None)
-                    if isinstance(tool_call_records, list):
-                        tool_call_records.append(
-                            {
-                                "name": mixed_intent_gesture_tool,
-                                "source": "preference_recall_mixed_intent",
-                                "turn_id": resolved_turn_id,
-                                "query": normalized_text,
-                                "result": gesture_result,
-                            }
-                        )
-                    logger.info(
-                        "mixed_intent_action_executed run_id=%s turn_id=%s source=%s tool=%s",
-                        controller._current_run_id() or "",
-                        resolved_turn_id,
-                        source,
-                        mixed_intent_gesture_tool,
+                    request_result = await request_fn(
+                        tool_name=mixed_intent_gesture_tool,
+                        tool_args={},
+                        websocket=websocket,
+                        source="preference_recall_mixed_intent",
+                        turn_id=resolved_turn_id,
+                        query=normalized_text,
                     )
                 except Exception:
                     logger.warning(
-                        "mixed_intent_action_failed run_id=%s turn_id=%s source=%s tool=%s",
+                        "mixed_intent_tool_execution_result run_id=%s turn_id=%s source=%s tool=%s outcome=error",
                         controller._current_run_id() or "",
                         resolved_turn_id,
                         source,
                         mixed_intent_gesture_tool,
                         exc_info=True,
+                    )
+                if isinstance(request_result, dict):
+                    outcome = str(request_result.get("outcome") or "unknown")
+                    reason = normalize_governance_reason(str(request_result.get("reason") or ""))
+                    logger.info(
+                        "mixed_intent_governance_decision run_id=%s turn_id=%s source=%s tool=%s outcome=%s reason=%s",
+                        controller._current_run_id() or "",
+                        resolved_turn_id,
+                        source,
+                        mixed_intent_gesture_tool,
+                        outcome,
+                        reason,
+                    )
+                    logger.info(
+                        "mixed_intent_tool_execution_result run_id=%s turn_id=%s source=%s tool=%s outcome=%s executed=%s",
+                        controller._current_run_id() or "",
+                        resolved_turn_id,
+                        source,
+                        mixed_intent_gesture_tool,
+                        outcome,
+                        str(bool(request_result.get("executed"))).lower(),
                     )
 
         query = controller._build_preference_recall_query(text.lower(), keywords=keywords)
