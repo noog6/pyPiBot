@@ -13,7 +13,7 @@ from interaction import InteractionState
 
 
 EMBODIMENT_PRIORITY_ALLOW = 30
-EMBODIMENT_PRIORITY_DEFER = 50
+EMBODIMENT_PRIORITY_NOOP = 40
 EMBODIMENT_PRIORITY_SUPPRESS = 70
 
 
@@ -41,19 +41,22 @@ def embodiment_decision_to_governance(decision: EmbodimentDecision) -> Governanc
     # Adapter mapping is intentionally seam-local:
     # - emit cue -> allow (eligible to execute now)
     # - suppress -> suppress (actively blocked by policy/cooldown)
-    # - none -> defer (non-emission without a hard block)
+    # - none -> expire/noop (non-emission and not queued for retry)
     if decision.action == EmbodimentActionType.EMIT_CUE:
         envelope_decision = "allow"
         priority = EMBODIMENT_PRIORITY_ALLOW
     elif decision.action == EmbodimentActionType.SUPPRESS:
         envelope_decision = "suppress"
         priority = EMBODIMENT_PRIORITY_SUPPRESS
+    elif decision.action == EmbodimentActionType.NONE:
+        envelope_decision = "expire"
+        priority = EMBODIMENT_PRIORITY_NOOP
     else:
-        envelope_decision = "defer"
-        priority = EMBODIMENT_PRIORITY_DEFER
+        raise ValueError(f"Unsupported embodiment action for governance mapping: {decision.action}")
 
     metadata = {
         "action": decision.action.value,
+        "result_class": "noop" if decision.action == EmbodimentActionType.NONE else envelope_decision,
         "cue_name": decision.cue_name,
         "delay_ms": decision.delay_ms,
     }
