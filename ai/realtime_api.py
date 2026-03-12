@@ -9052,9 +9052,22 @@ class RealtimeAPI:
             return False
         vision_state = self.get_vision_state()
         requires_fresh_look = is_current_visual_question(transcript)
+        logger.info(
+            "fresh_look_trigger_eval run_id=%s turn_id=%s matched=%s transcript=%r",
+            self._current_run_id() or "",
+            turn_id,
+            str(bool(requires_fresh_look)).lower(),
+            " ".join((transcript or "").split())[:160],
+        )
         if requires_fresh_look:
             await self._attempt_fresh_look_for_turn(turn_id=turn_id)
             vision_state = self.get_vision_state()
+        else:
+            logger.info(
+                "fresh_look_bypass_reason run_id=%s turn_id=%s reason=not_current_visual_question",
+                self._current_run_id() or "",
+                turn_id,
+            )
         fresh_frame_available = bool(
             isinstance(vision_state.get("last_frame_age_ms"), int)
             and int(vision_state["last_frame_age_ms"]) <= 5000
@@ -9118,6 +9131,14 @@ class RealtimeAPI:
             if reason in {"low_semantic_confidence", "short_utterance"}
             else f"Quick check: did you ask \"{snapshot.get('transcript_text') or transcript.strip()}\"?"
         )
+        if reason == "visual_unavailable":
+            logger.info(
+                "visual_clarify_text_selected run_id=%s turn_id=%s camera_active=%s message=%r",
+                self._current_run_id() or "",
+                turn_id,
+                str(bool(vision_state.get("camera_active", False) or vision_state.get("can_capture", False))).lower(),
+                clarify_text,
+            )
         if reason in {"low_semantic_confidence", "short_utterance"}:
             logger.info(
                 "short_utterance_policy_applied run_id=%s turn_id=%s input_event_key=%s reason=%s words=%s",
@@ -9205,7 +9226,16 @@ class RealtimeAPI:
         turn_id = str(metadata.get("turn_id") or self._current_turn_id_or_unknown())
         if self._has_camera_tool_result_for_turn(turn_id):
             return message
-        return self._visual_unavailable_clarify_text_for_turn(turn_id=turn_id, vision_state=self.get_vision_state())
+        expected = self._visual_unavailable_clarify_text_for_turn(turn_id=turn_id, vision_state=self.get_vision_state())
+        if message != expected:
+            logger.info(
+                "visual_clarify_drift_detected run_id=%s turn_id=%s emitted_message=%r expected_message=%r",
+                self._current_run_id() or "",
+                turn_id,
+                message,
+                expected,
+            )
+        return expected
 
     def _is_bounded_clarify_mode(self, metadata: dict[str, Any]) -> bool:
         trigger = str(metadata.get("trigger") or "").strip().lower()
@@ -9233,6 +9263,13 @@ class RealtimeAPI:
                 f"nothing else: {message!r}. Do not assert or describe any scene, objects, camera results, memory, "
                 "or inferred visual details. Do not add a second sentence, follow-on elaboration, or any extra text. "
                 "Keep the response short and non-assertive."
+            )
+            response_payload["tool_choice"] = "none"
+            logger.info(
+                "bounded_visual_clarify_enforced run_id=%s turn_id=%s exact_message=%r",
+                self._current_run_id() or "",
+                str(metadata.get("turn_id") or self._current_turn_id_or_unknown()),
+                message,
             )
             return response_create_event
         response_payload["instructions"] = (

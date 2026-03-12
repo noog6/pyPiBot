@@ -18,9 +18,21 @@ _CLEAR_MOTION_TERMS = {"look", "center", "left", "right", "up", "down", "back"}
 _CURRENT_VISUAL_PATTERNS = (
     r"\bwhat\s+do\s+you\s+see\s*(right\s+now|now)?\b",
     r"\bwhat'?s\s+in\s+front\s+of\s+you\b",
+    r"\b(?:tell|let\s+me\s+know)\s+me\s+what\s+you\s+see\s+in\s+front\s+of\s+you\b",
+    r"\bwhat\s+are\s+you\s+looking\s+at\s+(?:right\s+now|now)\b",
+    r"\bcan\s+you\s+look\s+and\s+tell\s+me\s+what(?:'?s|\s+is)?\s+(?:there|in\s+front\s+of\s+you)\b",
+    r"\blook\s+at\s+what'?s\s+in\s+front\s+of\s+you\s+and\s+describe\s+it\b",
     r"\btake\s+a\s+look\b",
     r"\bcan\s+you\s+check\b.*\b(now|right\s+now)\b",
     r"\blook\s+(now|right\s+now)\b",
+)
+
+_VISUAL_ACTION_TERMS = {"see", "look", "looking", "check", "describe"}
+_VISUAL_TARGET_TERMS = {"front", "there"}
+_VISUAL_PRESENT_TERMS = {"now", "current", "currently", "right"}
+_VISUAL_NEGATIVE_PATTERNS = (
+    r"\b(earlier|before|previously|yesterday|last\s+(?:time|night|week))\b",
+    r"\bwhat\s+did\s+you\s+see\b",
 )
 
 
@@ -139,9 +151,18 @@ def is_current_visual_question(text: str) -> bool:
     normalized = " ".join((text or "").lower().split())
     if not normalized:
         return False
+    for pattern in _VISUAL_NEGATIVE_PATTERNS:
+        if re.search(pattern, normalized):
+            return False
     for pattern in _CURRENT_VISUAL_PATTERNS:
         if re.search(pattern, normalized):
             return True
+    token_set = set(re.findall(r"[a-zA-Z0-9']+", normalized))
+    has_visual_action = bool(token_set & _VISUAL_ACTION_TERMS)
+    has_current_target = bool(token_set & _VISUAL_TARGET_TERMS)
+    has_present_hint = bool(token_set & _VISUAL_PRESENT_TERMS) or "in front of you" in normalized
+    if has_visual_action and has_current_target and has_present_hint:
+        return True
     return False
 
 
