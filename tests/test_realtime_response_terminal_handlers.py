@@ -205,6 +205,40 @@ def test_handle_response_done_reconciles_terminal_substantive_count() -> None:
         selection_reason="normal",
     )
 
+
+
+def test_handle_response_done_releases_blocked_followups_after_terminal_selection() -> None:
+    api = _make_api()
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    call_order: list[str] = []
+
+    def _decision(**_kwargs):
+        call_order.append("decision")
+        return True, "normal"
+
+    def _apply(**_kwargs):
+        call_order.append("apply")
+
+    def _release(**_kwargs):
+        call_order.append("release")
+
+    api._response_done_deliverable_decision = Mock(side_effect=_decision)
+    api._apply_terminal_deliverable_selection = Mock(side_effect=_apply)
+    api._release_blocked_tool_followups_for_response_done = Mock(side_effect=_release)
+
+    asyncio.run(api.handle_response_done({"type": "response.done"}))
+
+    assert call_order.index("decision") < call_order.index("apply") < call_order.index("release")
+    api._release_blocked_tool_followups_for_response_done.assert_called_once_with(response_id="resp_1")
+
 def test_handle_response_done_marks_micro_ack_as_non_deliverable() -> None:
     api = _make_api()
     api._active_response_origin = "micro_ack"

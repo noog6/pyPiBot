@@ -269,9 +269,6 @@ class ResponseTerminalHandlers:
                 state="done",
                 reason="response_done",
             )
-        api._release_blocked_tool_followups_for_response_done(
-            response_id=str(active_response_id_before_clear or ""),
-        )
         transcript_linked_input_event_key = str(api._active_input_event_key_for_turn(turn_id) or "").strip()
         transcript_final_linked = bool(transcript_linked_input_event_key and transcript_linked_input_event_key.startswith("item_"))
         selected, selection_reason = api._response_done_deliverable_decision(
@@ -337,6 +334,9 @@ class ResponseTerminalHandlers:
             response_id=resolved_response_id,
             selected=selected,
             selection_reason=selection_reason,
+        )
+        api._release_blocked_tool_followups_for_response_done(
+            response_id=resolved_response_id,
         )
         transcript_linked_input_event_key = str(api._active_input_event_key_for_turn(turn_id) or "").strip()
         transcript_final_linked = bool(transcript_linked_input_event_key and transcript_linked_input_event_key.startswith("item_"))
