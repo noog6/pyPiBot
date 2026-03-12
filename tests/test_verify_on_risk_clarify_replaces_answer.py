@@ -93,3 +93,26 @@ def test_visual_unavailable_message_normalizer_blocks_vision_claims_without_came
     )
 
     assert sanitized == "I can’t see right now. Want me to take a quick look with the camera?"
+
+
+def test_visual_unavailable_message_normalizer_respects_camera_active_truth() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._tool_call_records = []
+    api._current_turn_id_or_unknown = lambda: "turn-3"
+    api.get_vision_state = lambda: {
+        "available": False,
+        "can_capture": True,
+        "camera_active": True,
+        "queued_frame_count": 0,
+    }
+
+    sanitized = api._normalize_verify_clarify_message(
+        message="I can’t see right now. Want me to take a quick look with the camera?",
+        metadata={
+            "trigger": "asr_verify_on_risk",
+            "reason": "visual_unavailable",
+            "turn_id": "turn-3",
+        },
+    )
+
+    assert sanitized == "The camera is on, but I don’t have a fresh frame yet. Want me to take a new look now?"

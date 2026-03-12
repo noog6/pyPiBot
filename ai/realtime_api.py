@@ -8818,6 +8818,7 @@ class RealtimeAPI:
         ts = time.monotonic() if now is None else float(now)
         camera = getattr(self, "camera_controller", None)
         can_capture = bool(camera)
+        camera_active = bool(can_capture and getattr(camera, "is_vision_loop_alive", lambda: True)())
         queued_frame_count = 0
         if camera is not None:
             pending = getattr(camera, "_pending_images", None)
@@ -8836,7 +8837,16 @@ class RealtimeAPI:
             "last_frame_age_ms": last_frame_age_ms,
             "queued_frame_count": queued_frame_count,
             "can_capture": can_capture,
+            "camera_active": camera_active,
         }
+
+    def _visual_unavailable_clarify_text(self, vision_state: dict[str, Any]) -> str:
+        queued_frames = int(vision_state.get("queued_frame_count") or 0)
+        if queued_frames > 0:
+            return "The camera is on, but I’m still waiting for a fresh frame to finish processing."
+        if bool(vision_state.get("camera_active", False) or vision_state.get("can_capture", False)):
+            return "The camera is on, but I don’t have a fresh frame yet. Want me to take a new look now?"
+        return "I can’t see right now. Want me to take a quick look with the camera?"
 
     async def _maybe_verify_on_risk_clarify(
         self,
@@ -8854,6 +8864,10 @@ class RealtimeAPI:
         if self._asr_clarify_count_by_turn.get(turn_id, 0) >= self._asr_verify_max_clarify_per_turn:
             return False
         vision_state = self.get_vision_state()
+        fresh_frame_available = bool(
+            isinstance(vision_state.get("last_frame_age_ms"), int)
+            and int(vision_state["last_frame_age_ms"]) <= 5000
+        )
         normalized_transcript = " ".join((transcript or "").lower().split())
         known_domain = self._is_memory_intent(transcript) or any(
             marker in normalized_transcript
@@ -8877,7 +8891,7 @@ class RealtimeAPI:
             min_confidence=self._asr_verify_min_confidence,
             known_domain=known_domain,
             camera_available=bool(vision_state.get("available", False) or vision_state.get("can_capture", False)),
-            camera_recent=bool(vision_state.get("available", False)),
+            camera_recent=fresh_frame_available,
         )
         if not should_confirm:
             self._set_response_gating_verdict(
@@ -8909,7 +8923,7 @@ class RealtimeAPI:
         self._assistant_reply_response_id = None
         clarify_key = f"{input_event_key}:clarify"
         clarify_text = (
-            "I can’t see right now. Want me to take a quick look with the camera?"
+            self._visual_unavailable_clarify_text(vision_state)
             if reason == "visual_unavailable"
             else "I heard you, but I’m not sure what you mean yet. Could you be a bit more specific?"
             if reason in {"low_semantic_confidence", "short_utterance"}
@@ -9002,7 +9016,7 @@ class RealtimeAPI:
         turn_id = str(metadata.get("turn_id") or self._current_turn_id_or_unknown())
         if self._has_camera_tool_result_for_turn(turn_id):
             return message
-        return "I can’t see right now. Want me to take a quick look with the camera?"
+        return self._visual_unavailable_clarify_text(self.get_vision_state())
 
     def _is_bounded_clarify_mode(self, metadata: dict[str, Any]) -> bool:
         trigger = str(metadata.get("trigger") or "").strip().lower()
