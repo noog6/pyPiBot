@@ -256,6 +256,7 @@ def test_response_done_decision_holds_terminal_selection_when_required_phrase_op
         delivery_state_before_done="done",
         active_response_was_provisional=False,
         done_canonical_key=api._canonical_utterance_key(turn_id="turn_1", input_event_key="item_1"),
+        transcript_final_seen=True,
     )
 
     assert selected is False
@@ -297,6 +298,7 @@ def test_response_done_decision_holds_terminal_selection_when_exact_phrase_open(
         delivery_state_before_done="done",
         active_response_was_provisional=False,
         done_canonical_key=api._canonical_utterance_key(turn_id="turn_1", input_event_key="item_1"),
+        transcript_final_seen=True,
     )
 
     assert selected is False
@@ -1537,3 +1539,20 @@ def test_curiosity_surface_seam_ignores_unrelated_obligation_on_other_turn() -> 
     )
 
     assert "turn_1" in api._curiosity_surface_candidate_by_turn_id
+
+
+def test_response_done_decision_marks_provisional_server_auto_pre_final_as_non_deliverable() -> None:
+    api = _make_api()
+    api._is_empty_response_done = lambda **_kwargs: False
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id="turn_1",
+        origin="server_auto",
+        delivery_state_before_done="done",
+        active_response_was_provisional=True,
+        done_canonical_key=api._canonical_utterance_key(turn_id="turn_1", input_event_key="synthetic_server_auto_1"),
+        transcript_final_seen=False,
+    )
+
+    assert selected is False
+    assert reason == "provisional_server_auto_awaiting_transcript_final"
