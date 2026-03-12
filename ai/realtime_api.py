@@ -8886,6 +8886,7 @@ class RealtimeAPI:
                 "motion_settle_extension_used": False,
                 "extended_deadline_until_monotonic": None,
                 "eligible_motion_tool_name": None,
+                "claimed_pending_frame": False,
             }
         return store[turn_id]
 
@@ -8998,6 +8999,37 @@ class RealtimeAPI:
             return "camera_unavailable"
         return normalized
 
+    def _claim_one_pending_image_for_active_fresh_look(self, *, turn_id: str) -> tuple[bool, str]:
+        camera = self._resolve_camera_controller()
+        if camera is None:
+            return False, "camera_missing"
+
+        claim_one = getattr(camera, "claim_one_pending_image_for_active_fresh_look", None)
+        if callable(claim_one):
+            claimed_frame = claim_one()
+            if claimed_frame is None:
+                return False, "no_pending"
+            return True, "camera_claim_method"
+
+        pending = getattr(camera, "_pending_images", None)
+        if pending is None:
+            return False, "pending_queue_unavailable"
+
+        pending_lock = getattr(camera, "_pending_lock", None)
+        try:
+            if pending_lock is not None:
+                with pending_lock:
+                    if len(pending) <= 0:
+                        return False, "no_pending"
+                    pending.popleft()
+            else:
+                if len(pending) <= 0:
+                    return False, "no_pending"
+                pending.pop(0)
+        except Exception:
+            return False, "claim_error"
+        return True, "camera_pending_fallback"
+
     def _classify_visual_answer_provenance(self, *, turn_id: str, vision_state: dict[str, Any]) -> str:
         fresh_state = self._fresh_look_state_for_turn(turn_id=turn_id)
         if bool(fresh_state.get("completed", False)):
@@ -9025,6 +9057,7 @@ class RealtimeAPI:
         state["motion_settle_extension_used"] = False
         state["extended_deadline_until_monotonic"] = None
         state["eligible_motion_tool_name"] = None
+        state["claimed_pending_frame"] = False
         logger.info(
             "fresh_look_requested run_id=%s turn_id=%s reason=explicit_visual_question",
             self._current_run_id() or "",
@@ -9113,7 +9146,23 @@ class RealtimeAPI:
                 break
 
             vision_state = self.get_vision_state()
+            evidence_source = None
             if int(vision_state.get("queued_frame_count") or 0) > 0:
+                injection_ready, injection_reason = self.is_ready_for_injections(with_reason=True)
+                if not injection_ready and injection_reason == "response_in_progress":
+                    claimed, claim_source = self._claim_one_pending_image_for_active_fresh_look(turn_id=turn_id)
+                    if claimed:
+                        state["claimed_pending_frame"] = True
+                        evidence_source = claim_source
+                        logger.info(
+                            "fresh_look_pending_frame_claimed run_id=%s turn_id=%s source=%s",
+                            self._current_run_id() or "",
+                            turn_id,
+                            claim_source,
+                        )
+                else:
+                    evidence_source = "pending_queue_visible"
+            if evidence_source is not None:
                 completion_ts = time.monotonic()
                 self._last_fresh_look_completed_at_monotonic = completion_ts
                 state["completed"] = True
@@ -9130,7 +9179,7 @@ class RealtimeAPI:
                     "fresh_look_capture_completed run_id=%s turn_id=%s frame_id=%s age_ms=%s extension_used=%s capture_before_extended_timeout=%s",
                     self._current_run_id() or "",
                     turn_id,
-                    "pending_queue",
+                    evidence_source,
                     0,
                     str(bool(state.get("motion_settle_extension_used", False))).lower(),
                     str(bool(capture_before_extended_timeout)).lower(),

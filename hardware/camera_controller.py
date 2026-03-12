@@ -254,6 +254,13 @@ class CameraController:
             self._send_in_flight.clear()
         return True
 
+    def claim_one_pending_image_for_active_fresh_look(self) -> Any | None:
+        """Claim one pending frame for fresh-look local evidence handling."""
+        with self._pending_lock:
+            if not self._pending_images:
+                return None
+            return self._pending_images.popleft()
+
     def _queue_image_send(self, image: Any) -> bool:
         if not self.realtime_instance:
             logger.warning("[CAMERA] Unable to send image - realtime instance not available")
