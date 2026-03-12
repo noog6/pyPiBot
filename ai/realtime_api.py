@@ -10468,19 +10468,15 @@ class RealtimeAPI:
             block_decision = self._curiosity_surface_block_decision()
             if block_decision is not None:
                 if block_decision.decision == "defer" and not self._is_curiosity_defer_decision_fresh(block_decision):
-                    # Standardized as DEBUG for curiosity governance traces because this
-                    # can occur frequently during candidate scoring and is not an operator
-                    # state transition on its own.
-                    logger.debug(
-                        "curiosity_surface_governance_stale_ignored run_id=%s turn_id=%s subsystem=%s decision=%s "
-                        "reason_code=%s priority=%d expires_at=%.6f",
-                        self._current_run_id() or "none",
-                        turn_id,
-                        block_decision.subsystem,
-                        block_decision.decision,
-                        block_decision.reason_code,
-                        block_decision.priority,
-                        float(block_decision.expires_at or -1.0),
+                    self._log_governance_envelope(
+                        level="debug",
+                        anchor="curiosity_surface_governance_stale_ignored",
+                        subsystem=block_decision.subsystem,
+                        decision=block_decision.decision,
+                        reason_code=block_decision.reason_code,
+                        priority=block_decision.priority,
+                        turn_id=turn_id,
+                        metadata={"expires_at": float(block_decision.expires_at or -1.0)},
                     )
                     block_decision = None
             if block_decision is not None:
