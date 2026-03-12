@@ -183,6 +183,7 @@ realtime:
     enabled: true
     cooldown_s: 8.0
     wait_timeout_s: 1.0
+    motion_settle_extension_s: 1.5
   curiosity:
     enabled: true
     max_recent_candidates: 24
