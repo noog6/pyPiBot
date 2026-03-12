@@ -3172,3 +3172,64 @@ def test_transcript_final_recovery_schedules_upgrade_after_provisional_server_au
         "memory_intent_subtype": "none",
         "websocket": "set",
     }
+
+
+def test_tool_result_send_normalizes_oversized_call_id(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_response_turn_id = "turn_tool_norm"
+    api._current_input_event_key = "item_user_norm"
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+
+    async def _fake_add_no_tools(*_args, **_kwargs) -> None:
+        return None
+
+    async def _fake_research(**_kwargs):
+        return {"summary": "done"}
+
+    api._add_no_tools_follow_up_instruction = _fake_add_no_tools
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "perform_research", _fake_research)
+
+    oversized_call_id = "mixed_intent_a535dd5098194e50ac1f3de90318b5cc"
+    asyncio.run(api.execute_function_call("perform_research", oversized_call_id, {"query": "logs"}, ws))
+
+    function_outputs = [event for event in ws.sent if event.get("item", {}).get("type") == "function_call_output"]
+    assert len(function_outputs) == 1
+    normalized_call_id = str(function_outputs[0]["item"]["call_id"])
+    assert len(normalized_call_id) <= 32
+    assert normalized_call_id != oversized_call_id
+
+    response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert len(response_create_events) == 1
+    metadata = ((response_create_events[0].get("response") or {}).get("metadata") or {})
+    assert metadata.get("tool_call_id") == normalized_call_id
+    assert metadata.get("input_event_key") == f"tool:{normalized_call_id}"
+    assert api._tool_call_records[0]["call_id"] == normalized_call_id
+
+
+def test_tool_result_send_keeps_short_call_id_unchanged(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_response_turn_id = "turn_tool_short"
+    api._current_input_event_key = "item_user_short"
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+
+    async def _fake_add_no_tools(*_args, **_kwargs) -> None:
+        return None
+
+    async def _fake_research(**_kwargs):
+        return {"summary": "done"}
+
+    api._add_no_tools_follow_up_instruction = _fake_add_no_tools
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "perform_research", _fake_research)
+
+    short_call_id = "call_short_123"
+    asyncio.run(api.execute_function_call("perform_research", short_call_id, {"query": "logs"}, ws))
+
+    function_outputs = [event for event in ws.sent if event.get("item", {}).get("type") == "function_call_output"]
+    assert len(function_outputs) == 1
+    assert function_outputs[0]["item"]["call_id"] == short_call_id
