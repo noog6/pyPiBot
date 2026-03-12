@@ -179,6 +179,10 @@ realtime:
     strict: false
     regression_warning_threshold: 3
     debug_samples: false
+  fresh_look:
+    enabled: true
+    cooldown_s: 8.0
+    wait_timeout_s: 1.0
   curiosity:
     enabled: true
     max_recent_candidates: 24

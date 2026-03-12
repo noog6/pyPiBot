@@ -15,6 +15,13 @@ _STOPWORDS = {
 _VISUAL_TERMS = {"pants", "shirt", "hat", "wearing", "wear", "color", "see"}
 _GREETING_TERMS = {"hi", "hello", "hey", "yo", "sup", "howdy"}
 _CLEAR_MOTION_TERMS = {"look", "center", "left", "right", "up", "down", "back"}
+_CURRENT_VISUAL_PATTERNS = (
+    r"\bwhat\s+do\s+you\s+see\s*(right\s+now|now)?\b",
+    r"\bwhat'?s\s+in\s+front\s+of\s+you\b",
+    r"\btake\s+a\s+look\b",
+    r"\bcan\s+you\s+check\b.*\b(now|right\s+now)\b",
+    r"\blook\s+(now|right\s+now)\b",
+)
 
 
 def extract_topic_anchors(text: str, *, top_k: int = 5) -> list[str]:
@@ -126,6 +133,16 @@ def should_clarify(
     if tool_risk in {"high", "critical"} and snapshot.asr_confidence is not None and snapshot.asr_confidence < 0.8:
         return True, "high_risk_confirmation"
     return False, "none"
+
+
+def is_current_visual_question(text: str) -> bool:
+    normalized = " ".join((text or "").lower().split())
+    if not normalized:
+        return False
+    for pattern in _CURRENT_VISUAL_PATTERNS:
+        if re.search(pattern, normalized):
+            return True
+    return False
 
 
 def topic_mismatch_detected(transcript_text: str, response_text: str, *, threshold: float = 0.2) -> bool:

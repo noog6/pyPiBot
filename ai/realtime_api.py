@@ -67,7 +67,7 @@ from ai.realtime.research_runtime import ResearchRuntime
 from ai.realtime.response_create_runtime import ResponseCreateRuntime
 from ai.realtime.response_lifecycle import ResponseLifecycleTracker
 from ai.realtime.response_terminal_handlers import ResponseTerminalHandlers
-from ai.realtime.asr_trust import build_utterance_trust_snapshot, should_clarify
+from ai.realtime.asr_trust import build_utterance_trust_snapshot, is_current_visual_question, should_clarify
 from ai.curiosity_engine import CuriosityEngine
 from ai.opportunistic_arbitration import (
     OpportunisticActionCandidate,
@@ -1162,6 +1162,13 @@ class RealtimeAPI:
         self._asr_clarify_count_by_turn: dict[str, int] = {}
         self._asr_clarify_asked_input_event_keys: set[str] = set()
         self._utterance_trust_snapshot_by_input_event_key: dict[str, dict[str, Any]] = {}
+        fresh_look_cfg = (realtime_cfg.get("fresh_look") or {}) if isinstance(realtime_cfg, dict) else {}
+        self._fresh_look_enabled = bool(fresh_look_cfg.get("enabled", True))
+        self._fresh_look_cooldown_s = max(0.0, float(fresh_look_cfg.get("cooldown_s", 8.0)))
+        self._fresh_look_wait_timeout_s = max(0.1, float(fresh_look_cfg.get("wait_timeout_s", 1.0)))
+        self._last_fresh_look_request_at_monotonic: float | None = None
+        self._last_fresh_look_completed_at_monotonic: float | None = None
+        self._fresh_look_by_turn_id: dict[str, dict[str, Any]] = {}
         curiosity_cfg = realtime_cfg.get("curiosity") or {}
         self._curiosity_engine = CuriosityEngine(
             enabled=bool(curiosity_cfg.get("enabled", True)),
@@ -8855,6 +8862,145 @@ class RealtimeAPI:
 
         tasks[turn_id] = asyncio.create_task(_wait_for_upgrade_decision())
 
+    def _fresh_look_state_for_turn(self, *, turn_id: str) -> dict[str, Any]:
+        store = getattr(self, "_fresh_look_by_turn_id", None)
+        if not isinstance(store, dict):
+            store = {}
+            self._fresh_look_by_turn_id = store
+        if turn_id not in store:
+            store[turn_id] = {
+                "requested": False,
+                "completed": False,
+                "blocked_reason": "none",
+                "visual_answer_mode": "unavailable",
+                "last_fresh_capture_age_ms": None,
+            }
+        return store[turn_id]
+
+    def _fresh_look_gating_decision(self, *, turn_id: str) -> tuple[bool, str]:
+        if not bool(getattr(self, "_fresh_look_enabled", False)):
+            return False, "disabled"
+        camera = getattr(self, "camera_controller", None)
+        if camera is None:
+            return False, "camera_unavailable"
+        if not bool(getattr(camera, "is_vision_loop_alive", lambda: True)()):
+            return False, "camera_unavailable"
+        pending = getattr(camera, "_pending_images", None)
+        if pending is not None:
+            try:
+                if len(pending) > 0:
+                    return True, "allow"
+            except Exception:
+                pass
+        now = time.monotonic()
+        cooldown_s = max(0.0, float(getattr(self, "_fresh_look_cooldown_s", 0.0) or 0.0))
+        last_request = getattr(self, "_last_fresh_look_request_at_monotonic", None)
+        if cooldown_s > 0 and isinstance(last_request, (int, float)) and (now - float(last_request)) < cooldown_s:
+            return False, "cooldown"
+        ready, ready_reason = self.is_ready_for_injections(with_reason=True)
+        if not ready and ready_reason != "response_in_progress":
+            return False, "busy"
+        return True, "allow"
+
+    async def _attempt_fresh_look_for_turn(
+        self,
+        *,
+        turn_id: str,
+    ) -> dict[str, Any]:
+        state = self._fresh_look_state_for_turn(turn_id=turn_id)
+        state["requested"] = True
+        state["completed"] = False
+        state["blocked_reason"] = "none"
+        logger.info(
+            "fresh_look_requested run_id=%s turn_id=%s reason=explicit_visual_question",
+            self._current_run_id() or "",
+            turn_id,
+        )
+        allowed, gate_reason = self._fresh_look_gating_decision(turn_id=turn_id)
+        logger.info(
+            "fresh_look_gating_decision run_id=%s turn_id=%s action=%s reason=%s",
+            self._current_run_id() or "",
+            turn_id,
+            "allow" if allowed else "deny",
+            gate_reason,
+        )
+        if not allowed:
+            state["blocked_reason"] = gate_reason
+            state["visual_answer_mode"] = "ambient_recent" if bool(self.get_vision_state().get("available", False)) else "unavailable"
+            logger.info(
+                "fresh_look_fallback run_id=%s turn_id=%s reason=%s",
+                self._current_run_id() or "",
+                turn_id,
+                gate_reason,
+            )
+            return state
+
+        self._last_fresh_look_request_at_monotonic = time.monotonic()
+        logger.info(
+            "fresh_look_capture_started run_id=%s turn_id=%s",
+            self._current_run_id() or "",
+            turn_id,
+        )
+        deadline = time.monotonic() + max(0.1, float(getattr(self, "_fresh_look_wait_timeout_s", 1.0)))
+        while time.monotonic() <= deadline:
+            vision_state = self.get_vision_state()
+            if int(vision_state.get("queued_frame_count") or 0) > 0:
+                self._last_fresh_look_completed_at_monotonic = time.monotonic()
+                state["completed"] = True
+                state["blocked_reason"] = "none"
+                state["visual_answer_mode"] = "current"
+                state["last_fresh_capture_age_ms"] = 0
+                logger.info(
+                    "fresh_look_capture_completed run_id=%s turn_id=%s frame_id=%s age_ms=%s",
+                    self._current_run_id() or "",
+                    turn_id,
+                    "pending_queue",
+                    0,
+                )
+                logger.info(
+                    "fresh_look_context_attached run_id=%s turn_id=%s source=fresh_frame",
+                    self._current_run_id() or "",
+                    turn_id,
+                )
+                logger.info(
+                    "visual_answer_provenance run_id=%s turn_id=%s mode=%s",
+                    self._current_run_id() or "",
+                    turn_id,
+                    state["visual_answer_mode"],
+                )
+                return state
+            await asyncio.sleep(0.05)
+
+        state["blocked_reason"] = "timeout"
+        state["visual_answer_mode"] = "ambient_recent" if bool(self.get_vision_state().get("available", False)) else "historical"
+        logger.info(
+            "fresh_look_fallback run_id=%s turn_id=%s reason=%s",
+            self._current_run_id() or "",
+            turn_id,
+            "timeout",
+        )
+        logger.info(
+            "visual_answer_provenance run_id=%s turn_id=%s mode=%s",
+            self._current_run_id() or "",
+            turn_id,
+            state["visual_answer_mode"],
+        )
+        return state
+
+    def _visual_unavailable_clarify_text_for_turn(self, *, turn_id: str, vision_state: dict[str, Any]) -> str:
+        fresh_state = self._fresh_look_state_for_turn(turn_id=turn_id)
+        if bool(fresh_state.get("requested", False)) and not bool(fresh_state.get("completed", False)):
+            reason = str(fresh_state.get("blocked_reason") or "none")
+            if reason == "cooldown":
+                return "I can’t take a brand-new look yet because I just checked. I can answer from my most recent view or try again in a moment."
+            if reason == "busy":
+                return "I can’t take a fresh look this instant because vision is busy. I can answer from my recent view or try again shortly."
+            if reason == "timeout":
+                return "I tried to take a fresh look, but the frame is still pending. I can answer from recent context or retry."
+            if reason == "camera_unavailable":
+                return "I can’t take a fresh look right now because the camera isn’t available."
+        return self._visual_unavailable_clarify_text(vision_state)
+
     def get_vision_state(self, now: float | None = None) -> dict[str, Any]:
         ts = time.monotonic() if now is None else float(now)
         camera = getattr(self, "camera_controller", None)
@@ -8905,6 +9051,10 @@ class RealtimeAPI:
         if self._asr_clarify_count_by_turn.get(turn_id, 0) >= self._asr_verify_max_clarify_per_turn:
             return False
         vision_state = self.get_vision_state()
+        requires_fresh_look = is_current_visual_question(transcript)
+        if requires_fresh_look:
+            await self._attempt_fresh_look_for_turn(turn_id=turn_id)
+            vision_state = self.get_vision_state()
         fresh_frame_available = bool(
             isinstance(vision_state.get("last_frame_age_ms"), int)
             and int(vision_state["last_frame_age_ms"]) <= 5000
@@ -8962,7 +9112,7 @@ class RealtimeAPI:
         self._clear_assistant_reply_buffers()
         clarify_key = f"{input_event_key}:clarify"
         clarify_text = (
-            self._visual_unavailable_clarify_text(vision_state)
+            self._visual_unavailable_clarify_text_for_turn(turn_id=turn_id, vision_state=vision_state)
             if reason == "visual_unavailable"
             else "I heard you, but I’m not sure what you mean yet. Could you be a bit more specific?"
             if reason in {"low_semantic_confidence", "short_utterance"}
@@ -9055,7 +9205,7 @@ class RealtimeAPI:
         turn_id = str(metadata.get("turn_id") or self._current_turn_id_or_unknown())
         if self._has_camera_tool_result_for_turn(turn_id):
             return message
-        return self._visual_unavailable_clarify_text(self.get_vision_state())
+        return self._visual_unavailable_clarify_text_for_turn(turn_id=turn_id, vision_state=self.get_vision_state())
 
     def _is_bounded_clarify_mode(self, metadata: dict[str, Any]) -> bool:
         trigger = str(metadata.get("trigger") or "").strip().lower()

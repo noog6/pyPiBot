@@ -1,0 +1,147 @@
+from __future__ import annotations
+
+import asyncio
+import sys
+import time
+import types
+
+if "audioop" not in sys.modules:
+    sys.modules["audioop"] = types.ModuleType("audioop")
+
+from ai.realtime.asr_trust import is_current_visual_question
+from ai.realtime_api import RealtimeAPI
+
+
+class _CameraStub:
+    def __init__(self, *, pending_images: list[object] | None = None, alive: bool = True) -> None:
+        self._pending_images = pending_images or []
+        self._alive = alive
+
+    def is_vision_loop_alive(self) -> bool:
+        return self._alive
+
+
+def _build_api(*, camera: object | None = None) -> RealtimeAPI:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api.camera_controller = camera
+    api._fresh_look_enabled = True
+    api._fresh_look_cooldown_s = 10.0
+    api._fresh_look_wait_timeout_s = 0.15
+    api._last_fresh_look_request_at_monotonic = None
+    api._last_fresh_look_completed_at_monotonic = None
+    api._fresh_look_by_turn_id = {}
+    api._current_run_id = lambda: "run-test"
+    api._last_vision_frame_sent_at_monotonic = None
+    return api
+
+
+def test_current_visual_question_detection() -> None:
+    assert is_current_visual_question("what do you see right now")
+    assert is_current_visual_question("can you check what's on the shelf now")
+    assert not is_current_visual_question("what did you see earlier")
+
+
+def test_non_current_visual_question_does_not_trigger_fresh_look(monkeypatch) -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    called = []
+
+    async def _capture(**_kwargs):
+        called.append(True)
+        return {}
+
+    api._attempt_fresh_look_for_turn = _capture
+    api._asr_verify_on_risk_enabled = True
+    api._asr_clarify_asked_input_event_keys = set()
+    api._asr_clarify_count_by_turn = {}
+    api._asr_verify_max_clarify_per_turn = 1
+    api._asr_verify_short_utterance_ms = 300
+    api._asr_verify_min_confidence = 0.6
+    api._response_gating_verdict_by_input_event_key = {}
+    api._pending_server_auto_response_by_turn_id = {}
+    api._canonical_utterance_key = lambda *, turn_id, input_event_key: f"run-test:{turn_id}:{input_event_key}"
+    api._record_cancel_issued_timing = lambda *_args, **_kwargs: None
+    api._stale_response_ids_set = set()
+    api._mark_pending_server_auto_response_cancelled = lambda **_kwargs: None
+    api._suppress_cancelled_response_audio = lambda *_args, **_kwargs: None
+    api._get_or_create_transport = lambda: type("T", (), {"send_json": staticmethod(lambda *_a, **_k: asyncio.sleep(0))})()
+    api.assistant_reply = ""
+    api._assistant_reply_accum = ""
+
+    async def _send_assistant_message(*_args, **_kwargs):
+        return None
+
+    api.send_assistant_message = _send_assistant_message
+
+    asyncio.run(
+        api._maybe_verify_on_risk_clarify(
+            transcript="what did you see before",
+            websocket=object(),
+            turn_id="turn-1",
+            input_event_key="evt-1",
+            snapshot={"run_id": "run-test", "asr_confidence": 0.95},
+        )
+    )
+
+    assert called == []
+
+
+def test_fresh_look_respects_cooldown() -> None:
+    api = _build_api(camera=_CameraStub())
+    api._last_fresh_look_request_at_monotonic = time.monotonic()
+    api.is_ready_for_injections = lambda with_reason=False: (True, "ready") if with_reason else True
+
+    allowed, reason = api._fresh_look_gating_decision(turn_id="turn-2")
+
+    assert not allowed
+    assert reason == "cooldown"
+
+
+def test_fresh_look_respects_busy_state() -> None:
+    api = _build_api(camera=_CameraStub())
+    api.is_ready_for_injections = lambda with_reason=False: (False, "interaction_state=speaking") if with_reason else False
+
+    allowed, reason = api._fresh_look_gating_decision(turn_id="turn-2")
+
+    assert not allowed
+    assert reason == "busy"
+
+
+def test_successful_fresh_look_marks_current_provenance() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[object()]))
+    api.is_ready_for_injections = lambda with_reason=False: (True, "ready") if with_reason else True
+
+    state = asyncio.run(api._attempt_fresh_look_for_turn(turn_id="turn-3"))
+
+    assert state["requested"] is True
+    assert state["completed"] is True
+    assert state["visual_answer_mode"] == "current"
+    assert state["last_fresh_capture_age_ms"] == 0
+
+
+def test_failed_fresh_look_returns_truthful_timeout_wording() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    api.is_ready_for_injections = lambda with_reason=False: (True, "ready") if with_reason else True
+
+    state = asyncio.run(api._attempt_fresh_look_for_turn(turn_id="turn-4"))
+    message = api._visual_unavailable_clarify_text_for_turn(
+        turn_id="turn-4",
+        vision_state=api.get_vision_state(),
+    )
+
+    assert state["blocked_reason"] == "timeout"
+    assert "I tried to take a fresh look" in message
+
+
+def test_repeated_look_now_requests_do_not_spam_captures() -> None:
+    camera = _CameraStub(pending_images=[object()])
+    api = _build_api(camera=camera)
+    api._fresh_look_cooldown_s = 30.0
+    api.is_ready_for_injections = lambda with_reason=False: (True, "ready") if with_reason else True
+
+    first = asyncio.run(api._attempt_fresh_look_for_turn(turn_id="turn-5"))
+    camera._pending_images = []
+    second = asyncio.run(api._attempt_fresh_look_for_turn(turn_id="turn-6"))
+
+    assert first["completed"] is True
+    assert second["completed"] is False
+    assert second["blocked_reason"] == "cooldown"
