@@ -11,6 +11,7 @@ if "audioop" not in sys.modules:
 
 from ai.event_bus import Event
 from ai.realtime_api import RealtimeAPI
+from core.logging import logger
 
 
 class _StimuliRecorder:
@@ -200,3 +201,31 @@ def test_battery_response_decision_reason_code_is_normalized() -> None:
     )
 
     assert decision.reason_code == "topic_suppression"
+
+
+def test_battery_governance_log_includes_standardized_envelope(monkeypatch) -> None:
+    api = _make_api_stub()
+    info_messages: list[str] = []
+    monkeypatch.setattr(logger, "info", lambda msg, *args: info_messages.append(msg % args if args else msg))
+    api._current_run_id = lambda: "run-395"
+    api._current_turn_id_or_unknown = lambda: "turn_22"
+
+    enter_warning = Event(
+        source="battery",
+        kind="status",
+        metadata={"severity": "warning", "event_type": "status", "transition": "enter_warning"},
+    )
+
+    assert api._should_request_battery_response(enter_warning, fallback=False) is True
+    assert info_messages
+    rendered = info_messages[-1]
+    assert "battery_governance" in rendered
+    assert "run_id=run-395" in rendered
+    assert "turn_id=turn_22" in rendered
+    assert "subsystem=battery" in rendered
+    assert "decision=allow" in rendered
+    assert "reason_code=warning_transition_allowed" in rendered
+    assert "priority=" in rendered
+    assert "event_type=status" in rendered
+    assert "severity=warning" in rendered
+    assert "transition=enter_warning" in rendered

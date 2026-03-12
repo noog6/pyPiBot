@@ -1303,6 +1303,8 @@ def test_curiosity_surface_stale_defer_decision_no_longer_blocks(monkeypatch) ->
 
 def test_curiosity_surface_fresh_defer_decision_still_blocks(monkeypatch) -> None:
     api = _make_api()
+    debug_logs: list[str] = []
+    monkeypatch.setattr(logger, "debug", lambda msg, *args, **_kwargs: debug_logs.append(msg % args if args else msg))
 
     class _Candidate:
         source = "conversation"
@@ -1336,6 +1338,16 @@ def test_curiosity_surface_fresh_defer_decision_still_blocks(monkeypatch) -> Non
     )
 
     assert api._curiosity_surface_candidate_by_turn_id == {}
+    governance_logs = [entry for entry in debug_logs if entry.startswith("curiosity_surface_governance ")]
+    assert governance_logs
+    rendered = governance_logs[-1]
+    assert "run_id=run-395" in rendered
+    assert "turn_id=turn_1" in rendered
+    assert "subsystem=curiosity" in rendered
+    assert "decision=defer" in rendered
+    assert "reason_code=obligation_open" in rendered
+    assert "priority=" in rendered
+    assert "obligation_count=1" in rendered
 
 def test_curiosity_surface_seam_passes_curiosity_and_embodiment_governance_inputs() -> None:
     api = _make_api()

@@ -3489,17 +3489,62 @@ class RealtimeAPI:
         return f"{event.source} event: {event.metadata}", default_response
 
 
+    @staticmethod
+    def _governance_log_value(value: Any) -> str:
+        if value is None:
+            return "none"
+        if isinstance(value, bool):
+            return str(value).lower()
+        return str(value)
+
+    def _log_governance_envelope(
+        self,
+        *,
+        level: str,
+        anchor: str,
+        subsystem: str,
+        decision: str,
+        reason_code: str,
+        priority: int,
+        turn_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        fields: list[tuple[str, Any]] = [
+            ("run_id", self._current_run_id()),
+            ("turn_id", turn_id or self._current_turn_id_or_unknown()),
+            ("subsystem", subsystem),
+            ("decision", decision),
+            ("reason_code", reason_code),
+            ("priority", priority),
+        ]
+        if isinstance(metadata, dict):
+            fields.extend(metadata.items())
+        rendered = " ".join(
+            f"{key}={self._governance_log_value(value)}"
+            for key, value in fields
+            if value is not None
+        )
+        log_method = logger.debug if level == "debug" else logger.info
+        log_method("%s %s", anchor, rendered)
+
     def _battery_response_decision(self, event: Event, *, fallback: bool = False) -> GovernanceDecision:
         return self._battery_policy().response_decision(event, fallback=fallback)
 
     def _should_request_battery_response(self, event: Event, *, fallback: bool = False) -> bool:
         decision = self._battery_response_decision(event, fallback=fallback)
-        logger.info(
-            "battery_response_governance decision=%s reason=%s subsystem=%s priority=%d",
-            decision.decision,
-            decision.reason_code,
-            decision.subsystem,
-            decision.priority,
+        metadata = decision.metadata if isinstance(decision.metadata, dict) else {}
+        self._log_governance_envelope(
+            level="info",
+            anchor="battery_governance",
+            subsystem=decision.subsystem,
+            decision=decision.decision,
+            reason_code=decision.reason_code,
+            priority=decision.priority,
+            metadata={
+                "event_type": metadata.get("event_type"),
+                "severity": metadata.get("severity"),
+                "transition": metadata.get("transition"),
+            },
         )
         return decision.decision == "allow"
 
@@ -3727,14 +3772,17 @@ class RealtimeAPI:
         )
         governance_decision = embodiment_decision_to_governance(decision)
         result_class = str(governance_decision.metadata.get("result_class") or governance_decision.decision)
-        logger.debug(
-            "embodiment_governance result_class=%s decision=%s reason=%s subsystem=%s priority=%d cue=%s",
-            result_class,
-            governance_decision.decision,
-            governance_decision.reason_code,
-            governance_decision.subsystem,
-            governance_decision.priority,
-            decision.cue_name or "none",
+        self._log_governance_envelope(
+            level="debug",
+            anchor="embodiment_governance",
+            subsystem=governance_decision.subsystem,
+            decision=governance_decision.decision,
+            reason_code=governance_decision.reason_code,
+            priority=governance_decision.priority,
+            metadata={
+                "cue_name": decision.cue_name or "none",
+                "result_class": result_class,
+            },
         )
 
         if decision.action == EmbodimentActionType.NONE:
@@ -10424,19 +10472,33 @@ class RealtimeAPI:
                     # can occur frequently during candidate scoring and is not an operator
                     # state transition on its own.
                     logger.debug(
-                        "curiosity_surface_governance_stale_ignored reason=%s subsystem=%s expires_at=%.6f",
-                        block_decision.reason_code,
+                        "curiosity_surface_governance_stale_ignored run_id=%s turn_id=%s subsystem=%s decision=%s "
+                        "reason_code=%s priority=%d expires_at=%.6f",
+                        self._current_run_id() or "none",
+                        turn_id,
                         block_decision.subsystem,
+                        block_decision.decision,
+                        block_decision.reason_code,
+                        block_decision.priority,
                         float(block_decision.expires_at or -1.0),
                     )
                     block_decision = None
             if block_decision is not None:
-                logger.debug(
-                    "curiosity_surface_governance decision=%s reason=%s subsystem=%s priority=%d",
-                    block_decision.decision,
-                    block_decision.reason_code,
-                    block_decision.subsystem,
-                    block_decision.priority,
+                metadata = block_decision.metadata if isinstance(block_decision.metadata, dict) else {}
+                self._log_governance_envelope(
+                    level="debug",
+                    anchor="curiosity_surface_governance",
+                    subsystem=block_decision.subsystem,
+                    decision=block_decision.decision,
+                    reason_code=block_decision.reason_code,
+                    priority=block_decision.priority,
+                    turn_id=turn_id,
+                    metadata={
+                        "state": metadata.get("state"),
+                        "awaiting_confirmation": metadata.get("awaiting_confirmation"),
+                        "obligation_count": metadata.get("obligation_count"),
+                        "response_in_flight": metadata.get("response_in_flight"),
+                    },
                 )
             decision = engine.evaluate(
                 candidate=candidate,
