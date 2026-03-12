@@ -61,6 +61,7 @@ def _make_api() -> RealtimeAPI:
     api._pending_image_stimulus = None
     api._pending_image_flush_after_playback = False
     api._active_response_metadata = {}
+    api._fresh_look_by_turn_id = {}
 
     api._current_turn_id_or_unknown = lambda: "turn_1"
     api._canonical_utterance_key = lambda turn_id, input_event_key: f"{turn_id}::{input_event_key or 'none'}"
@@ -663,3 +664,25 @@ def test_clear_assistant_reply_buffers_for_other_response_preserves_active_prefi
     assert api._assistant_reply_text_for_response("resp_stale") == ""
     assert api._assistant_reply_text_for_response("resp_1") == "surviving prefix"
     assert api.assistant_reply == "surviving prefix"
+
+
+def test_handle_transcribe_response_done_skips_visual_provenance_for_non_visual_startup_prompt() -> None:
+    api = _make_api()
+    api._assistant_reply_response_id = "resp_1"
+    api._assistant_reply_by_response_id = {"resp_1": "Ready!"}
+    api.assistant_reply = "Ready!"
+    api._active_response_metadata = {"turn_id": "turn_1", "trigger": "startup_prompt"}
+    api._utterance_trust_snapshot_by_input_event_key = {"input_evt_1": {"transcript_text": "", "visual_question": False}}
+    api._normalize_memory_recall_answer = lambda text: text
+    api._normalize_verify_clarify_message = lambda **kwargs: kwargs["message"]
+    api._classify_visual_answer_provenance = Mock(return_value="historical")
+    api.get_vision_state = lambda: {"available": False, "can_capture": False, "camera_active": False}
+    api._clear_assistant_reply_buffers = lambda **_kwargs: None
+    api._maybe_enqueue_reflection = lambda *_args, **_kwargs: None
+
+    with patch("ai.realtime.response_terminal_handlers.logger.info") as info_log:
+        asyncio.run(api.handle_transcribe_response_done())
+
+    api._classify_visual_answer_provenance.assert_not_called()
+    assert not any(call.args and call.args[0] == "visual_answer_provenance_final run_id=%s turn_id=%s mode=%s" for call in info_log.call_args_list)
+
