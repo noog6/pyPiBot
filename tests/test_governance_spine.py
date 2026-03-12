@@ -66,3 +66,19 @@ def test_opportunistic_arbitration_uses_candidate_priority_not_governance_envelo
     assert curiosity_governance.priority < embodiment_governance.priority
     assert result.selected_action_kind == "curiosity_surface"
     assert result.selected_source == "curiosity_engine"
+
+
+def test_governance_decision_accepts_expiry_fields_as_optional_adapter_hints() -> None:
+    decision = GovernanceDecision(
+        decision="defer",
+        reason_code="confirmation_pending",
+        subsystem="curiosity",
+        priority=90,
+        ttl_s=1.0,
+        expires_at=42.0,
+        metadata={"issued_at_monotonic_s": 41.0},
+    )
+
+    assert decision.ttl_s == 1.0
+    assert decision.expires_at == 42.0
+    assert decision.metadata["issued_at_monotonic_s"] == 41.0

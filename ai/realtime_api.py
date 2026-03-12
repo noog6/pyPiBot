@@ -223,6 +223,7 @@ CURIOSITY_PRIORITY_BUSY = 70
 CURIOSITY_PRIORITY_LISTENING = 80
 CURIOSITY_PRIORITY_OBLIGATION_OPEN = 85
 CURIOSITY_PRIORITY_CONFIRMATION_PENDING = 90
+_CURIOSITY_DEFER_TTL_S = 1.0
 _PREFERENCE_KEYWORD_STOPWORDS = {
     "which",
     "what",
@@ -10133,6 +10134,21 @@ class RealtimeAPI:
         # treated as stronger arbitration constraints than busy-turn soft deferral.
         # GovernanceDecision.priority values emitted here are seam-local telemetry
         # and are not cross-subsystem ordering inputs without an explicit arbiter.
+        now = time.monotonic()
+
+        def _defer_decision(*, reason_code: str, priority: int, metadata: dict[str, Any]) -> GovernanceDecision:
+            # Contract: curiosity defer decisions are short-lived. Callers must
+            # verify freshness before using defer reasons as an active gate.
+            return GovernanceDecision(
+                decision="defer",
+                reason_code=reason_code,
+                subsystem="curiosity",
+                priority=priority,
+                ttl_s=_CURIOSITY_DEFER_TTL_S,
+                expires_at=now + _CURIOSITY_DEFER_TTL_S,
+                metadata={**metadata, "issued_at_monotonic_s": now},
+            )
+
         state = getattr(getattr(self, "state_manager", None), "state", None)
         if state == InteractionState.LISTENING:
             return GovernanceDecision(
@@ -10143,31 +10159,41 @@ class RealtimeAPI:
                 metadata={"state": state.value},
             )
         if self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase():
-            return GovernanceDecision(
-                decision="defer",
+            return _defer_decision(
                 reason_code="confirmation_pending",
-                subsystem="curiosity",
                 priority=CURIOSITY_PRIORITY_CONFIRMATION_PENDING,
                 metadata={"awaiting_confirmation": True},
             )
         obligations = getattr(self, "_response_obligations", {})
         if isinstance(obligations, dict) and obligations:
-            return GovernanceDecision(
-                decision="defer",
+            return _defer_decision(
                 reason_code="obligation_open",
-                subsystem="curiosity",
                 priority=CURIOSITY_PRIORITY_OBLIGATION_OPEN,
                 metadata={"obligation_count": len(obligations)},
             )
         if bool(getattr(self, "_response_in_flight", False)):
-            return GovernanceDecision(
-                decision="defer",
+            return _defer_decision(
                 reason_code="busy_turn",
-                subsystem="curiosity",
                 priority=CURIOSITY_PRIORITY_BUSY,
                 metadata={"response_in_flight": True},
             )
         return None
+
+    def _is_curiosity_defer_decision_fresh(self, decision: GovernanceDecision, *, now: float | None = None) -> bool:
+        """Return True when a curiosity defer envelope is still fresh in this seam.
+
+        This helper is intentionally seam-scoped and must not be treated as a
+        universal freshness oracle for all governance decisions.
+        """
+
+        if decision.expires_at is None and decision.ttl_s is None:
+            return True
+        decision_now = time.monotonic() if now is None else now
+        if decision.expires_at is not None:
+            return decision_now <= float(decision.expires_at)
+        issued_at = float((decision.metadata or {}).get("issued_at_monotonic_s") or 0.0)
+        ttl_s = max(0.0, float(decision.ttl_s or 0.0))
+        return decision_now <= issued_at + ttl_s
 
     def _curiosity_surface_block_reason(self) -> str | None:
         decision = self._curiosity_surface_block_decision()
@@ -10392,6 +10418,18 @@ class RealtimeAPI:
                 candidate.dedupe_key,
             )
             block_decision = self._curiosity_surface_block_decision()
+            if block_decision is not None:
+                if block_decision.decision == "defer" and not self._is_curiosity_defer_decision_fresh(block_decision):
+                    # Standardized as DEBUG for curiosity governance traces because this
+                    # can occur frequently during candidate scoring and is not an operator
+                    # state transition on its own.
+                    logger.debug(
+                        "curiosity_surface_governance_stale_ignored reason=%s subsystem=%s expires_at=%.6f",
+                        block_decision.reason_code,
+                        block_decision.subsystem,
+                        float(block_decision.expires_at or -1.0),
+                    )
+                    block_decision = None
             if block_decision is not None:
                 logger.debug(
                     "curiosity_surface_governance decision=%s reason=%s subsystem=%s priority=%d",
