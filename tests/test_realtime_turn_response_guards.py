@@ -1299,6 +1299,14 @@ def test_curiosity_surface_stale_defer_decision_no_longer_blocks(monkeypatch) ->
     )
 
     assert stale_logs
+    stale_log = stale_logs[0]
+    assert "run_id=" in stale_log
+    assert "turn_id=" in stale_log
+    assert "subsystem=curiosity" in stale_log
+    assert "decision=defer" in stale_log
+    assert "reason_code=obligation_open" in stale_log
+    assert "priority=" in stale_log
+    assert "expires_at=" in stale_log
 
 
 def test_curiosity_surface_fresh_defer_decision_still_blocks(monkeypatch) -> None:
