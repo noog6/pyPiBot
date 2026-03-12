@@ -20,6 +20,11 @@ class _CameraStub:
     def is_vision_loop_alive(self) -> bool:
         return self._alive
 
+    def claim_one_pending_image_for_active_fresh_look(self) -> object | None:
+        if not self._pending_images:
+            return None
+        return self._pending_images.pop(0)
+
 
 def _build_api(*, camera: object | None = None) -> RealtimeAPI:
     api = RealtimeAPI.__new__(RealtimeAPI)
@@ -543,3 +548,58 @@ def test_extension_applies_when_motion_before_base_deadline_even_if_loop_observe
     assert state["blocked_reason"] == "timeout"
     assert state["motion_settle_extension_used"] is True
     assert isinstance(state["extended_deadline_until_monotonic"], float)
+
+
+def test_fresh_look_claims_single_pending_frame_during_response_in_progress() -> None:
+    frame_one = object()
+    frame_two = object()
+    camera = _CameraStub(pending_images=[frame_one, frame_two])
+    api = _build_api(camera=camera)
+    api.is_ready_for_injections = lambda with_reason=False: (False, "response_in_progress") if with_reason else False
+
+    state = asyncio.run(api._attempt_fresh_look_for_turn(turn_id="turn-claim-single"))
+
+    assert state["completed"] is True
+    assert state["claimed_pending_frame"] is True
+    assert len(camera._pending_images) == 1
+
+
+def test_fresh_look_claimed_frame_is_not_reused_by_later_turn() -> None:
+    camera = _CameraStub(pending_images=[object()])
+    api = _build_api(camera=camera)
+    api._fresh_look_wait_timeout_s = 0.03
+    api._fresh_look_cooldown_s = 0.0
+    api.is_ready_for_injections = lambda with_reason=False: (False, "response_in_progress") if with_reason else False
+
+    first = asyncio.run(api._attempt_fresh_look_for_turn(turn_id="turn-first"))
+    second = asyncio.run(api._attempt_fresh_look_for_turn(turn_id="turn-second"))
+
+    assert first["completed"] is True
+    assert first["claimed_pending_frame"] is True
+    assert second["completed"] is False
+    assert second["blocked_reason"] == "timeout"
+
+
+def test_fresh_look_timeout_when_pending_frame_never_arrives_during_response_in_progress() -> None:
+    camera = _CameraStub(pending_images=[])
+    api = _build_api(camera=camera)
+    api._fresh_look_wait_timeout_s = 0.03
+    api.is_ready_for_injections = lambda with_reason=False: (False, "response_in_progress") if with_reason else False
+
+    state = asyncio.run(api._attempt_fresh_look_for_turn(turn_id="turn-no-pending"))
+
+    assert state["completed"] is False
+    assert state["blocked_reason"] == "timeout"
+    assert state["claimed_pending_frame"] is False
+
+
+def test_fresh_look_does_not_claim_pending_frame_when_injection_lane_ready() -> None:
+    camera = _CameraStub(pending_images=[object()])
+    api = _build_api(camera=camera)
+    api.is_ready_for_injections = lambda with_reason=False: (True, "ready") if with_reason else True
+
+    state = asyncio.run(api._attempt_fresh_look_for_turn(turn_id="turn-no-claim-ready-lane"))
+
+    assert state["completed"] is True
+    assert state["claimed_pending_frame"] is False
+    assert len(camera._pending_images) == 1
