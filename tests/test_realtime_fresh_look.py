@@ -41,6 +41,24 @@ def test_current_visual_question_detection() -> None:
     assert not is_current_visual_question("what did you see earlier")
 
 
+
+
+def test_current_visual_question_detection_covers_natural_phrasing() -> None:
+    assert is_current_visual_question("tell me what you see in front of you")
+    assert is_current_visual_question("let me know what you see in front of you")
+    assert is_current_visual_question("what are you looking at right now")
+    assert is_current_visual_question("can you look and tell me what's there")
+    assert is_current_visual_question("look at what's in front of you and describe it")
+
+
+def test_mixed_motion_and_visual_utterance_triggers_fresh_look() -> None:
+    assert is_current_visual_question("go back to center and tell me what you see in front of you")
+
+
+def test_non_current_visual_question_detection_stays_false() -> None:
+    assert not is_current_visual_question("what did you see earlier")
+    assert not is_current_visual_question("what do you remember seeing last night")
+
 def test_non_current_visual_question_does_not_trigger_fresh_look(monkeypatch) -> None:
     api = _build_api(camera=_CameraStub(pending_images=[]))
     called = []
@@ -83,6 +101,50 @@ def test_non_current_visual_question_does_not_trigger_fresh_look(monkeypatch) ->
     )
 
     assert called == []
+
+
+def test_verify_on_risk_runs_fresh_look_before_visual_unavailable_clarify() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    call_order: list[str] = []
+
+    async def _capture(**_kwargs):
+        call_order.append("fresh_look")
+        return {"requested": True, "completed": False, "blocked_reason": "timeout"}
+
+    async def _send_assistant_message(*_args, **_kwargs):
+        call_order.append("clarify")
+        return None
+
+    api._attempt_fresh_look_for_turn = _capture
+    api.send_assistant_message = _send_assistant_message
+    api._asr_verify_on_risk_enabled = True
+    api._asr_clarify_asked_input_event_keys = set()
+    api._asr_clarify_count_by_turn = {}
+    api._asr_verify_max_clarify_per_turn = 1
+    api._asr_verify_short_utterance_ms = 300
+    api._asr_verify_min_confidence = 0.6
+    api._response_gating_verdict_by_input_event_key = {}
+    api._pending_server_auto_response_by_turn_id = {}
+    api._canonical_utterance_key = lambda *, turn_id, input_event_key: f"run-test:{turn_id}:{input_event_key}"
+    api._record_cancel_issued_timing = lambda *_args, **_kwargs: None
+    api._stale_response_ids_set = set()
+    api._mark_pending_server_auto_response_cancelled = lambda **_kwargs: None
+    api._suppress_cancelled_response_audio = lambda *_args, **_kwargs: None
+    api._get_or_create_transport = lambda: type("T", (), {"send_json": staticmethod(lambda *_a, **_k: asyncio.sleep(0))})()
+    api.assistant_reply = ""
+    api._assistant_reply_accum = ""
+
+    asyncio.run(
+        api._maybe_verify_on_risk_clarify(
+            transcript="go back to center and tell me what you see in front of you",
+            websocket=object(),
+            turn_id="turn-7",
+            input_event_key="evt-7",
+            snapshot={"run_id": "run-test", "asr_confidence": 0.95},
+        )
+    )
+
+    assert call_order == ["fresh_look", "clarify"]
 
 
 def test_fresh_look_respects_cooldown() -> None:
