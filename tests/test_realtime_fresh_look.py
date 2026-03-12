@@ -27,6 +27,7 @@ def _build_api(*, camera: object | None = None) -> RealtimeAPI:
     api._fresh_look_enabled = True
     api._fresh_look_cooldown_s = 10.0
     api._fresh_look_wait_timeout_s = 0.15
+    api._fresh_look_motion_settle_extension_s = 0.12
     api._last_fresh_look_request_at_monotonic = None
     api._last_fresh_look_completed_at_monotonic = None
     api._fresh_look_by_turn_id = {}
@@ -318,3 +319,227 @@ def test_repeated_look_now_requests_do_not_spam_captures() -> None:
     assert first["completed"] is True
     assert second["completed"] is False
     assert second["blocked_reason"] == "cooldown"
+
+
+def test_fresh_look_times_out_without_eligible_motion_extension() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    api.is_ready_for_injections = lambda with_reason=False: (True, "ready") if with_reason else True
+
+    state = asyncio.run(api._attempt_fresh_look_for_turn(turn_id="turn-no-motion"))
+
+    assert state["blocked_reason"] == "timeout"
+    assert state["motion_settle_extension_used"] is False
+    assert state["extended_deadline_until_monotonic"] is None
+
+
+def test_fresh_look_deadline_extends_once_for_eligible_same_turn_motion() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    api._fresh_look_wait_timeout_s = 0.08
+    api._fresh_look_motion_settle_extension_s = 0.25
+    api.is_ready_for_injections = lambda with_reason=False: (True, "ready") if with_reason else True
+
+    async def _trigger_motion() -> None:
+        await asyncio.sleep(0.02)
+        api._mark_fresh_look_motion_request_for_turn(turn_id="turn-extend-once", tool_name="gesture_look_center", source="intent_commit")
+        first_motion = api._fresh_look_state_for_turn(turn_id="turn-extend-once")["motion_requested_at_monotonic"]
+        await asyncio.sleep(0.04)
+        api._mark_fresh_look_motion_request_for_turn(turn_id="turn-extend-once", tool_name="gesture_look_center", source="intent_commit")
+        second_motion = api._fresh_look_state_for_turn(turn_id="turn-extend-once")["motion_requested_at_monotonic"]
+        assert isinstance(first_motion, float)
+        assert isinstance(second_motion, float)
+
+    async def _run() -> dict[str, object]:
+        fresh_task = asyncio.create_task(api._attempt_fresh_look_for_turn(turn_id="turn-extend-once"))
+        motion_task = asyncio.create_task(_trigger_motion())
+        await asyncio.gather(motion_task, fresh_task)
+        return fresh_task.result()
+
+    state = asyncio.run(_run())
+
+    assert state["blocked_reason"] == "timeout"
+    assert state["motion_settle_extension_used"] is True
+    assert isinstance(state["extended_deadline_until_monotonic"], float)
+
+
+def test_fresh_look_succeeds_when_frame_arrives_during_extended_settle_window() -> None:
+    camera = _CameraStub(pending_images=[])
+    api = _build_api(camera=camera)
+    api._fresh_look_wait_timeout_s = 0.08
+    api._fresh_look_motion_settle_extension_s = 0.30
+    api.is_ready_for_injections = lambda with_reason=False: (True, "ready") if with_reason else True
+
+    async def _trigger_motion_and_frame() -> None:
+        await asyncio.sleep(0.03)
+        api._mark_fresh_look_motion_request_for_turn(
+            turn_id="turn-extended-success",
+            tool_name="gesture_look_center",
+            source="intent_commit",
+        )
+        await asyncio.sleep(0.10)
+        api._mark_fresh_look_motion_request_for_turn(
+            turn_id="turn-extended-success",
+            tool_name="gesture_look_center",
+            source="tool_result_late",
+        )
+        camera._pending_images.append(object())
+
+    async def _run() -> dict[str, object]:
+        fresh_task = asyncio.create_task(api._attempt_fresh_look_for_turn(turn_id="turn-extended-success"))
+        producer_task = asyncio.create_task(_trigger_motion_and_frame())
+        await asyncio.gather(producer_task, fresh_task)
+        return fresh_task.result()
+
+    state = asyncio.run(_run())
+
+    assert state["completed"] is True
+    assert state["blocked_reason"] == "none"
+    assert state["motion_settle_extension_used"] is True
+
+
+def test_non_visual_turn_motion_mark_does_not_trigger_extension() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    state = api._fresh_look_state_for_turn(turn_id="turn-non-visual")
+    state["requested"] = True
+    state["is_current_visual_turn"] = False
+
+    api._mark_fresh_look_motion_request_for_turn(turn_id="turn-non-visual", tool_name="gesture_look_center", source="intent_commit")
+
+    assert state["motion_requested_at_monotonic"] is None
+
+
+def test_ineligible_tool_does_not_trigger_fresh_look_extension() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    state = api._fresh_look_state_for_turn(turn_id="turn-ineligible")
+    state["requested"] = True
+    state["is_current_visual_turn"] = True
+
+    api._mark_fresh_look_motion_request_for_turn(turn_id="turn-ineligible", tool_name="gesture_nod", source="intent_commit")
+
+    assert state["motion_requested_at_monotonic"] is None
+
+
+def test_repeated_eligible_motion_requests_do_not_stack_extensions() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    state = api._fresh_look_state_for_turn(turn_id="turn-repeat-motion")
+    state["requested"] = True
+    state["completed"] = False
+    state["is_current_visual_turn"] = True
+
+    api._mark_fresh_look_motion_request_for_turn(turn_id="turn-repeat-motion", tool_name="gesture_look_center", source="intent_commit")
+    first_mark = state["motion_requested_at_monotonic"]
+    state["motion_settle_extension_used"] = True
+    api._mark_fresh_look_motion_request_for_turn(turn_id="turn-repeat-motion", tool_name="gesture_look_center", source="tool_result")
+
+    assert isinstance(first_mark, float)
+    assert isinstance(state["motion_requested_at_monotonic"], float)
+    assert state["motion_requested_at_monotonic"] == first_mark
+
+
+def test_motion_intent_before_tool_result_extends_fresh_look() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    api._fresh_look_wait_timeout_s = 0.08
+    api._fresh_look_motion_settle_extension_s = 0.22
+    api.is_ready_for_injections = lambda with_reason=False: (True, "ready") if with_reason else True
+
+    async def _run() -> dict[str, object]:
+        fresh_task = asyncio.create_task(api._attempt_fresh_look_for_turn(turn_id="turn-intent-early"))
+        await asyncio.sleep(0.03)
+        api._mark_fresh_look_motion_request_for_turn(
+            turn_id="turn-intent-early",
+            tool_name="gesture_look_center",
+            source="intent_commit",
+        )
+        await asyncio.sleep(0.12)
+        api._mark_fresh_look_motion_request_for_turn(
+            turn_id="turn-intent-early",
+            tool_name="gesture_look_center",
+            source="tool_result_late",
+        )
+        await fresh_task
+        return fresh_task.result()
+
+    state = asyncio.run(_run())
+
+    assert state["blocked_reason"] == "timeout"
+    assert state["motion_settle_extension_used"] is True
+    assert state["eligible_motion_tool_name"] == "gesture_look_center"
+
+
+def test_extension_holds_when_tool_result_arrives_after_base_timeout() -> None:
+    camera = _CameraStub(pending_images=[])
+    api = _build_api(camera=camera)
+    api._fresh_look_wait_timeout_s = 0.07
+    api._fresh_look_motion_settle_extension_s = 0.28
+    api.is_ready_for_injections = lambda with_reason=False: (True, "ready") if with_reason else True
+
+    async def _run() -> dict[str, object]:
+        fresh_task = asyncio.create_task(api._attempt_fresh_look_for_turn(turn_id="turn-late-result"))
+        await asyncio.sleep(0.02)
+        api._mark_fresh_look_motion_request_for_turn(
+            turn_id="turn-late-result",
+            tool_name="gesture_look_center",
+            source="intent_commit",
+        )
+        await asyncio.sleep(0.08)
+        api._mark_fresh_look_motion_request_for_turn(
+            turn_id="turn-late-result",
+            tool_name="gesture_look_center",
+            source="tool_result_late",
+        )
+        await asyncio.sleep(0.08)
+        camera._pending_images.append(object())
+        await fresh_task
+        return fresh_task.result()
+
+    state = asyncio.run(_run())
+
+    assert state["completed"] is True
+    assert state["motion_settle_extension_used"] is True
+
+
+def test_multi_seam_motion_marking_preserves_first_timestamp() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    state = api._fresh_look_state_for_turn(turn_id="turn-first-ts")
+    state["requested"] = True
+    state["completed"] = False
+    state["is_current_visual_turn"] = True
+
+    api._mark_fresh_look_motion_request_for_turn(
+        turn_id="turn-first-ts",
+        tool_name="gesture_look_center",
+        source="execute_function_call_commit",
+    )
+    first_ts = state["motion_requested_at_monotonic"]
+    time.sleep(0.01)
+    api._mark_fresh_look_motion_request_for_turn(
+        turn_id="turn-first-ts",
+        tool_name="gesture_look_center",
+        source="tool_result_queued",
+    )
+
+    assert isinstance(first_ts, float)
+    assert state["motion_requested_at_monotonic"] == first_ts
+
+
+def test_extension_applies_when_motion_before_base_deadline_even_if_loop_observes_late() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    api._fresh_look_wait_timeout_s = 0.02
+    api._fresh_look_motion_settle_extension_s = 0.22
+    api.is_ready_for_injections = lambda with_reason=False: (True, "ready") if with_reason else True
+
+    async def _run() -> dict[str, object]:
+        fresh_task = asyncio.create_task(api._attempt_fresh_look_for_turn(turn_id="turn-loop-jitter"))
+        await asyncio.sleep(0.005)
+        api._mark_fresh_look_motion_request_for_turn(
+            turn_id="turn-loop-jitter",
+            tool_name="gesture_look_center",
+            source="execute_function_call_commit",
+        )
+        await fresh_task
+        return fresh_task.result()
+
+    state = asyncio.run(_run())
+
+    assert state["blocked_reason"] == "timeout"
+    assert state["motion_settle_extension_used"] is True
+    assert isinstance(state["extended_deadline_until_monotonic"], float)

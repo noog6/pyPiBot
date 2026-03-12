@@ -1169,6 +1169,10 @@ class RealtimeAPI:
         self._fresh_look_enabled = bool(fresh_look_cfg.get("enabled", True))
         self._fresh_look_cooldown_s = max(0.0, float(fresh_look_cfg.get("cooldown_s", 8.0)))
         self._fresh_look_wait_timeout_s = max(0.1, float(fresh_look_cfg.get("wait_timeout_s", 1.0)))
+        self._fresh_look_motion_settle_extension_s = min(
+            2.0,
+            max(0.1, float(fresh_look_cfg.get("motion_settle_extension_s", 1.5))),
+        )
         self._last_fresh_look_request_at_monotonic: float | None = None
         self._last_fresh_look_completed_at_monotonic: float | None = None
         self._fresh_look_by_turn_id: dict[str, dict[str, Any]] = {}
@@ -8877,9 +8881,58 @@ class RealtimeAPI:
                 "blocked_reason": "none",
                 "visual_answer_mode": "unavailable",
                 "last_fresh_capture_age_ms": None,
+                "is_current_visual_turn": False,
+                "motion_requested_at_monotonic": None,
+                "motion_settle_extension_used": False,
+                "extended_deadline_until_monotonic": None,
+                "eligible_motion_tool_name": None,
             }
         return store[turn_id]
 
+    @staticmethod
+    def _is_fresh_look_motion_service_gesture_tool(*, tool_name: str | None) -> bool:
+        normalized_tool_name = str(tool_name or "").strip().lower()
+        return normalized_tool_name in {
+            "gesture_look_center",
+            "gesture_look_left",
+            "gesture_look_right",
+            "gesture_look_up",
+            "gesture_look_down",
+            "gesture_look_around",
+        }
+
+    def _mark_fresh_look_motion_request_for_turn(
+        self,
+        *,
+        turn_id: str,
+        tool_name: str | None,
+        source: str = "unknown",
+    ) -> None:
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return
+        if not self._is_fresh_look_motion_service_gesture_tool(tool_name=tool_name):
+            return
+        state = self._fresh_look_state_for_turn(turn_id=normalized_turn_id)
+        if not bool(state.get("requested", False)) or bool(state.get("completed", False)):
+            return
+        if not bool(state.get("is_current_visual_turn", False)):
+            return
+        first_motion_ts = state.get("motion_requested_at_monotonic")
+        is_first_observation = not isinstance(first_motion_ts, (int, float))
+        if is_first_observation:
+            first_motion_ts = time.monotonic()
+            state["motion_requested_at_monotonic"] = first_motion_ts
+        state["eligible_motion_tool_name"] = str(tool_name or "").strip().lower() or None
+        logger.info(
+            "fresh_look_motion_intent_observed run_id=%s turn_id=%s tool=%s source=%s motion_requested_at_monotonic=%.6f first_observation_preserved=%s",
+            self._current_run_id() or "",
+            normalized_turn_id,
+            state.get("eligible_motion_tool_name") or "unknown",
+            str(source or "unknown"),
+            float(first_motion_ts),
+            str(bool(not is_first_observation)).lower(),
+        )
 
     def _resolve_camera_controller(self) -> Any:
         camera = getattr(self, "camera_controller", None)
@@ -8967,6 +9020,11 @@ class RealtimeAPI:
         state["requested"] = True
         state["completed"] = False
         state["blocked_reason"] = "none"
+        state["is_current_visual_turn"] = True
+        state["motion_requested_at_monotonic"] = None
+        state["motion_settle_extension_used"] = False
+        state["extended_deadline_until_monotonic"] = None
+        state["eligible_motion_tool_name"] = None
         logger.info(
             "fresh_look_requested run_id=%s turn_id=%s reason=explicit_visual_question",
             self._current_run_id() or "",
@@ -9019,21 +9077,63 @@ class RealtimeAPI:
             self._current_run_id() or "",
             turn_id,
         )
-        deadline = time.monotonic() + max(0.1, float(getattr(self, "_fresh_look_wait_timeout_s", 1.0)))
-        while time.monotonic() <= deadline:
+        base_deadline = time.monotonic() + max(0.1, float(getattr(self, "_fresh_look_wait_timeout_s", 1.0)))
+        deadline = base_deadline
+        logger.info(
+            "fresh_look_base_deadline run_id=%s turn_id=%s deadline_monotonic=%.6f",
+            self._current_run_id() or "",
+            turn_id,
+            base_deadline,
+        )
+        while True:
+            now = time.monotonic()
+            motion_ts = state.get("motion_requested_at_monotonic")
+            motion_before_base_timeout = isinstance(motion_ts, (int, float)) and float(motion_ts) <= float(base_deadline)
+            if (
+                motion_before_base_timeout
+                and bool(state.get("is_current_visual_turn", False))
+                and not bool(state.get("motion_settle_extension_used", False))
+            ):
+                extension_s = max(0.1, float(getattr(self, "_fresh_look_motion_settle_extension_s", 1.5) or 1.5))
+                deadline += extension_s
+                state["motion_settle_extension_used"] = True
+                state["extended_deadline_until_monotonic"] = deadline
+                logger.info(
+                    "fresh_look_motion_extension_applied run_id=%s turn_id=%s tool=%s extension_s=%.3f extended_deadline_monotonic=%.6f before_base_timeout_expired=%s observed_after_base_timeout=%s",
+                    self._current_run_id() or "",
+                    turn_id,
+                    state.get("eligible_motion_tool_name") or "unknown",
+                    extension_s,
+                    deadline,
+                    str(bool(motion_before_base_timeout)).lower(),
+                    str(bool(now > base_deadline)).lower(),
+                )
+
+            if now > deadline:
+                break
+
             vision_state = self.get_vision_state()
             if int(vision_state.get("queued_frame_count") or 0) > 0:
-                self._last_fresh_look_completed_at_monotonic = time.monotonic()
+                completion_ts = time.monotonic()
+                self._last_fresh_look_completed_at_monotonic = completion_ts
                 state["completed"] = True
                 state["blocked_reason"] = "none"
                 state["visual_answer_mode"] = "fresh_current"
                 state["last_fresh_capture_age_ms"] = 0
+                capture_before_extended_timeout = True
+                if bool(state.get("motion_settle_extension_used", False)):
+                    extended_deadline = state.get("extended_deadline_until_monotonic")
+                    capture_before_extended_timeout = (
+                        isinstance(extended_deadline, (int, float)) and completion_ts <= float(extended_deadline)
+                    )
                 logger.info(
-                    "fresh_look_capture_completed run_id=%s turn_id=%s frame_id=%s age_ms=%s",
+                    "fresh_look_capture_completed run_id=%s turn_id=%s frame_id=%s age_ms=%s extension_used=%s capture_before_extended_timeout=%s",
                     self._current_run_id() or "",
                     turn_id,
                     "pending_queue",
                     0,
+                    str(bool(state.get("motion_settle_extension_used", False))).lower(),
+                    str(bool(capture_before_extended_timeout)).lower(),
                 )
                 logger.info(
                     "fresh_look_context_attached run_id=%s turn_id=%s source=fresh_frame",
@@ -9053,6 +9153,13 @@ class RealtimeAPI:
         state["visual_answer_mode"] = self._classify_visual_answer_provenance(
             turn_id=turn_id,
             vision_state=self.get_vision_state(),
+        )
+        logger.info(
+            "fresh_look_timeout run_id=%s turn_id=%s extension_used=%s extended_deadline_monotonic=%s",
+            self._current_run_id() or "",
+            turn_id,
+            str(bool(state.get("motion_settle_extension_used", False))).lower(),
+            state.get("extended_deadline_until_monotonic"),
         )
         logger.info(
             "fresh_look_fallback run_id=%s turn_id=%s reason=%s",
@@ -14874,6 +14981,11 @@ class RealtimeAPI:
         call_id = normalized_call_id
 
         if function_name in function_map:
+            self._mark_fresh_look_motion_request_for_turn(
+                turn_id=self._current_turn_id_or_unknown(),
+                tool_name=function_name,
+                source="execute_function_call_commit",
+            )
             try:
                 result = await function_map[function_name](**args)
                 log_tool_call(function_name, args, result)
@@ -14883,6 +14995,12 @@ class RealtimeAPI:
                     self._current_turn_id_or_unknown(),
                     call_id,
                 )
+                if isinstance(result, dict) and bool(result.get("queued", False)):
+                    self._mark_fresh_look_motion_request_for_turn(
+                        turn_id=self._current_turn_id_or_unknown(),
+                        tool_name=function_name,
+                        source="tool_result_queued",
+                    )
             except Exception as exc:
                 error_message = f"Error executing function '{function_name}': {exc}"
                 log_error(error_message)
