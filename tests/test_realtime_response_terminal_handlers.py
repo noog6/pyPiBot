@@ -60,6 +60,7 @@ def _make_api() -> RealtimeAPI:
     api._preference_recall_suppressed_input_event_keys = set()
     api._pending_image_stimulus = None
     api._pending_image_flush_after_playback = False
+    api._active_response_metadata = {}
 
     api._current_turn_id_or_unknown = lambda: "turn_1"
     api._canonical_utterance_key = lambda turn_id, input_event_key: f"{turn_id}::{input_event_key or 'none'}"
@@ -620,6 +621,31 @@ def test_handle_transcribe_response_done_logs_from_per_response_buffer_prefix() 
 
     rendered = " ".join(str(arg) for arg in info_log.call_args.args)
     assert "I can see rows of games stacked at different levels." in rendered
+
+
+def test_handle_transcribe_response_done_enforces_bounded_visual_clarify_exact_message() -> None:
+    api = _make_api()
+    api._assistant_reply_by_response_id = {
+        "resp_1": "Once the camera is available, I'll help describe what's in front."
+    }
+    api._assistant_reply_response_id = "resp_1"
+    api._maybe_enqueue_reflection = Mock()
+    api.assistant_reply = ""
+    api._assistant_reply_accum = ""
+    api._active_response_metadata = {
+        "trigger": "asr_verify_on_risk",
+        "reason": "visual_unavailable",
+        "clarify_mode": "bounded",
+        "turn_id": "turn_1",
+    }
+    api._normalize_memory_recall_answer = lambda text: text
+    api._normalize_verify_clarify_message = lambda *, message, metadata: "I can’t take a fresh look right now because the camera isn’t available."
+
+    with patch("ai.realtime.response_terminal_handlers.log_info") as info_log:
+        asyncio.run(api.handle_transcribe_response_done())
+
+    rendered = " ".join(str(arg) for arg in info_log.call_args.args)
+    assert "I can’t take a fresh look right now because the camera isn’t available." in rendered
 
 
 def test_clear_assistant_reply_buffers_for_other_response_preserves_active_prefix() -> None:

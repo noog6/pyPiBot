@@ -78,6 +78,9 @@ class ResponseTerminalHandlers:
         reply_text = api._assistant_reply_text_for_response(response_id) if response_id else str(api.assistant_reply or "")
 
         if reply_text:
+            active_metadata = getattr(api, "_active_response_metadata", {})
+            if not isinstance(active_metadata, dict):
+                active_metadata = {}
             active_input_event_key = str(getattr(api, "_active_response_input_event_key", "") or "").strip()
             snapshot = getattr(api, "_utterance_trust_snapshot_by_input_event_key", {}).get(active_input_event_key, {})
             transcript_text = str(snapshot.get("transcript_text") or "")
@@ -106,6 +109,33 @@ class ResponseTerminalHandlers:
                     api.response_in_progress = False
                     return
             normalized_reply = api._normalize_memory_recall_answer(reply_text)
+            trigger = str(active_metadata.get("trigger") or "").strip().lower()
+            reason = str(active_metadata.get("reason") or "").strip().lower()
+            clarify_mode = str(active_metadata.get("clarify_mode") or "").strip().lower()
+            if trigger == "asr_verify_on_risk" and reason == "visual_unavailable" and clarify_mode == "bounded":
+                expected = api._normalize_verify_clarify_message(
+                    message=normalized_reply,
+                    metadata=active_metadata,
+                )
+                logger.info(
+                    "bounded_visual_clarify_expected_vs_final run_id=%s turn_id=%s expected_message=%r final_message=%r",
+                    api._current_run_id() or "",
+                    str(active_metadata.get("turn_id") or api._current_turn_id_or_unknown()),
+                    expected,
+                    normalized_reply,
+                )
+                normalized_reply = expected
+            turn_id = str(active_metadata.get("turn_id") or api._current_turn_id_or_unknown())
+            provenance = api._classify_visual_answer_provenance(
+                turn_id=turn_id,
+                vision_state=api.get_vision_state(),
+            )
+            logger.info(
+                "visual_answer_provenance_final run_id=%s turn_id=%s mode=%s",
+                api._current_run_id() or "",
+                turn_id,
+                provenance,
+            )
             log_info(f"Assistant Response: {normalized_reply}", style="bold blue")
             if response_id:
                 per_response = getattr(api, "_assistant_reply_by_response_id", None)
