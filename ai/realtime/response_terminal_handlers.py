@@ -272,12 +272,15 @@ class ResponseTerminalHandlers:
         api._release_blocked_tool_followups_for_response_done(
             response_id=str(active_response_id_before_clear or ""),
         )
+        transcript_linked_input_event_key = str(api._active_input_event_key_for_turn(turn_id) or "").strip()
+        transcript_final_linked = bool(transcript_linked_input_event_key and transcript_linked_input_event_key.startswith("item_"))
         selected, selection_reason = api._response_done_deliverable_decision(
             turn_id=turn_id,
             origin=str(active_response_origin_before_clear or ""),
             delivery_state_before_done=delivery_state_before_done,
             active_response_was_provisional=active_response_was_provisional,
             done_canonical_key=done_canonical_key,
+            transcript_final_seen=transcript_final_linked,
         )
         exact_phrase_close_deferred = False
         if selection_reason == "exact_phrase_obligation_open":

@@ -7173,6 +7173,11 @@ class RealtimeAPI:
             terminal_reason,
         )
         if not parent_covered:
+            if self._parent_deliverable_classification_pending(
+                parent_state=parent_state,
+                response_metadata=response_metadata,
+            ):
+                return False, state_entry, "parent_deliverable_pending"
             return False, state_entry, "parent_not_deliverable"
         return True, state_entry, "parent_covered_tool_result"
 
@@ -7284,6 +7289,7 @@ class RealtimeAPI:
         delivery_state_before_done: str | None,
         active_response_was_provisional: bool,
         done_canonical_key: str,
+        transcript_final_seen: bool,
     ) -> tuple[bool, str]:
         if delivery_state_before_done == "cancelled":
             return False, "cancelled"
@@ -7291,6 +7297,12 @@ class RealtimeAPI:
             return False, "micro_ack_non_deliverable"
         if active_response_was_provisional and self._is_empty_response_done(canonical_key=done_canonical_key):
             return False, "provisional_empty_non_deliverable"
+        if (
+            active_response_was_provisional
+            and str(origin or "").strip().lower() == "server_auto"
+            and not bool(transcript_final_seen)
+        ):
+            return False, "provisional_server_auto_awaiting_transcript_final"
         if (
             str(origin or "").strip().lower() == "server_auto"
             and self._turn_has_pending_tool_followup(turn_id=turn_id)
@@ -7344,6 +7356,7 @@ class RealtimeAPI:
                 "micro_ack_non_deliverable",
                 "cancelled",
                 "provisional_empty_non_deliverable",
+                "provisional_server_auto_awaiting_transcript_final",
                 "exact_phrase_obligation_open",
             }:
                 if str(record.deliverable_class or "unknown").strip().lower() == "unknown":
@@ -7483,6 +7496,32 @@ class RealtimeAPI:
             source = "none"
         return covered, source, deliverable_observed, deliverable_class, terminal_selected, terminal_reason
 
+    def _parent_deliverable_classification_pending(
+        self,
+        *,
+        parent_state: CanonicalResponseState,
+        response_metadata: dict[str, Any],
+    ) -> bool:
+        parent_origin = str(getattr(parent_state, "origin", "") or "").strip().lower()
+        if parent_origin != "server_auto":
+            return False
+        parent_response_id = str(getattr(parent_state, "response_id", "") or "").strip()
+        if not parent_response_id or not self._is_provisional_response(response_id=parent_response_id):
+            return False
+        parent_turn_id = str(
+            response_metadata.get("parent_turn_id")
+            or response_metadata.get("turn_id")
+            or getattr(parent_state, "turn_id", "")
+            or ""
+        ).strip()
+        if not parent_turn_id:
+            return True
+        transcript_linked_input_event_key = str(self._active_input_event_key_for_turn(parent_turn_id) or "").strip()
+        transcript_final_seen = bool(
+            transcript_linked_input_event_key and transcript_linked_input_event_key.startswith("item_")
+        )
+        return not transcript_final_seen
+
     def _turn_has_final_deliverable(self, *, turn_id: str) -> bool:
         normalized_turn_id = str(turn_id or "").strip()
         if not normalized_turn_id:
@@ -7575,13 +7614,16 @@ class RealtimeAPI:
                 blocked_by_response_id=normalized_response_id,
             )
             parent_state = parent_entry[1] if parent_entry else None
+            release_decision = "drop" if should_drop else "release"
+            if reason == "parent_deliverable_pending":
+                release_decision = "hold"
             logger.info(
                 "queue_release_parent_eval run_id=%s turn_id=%s canonical_key=%s tool_call_id=%s release_decision=%s reason=%s resolved_parent_response_id=%s resolved_parent_origin=%s resolved_parent_deliverable_state=%s",
                 self._current_run_id() or "",
                 turn_id,
                 canonical_key,
                 str(response_metadata.get("tool_call_id") or "").strip() or "unknown",
-                "drop" if should_drop else "release",
+                release_decision,
                 reason,
                 str(getattr(parent_state, "response_id", "") or "").strip() or "none",
                 str(getattr(parent_state, "origin", "") or "").strip() or "none",
@@ -7604,6 +7646,13 @@ class RealtimeAPI:
                     turn_id,
                     origin,
                     normalized_response_id,
+                )
+                continue
+            if reason == "parent_deliverable_pending":
+                self._set_tool_followup_state(
+                    canonical_key=canonical_key,
+                    state="blocked_active_response",
+                    reason=f"parent_deliverable_pending response_id={normalized_response_id}",
                 )
                 continue
             response_metadata["tool_followup_release"] = "true"
