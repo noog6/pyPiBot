@@ -998,3 +998,54 @@ def test_distinct_info_tool_followup_not_suppressed_after_canonical_ownership() 
 
     assert should_drop is False
     assert reason == "distinct_info"
+
+
+def test_transcript_buffer_retains_prefix_per_response_id_across_active_response_shift() -> None:
+    api = _build_api_stub()
+    api._active_response_id = "resp-new"
+    api.assistant_reply = ""
+    api._assistant_reply_accum = ""
+    api._assistant_reply_response_id = None
+
+    api._append_assistant_reply_text("Leading prefix ", response_id="resp-old")
+    api._append_assistant_reply_text("continues.", response_id="resp-old")
+
+    assert api.assistant_reply == ""
+    assert api._assistant_reply_accum == ""
+    assert api._assistant_reply_text_for_response("resp-old") == "Leading prefix continues."
+
+
+def test_stale_suppression_does_not_drop_surviving_response_prefix() -> None:
+    api = _build_api_stub()
+
+    api._active_response_id = "resp-final"
+    api.assistant_reply = ""
+    api._assistant_reply_accum = ""
+    api._assistant_reply_response_id = None
+    api._append_assistant_reply_text("The front has ", response_id="resp-final")
+
+    api._stale_response_ids().add("resp-stale")
+    stale_event = {
+        "type": "response.output_audio_transcript.delta",
+        "response_id": "resp-stale",
+        "delta": "old text",
+    }
+    asyncio.run(api._handle_event_legacy(stale_event, websocket=None))
+
+    assert api._assistant_reply_text_for_response("resp-final") == "The front has "
+
+
+def test_audio_transcript_done_reconstructs_full_sentence_from_multiple_deltas() -> None:
+    api = _build_api_stub()
+    api._active_response_id = "resp-final"
+    api._assistant_reply_response_id = "resp-final"
+
+    events = [
+        {"type": "response.output_audio_transcript.delta", "response_id": "resp-final", "delta": "I can see "},
+        {"type": "response.output_audio_transcript.delta", "response_id": "resp-final", "delta": "a shelf "},
+        {"type": "response.output_audio_transcript.delta", "response_id": "resp-final", "delta": "of games."},
+    ]
+    for event in events:
+        asyncio.run(api._handle_event_legacy(event, websocket=None))
+
+    assert api._assistant_reply_text_for_response("resp-final") == "I can see a shelf of games."

@@ -46,9 +46,7 @@ class ResponseTerminalHandlers:
             and (api._has_active_confirmation_token() or api._pending_action is not None)
             and api._is_awaiting_confirmation_phase()
         ):
-            api.assistant_reply = ""
-            api._assistant_reply_accum = ""
-            api._assistant_reply_response_id = None
+            api._clear_assistant_reply_buffers()
             if api.websocket is not None:
                 token = getattr(api, "_pending_confirmation_token", None)
                 if token is not None:
@@ -76,13 +74,16 @@ class ResponseTerminalHandlers:
             logger.info("Finished handle_transcribe_response_done()")
             return
 
-        if api.assistant_reply:
+        response_id = str(getattr(api, "_assistant_reply_response_id", "") or "").strip()
+        reply_text = api._assistant_reply_text_for_response(response_id) if response_id else str(api.assistant_reply or "")
+
+        if reply_text:
             active_input_event_key = str(getattr(api, "_active_response_input_event_key", "") or "").strip()
             snapshot = getattr(api, "_utterance_trust_snapshot_by_input_event_key", {}).get(active_input_event_key, {})
             transcript_text = str(snapshot.get("transcript_text") or "")
             if (
                 transcript_text
-                and topic_mismatch_detected(transcript_text, api.assistant_reply)
+                and topic_mismatch_detected(transcript_text, reply_text)
                 and bool(getattr(api, "_asr_verify_on_risk_enabled", False))
             ):
                 websocket = getattr(api, "websocket", None)
@@ -101,15 +102,17 @@ class ResponseTerminalHandlers:
                         active_input_event_key,
                         ",".join(snapshot.get("topic_anchors") or []),
                     )
-                    api.assistant_reply = ""
-                    api._assistant_reply_accum = ""
-                    api._assistant_reply_response_id = None
+                    api._clear_assistant_reply_buffers(response_id=response_id)
                     api.response_in_progress = False
                     return
-            api.assistant_reply = api._normalize_memory_recall_answer(api.assistant_reply)
-            log_info(f"Assistant Response: {api.assistant_reply}", style="bold blue")
-            api.assistant_reply = ""
-            api._assistant_reply_response_id = None
+            normalized_reply = api._normalize_memory_recall_answer(reply_text)
+            log_info(f"Assistant Response: {normalized_reply}", style="bold blue")
+            if response_id:
+                per_response = getattr(api, "_assistant_reply_by_response_id", None)
+                if isinstance(per_response, dict):
+                    per_response[response_id] = normalized_reply
+            api.assistant_reply = normalized_reply
+            api._clear_assistant_reply_buffers(response_id=response_id or None)
 
         api.response_in_progress = False
         api._maybe_enqueue_reflection("response transcript done")

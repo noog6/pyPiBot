@@ -85,6 +85,7 @@ def _make_api() -> RealtimeAPI:
     api._recover_confirmation_guard_microphone = lambda *_args, **_kwargs: None
     api._drain_response_create_queue = AsyncMock()
     api._flush_pending_image_stimulus = AsyncMock()
+    api._reflection_enqueued = False
     return api
 
 
@@ -593,3 +594,46 @@ def test_terminal_substantive_reconcile_exact_phrase_repair_path_totals_one() ->
 
     state = api._conversation_efficiency_state(turn_id="turn_1")
     assert state.substantive_count == 1
+
+
+def test_handle_transcribe_response_done_logs_from_per_response_buffer_prefix() -> None:
+    api = _make_api()
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    api._assistant_reply_by_response_id = {
+        "resp_1": "I can see rows of games stacked at different levels."
+    }
+    api._assistant_reply_response_id = "resp_1"
+    api._maybe_enqueue_reflection = Mock()
+    api.assistant_reply = "different levels."
+    api._assistant_reply_accum = "different levels."
+
+    with patch("ai.realtime.response_terminal_handlers.log_info") as info_log:
+        asyncio.run(api.handle_transcribe_response_done())
+
+    rendered = " ".join(str(arg) for arg in info_log.call_args.args)
+    assert "I can see rows of games stacked at different levels." in rendered
+
+
+def test_clear_assistant_reply_buffers_for_other_response_preserves_active_prefix() -> None:
+    api = _make_api()
+    api._assistant_reply_by_response_id = {
+        "resp_stale": "stale prefix",
+        "resp_1": "surviving prefix",
+    }
+    api._assistant_reply_response_id = "resp_1"
+    api.assistant_reply = "surviving prefix"
+    api._assistant_reply_accum = "surviving prefix"
+
+    api._clear_assistant_reply_buffers(response_id="resp_stale")
+
+    assert api._assistant_reply_text_for_response("resp_stale") == ""
+    assert api._assistant_reply_text_for_response("resp_1") == "surviving prefix"
+    assert api.assistant_reply == "surviving prefix"

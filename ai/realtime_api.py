@@ -656,6 +656,7 @@ class RealtimeAPI:
         self.assistant_reply = ""
         self._assistant_reply_accum = ""
         self._assistant_reply_response_id: str | None = None
+        self._assistant_reply_by_response_id: dict[str, str] = {}
         self._audio_accum = bytearray()
         self._audio_accum_response_id: str | None = None
         self._audio_accum_bytes_target = 9600
@@ -4596,8 +4597,29 @@ class RealtimeAPI:
         segment = str(text or "")
         if not segment:
             return
+
+        def _append_segment(prior_text: str, new_text: str) -> str:
+            needs_separator = (
+                allow_separator
+                and bool(prior_text)
+                and not prior_text.endswith((" ", "\n", "\t"))
+                and not new_text.startswith((" ", "\n", "\t", ".", ",", "!", "?", ":", ";"))
+            )
+            if needs_separator:
+                return f"{prior_text} {new_text}"
+            return f"{prior_text}{new_text}"
+
         active_response_id = str(getattr(self, "_active_response_id", "") or "").strip()
         normalized_response_id = str(response_id or "").strip()
+        if normalized_response_id:
+            per_response = getattr(self, "_assistant_reply_by_response_id", None)
+            if not isinstance(per_response, dict):
+                per_response = {}
+                self._assistant_reply_by_response_id = per_response
+            per_response[normalized_response_id] = _append_segment(
+                str(per_response.get(normalized_response_id) or ""),
+                segment,
+            )
         if normalized_response_id and active_response_id and normalized_response_id != active_response_id:
             logger.debug(
                 "assistant_text_delta_discarded reason=inactive_response response_id=%s active_response_id=%s",
@@ -4614,17 +4636,36 @@ class RealtimeAPI:
         elif active_response_id and not buffer_response_id:
             self._assistant_reply_response_id = active_response_id
         prior = str(getattr(self, "_assistant_reply_accum", "") or "")
-        needs_separator = (
-            allow_separator
-            and bool(prior)
-            and not prior.endswith((" ", "\n", "\t"))
-            and not segment.startswith((" ", "\n", "\t", ".", ",", "!", "?", ":", ";"))
-        )
-        if needs_separator:
-            self.assistant_reply += " "
-            self._assistant_reply_accum += " "
-        self.assistant_reply += segment
-        self._assistant_reply_accum += segment
+        updated = _append_segment(prior, segment)
+        self.assistant_reply = updated
+        self._assistant_reply_accum = updated
+
+    def _assistant_reply_text_for_response(self, response_id: str | None) -> str:
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            return str(getattr(self, "assistant_reply", "") or "")
+        per_response = getattr(self, "_assistant_reply_by_response_id", None)
+        if isinstance(per_response, dict):
+            return str(per_response.get(normalized_response_id) or "")
+        return ""
+
+    def _clear_assistant_reply_buffers(self, *, response_id: str | None = None) -> None:
+        normalized_response_id = str(response_id or "").strip()
+        if normalized_response_id:
+            per_response = getattr(self, "_assistant_reply_by_response_id", None)
+            if isinstance(per_response, dict):
+                per_response.pop(normalized_response_id, None)
+            if str(getattr(self, "_assistant_reply_response_id", "") or "").strip() == normalized_response_id:
+                self.assistant_reply = ""
+                self._assistant_reply_accum = ""
+                self._assistant_reply_response_id = None
+            return
+        self.assistant_reply = ""
+        self._assistant_reply_accum = ""
+        self._assistant_reply_response_id = None
+        per_response = getattr(self, "_assistant_reply_by_response_id", None)
+        if isinstance(per_response, dict):
+            per_response.clear()
 
     def _memory_pin_followup_needed(
         self,
@@ -8918,9 +8959,7 @@ class RealtimeAPI:
             self._suppress_cancelled_response_audio(pending.response_id)
             transport = self._get_or_create_transport()
             await transport.send_json(websocket, cancel_event)
-        self.assistant_reply = ""
-        self._assistant_reply_accum = ""
-        self._assistant_reply_response_id = None
+        self._clear_assistant_reply_buffers()
         clarify_key = f"{input_event_key}:clarify"
         clarify_text = (
             self._visual_unavailable_clarify_text(vision_state)
@@ -12993,8 +13032,7 @@ class RealtimeAPI:
         self.response_in_progress = True
         self._response_in_flight = True
         self._speaking_started = False
-        self.assistant_reply = ""
-        self._assistant_reply_accum = ""
+        self._clear_assistant_reply_buffers()
         self._assistant_reply_response_id = self._active_response_id
         self._tool_call_records = []
         self._last_tool_call_results = []
@@ -13174,10 +13212,7 @@ class RealtimeAPI:
             cancel_event = {"type": "response.cancel", "response_id": old_response_id}
             self._record_cancel_issued_timing(old_response_id)
             self._stale_response_ids().add(old_response_id)
-            if str(getattr(self, "_assistant_reply_response_id", "") or "").strip() == old_response_id:
-                self.assistant_reply = ""
-                self._assistant_reply_accum = ""
-                self._assistant_reply_response_id = None
+            self._clear_assistant_reply_buffers(response_id=old_response_id)
             log_ws_event("Outgoing", cancel_event)
             self._track_outgoing_event(cancel_event, origin="server_auto_upgrade")
             self._mark_pending_server_auto_response_cancelled(
