@@ -55,9 +55,17 @@ def test_mixed_motion_and_visual_utterance_triggers_fresh_look() -> None:
     assert is_current_visual_question("go back to center and tell me what you see in front of you")
 
 
+def test_current_visual_question_detection_covers_conditional_see_phrasing() -> None:
+    assert is_current_visual_question("look back at center and then tell me if you see a can of pop in your field of view")
+    assert is_current_visual_question("tell me if you see a can of pop")
+    assert is_current_visual_question("do you see a can of pop in your field of view")
+    assert is_current_visual_question("can you check whether there is a can of pop in front of you")
+
+
 def test_non_current_visual_question_detection_stays_false() -> None:
     assert not is_current_visual_question("what did you see earlier")
     assert not is_current_visual_question("what do you remember seeing last night")
+    assert not is_current_visual_question("tell me if you saw a can of pop earlier")
 
 def test_non_current_visual_question_does_not_trigger_fresh_look(monkeypatch) -> None:
     api = _build_api(camera=_CameraStub(pending_images=[]))
@@ -168,6 +176,30 @@ def test_fresh_look_respects_busy_state() -> None:
     assert reason == "injection_not_ready"
 
 
+
+
+def test_get_vision_state_uses_camera_instance_fallback_when_controller_unset() -> None:
+    api = _build_api(camera=None)
+    api.camera_instance = _CameraStub(pending_images=[], alive=True)
+    api._last_vision_frame_sent_at_monotonic = time.monotonic()
+
+    state = api.get_vision_state()
+
+    assert state["can_capture"] is True
+    assert state["camera_active"] is True
+    assert state["available"] is True
+
+
+def test_fresh_look_gating_uses_camera_instance_fallback_when_controller_unset() -> None:
+    api = _build_api(camera=None)
+    api.camera_instance = _CameraStub(pending_images=[])
+    api.is_ready_for_injections = lambda with_reason=False: (False, "interaction_state=speaking") if with_reason else False
+
+    allowed, reason = api._fresh_look_gating_decision(turn_id="turn-fallback")
+
+    assert not allowed
+    assert reason == "injection_not_ready"
+
 def test_fresh_look_alive_camera_not_marked_camera_unavailable() -> None:
     api = _build_api(camera=_CameraStub(pending_images=[]))
     api.is_ready_for_injections = lambda with_reason=False: (False, "interaction_state=speaking") if with_reason else False
@@ -200,6 +232,18 @@ def test_visual_answer_provenance_ambient_recent_when_queue_present() -> None:
 
     assert mode == "ambient_recent"
 
+
+
+
+def test_get_vision_state_reports_camera_alive_and_available_when_recent_frame_exists() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    api._last_vision_frame_sent_at_monotonic = time.monotonic()
+
+    state = api.get_vision_state()
+
+    assert state["can_capture"] is True
+    assert state["camera_active"] is True
+    assert state["available"] is True
 
 def test_camera_active_clarify_never_uses_camera_unavailable_message() -> None:
     api = _build_api(camera=_CameraStub(pending_images=[]))

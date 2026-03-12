@@ -692,6 +692,8 @@ class RealtimeAPI:
         }
         self.response_start_time: float | None = None
         self.websocket = None
+        self.camera_controller = None
+        self.camera_instance = None
         self.profile_manager = ProfileManager.get_instance()
         self._memory_manager = MemoryManager.get_instance()
         self.state_manager = InteractionStateManager()
@@ -8878,10 +8880,20 @@ class RealtimeAPI:
             }
         return store[turn_id]
 
+
+    def _resolve_camera_controller(self) -> Any:
+        camera = getattr(self, "camera_controller", None)
+        if camera is not None:
+            return camera
+        camera = getattr(self, "camera_instance", None)
+        if camera is not None:
+            return camera
+        return None
+
     def _fresh_look_gating_decision(self, *, turn_id: str) -> tuple[bool, str]:
         if not bool(getattr(self, "_fresh_look_enabled", False)):
             return False, "disabled"
-        camera = getattr(self, "camera_controller", None)
+        camera = self._resolve_camera_controller()
         if camera is None:
             return False, "camera_missing"
         if not bool(getattr(camera, "is_vision_loop_alive", lambda: True)()):
@@ -9072,7 +9084,7 @@ class RealtimeAPI:
 
     def get_vision_state(self, now: float | None = None) -> dict[str, Any]:
         ts = time.monotonic() if now is None else float(now)
-        camera = getattr(self, "camera_controller", None)
+        camera = self._resolve_camera_controller()
         can_capture = bool(camera)
         camera_active = bool(can_capture and getattr(camera, "is_vision_loop_alive", lambda: True)())
         queued_frame_count = 0

@@ -25,6 +25,10 @@ _CURRENT_VISUAL_PATTERNS = (
     r"\btake\s+a\s+look\b",
     r"\bcan\s+you\s+check\b.*\b(now|right\s+now)\b",
     r"\blook\s+(now|right\s+now)\b",
+    r"\b(?:tell\s+me\s+if|can\s+you\s+tell\s+me\s+if|let\s+me\s+know\s+if)\s+you\s+see\b",
+    r"\bdo\s+you\s+see\b.*\bin\s+your\s+field\s+of\s+view\b",
+    r"\bcan\s+you\s+check\s+whether\s+there\s+is\b.*\b(?:in\s+front\s+of\s+you|ahead\s+of\s+you)\b",
+    r"\blook\s+back\s+(?:at|to)\s+center\b.*\b(?:tell\s+me\s+if\s+you\s+see|do\s+you\s+see)\b",
 )
 
 _VISUAL_ACTION_TERMS = {"see", "look", "looking", "check", "describe"}
@@ -159,8 +163,12 @@ def is_current_visual_question(text: str) -> bool:
             return True
     token_set = set(re.findall(r"[a-zA-Z0-9']+", normalized))
     has_visual_action = bool(token_set & _VISUAL_ACTION_TERMS)
-    has_current_target = bool(token_set & _VISUAL_TARGET_TERMS)
-    has_present_hint = bool(token_set & _VISUAL_PRESENT_TERMS) or "in front of you" in normalized
+    has_current_target = bool(token_set & _VISUAL_TARGET_TERMS) or "field of view" in normalized
+    has_present_hint = (
+        bool(token_set & _VISUAL_PRESENT_TERMS)
+        or "in front of you" in normalized
+        or "field of view" in normalized
+    )
     if has_visual_action and has_current_target and has_present_hint:
         return True
     return False

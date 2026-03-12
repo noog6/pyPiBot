@@ -126,16 +126,21 @@ class ResponseTerminalHandlers:
                 )
                 normalized_reply = expected
             turn_id = str(active_metadata.get("turn_id") or api._current_turn_id_or_unknown())
-            provenance = api._classify_visual_answer_provenance(
-                turn_id=turn_id,
-                vision_state=api.get_vision_state(),
-            )
-            logger.info(
-                "visual_answer_provenance_final run_id=%s turn_id=%s mode=%s",
-                api._current_run_id() or "",
-                turn_id,
-                provenance,
-            )
+            trigger = str(active_metadata.get("trigger") or "").strip().lower()
+            is_visual_turn = bool(snapshot.get("visual_question", False)) or (
+                trigger == "asr_verify_on_risk" and reason == "visual_unavailable"
+            ) or bool(api._fresh_look_state_for_turn(turn_id=turn_id).get("requested", False))
+            if is_visual_turn:
+                provenance = api._classify_visual_answer_provenance(
+                    turn_id=turn_id,
+                    vision_state=api.get_vision_state(),
+                )
+                logger.info(
+                    "visual_answer_provenance_final run_id=%s turn_id=%s mode=%s",
+                    api._current_run_id() or "",
+                    turn_id,
+                    provenance,
+                )
             log_info(f"Assistant Response: {normalized_reply}", style="bold blue")
             if response_id:
                 per_response = getattr(api, "_assistant_reply_by_response_id", None)
