@@ -48,7 +48,14 @@ def test_embodiment_governance_logs_noop_result_class_for_none(monkeypatch) -> N
     api._handle_state_gesture(InteractionState.THINKING)
 
     assert any(
-        "embodiment_governance result_class=noop decision=expire reason=attention_continuity_hold" in msg
+        "embodiment_governance" in msg
+        and "turn_id=turn-unknown" in msg
+        and "subsystem=embodiment" in msg
+        and "decision=expire" in msg
+        and "reason_code=attention_continuity_hold" in msg
+        and "priority=40" in msg
+        and "result_class=noop" in msg
+        and "cue_name=none" in msg
         for msg in debug_messages
     )
     assert any(
