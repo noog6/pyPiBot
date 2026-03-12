@@ -2464,7 +2464,7 @@ def test_tool_followup_release_not_suppressed_when_parent_only_has_unclassified_
     assert should_drop is False
     assert reason == "parent_not_deliverable"
 
-def test_tool_followup_create_seam_uses_terminal_selection_when_parent_canonical_coverage_lags() -> None:
+def test_tool_followup_create_seam_does_not_use_terminal_selection_without_substantive_parent_output() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
     ws = _RecordingWs()
@@ -2485,6 +2485,7 @@ def test_tool_followup_create_seam_uses_terminal_selection_when_parent_canonical
             setattr(record, "done", True),
             setattr(record, "deliverable_observed", False),
             setattr(record, "deliverable_class", "unknown"),
+            setattr(record, "audio_started", False),
         ),
     )
     api._apply_terminal_deliverable_selection(
@@ -2494,16 +2495,6 @@ def test_tool_followup_create_seam_uses_terminal_selection_when_parent_canonical
         input_event_key=parent_input_event_key,
         selected=True,
         selection_reason="normal",
-    )
-    # Simulate stale canonical coverage fields lagging behind terminal selection state.
-    api._canonical_response_state_mutate(
-        canonical_key=parent_key,
-        turn_id=parent_turn_id,
-        input_event_key=parent_input_event_key,
-        mutator=lambda record: (
-            setattr(record, "deliverable_observed", False),
-            setattr(record, "deliverable_class", "unknown"),
-        ),
     )
 
     response_create_event, canonical_key = api._build_tool_followup_response_create_event(
@@ -2533,8 +2524,182 @@ def test_tool_followup_create_seam_uses_terminal_selection_when_parent_canonical
 
     asyncio.run(api._drain_response_create_queue(source_trigger="playback_complete"))
 
-    assert [event for event in ws.sent if event.get("type") == "response.create"] == []
-    assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
+    assert len([event for event in ws.sent if event.get("type") == "response.create"]) == 1
+    assert api._tool_followup_state(canonical_key=canonical_key) in {"creating", "created", "released_on_response_done"}
+
+
+def test_tool_followup_pruned_when_parent_has_substantive_audio_output() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_parent_substantive"
+    parent_input_event_key = "item_parent_substantive"
+    parent_response_id = "resp-parent-substantive"
+    parent_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "upgraded_response"),
+            setattr(record, "response_id", parent_response_id),
+            setattr(record, "audio_started", True),
+            setattr(record, "done", True),
+            setattr(record, "deliverable_observed", False),
+            setattr(record, "deliverable_class", "unknown"),
+        ),
+    )
+    api._apply_terminal_deliverable_selection(
+        canonical_key=parent_key,
+        response_id=parent_response_id,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        selected=True,
+        selection_reason="normal",
+    )
+
+    response_create_event, canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_parent_substantive",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+    metadata = ((response_create_event.get("response") or {}).get("metadata") or {})
+    metadata["blocked_by_response_id"] = parent_response_id
+    metadata["parent_turn_id"] = turn_id
+    metadata["parent_input_event_key"] = parent_input_event_key
+
+    should_drop, _entry, reason = api._should_suppress_queued_tool_followup_release(
+        response_metadata=metadata,
+        blocked_by_response_id=parent_response_id,
+    )
+
+    assert should_drop is True
+    assert reason == "parent_covered_tool_result"
+
+
+def test_tool_followup_blocked_by_active_parent_is_released_and_drained_after_parent_done() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+
+    turn_id = "turn_parent_release"
+    parent_input_event_key = "item_parent_release"
+    parent_response_id = "resp-parent-release"
+    parent_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "upgraded_response"),
+            setattr(record, "response_id", parent_response_id),
+            setattr(record, "done", True),
+            setattr(record, "deliverable_observed", False),
+            setattr(record, "deliverable_class", "unknown"),
+        ),
+    )
+
+    response_create_event, canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_parent_release",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+    metadata = ((response_create_event.get("response") or {}).get("metadata") or {})
+    metadata["blocked_by_response_id"] = parent_response_id
+    metadata["parent_turn_id"] = turn_id
+    metadata["parent_input_event_key"] = parent_input_event_key
+    metadata["turn_id"] = turn_id
+    canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=str(metadata.get("input_event_key") or ""))
+
+    api._response_create_queue.append(
+        {
+            "event": response_create_event,
+            "origin": "tool_output",
+            "turn_id": turn_id,
+            "websocket": ws,
+        }
+    )
+    api._set_tool_followup_state(canonical_key=canonical_key, state="blocked_active_response", reason="test_seed")
+
+    api._release_blocked_tool_followups_for_response_done(response_id=parent_response_id)
+    assert api._tool_followup_state(canonical_key=canonical_key) == "scheduled_release"
+
+    asyncio.run(api._drain_response_create_queue(source_trigger="response_done"))
+    assert len([event for event in ws.sent if event.get("type") == "response.create"]) == 1
+
+
+def test_terminal_prune_path_is_idempotent_without_substantive_parent_output() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_terminal_idempotent"
+    parent_input_event_key = "item_parent_terminal_idempotent"
+    parent_response_id = "resp-parent-terminal-idempotent"
+    parent_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "upgraded_response"),
+            setattr(record, "response_id", parent_response_id),
+            setattr(record, "done", True),
+            setattr(record, "deliverable_observed", False),
+            setattr(record, "deliverable_class", "unknown"),
+        ),
+    )
+
+    response_create_event, canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_terminal_idempotent",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+    metadata = ((response_create_event.get("response") or {}).get("metadata") or {})
+    metadata["turn_id"] = turn_id
+    metadata["parent_turn_id"] = turn_id
+    metadata["parent_input_event_key"] = parent_input_event_key
+    metadata["blocked_by_response_id"] = parent_response_id
+
+    api._pending_response_create = PendingResponseCreate(
+        websocket=_RecordingWs(),
+        event=response_create_event,
+        origin="tool_output",
+        turn_id=turn_id,
+        created_at=0.0,
+        reason="active_response",
+        record_ai_call=False,
+        debug_context=None,
+        memory_brief_note=None,
+        queued_reminder_key=None,
+        enqueued_done_serial=0,
+        enqueue_seq=1,
+    )
+    api._sync_pending_response_create_queue()
+
+    api._apply_terminal_deliverable_selection(
+        canonical_key=parent_key,
+        response_id=parent_response_id,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        selected=True,
+        selection_reason="normal",
+    )
+    first_pending = api._pending_response_create
+    first_queue_size = len(api._response_create_queue)
+    first_state = api._tool_followup_state(canonical_key=canonical_key)
+
+    api._drop_dead_tool_followup_creates_after_terminal_selection(
+        turn_id=turn_id,
+        selected_response_id=parent_response_id,
+    )
+
+    assert first_pending is not None
+    assert first_queue_size == 1
+    assert first_state == "new"
+    assert api._pending_response_create is not None
+    assert len(api._response_create_queue) == 1
+    assert api._tool_followup_state(canonical_key=canonical_key) == "new"
 
 
 def test_gesture_followup_dropped_on_response_done_and_playback_complete_when_parent_already_spoke_action() -> None:
@@ -3417,7 +3582,7 @@ def test_provisional_server_auto_parent_progression_holds_then_deterministically
         selection_reason="normal",
     )
 
-    # 6) tool followup outcome is deterministic after parent classification stabilizes
+    # 6) without substantive parent output, followup is released after completion
     api._release_blocked_tool_followups_for_response_done(response_id=parent_response_id)
-    assert api._tool_followup_state(canonical_key=tool_canonical_key) == "dropped"
-    assert followup_metadata.get("tool_followup_release") != "true"
+    assert api._tool_followup_state(canonical_key=tool_canonical_key) == "scheduled_release"
+    assert followup_metadata.get("tool_followup_release") == "true"

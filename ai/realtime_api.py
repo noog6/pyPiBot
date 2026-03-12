@@ -7349,9 +7349,12 @@ class RealtimeAPI:
                 record.response_id = normalized_response_id
             if selected:
                 record.created = True
-                record.deliverable_observed = True
-                if str(record.deliverable_class or "unknown").strip().lower() == "unknown":
-                    record.deliverable_class = "final"
+                prior_class = str(record.deliverable_class or "unknown").strip().lower()
+                has_substantive_output = bool(record.audio_started) or prior_class in {"progress", "final"}
+                if has_substantive_output:
+                    record.deliverable_observed = True
+                    if prior_class == "unknown":
+                        record.deliverable_class = "final"
             elif normalized_reason in {
                 "micro_ack_non_deliverable",
                 "cancelled",
@@ -7487,11 +7490,9 @@ class RealtimeAPI:
             if isinstance(selection_entry, dict):
                 terminal_selected = bool(selection_entry.get("selected", False))
                 terminal_reason = str(selection_entry.get("reason") or "unknown").strip().lower() or "unknown"
-        covered = canonical_covered or terminal_selected
+        covered = canonical_covered
         if canonical_covered:
             source = "canonical"
-        elif terminal_selected:
-            source = "terminal_selection"
         else:
             source = "none"
         return covered, source, deliverable_observed, deliverable_class, terminal_selected, terminal_reason
