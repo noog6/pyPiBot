@@ -181,3 +181,37 @@ def test_mixed_intent_tool_request_blocked_execution_defer_records_deferred_stat
     assert result["executed"] is False
     assert api._record_intent_state.call_args.args[2] == "deferred"
     api._execute_action.assert_not_awaited()
+
+
+
+def test_normalize_realtime_call_id_direct_behavior() -> None:
+    short_call_id = "call_short_123"
+    assert RealtimeAPI._normalize_realtime_call_id(short_call_id) == short_call_id
+
+    oversized_call_id = "mixed_intent_a535dd5098194e50ac1f3de90318b5cc"
+    normalized_once = RealtimeAPI._normalize_realtime_call_id(oversized_call_id)
+    normalized_twice = RealtimeAPI._normalize_realtime_call_id(oversized_call_id)
+
+    assert len(normalized_once) <= 32
+    assert normalized_once == normalized_twice
+    assert normalized_once.startswith("mixedin_")
+
+
+def test_mixed_intent_tool_request_generated_call_id_is_realtime_safe() -> None:
+    api = _setup_api()
+
+    result = asyncio.run(
+        RealtimeAPI._submit_mixed_intent_tool_request(
+            api,
+            tool_name="gesture_look_around",
+            tool_args={},
+            websocket=object(),
+            source="preference_recall_mixed_intent",
+            turn_id="turn_1",
+            query="look around",
+        )
+    )
+
+    call_id = str(result.get("call_id") or "")
+    assert call_id.startswith("mixint_")
+    assert len(call_id) <= 32

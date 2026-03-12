@@ -267,6 +267,7 @@ _PREFERENCE_RECALL_VARIANT_NOISE_TOKENS = _PREFERENCE_QUERY_NOISE_TOKENS | {
     "your",
 }
 _SPEAKING_SETTLE_RETRY_MAX_AGE_S = 2.0
+REALTIME_CALL_ID_MAX_LENGTH = 32
 
 
 @dataclass
@@ -6833,6 +6834,15 @@ class RealtimeAPI:
                 str(dropped_pending).lower(),
                 dropped_queue,
             )
+
+    @staticmethod
+    def _normalize_realtime_call_id(call_id: str, *, max_length: int = REALTIME_CALL_ID_MAX_LENGTH) -> str:
+        raw_call_id = str(call_id or "").strip()
+        if len(raw_call_id) <= max_length:
+            return raw_call_id
+        readable_prefix = re.sub(r"[^a-z0-9]+", "", raw_call_id.lower())[:7] or "call"
+        digest_suffix = hashlib.sha256(raw_call_id.encode("utf-8")).hexdigest()[:24]
+        return f"{readable_prefix}_{digest_suffix}"[:max_length]
 
     @staticmethod
     def _tool_call_id_from_input_event_key(input_event_key: str | None) -> str:
@@ -14322,7 +14332,7 @@ class RealtimeAPI:
         turn_id: str,
         query: str,
     ) -> dict[str, Any]:
-        call_id = f"mixed_intent_{uuid.uuid4().hex}"
+        call_id = f"mixint_{uuid.uuid4().hex[:24]}"
         action = self._governance.build_action_packet(
             tool_name,
             call_id,
@@ -14473,6 +14483,16 @@ class RealtimeAPI:
         force_no_tools_followup: bool = False,
         inject_no_tools_instruction: bool = False,
     ) -> None:
+        normalized_call_id = self._normalize_realtime_call_id(call_id)
+        if normalized_call_id != call_id:
+            logger.warning(
+                "tool_result_call_id_normalized original_call_id=%s normalized_call_id=%s max_length=%s",
+                call_id,
+                normalized_call_id,
+                REALTIME_CALL_ID_MAX_LENGTH,
+            )
+        call_id = normalized_call_id
+
         if function_name in function_map:
             try:
                 result = await function_map[function_name](**args)
