@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import sys
 import types
 
@@ -1219,6 +1220,122 @@ def test_curiosity_surface_candidate_pruned_on_turn_complete_and_max_size() -> N
 
 
 
+
+
+
+def test_curiosity_surface_block_defer_decision_sets_expiry_fields() -> None:
+    api = _make_api()
+    api._response_obligations = {"k": {"state": "open"}}
+
+    decision = api._curiosity_surface_block_decision()
+
+    assert decision is not None
+    assert decision.decision == "defer"
+    assert decision.ttl_s == 1.0
+    assert decision.expires_at is not None
+    issued_at = float(decision.metadata.get("issued_at_monotonic_s", 0.0))
+    assert issued_at > 0.0
+    assert decision.expires_at == issued_at + decision.ttl_s
+
+
+def test_curiosity_surface_stale_defer_decision_no_longer_blocks(monkeypatch) -> None:
+    api = _make_api()
+
+    class _Candidate:
+        source = "conversation"
+        reason_code = "curiosity_repeat_topic"
+        score = 0.8
+        dedupe_key = "topic:battery"
+        suggested_followup = "Ask about battery trend"
+        created_at = 10.0
+
+    class _Decision:
+        outcome = "surface"
+        reason = "surface_threshold"
+
+    class _Engine:
+        candidate_ttl_s = 120.0
+
+        def build_conversation_candidate(self, **_kwargs):
+            return _Candidate()
+
+        def evaluate(self, **kwargs):
+            assert kwargs["arbitration_block_reason"] is None
+            return _Decision()
+
+    stale_logs: list[str] = []
+
+    def _capture_debug(msg, *args, **_kwargs):
+        rendered = msg % args if args else msg
+        if rendered.startswith("curiosity_surface_governance_stale_ignored"):
+            stale_logs.append(rendered)
+
+    monkeypatch.setattr(logger, "debug", _capture_debug)
+    api._curiosity_engine = _Engine()
+    api._response_obligations = {"k": {"state": "open"}}
+    api._arbitrate_opportunistic_surface = lambda **_kwargs: types.SimpleNamespace(
+        selected_action_kind="curiosity_surface",
+        selected_source="curiosity_engine",
+        reason_code="arbitration_selected",
+        selected_native_reason_code="curiosity_repeat_topic",
+        is_opportunistic=True,
+        suppressed_or_deferred=(),
+    )
+    api._embodiment_policy.decide_state_cue = lambda **_kwargs: EmbodimentDecision(
+        action=EmbodimentActionType.NONE,
+        reason="attention_continuity_hold",
+    )
+
+    now = time.monotonic()
+    monkeypatch.setattr(time, "monotonic", lambda: now)
+    stale_decision = api._curiosity_surface_block_decision()
+    monkeypatch.setattr(api, "_curiosity_surface_block_decision", lambda: stale_decision)
+    monkeypatch.setattr(api, "_is_curiosity_defer_decision_fresh", lambda _decision: False)
+
+    api._evaluate_curiosity_from_trust_snapshot(
+        turn_id="turn_1",
+        input_event_key="item_1",
+        snapshot={"topic_anchors": ["battery"], "word_count": 4},
+    )
+
+    assert stale_logs
+
+
+def test_curiosity_surface_fresh_defer_decision_still_blocks(monkeypatch) -> None:
+    api = _make_api()
+
+    class _Candidate:
+        source = "conversation"
+        reason_code = "curiosity_repeat_topic"
+        score = 0.8
+        dedupe_key = "topic:battery"
+        suggested_followup = "Ask about battery trend"
+        created_at = 10.0
+
+    class _Decision:
+        outcome = "ignore"
+        reason = "arbitration_blocked"
+
+    class _Engine:
+        candidate_ttl_s = 120.0
+
+        def build_conversation_candidate(self, **_kwargs):
+            return _Candidate()
+
+        def evaluate(self, **kwargs):
+            assert kwargs["arbitration_block_reason"] == "obligation_open"
+            return _Decision()
+
+    api._curiosity_engine = _Engine()
+    api._response_obligations = {"k": {"state": "open"}}
+
+    api._evaluate_curiosity_from_trust_snapshot(
+        turn_id="turn_1",
+        input_event_key="item_1",
+        snapshot={"topic_anchors": ["battery"], "word_count": 4},
+    )
+
+    assert api._curiosity_surface_candidate_by_turn_id == {}
 
 def test_curiosity_surface_seam_passes_curiosity_and_embodiment_governance_inputs() -> None:
     api = _make_api()

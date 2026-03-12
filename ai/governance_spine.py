@@ -26,6 +26,10 @@ class GovernanceDecision:
     not globally comparable across subsystems (for example battery/curiosity/
     embodiment) unless an explicit cross-system arbitration seam consumes and
     normalizes it.
+
+    Freshness fields (``ttl_s``/``expires_at``) are optional adapter hints.
+    They only affect runtime behavior when a specific seam explicitly checks
+    them before acting on a decision.
     """
 
     decision: GovernanceDecisionType
