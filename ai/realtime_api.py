@@ -10126,6 +10126,8 @@ class RealtimeAPI:
     def _curiosity_surface_block_decision(self) -> GovernanceDecision | None:
         # Adapter precedence is intentional: listening/confirmation/obligation are
         # treated as stronger arbitration constraints than busy-turn soft deferral.
+        # GovernanceDecision.priority values emitted here are seam-local telemetry
+        # and are not cross-subsystem ordering inputs without an explicit arbiter.
         state = getattr(getattr(self, "state_manager", None), "state", None)
         if state == InteractionState.LISTENING:
             return GovernanceDecision(

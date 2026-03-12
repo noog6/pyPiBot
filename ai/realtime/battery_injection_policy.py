@@ -68,6 +68,8 @@ class BatteryInjectionPolicy:
 
         # Adapter mapping is intentionally conservative at this seam:
         # suppress = hard policy block; allow = eligible for response creation.
+        # GovernanceDecision.priority remains seam-local observability metadata
+        # unless/until an explicit cross-system arbiter consumes it.
         if "battery" in getattr(self._api, "_suppressed_topics", set()) and not self.is_safety_override(event):
             logger.info("battery_response_suppressed reason=topic_suppression")
             return GovernanceDecision(

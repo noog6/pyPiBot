@@ -42,6 +42,8 @@ def embodiment_decision_to_governance(decision: EmbodimentDecision) -> Governanc
     # - emit cue -> allow (eligible to execute now)
     # - suppress -> suppress (actively blocked by policy/cooldown)
     # - none -> expire/noop (non-emission and not queued for retry)
+    # GovernanceDecision.priority here is seam-local/observability metadata and
+    # must not be compared across subsystem envelopes without an explicit arbiter.
     if decision.action == EmbodimentActionType.EMIT_CUE:
         envelope_decision = "allow"
         priority = EMBODIMENT_PRIORITY_ALLOW
