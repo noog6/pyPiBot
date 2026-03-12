@@ -4,6 +4,7 @@ import types
 if "audioop" not in sys.modules:
     sys.modules["audioop"] = types.ModuleType("audioop")
 
+from ai.governance_spine import GovernanceDecision
 from ai.opportunistic_arbitration import (
     OpportunisticActionCandidate,
     arbitrate_opportunistic_actions,
@@ -177,3 +178,65 @@ def test_seam_distinguishes_no_obligation_vs_obligation_vs_user_turn_priority() 
     assert obligation_open.reason_code == "obligation_open"
     assert explicit_signal.selected_action_kind == "explicit_user_turn"
     assert explicit_signal.reason_code == "explicit_intent_priority"
+
+
+def test_governance_inputs_from_two_subsystems_are_consumed() -> None:
+    result = arbitrate_opportunistic_actions(
+        user_turn_priority_active=False,
+        response_obligation_priority_active=False,
+        confirmation_pending=False,
+        busy_turn=False,
+        candidate_curiosity=_curiosity_candidate(priority=60),
+        candidate_curiosity_governance=GovernanceDecision(
+            decision="allow",
+            reason_code="curiosity_repeat_topic",
+            subsystem="curiosity",
+            priority=10,
+        ),
+        candidate_embodiment_flourish=_embodiment_candidate(priority=90),
+        candidate_embodiment_governance=GovernanceDecision(
+            decision="defer",
+            reason_code="attention_continuity_hold",
+            subsystem="embodiment",
+            priority=99,
+        ),
+    )
+
+    assert result.selected_action_kind == "curiosity_surface"
+    assert result.selected_source == "curiosity_engine"
+    assert any(
+        suppressed.action_kind == "embodiment_flourish"
+        and suppressed.reason_code == "attention_continuity_hold"
+        and suppressed.result == "defer"
+        for suppressed in result.suppressed_or_deferred
+    )
+
+
+def test_deterministic_winner_with_governance_envelopes() -> None:
+    kwargs = dict(
+        user_turn_priority_active=False,
+        response_obligation_priority_active=False,
+        confirmation_pending=False,
+        busy_turn=False,
+        candidate_curiosity=_curiosity_candidate(priority=50),
+        candidate_curiosity_governance=GovernanceDecision(
+            decision="allow",
+            reason_code="curiosity_repeat_topic",
+            subsystem="curiosity",
+            priority=30,
+        ),
+        candidate_embodiment_flourish=_embodiment_candidate(priority=50),
+        candidate_embodiment_governance=GovernanceDecision(
+            decision="allow",
+            reason_code="state_cue_emission",
+            subsystem="embodiment",
+            priority=70,
+        ),
+    )
+
+    result_1 = arbitrate_opportunistic_actions(**kwargs)
+    result_2 = arbitrate_opportunistic_actions(**kwargs)
+
+    assert result_1.selected_action_kind == result_2.selected_action_kind
+    assert result_1.selected_source == result_2.selected_source
+    assert result_1.selected_native_reason_code == result_2.selected_native_reason_code

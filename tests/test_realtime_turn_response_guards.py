@@ -13,7 +13,9 @@ from collections import deque
 
 from ai.realtime.response_create_runtime import ResponseCreateRuntime
 from ai.realtime.types import CanonicalResponseState
-from ai.embodiment_policy import EmbodimentPolicy
+from ai.embodiment_policy import EmbodimentActionType, EmbodimentDecision, EmbodimentPolicy
+from ai.governance_spine import GovernanceDecision
+from ai.opportunistic_arbitration import OpportunisticActionCandidate
 from ai.realtime_api import PendingResponseCreate, RealtimeAPI
 from core.logging import logger
 from interaction import InteractionState
@@ -1215,6 +1217,114 @@ def test_curiosity_surface_candidate_pruned_on_turn_complete_and_max_size() -> N
     assert "turn_2" not in api._curiosity_surface_candidate_by_turn_id
     assert len(api._curiosity_surface_candidate_by_turn_id) <= api._curiosity_surface_max_turns
 
+
+
+
+def test_curiosity_surface_seam_passes_curiosity_and_embodiment_governance_inputs() -> None:
+    api = _make_api()
+
+    class _Candidate:
+        source = "conversation"
+        reason_code = "curiosity_repeat_topic"
+        score = 0.8
+        dedupe_key = "topic:battery"
+        suggested_followup = "Ask about battery trend"
+        created_at = 10.0
+
+    class _Decision:
+        outcome = "surface"
+        reason = "surface_threshold"
+
+    class _Engine:
+        candidate_ttl_s = 120.0
+
+        def build_conversation_candidate(self, **_kwargs):
+            return _Candidate()
+
+        def evaluate(self, **_kwargs):
+            return _Decision()
+
+    captured: dict[str, object] = {}
+
+    def _capture_arbitration(**kwargs):
+        captured.update(kwargs)
+        return types.SimpleNamespace(
+            selected_action_kind="curiosity_surface",
+            selected_source="curiosity_engine",
+            reason_code="arbitration_selected",
+            selected_native_reason_code="curiosity_repeat_topic",
+            is_opportunistic=True,
+            suppressed_or_deferred=(),
+        )
+
+    def _embodiment_none(**_kwargs):
+        return EmbodimentDecision(
+            action=EmbodimentActionType.NONE,
+            reason="attention_continuity_hold",
+        )
+
+    api._curiosity_engine = _Engine()
+    api._arbitrate_opportunistic_surface = _capture_arbitration
+    api._embodiment_policy.decide_state_cue = _embodiment_none
+
+    api._evaluate_curiosity_from_trust_snapshot(
+        turn_id="turn_1",
+        input_event_key="item_1",
+        snapshot={"topic_anchors": ["battery"], "word_count": 4},
+    )
+
+    curiosity_governance = captured.get("candidate_curiosity_governance")
+    embodiment_governance = captured.get("candidate_embodiment_governance")
+    assert curiosity_governance is not None
+    assert embodiment_governance is not None
+    assert curiosity_governance.subsystem == "curiosity"
+    assert curiosity_governance.decision == "allow"
+    assert embodiment_governance.subsystem == "embodiment"
+    assert embodiment_governance.reason_code == "attention_continuity_hold"
+
+
+
+def test_opportunistic_arbitration_logs_governance_envelopes_and_winner(monkeypatch) -> None:
+    api = _make_api()
+    info_logs: list[str] = []
+
+    def _capture_info(msg, *args, **_kwargs):
+        rendered = msg % args if args else msg
+        if rendered.startswith("opportunistic_arbitration_seam"):
+            info_logs.append(rendered)
+
+    monkeypatch.setattr(logger, "info", _capture_info)
+
+    result = api._arbitrate_opportunistic_surface(
+        candidate_curiosity=OpportunisticActionCandidate(
+            action_kind="curiosity_surface",
+            source="curiosity_engine",
+            priority=60,
+            reason_code="curiosity_repeat_topic",
+            opportunistic=True,
+            ttl_s=120.0,
+        ),
+        candidate_curiosity_governance=GovernanceDecision(decision="allow", reason_code="curiosity_repeat_topic", subsystem="curiosity", priority=60),
+        candidate_embodiment_flourish=OpportunisticActionCandidate(
+            action_kind="embodiment_flourish",
+            source="embodiment_policy",
+            priority=30,
+            reason_code="attention_continuity_hold",
+            opportunistic=True,
+            ttl_s=None,
+        ),
+        candidate_embodiment_governance=GovernanceDecision(
+            decision="defer",
+            reason_code="attention_continuity_hold",
+            subsystem="embodiment",
+            priority=40,
+        ),
+    )
+
+    assert result.selected_action_kind == "curiosity_surface"
+    assert info_logs
+    assert "governance_inputs=" in info_logs[0]
+    assert "selected_kind=" in info_logs[0]
 
 def test_curiosity_surface_path_runs_seam_arbitration_and_suppresses_when_obligation_open() -> None:
     api = _make_api()

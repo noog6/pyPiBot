@@ -80,7 +80,12 @@ from ai.realtime.transport import RealtimeTransport
 from ai.realtime.types import CanonicalResponseState, PendingResponseCreate, UtteranceContext
 from ai.realtime import preference_recall_runtime
 from ai.attention_continuity import AttentionContinuity, AttentionSnapshot
-from ai.embodiment_policy import EmbodimentActionType, EmbodimentPolicy, embodiment_decision_to_governance
+from ai.embodiment_policy import (
+    EMBODIMENT_PRIORITY_ALLOW,
+    EmbodimentActionType,
+    EmbodimentPolicy,
+    embodiment_decision_to_governance,
+)
 from ai.interaction_lifecycle_controller import (
     InteractionLifecycleController,
     InteractionLifecycleState,
@@ -10168,14 +10173,57 @@ class RealtimeAPI:
         decision = self._curiosity_surface_block_decision()
         return decision.reason_code if decision else None
 
+    def _build_opportunistic_embodiment_flourish_input(
+        self,
+    ) -> tuple[OpportunisticActionCandidate, GovernanceDecision]:
+        state = getattr(getattr(self, "state_manager", None), "state", None) or InteractionState.IDLE
+        previous_state = getattr(self, "_last_interaction_state", InteractionState.IDLE)
+        now = time.monotonic()
+        attention = (
+            self._attention_continuity.snapshot(now_s=now)
+            if getattr(self, "_attention_continuity", None) is not None
+            else AttentionSnapshot(
+                active=False,
+                user_speaking=False,
+                acquired_at_s=None,
+                hold_until_s=None,
+                release_reason="uninitialized",
+            )
+        )
+        decision = self._embodiment_policy.decide_state_cue(
+            state=state,
+            previous_state=previous_state,
+            turn_contract_blocks_gestures=self._turn_contract_blocks_gesture_cues(),
+            now_monotonic_s=now,
+            last_gesture_time_s=self._last_gesture_time,
+            gesture_global_cooldown_s=self._gesture_global_cooldown_s,
+            gesture_name_last_fired_s=self._gesture_last_fired,
+            gesture_cooldowns_s=self._gesture_cooldowns_s,
+            random_delay_ms=lambda low, _high: low,
+            attention=attention,
+        )
+        governance = embodiment_decision_to_governance(decision)
+        return (
+            OpportunisticActionCandidate(
+                action_kind="embodiment_flourish",
+                source="embodiment_policy",
+                priority=EMBODIMENT_PRIORITY_ALLOW,
+                reason_code=governance.reason_code,
+                opportunistic=True,
+            ),
+            governance,
+        )
+
     def _arbitrate_opportunistic_surface(
         self,
         *,
         user_turn_priority_active: bool = False,
         response_obligation_priority_active: bool = False,
         candidate_curiosity: OpportunisticActionCandidate | None = None,
+        candidate_curiosity_governance: GovernanceDecision | None = None,
         candidate_low_priority_injection: OpportunisticActionCandidate | None = None,
         candidate_embodiment_flourish: OpportunisticActionCandidate | None = None,
+        candidate_embodiment_governance: GovernanceDecision | None = None,
     ) -> OpportunisticArbitrationResult:
         confirmation_pending = self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase()
         obligations = getattr(self, "_response_obligations", {})
@@ -10187,8 +10235,10 @@ class RealtimeAPI:
             confirmation_pending=confirmation_pending,
             busy_turn=busy_turn,
             candidate_curiosity=candidate_curiosity,
+            candidate_curiosity_governance=candidate_curiosity_governance,
             candidate_low_priority_injection=candidate_low_priority_injection,
             candidate_embodiment_flourish=candidate_embodiment_flourish,
+            candidate_embodiment_governance=candidate_embodiment_governance,
         )
         candidate_summary: list[dict[str, Any]] = []
         for candidate in (
@@ -10216,8 +10266,19 @@ class RealtimeAPI:
             }
             for suppressed in result.suppressed_or_deferred
         ]
+        governance_inputs = []
+        for governance in (candidate_curiosity_governance, candidate_embodiment_governance):
+            if isinstance(governance, GovernanceDecision):
+                governance_inputs.append(
+                    {
+                        "subsystem": governance.subsystem,
+                        "decision": governance.decision,
+                        "reason_code": governance.reason_code,
+                        "priority": int(governance.priority),
+                    }
+                )
         logger.info(
-            "opportunistic_arbitration_seam user_turn_priority_active=%s response_obligation_priority_active=%s confirmation_pending=%s obligation_open=%s busy_turn=%s selected_kind=%s selected_source=%s selected_reason=%s selected_native_reason=%s selected_is_opportunistic=%s candidates=%s suppressed=%s",
+            "opportunistic_arbitration_seam user_turn_priority_active=%s response_obligation_priority_active=%s confirmation_pending=%s obligation_open=%s busy_turn=%s selected_kind=%s selected_source=%s selected_reason=%s selected_native_reason=%s selected_is_opportunistic=%s governance_inputs=%s candidates=%s suppressed=%s",
             str(bool(user_turn_priority_active)).lower(),
             str(bool(response_obligation_priority_active)).lower(),
             str(bool(confirmation_pending)).lower(),
@@ -10228,6 +10289,7 @@ class RealtimeAPI:
             result.reason_code,
             result.selected_native_reason_code or "none",
             str(bool(result.is_opportunistic)).lower(),
+            json.dumps(governance_inputs, sort_keys=True),
             json.dumps(candidate_summary, sort_keys=True),
             json.dumps(suppressed_summary, sort_keys=True),
         )
@@ -10357,6 +10419,15 @@ class RealtimeAPI:
                 candidate.score,
             )
             if decision.outcome == "surface":
+                curiosity_governance = GovernanceDecision(
+                    decision="allow",
+                    reason_code=candidate.reason_code,
+                    subsystem="curiosity",
+                    priority=60,
+                    ttl_s=float(getattr(self._curiosity_engine, "candidate_ttl_s", 0.0) or 0.0),
+                    metadata={"surface_outcome": decision.outcome},
+                )
+                embodiment_candidate, embodiment_governance = self._build_opportunistic_embodiment_flourish_input()
                 arbitration = self._arbitrate_opportunistic_surface(
                     response_obligation_priority_active=(
                         self._response_obligation_key(turn_id=turn_id, input_event_key=input_event_key)
@@ -10370,6 +10441,9 @@ class RealtimeAPI:
                         opportunistic=True,
                         ttl_s=float(getattr(self._curiosity_engine, "candidate_ttl_s", 0.0) or 0.0),
                     ),
+                    candidate_curiosity_governance=curiosity_governance,
+                    candidate_embodiment_flourish=embodiment_candidate,
+                    candidate_embodiment_governance=embodiment_governance,
                 )
                 if arbitration.selected_action_kind != "curiosity_surface":
                     logger.info(
