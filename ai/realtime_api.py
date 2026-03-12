@@ -657,6 +657,7 @@ class RealtimeAPI:
         self._assistant_reply_accum = ""
         self._assistant_reply_response_id: str | None = None
         self._assistant_reply_by_response_id: dict[str, str] = {}
+        self._active_response_metadata: dict[str, Any] = {}
         self._audio_accum = bytearray()
         self._audio_accum_response_id: str | None = None
         self._audio_accum_bytes_target = 9600
@@ -8882,9 +8883,9 @@ class RealtimeAPI:
             return False, "disabled"
         camera = getattr(self, "camera_controller", None)
         if camera is None:
-            return False, "camera_unavailable"
+            return False, "camera_missing"
         if not bool(getattr(camera, "is_vision_loop_alive", lambda: True)()):
-            return False, "camera_unavailable"
+            return False, "camera_loop_inactive"
         pending = getattr(camera, "_pending_images", None)
         if pending is not None:
             try:
@@ -8899,8 +8900,51 @@ class RealtimeAPI:
             return False, "cooldown"
         ready, ready_reason = self.is_ready_for_injections(with_reason=True)
         if not ready and ready_reason != "response_in_progress":
-            return False, "busy"
+            return False, "injection_not_ready"
         return True, "allow"
+
+    def _fresh_look_gating_reason_detail(self, *, turn_id: str, gate_reason: str, vision_state: dict[str, Any]) -> str:
+        reason = str(gate_reason or "unknown").strip().lower()
+        legacy_bucket = self._fresh_look_legacy_reason_bucket(reason)
+        details = {
+            "camera_missing": "camera_controller_absent",
+            "camera_loop_inactive": "camera_loop_not_alive",
+            "cooldown": "fresh_look_cooldown_active",
+            "injection_not_ready": "injection_lane_not_ready",
+            "allow": "allow",
+        }
+        detail = details.get(reason, "unknown")
+        logger.info(
+            "fresh_look_gating_reason_detail run_id=%s turn_id=%s reason=%s legacy_bucket=%s detail=%s camera_active=%s can_capture=%s queued_frame_count=%s",
+            self._current_run_id() or "",
+            turn_id,
+            reason,
+            legacy_bucket,
+            detail,
+            str(bool(vision_state.get("camera_active", False))).lower(),
+            str(bool(vision_state.get("can_capture", False))).lower(),
+            int(vision_state.get("queued_frame_count") or 0),
+        )
+        return detail
+
+    def _fresh_look_legacy_reason_bucket(self, reason: str) -> str:
+        normalized = str(reason or "unknown").strip().lower()
+        if normalized in {"camera_missing", "camera_loop_inactive"}:
+            return "camera_unavailable"
+        return normalized
+
+    def _classify_visual_answer_provenance(self, *, turn_id: str, vision_state: dict[str, Any]) -> str:
+        fresh_state = self._fresh_look_state_for_turn(turn_id=turn_id)
+        if bool(fresh_state.get("completed", False)):
+            return "fresh_current"
+        if int(vision_state.get("queued_frame_count") or 0) > 0:
+            return "ambient_recent"
+        last_age_ms = vision_state.get("last_frame_age_ms")
+        if isinstance(last_age_ms, int) and last_age_ms <= 5000:
+            return "ambient_recent"
+        if bool(vision_state.get("can_capture", False) or vision_state.get("camera_active", False)):
+            return "ambient_stale"
+        return "historical"
 
     async def _attempt_fresh_look_for_turn(
         self,
@@ -8916,17 +8960,39 @@ class RealtimeAPI:
             self._current_run_id() or "",
             turn_id,
         )
-        allowed, gate_reason = self._fresh_look_gating_decision(turn_id=turn_id)
+        pre_gate_vision_state = self.get_vision_state()
         logger.info(
-            "fresh_look_gating_decision run_id=%s turn_id=%s action=%s reason=%s",
+            "visual_state_snapshot_for_fresh_look run_id=%s turn_id=%s can_capture=%s camera_active=%s available=%s queued_frame_count=%s last_frame_age_ms=%s",
+            self._current_run_id() or "",
+            turn_id,
+            str(bool(pre_gate_vision_state.get("can_capture", False))).lower(),
+            str(bool(pre_gate_vision_state.get("camera_active", False))).lower(),
+            str(bool(pre_gate_vision_state.get("available", False))).lower(),
+            int(pre_gate_vision_state.get("queued_frame_count") or 0),
+            pre_gate_vision_state.get("last_frame_age_ms"),
+        )
+        allowed, gate_reason = self._fresh_look_gating_decision(turn_id=turn_id)
+        reason_detail = self._fresh_look_gating_reason_detail(
+            turn_id=turn_id,
+            gate_reason=gate_reason,
+            vision_state=pre_gate_vision_state,
+        )
+        legacy_bucket = self._fresh_look_legacy_reason_bucket(gate_reason)
+        logger.info(
+            "fresh_look_gating_decision run_id=%s turn_id=%s action=%s reason=%s legacy_bucket=%s detail=%s",
             self._current_run_id() or "",
             turn_id,
             "allow" if allowed else "deny",
             gate_reason,
+            legacy_bucket,
+            reason_detail,
         )
         if not allowed:
             state["blocked_reason"] = gate_reason
-            state["visual_answer_mode"] = "ambient_recent" if bool(self.get_vision_state().get("available", False)) else "unavailable"
+            state["visual_answer_mode"] = self._classify_visual_answer_provenance(
+                turn_id=turn_id,
+                vision_state=pre_gate_vision_state,
+            )
             logger.info(
                 "fresh_look_fallback run_id=%s turn_id=%s reason=%s",
                 self._current_run_id() or "",
@@ -8948,7 +9014,7 @@ class RealtimeAPI:
                 self._last_fresh_look_completed_at_monotonic = time.monotonic()
                 state["completed"] = True
                 state["blocked_reason"] = "none"
-                state["visual_answer_mode"] = "current"
+                state["visual_answer_mode"] = "fresh_current"
                 state["last_fresh_capture_age_ms"] = 0
                 logger.info(
                     "fresh_look_capture_completed run_id=%s turn_id=%s frame_id=%s age_ms=%s",
@@ -8972,7 +9038,10 @@ class RealtimeAPI:
             await asyncio.sleep(0.05)
 
         state["blocked_reason"] = "timeout"
-        state["visual_answer_mode"] = "ambient_recent" if bool(self.get_vision_state().get("available", False)) else "historical"
+        state["visual_answer_mode"] = self._classify_visual_answer_provenance(
+            turn_id=turn_id,
+            vision_state=self.get_vision_state(),
+        )
         logger.info(
             "fresh_look_fallback run_id=%s turn_id=%s reason=%s",
             self._current_run_id() or "",
@@ -8993,11 +9062,11 @@ class RealtimeAPI:
             reason = str(fresh_state.get("blocked_reason") or "none")
             if reason == "cooldown":
                 return "I can’t take a brand-new look yet because I just checked. I can answer from my most recent view or try again in a moment."
-            if reason == "busy":
+            if reason == "injection_not_ready":
                 return "I can’t take a fresh look this instant because vision is busy. I can answer from my recent view or try again shortly."
             if reason == "timeout":
                 return "I tried to take a fresh look, but the frame is still pending. I can answer from recent context or retry."
-            if reason == "camera_unavailable":
+            if reason in {"camera_missing", "camera_loop_inactive"}:
                 return "I can’t take a fresh look right now because the camera isn’t available."
         return self._visual_unavailable_clarify_text(vision_state)
 
@@ -9139,6 +9208,15 @@ class RealtimeAPI:
                 str(bool(vision_state.get("camera_active", False) or vision_state.get("can_capture", False))).lower(),
                 clarify_text,
             )
+            logger.info(
+                "camera_active_unavailable_consistency run_id=%s turn_id=%s blocked_reason=%s camera_active=%s can_capture=%s available=%s",
+                self._current_run_id() or "",
+                turn_id,
+                str(self._fresh_look_state_for_turn(turn_id=turn_id).get("blocked_reason") or "none"),
+                str(bool(vision_state.get("camera_active", False))).lower(),
+                str(bool(vision_state.get("can_capture", False))).lower(),
+                str(bool(vision_state.get("available", False))).lower(),
+            )
         if reason in {"low_semantic_confidence", "short_utterance"}:
             logger.info(
                 "short_utterance_policy_applied run_id=%s turn_id=%s input_event_key=%s reason=%s words=%s",
@@ -9235,6 +9313,13 @@ class RealtimeAPI:
                 message,
                 expected,
             )
+        logger.info(
+            "bounded_visual_clarify_expected_vs_final run_id=%s turn_id=%s expected_message=%r final_message=%r",
+            self._current_run_id() or "",
+            turn_id,
+            expected,
+            message,
+        )
         return expected
 
     def _is_bounded_clarify_mode(self, metadata: dict[str, Any]) -> bool:
@@ -12721,6 +12806,7 @@ class RealtimeAPI:
         log_info(f"response.created: origin={origin}")
         response = event.get("response") or {}
         response_metadata = response.get("metadata") if isinstance(response, dict) else None
+        self._active_response_metadata = dict(response_metadata) if isinstance(response_metadata, dict) else {}
         metadata_turn_id = str(response_metadata.get("turn_id") or "").strip() if isinstance(response_metadata, dict) else ""
         metadata_input_event_key = str(response_metadata.get("input_event_key") or "").strip() if isinstance(response_metadata, dict) else ""
         metadata_upgrade_chain_id = str(response_metadata.get("upgrade_chain_id") or "").strip() if isinstance(response_metadata, dict) else ""

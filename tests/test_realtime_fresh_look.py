@@ -165,7 +165,19 @@ def test_fresh_look_respects_busy_state() -> None:
     allowed, reason = api._fresh_look_gating_decision(turn_id="turn-2")
 
     assert not allowed
-    assert reason == "busy"
+    assert reason == "injection_not_ready"
+
+
+def test_fresh_look_alive_camera_not_marked_camera_unavailable() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    api.is_ready_for_injections = lambda with_reason=False: (False, "interaction_state=speaking") if with_reason else False
+
+    allowed, reason = api._fresh_look_gating_decision(turn_id="turn-camera-alive")
+
+    assert not allowed
+    assert reason != "camera_missing"
+    assert reason != "camera_loop_inactive"
+    assert reason == "injection_not_ready"
 
 
 def test_successful_fresh_look_marks_current_provenance() -> None:
@@ -176,8 +188,63 @@ def test_successful_fresh_look_marks_current_provenance() -> None:
 
     assert state["requested"] is True
     assert state["completed"] is True
-    assert state["visual_answer_mode"] == "current"
+    assert state["visual_answer_mode"] == "fresh_current"
     assert state["last_fresh_capture_age_ms"] == 0
+
+
+def test_visual_answer_provenance_ambient_recent_when_queue_present() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[object()]))
+    state = api.get_vision_state()
+
+    mode = api._classify_visual_answer_provenance(turn_id="turn-ambient", vision_state=state)
+
+    assert mode == "ambient_recent"
+
+
+def test_camera_active_clarify_never_uses_camera_unavailable_message() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    api.is_ready_for_injections = lambda with_reason=False: (False, "interaction_state=speaking") if with_reason else False
+
+    state = asyncio.run(api._attempt_fresh_look_for_turn(turn_id="turn-clarify"))
+    message = api._visual_unavailable_clarify_text_for_turn(
+        turn_id="turn-clarify",
+        vision_state=api.get_vision_state(),
+    )
+
+    assert state["blocked_reason"] == "injection_not_ready"
+    assert "camera isn’t available" not in message
+
+
+def test_mixed_motion_visual_prompt_preserves_truthful_ambient_provenance() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[object()]))
+    api._tool_call_records = [{"turn_id": "turn-mixed", "name": "gesture_look_center"}]
+    api._fresh_look_state_for_turn(turn_id="turn-mixed")["completed"] = False
+
+    provenance = api._classify_visual_answer_provenance(
+        turn_id="turn-mixed",
+        vision_state=api.get_vision_state(),
+    )
+
+    assert provenance == "ambient_recent"
+
+
+def test_bounded_visual_clarify_never_uses_camera_unavailable_when_injection_not_ready() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    api.is_ready_for_injections = lambda with_reason=False: (False, "interaction_state=speaking") if with_reason else False
+    asyncio.run(api._attempt_fresh_look_for_turn(turn_id="turn-bounded"))
+
+    final_text = api._normalize_verify_clarify_message(
+        message="I can’t take a fresh look right now because the camera isn’t available.",
+        metadata={
+            "trigger": "asr_verify_on_risk",
+            "reason": "visual_unavailable",
+            "clarify_mode": "bounded",
+            "turn_id": "turn-bounded",
+        },
+    )
+
+    assert "camera isn’t available" not in final_text
+    assert "vision is busy" in final_text
 
 
 def test_failed_fresh_look_returns_truthful_timeout_wording() -> None:
