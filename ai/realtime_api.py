@@ -8912,6 +8912,7 @@ class RealtimeAPI:
         *,
         turn_id: str,
         response_metadata: dict[str, Any] | None = None,
+        seam: str | None = None,
     ) -> tuple[str, str]:
         metadata = response_metadata if isinstance(response_metadata, dict) else {}
         metadata_actuator, metadata_intent_class = self._normalize_visual_ownership(
@@ -8922,6 +8923,17 @@ class RealtimeAPI:
         state_actuator, state_intent_class = self._normalize_visual_ownership(
             visual_actuator=fresh_state.get("visual_actuator"),
             visual_intent_class=fresh_state.get("visual_intent_class"),
+        )
+        metadata_owned = metadata_actuator != "none" or metadata_intent_class != "none"
+        state_owned = state_actuator != "none" or state_intent_class != "none"
+        source = (
+            "merged"
+            if metadata_owned and state_owned
+            else "metadata"
+            if metadata_owned
+            else "turn_state"
+            if state_owned
+            else "none"
         )
         resolved_actuator = metadata_actuator if metadata_actuator != "none" else state_actuator
         resolved_intent_class = metadata_intent_class if metadata_intent_class != "none" else state_intent_class
@@ -8939,6 +8951,17 @@ class RealtimeAPI:
         if isinstance(response_metadata, dict):
             response_metadata.setdefault("visual_actuator", resolved_actuator)
             response_metadata.setdefault("visual_intent_class", resolved_intent_class)
+        normalized_seam = str(seam or "").strip().lower()
+        if normalized_seam in {"response_created", "replacement_scheduled", "verify_on_risk", "terminal_done"}:
+            logger.info(
+                "visual_ownership_resolved run_id=%s turn_id=%s visual_actuator=%s visual_intent_class=%s source=%s seam=%s",
+                self._current_run_id() or "",
+                turn_id,
+                resolved_actuator,
+                resolved_intent_class,
+                source,
+                normalized_seam,
+            )
         return resolved_actuator, resolved_intent_class
 
     @staticmethod
@@ -9376,7 +9399,7 @@ class RealtimeAPI:
         vision_state = self.get_vision_state()
         requires_fresh_look = is_current_visual_question(transcript)
         fresh_state = self._fresh_look_state_for_turn(turn_id=turn_id)
-        visual_actuator, _ = self._resolve_visual_ownership_for_turn(turn_id=turn_id)
+        visual_actuator, _ = self._resolve_visual_ownership_for_turn(turn_id=turn_id, seam="verify_on_risk")
         explicit_inspect_owns_turn = visual_actuator == "explicit_inspect"
         logger.info(
             "fresh_look_trigger_eval run_id=%s turn_id=%s matched=%s transcript=%r",
@@ -9510,7 +9533,7 @@ class RealtimeAPI:
                     input_event_key,
                     reason,
                 )
-        resolved_visual_actuator, resolved_visual_intent_class = self._resolve_visual_ownership_for_turn(turn_id=turn_id)
+        resolved_visual_actuator, resolved_visual_intent_class = self._resolve_visual_ownership_for_turn(turn_id=turn_id, seam="verify_on_risk")
         await self.send_assistant_message(
             clarify_text,
             websocket,
@@ -13083,6 +13106,7 @@ class RealtimeAPI:
             self._resolve_visual_ownership_for_turn(
                 turn_id=metadata_visual_turn_id,
                 response_metadata=self._active_response_metadata,
+                seam="response_created",
             )
         metadata_turn_id = str(response_metadata.get("turn_id") or "").strip() if isinstance(response_metadata, dict) else ""
         metadata_input_event_key = str(response_metadata.get("input_event_key") or "").strip() if isinstance(response_metadata, dict) else ""
@@ -13787,7 +13811,7 @@ class RealtimeAPI:
         metadata["input_event_key"] = str(input_event_key or "").strip()
         metadata["safety_override"] = "true"
         metadata["transcript_upgrade_replacement"] = "true"
-        resolved_visual_actuator, resolved_visual_intent_class = self._resolve_visual_ownership_for_turn(turn_id=turn_id)
+        resolved_visual_actuator, resolved_visual_intent_class = self._resolve_visual_ownership_for_turn(turn_id=turn_id, seam="replacement_scheduled")
         metadata["visual_actuator"] = resolved_visual_actuator
         metadata["visual_intent_class"] = resolved_visual_intent_class
         normalized_memory_intent_subtype = str(memory_intent_subtype or "none").strip().lower() or "none"

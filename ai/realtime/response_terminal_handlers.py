@@ -131,6 +131,7 @@ class ResponseTerminalHandlers:
             visual_actuator, visual_intent_class = api._resolve_visual_ownership_for_turn(
                 turn_id=turn_id,
                 response_metadata=active_metadata,
+                seam="terminal_done",
             )
             is_visual_turn = bool(snapshot.get("visual_question", False)) or (
                 trigger == "asr_verify_on_risk" and reason == "visual_unavailable"
