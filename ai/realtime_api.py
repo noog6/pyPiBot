@@ -8888,6 +8888,8 @@ class RealtimeAPI:
                 "eligible_motion_tool_name": None,
                 "claimed_pending_frame": False,
                 "evidence_source": None,
+                "visual_actuator": "none",
+                "visual_intent_class": "none",
             }
         return store[turn_id]
 
@@ -9049,8 +9051,16 @@ class RealtimeAPI:
         *,
         turn_id: str,
         initial_motion_tool_name: str | None = None,
+        visual_actuator: str = "heuristic_fresh_look",
+        visual_intent_class: str = "fallback_visual_question",
     ) -> dict[str, Any]:
         state = self._fresh_look_state_for_turn(turn_id=turn_id)
+        normalized_visual_actuator = str(visual_actuator or "heuristic_fresh_look").strip().lower()
+        if normalized_visual_actuator not in {"explicit_inspect", "heuristic_fresh_look"}:
+            normalized_visual_actuator = "heuristic_fresh_look"
+        normalized_visual_intent_class = str(visual_intent_class or "fallback_visual_question").strip().lower()
+        if normalized_visual_intent_class not in {"explicit_inspect", "fallback_visual_question"}:
+            normalized_visual_intent_class = "fallback_visual_question"
         state["requested"] = True
         state["completed"] = False
         state["blocked_reason"] = "none"
@@ -9061,15 +9071,33 @@ class RealtimeAPI:
         state["eligible_motion_tool_name"] = None
         state["claimed_pending_frame"] = False
         state["evidence_source"] = None
+        state["visual_actuator"] = normalized_visual_actuator
+        state["visual_intent_class"] = normalized_visual_intent_class
         initial_motion_tool = str(initial_motion_tool_name or "").strip().lower() or None
         if self._is_fresh_look_motion_service_gesture_tool(tool_name=initial_motion_tool):
             state["motion_requested_at_monotonic"] = time.monotonic()
             state["eligible_motion_tool_name"] = initial_motion_tool
         logger.info(
-            "fresh_look_requested run_id=%s turn_id=%s reason=explicit_visual_question",
+            "fresh_look_requested run_id=%s turn_id=%s reason=explicit_visual_question visual_actuator=%s visual_intent_class=%s",
             self._current_run_id() or "",
             turn_id,
+            normalized_visual_actuator,
+            normalized_visual_intent_class,
         )
+        if normalized_visual_actuator == "explicit_inspect":
+            logger.info(
+                "visual_actuator_explicit_inspect_selected run_id=%s turn_id=%s visual_intent_class=%s",
+                self._current_run_id() or "",
+                turn_id,
+                normalized_visual_intent_class,
+            )
+        else:
+            logger.info(
+                "visual_actuator_heuristic_fallback_selected run_id=%s turn_id=%s visual_intent_class=%s",
+                self._current_run_id() or "",
+                turn_id,
+                normalized_visual_intent_class,
+            )
         pre_gate_vision_state = self.get_vision_state()
         logger.info(
             "visual_state_snapshot_for_fresh_look run_id=%s turn_id=%s can_capture=%s camera_active=%s available=%s queued_frame_count=%s last_frame_age_ms=%s",
@@ -9297,6 +9325,8 @@ class RealtimeAPI:
             return False
         vision_state = self.get_vision_state()
         requires_fresh_look = is_current_visual_question(transcript)
+        fresh_state = self._fresh_look_state_for_turn(turn_id=turn_id)
+        explicit_inspect_owns_turn = str(fresh_state.get("visual_actuator") or "").strip().lower() == "explicit_inspect"
         logger.info(
             "fresh_look_trigger_eval run_id=%s turn_id=%s matched=%s transcript=%r",
             self._current_run_id() or "",
@@ -9304,8 +9334,19 @@ class RealtimeAPI:
             str(bool(requires_fresh_look)).lower(),
             " ".join((transcript or "").split())[:160],
         )
-        if requires_fresh_look:
-            await self._attempt_fresh_look_for_turn(turn_id=turn_id)
+        if requires_fresh_look and explicit_inspect_owns_turn:
+            logger.info(
+                "visual_heuristic_fallback_skipped_explicit_owner run_id=%s turn_id=%s visual_actuator=explicit_inspect visual_intent_class=%s",
+                self._current_run_id() or "",
+                turn_id,
+                str(fresh_state.get("visual_intent_class") or "explicit_inspect"),
+            )
+        elif requires_fresh_look:
+            await self._attempt_fresh_look_for_turn(
+                turn_id=turn_id,
+                visual_actuator="heuristic_fresh_look",
+                visual_intent_class="fallback_visual_question",
+            )
             vision_state = self.get_vision_state()
         else:
             logger.info(
@@ -9426,6 +9467,8 @@ class RealtimeAPI:
                 "reason": reason,
                 "input_event_key": clarify_key,
                 "clarify_mode": "bounded",
+                "visual_actuator": str(self._fresh_look_state_for_turn(turn_id=turn_id).get("visual_actuator") or "none"),
+                "visual_intent_class": str(self._fresh_look_state_for_turn(turn_id=turn_id).get("visual_intent_class") or "none"),
             },
         )
         logger.info(
@@ -15035,6 +15078,8 @@ class RealtimeAPI:
         state = await self._attempt_fresh_look_for_turn(
             turn_id=turn_id,
             initial_motion_tool_name=initial_motion_tool_name,
+            visual_actuator="explicit_inspect",
+            visual_intent_class="explicit_inspect",
         )
         vision_state = self.get_vision_state()
         blocked_reason = str(state.get("blocked_reason") or "none")
@@ -15056,6 +15101,8 @@ class RealtimeAPI:
             "last_frame_age_ms": vision_state.get("last_frame_age_ms"),
             "recenter_applied": recenter_applied,
             "evidence_source": state.get("evidence_source"),
+            "visual_actuator": state.get("visual_actuator"),
+            "visual_intent_class": state.get("visual_intent_class"),
             "turn_id": turn_id,
         }
 

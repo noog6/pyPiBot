@@ -9,6 +9,7 @@ if "audioop" not in sys.modules:
     sys.modules["audioop"] = types.ModuleType("audioop")
 
 from ai.realtime.asr_trust import is_current_visual_question
+from ai.tools import function_map
 from ai.realtime_api import RealtimeAPI
 
 
@@ -121,7 +122,10 @@ def test_verify_on_risk_runs_fresh_look_before_visual_unavailable_clarify() -> N
     api = _build_api(camera=_CameraStub(pending_images=[]))
     call_order: list[str] = []
 
-    async def _capture(**_kwargs):
+    capture_kwargs: list[dict[str, object]] = []
+
+    async def _capture(**kwargs):
+        capture_kwargs.append(kwargs)
         call_order.append("fresh_look")
         return {"requested": True, "completed": False, "blocked_reason": "timeout"}
 
@@ -159,6 +163,56 @@ def test_verify_on_risk_runs_fresh_look_before_visual_unavailable_clarify() -> N
     )
 
     assert call_order == ["fresh_look", "clarify"]
+    assert capture_kwargs
+    assert capture_kwargs[0]["visual_actuator"] == "heuristic_fresh_look"
+    assert capture_kwargs[0]["visual_intent_class"] == "fallback_visual_question"
+
+
+def test_verify_on_risk_skips_heuristic_when_explicit_inspect_already_selected() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    called = []
+
+    async def _capture(**_kwargs):
+        called.append(True)
+        return {}
+
+    api._attempt_fresh_look_for_turn = _capture
+    state = api._fresh_look_state_for_turn(turn_id="turn-explicit")
+    state["visual_actuator"] = "explicit_inspect"
+    state["visual_intent_class"] = "explicit_inspect"
+    api._asr_verify_on_risk_enabled = True
+    api._asr_clarify_asked_input_event_keys = set()
+    api._asr_clarify_count_by_turn = {}
+    api._asr_verify_max_clarify_per_turn = 1
+    api._asr_verify_short_utterance_ms = 300
+    api._asr_verify_min_confidence = 0.6
+    api._response_gating_verdict_by_input_event_key = {}
+    api._pending_server_auto_response_by_turn_id = {}
+    api._canonical_utterance_key = lambda *, turn_id, input_event_key: f"run-test:{turn_id}:{input_event_key}"
+    api._record_cancel_issued_timing = lambda *_args, **_kwargs: None
+    api._stale_response_ids_set = set()
+    api._mark_pending_server_auto_response_cancelled = lambda **_kwargs: None
+    api._suppress_cancelled_response_audio = lambda *_args, **_kwargs: None
+    api._get_or_create_transport = lambda: type("T", (), {"send_json": staticmethod(lambda *_a, **_k: asyncio.sleep(0))})()
+    api.assistant_reply = ""
+    api._assistant_reply_accum = ""
+
+    async def _send_assistant_message(*_args, **_kwargs):
+        return None
+
+    api.send_assistant_message = _send_assistant_message
+
+    asyncio.run(
+        api._maybe_verify_on_risk_clarify(
+            transcript="tell me what you see in front of you",
+            websocket=object(),
+            turn_id="turn-explicit",
+            input_event_key="evt-explicit",
+            snapshot={"run_id": "run-test", "asr_confidence": 0.95},
+        )
+    )
+
+    assert called == []
 
 
 def test_fresh_look_respects_cooldown() -> None:
@@ -228,6 +282,27 @@ def test_successful_fresh_look_marks_current_provenance() -> None:
     assert state["completed"] is True
     assert state["visual_answer_mode"] == "fresh_current"
     assert state["last_fresh_capture_age_ms"] == 0
+
+
+def test_explicit_inspect_marks_visual_actuator_metadata() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    api.is_ready_for_injections = lambda with_reason=False: (True, "ready") if with_reason else True
+
+    async def _center(**_kwargs):
+        return {"queued": True}
+
+    original = function_map.get("gesture_look_center")
+    function_map["gesture_look_center"] = _center
+    try:
+        result = asyncio.run(api._inspect_current_view_tool(recenter=True, delay_ms=5))
+    finally:
+        if original is None:
+            function_map.pop("gesture_look_center", None)
+        else:
+            function_map["gesture_look_center"] = original
+
+    assert result["visual_actuator"] == "explicit_inspect"
+    assert result["visual_intent_class"] == "explicit_inspect"
 
 
 def test_visual_answer_provenance_ambient_recent_when_queue_present() -> None:

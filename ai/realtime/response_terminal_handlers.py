@@ -127,20 +127,40 @@ class ResponseTerminalHandlers:
                 normalized_reply = expected
             turn_id = str(active_metadata.get("turn_id") or api._current_turn_id_or_unknown())
             trigger = str(active_metadata.get("trigger") or "").strip().lower()
+            fresh_state = api._fresh_look_state_for_turn(turn_id=turn_id)
+            visual_actuator = str(
+                active_metadata.get("visual_actuator")
+                or fresh_state.get("visual_actuator")
+                or "none"
+            ).strip().lower() or "none"
+            visual_intent_class = str(
+                active_metadata.get("visual_intent_class")
+                or fresh_state.get("visual_intent_class")
+                or "none"
+            ).strip().lower() or "none"
             is_visual_turn = bool(snapshot.get("visual_question", False)) or (
                 trigger == "asr_verify_on_risk" and reason == "visual_unavailable"
-            ) or bool(api._fresh_look_state_for_turn(turn_id=turn_id).get("requested", False))
+            ) or bool(fresh_state.get("requested", False))
             if is_visual_turn:
                 provenance = api._classify_visual_answer_provenance(
                     turn_id=turn_id,
                     vision_state=api.get_vision_state(),
                 )
                 logger.info(
-                    "visual_answer_provenance_final run_id=%s turn_id=%s mode=%s",
+                    "visual_answer_provenance_final run_id=%s turn_id=%s mode=%s visual_actuator=%s visual_intent_class=%s",
                     api._current_run_id() or "",
                     turn_id,
                     provenance,
+                    visual_actuator,
+                    visual_intent_class,
                 )
+            logger.info(
+                "visual_actuator_final run_id=%s turn_id=%s visual_actuator=%s visual_intent_class=%s",
+                api._current_run_id() or "",
+                turn_id,
+                visual_actuator,
+                visual_intent_class,
+            )
             log_info(f"Assistant Response: {normalized_reply}", style="bold blue")
             if response_id:
                 per_response = getattr(api, "_assistant_reply_by_response_id", None)

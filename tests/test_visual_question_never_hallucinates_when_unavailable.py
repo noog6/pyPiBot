@@ -29,10 +29,10 @@ def test_no_hallucinated_vision_when_unavailable() -> None:
     api._suppress_cancelled_response_audio = lambda *_args, **_kwargs: None
     api._get_or_create_transport = lambda: type("T", (), {"send_json": staticmethod(lambda *_args, **_kwargs: asyncio.sleep(0))})()
 
-    captured: list[str] = []
+    captured: list[tuple[str, dict[str, object]]] = []
 
-    async def _send_assistant_message(msg: str, *_args, **_kwargs):
-        captured.append(msg)
+    async def _send_assistant_message(msg: str, *_args, **kwargs):
+        captured.append((msg, kwargs.get("response_metadata") or {}))
 
     api.send_assistant_message = _send_assistant_message
     api.assistant_reply = ""
@@ -49,8 +49,10 @@ def test_no_hallucinated_vision_when_unavailable() -> None:
     )
 
     assert captured
-    assert "I see" not in captured[0]
-    assert "shirt" not in captured[0].lower()
+    assert "I see" not in captured[0][0]
+    assert "shirt" not in captured[0][0].lower()
+    assert captured[0][1].get("visual_actuator") == "heuristic_fresh_look"
+    assert captured[0][1].get("visual_intent_class") == "fallback_visual_question"
 
 
 def test_visual_question_with_capturable_but_stale_frame_still_clarifies() -> None:
