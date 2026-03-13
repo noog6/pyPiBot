@@ -603,3 +603,64 @@ def test_fresh_look_does_not_claim_pending_frame_when_injection_lane_ready() -> 
     assert state["completed"] is True
     assert state["claimed_pending_frame"] is False
     assert len(camera._pending_images) == 1
+
+def test_explicit_inspect_tool_registered() -> None:
+    from ai.tools import tools
+
+    inspect_spec = next((tool for tool in tools if tool.get("name") == "inspect_current_view"), None)
+
+    assert inspect_spec is not None
+    assert inspect_spec["parameters"]["properties"]["recenter"]["type"] == "boolean"
+
+
+def test_inspect_current_view_returns_structured_success_contract() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[object()]))
+    api.is_ready_for_injections = lambda with_reason=False: (True, "ready") if with_reason else True
+    api._current_turn_id_or_unknown = lambda: "turn-inspect-ok"
+
+    result = asyncio.run(api._inspect_current_view_tool(recenter=False))
+
+    assert result["status"] == "ok"
+    assert result["visual_answer_mode"] == "fresh_current"
+    assert result["claimed_pending_frame"] is False
+    assert result["recenter_applied"] is False
+    assert result["evidence_source"] == "pending_queue_visible"
+
+
+def test_inspect_current_view_returns_timeout_status_without_false_success() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    api._fresh_look_wait_timeout_s = 0.03
+    api.is_ready_for_injections = lambda with_reason=False: (True, "ready") if with_reason else True
+    api._current_turn_id_or_unknown = lambda: "turn-inspect-timeout"
+
+    result = asyncio.run(api._inspect_current_view_tool(recenter=False))
+
+    assert result["status"] == "timeout"
+    assert result["blocked_reason"] == "timeout"
+    assert result["visual_answer_mode"] != "fresh_current"
+
+
+def test_inspect_current_view_recenter_uses_existing_motion_tool() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[object()]))
+    api.is_ready_for_injections = lambda with_reason=False: (True, "ready") if with_reason else True
+    api._current_turn_id_or_unknown = lambda: "turn-inspect-recenter"
+
+    from ai import realtime_api as realtime_module
+
+    calls: list[tuple[str, int]] = []
+    original = realtime_module.function_map["gesture_look_center"]
+
+    async def _fake_center(delay_ms: int = 0) -> dict[str, object]:
+        calls.append(("gesture_look_center", delay_ms))
+        return {"queued": True, "gesture": "look_center", "delay_ms": delay_ms}
+
+    realtime_module.function_map["gesture_look_center"] = _fake_center
+    try:
+        result = asyncio.run(api._inspect_current_view_tool(recenter=True, delay_ms=120))
+    finally:
+        realtime_module.function_map["gesture_look_center"] = original
+
+    assert calls == [("gesture_look_center", 120)]
+    assert result["recenter_applied"] is True
+    state = api._fresh_look_state_for_turn(turn_id="turn-inspect-recenter")
+    assert state["eligible_motion_tool_name"] == "gesture_look_center"
