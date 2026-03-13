@@ -779,6 +779,46 @@ def test_upgrade_chain_id_propagates_into_replacement_metadata() -> None:
     assert metadata["upgrade_chain_id"] == "run-464:turn_8:synthetic_server_auto_8"
 
 
+
+
+def test_cancel_and_replace_propagates_explicit_inspect_visual_ownership_metadata() -> None:
+    api = _build_api_stub()
+    transport = _Transport()
+    replacement_calls: list[dict[str, object]] = []
+
+    api._fresh_look_state_for_turn(turn_id="turn_55")["visual_actuator"] = "explicit_inspect"
+    api._fresh_look_state_for_turn(turn_id="turn_55")["visual_intent_class"] = "explicit_inspect"
+    api._pending_server_auto_response_by_turn_id["turn_55"] = PendingServerAutoResponse(
+        turn_id="turn_55",
+        response_id="resp-server-auto",
+        canonical_key="run-464:turn_55:synthetic_server_auto_55",
+        created_at_ms=1,
+        active=True,
+    )
+    api._get_or_create_transport = lambda: transport
+    api._peek_pending_preference_memory_context_payload = lambda **_kwargs: None
+
+    async def _fake_send_response_create(_websocket, event, **kwargs):
+        replacement_calls.append({"event": event, **kwargs})
+        return True
+
+    api._send_response_create = _fake_send_response_create
+
+    replaced = asyncio.run(
+        api._cancel_and_replace_pending_server_auto_on_transcript_final(
+            websocket=object(),
+            turn_id="turn_55",
+            input_event_key="item_555",
+            origin_label="upgraded_response",
+        )
+    )
+
+    assert replaced is True
+    metadata = replacement_calls[0]["event"]["response"]["metadata"]
+    assert metadata["visual_actuator"] == "explicit_inspect"
+    assert metadata["visual_intent_class"] == "explicit_inspect"
+
+
 def test_mark_pending_server_auto_response_replaced_is_idempotent_after_upgrade(monkeypatch) -> None:
     api = _build_api_stub()
     api._pending_server_auto_response_by_turn_id["turn_20"] = PendingServerAutoResponse(

@@ -8894,6 +8894,54 @@ class RealtimeAPI:
         return store[turn_id]
 
     @staticmethod
+    def _normalize_visual_ownership(
+        *,
+        visual_actuator: str | None,
+        visual_intent_class: str | None,
+    ) -> tuple[str, str]:
+        normalized_visual_actuator = str(visual_actuator or "none").strip().lower() or "none"
+        if normalized_visual_actuator not in {"explicit_inspect", "heuristic_fresh_look", "none"}:
+            normalized_visual_actuator = "none"
+        normalized_visual_intent_class = str(visual_intent_class or "none").strip().lower() or "none"
+        if normalized_visual_intent_class not in {"explicit_inspect", "fallback_visual_question", "none"}:
+            normalized_visual_intent_class = "none"
+        return normalized_visual_actuator, normalized_visual_intent_class
+
+    def _resolve_visual_ownership_for_turn(
+        self,
+        *,
+        turn_id: str,
+        response_metadata: dict[str, Any] | None = None,
+    ) -> tuple[str, str]:
+        metadata = response_metadata if isinstance(response_metadata, dict) else {}
+        metadata_actuator, metadata_intent_class = self._normalize_visual_ownership(
+            visual_actuator=metadata.get("visual_actuator"),
+            visual_intent_class=metadata.get("visual_intent_class"),
+        )
+        fresh_state = self._fresh_look_state_for_turn(turn_id=turn_id)
+        state_actuator, state_intent_class = self._normalize_visual_ownership(
+            visual_actuator=fresh_state.get("visual_actuator"),
+            visual_intent_class=fresh_state.get("visual_intent_class"),
+        )
+        resolved_actuator = metadata_actuator if metadata_actuator != "none" else state_actuator
+        resolved_intent_class = metadata_intent_class if metadata_intent_class != "none" else state_intent_class
+        if resolved_actuator == "explicit_inspect":
+            resolved_intent_class = "explicit_inspect"
+        elif resolved_intent_class == "explicit_inspect":
+            resolved_actuator = "explicit_inspect"
+        if resolved_actuator == "none" and resolved_intent_class != "none":
+            resolved_actuator = "heuristic_fresh_look"
+        if resolved_intent_class == "none" and resolved_actuator == "heuristic_fresh_look":
+            resolved_intent_class = "fallback_visual_question"
+        if resolved_actuator != state_actuator or resolved_intent_class != state_intent_class:
+            fresh_state["visual_actuator"] = resolved_actuator
+            fresh_state["visual_intent_class"] = resolved_intent_class
+        if isinstance(response_metadata, dict):
+            response_metadata.setdefault("visual_actuator", resolved_actuator)
+            response_metadata.setdefault("visual_intent_class", resolved_intent_class)
+        return resolved_actuator, resolved_intent_class
+
+    @staticmethod
     def _is_fresh_look_motion_service_gesture_tool(*, tool_name: str | None) -> bool:
         normalized_tool_name = str(tool_name or "").strip().lower()
         return normalized_tool_name in {
@@ -9055,11 +9103,13 @@ class RealtimeAPI:
         visual_intent_class: str = "fallback_visual_question",
     ) -> dict[str, Any]:
         state = self._fresh_look_state_for_turn(turn_id=turn_id)
-        normalized_visual_actuator = str(visual_actuator or "heuristic_fresh_look").strip().lower()
-        if normalized_visual_actuator not in {"explicit_inspect", "heuristic_fresh_look"}:
+        normalized_visual_actuator, normalized_visual_intent_class = self._normalize_visual_ownership(
+            visual_actuator=visual_actuator,
+            visual_intent_class=visual_intent_class,
+        )
+        if normalized_visual_actuator == "none":
             normalized_visual_actuator = "heuristic_fresh_look"
-        normalized_visual_intent_class = str(visual_intent_class or "fallback_visual_question").strip().lower()
-        if normalized_visual_intent_class not in {"explicit_inspect", "fallback_visual_question"}:
+        if normalized_visual_intent_class == "none":
             normalized_visual_intent_class = "fallback_visual_question"
         state["requested"] = True
         state["completed"] = False
@@ -9326,7 +9376,8 @@ class RealtimeAPI:
         vision_state = self.get_vision_state()
         requires_fresh_look = is_current_visual_question(transcript)
         fresh_state = self._fresh_look_state_for_turn(turn_id=turn_id)
-        explicit_inspect_owns_turn = str(fresh_state.get("visual_actuator") or "").strip().lower() == "explicit_inspect"
+        visual_actuator, _ = self._resolve_visual_ownership_for_turn(turn_id=turn_id)
+        explicit_inspect_owns_turn = visual_actuator == "explicit_inspect"
         logger.info(
             "fresh_look_trigger_eval run_id=%s turn_id=%s matched=%s transcript=%r",
             self._current_run_id() or "",
@@ -9459,6 +9510,7 @@ class RealtimeAPI:
                     input_event_key,
                     reason,
                 )
+        resolved_visual_actuator, resolved_visual_intent_class = self._resolve_visual_ownership_for_turn(turn_id=turn_id)
         await self.send_assistant_message(
             clarify_text,
             websocket,
@@ -9467,8 +9519,8 @@ class RealtimeAPI:
                 "reason": reason,
                 "input_event_key": clarify_key,
                 "clarify_mode": "bounded",
-                "visual_actuator": str(self._fresh_look_state_for_turn(turn_id=turn_id).get("visual_actuator") or "none"),
-                "visual_intent_class": str(self._fresh_look_state_for_turn(turn_id=turn_id).get("visual_intent_class") or "none"),
+                "visual_actuator": resolved_visual_actuator,
+                "visual_intent_class": resolved_visual_intent_class,
             },
         )
         logger.info(
@@ -13026,6 +13078,12 @@ class RealtimeAPI:
         response = event.get("response") or {}
         response_metadata = response.get("metadata") if isinstance(response, dict) else None
         self._active_response_metadata = dict(response_metadata) if isinstance(response_metadata, dict) else {}
+        metadata_visual_turn_id = str((response_metadata or {}).get("turn_id") or "").strip() if isinstance(response_metadata, dict) else ""
+        if metadata_visual_turn_id:
+            self._resolve_visual_ownership_for_turn(
+                turn_id=metadata_visual_turn_id,
+                response_metadata=self._active_response_metadata,
+            )
         metadata_turn_id = str(response_metadata.get("turn_id") or "").strip() if isinstance(response_metadata, dict) else ""
         metadata_input_event_key = str(response_metadata.get("input_event_key") or "").strip() if isinstance(response_metadata, dict) else ""
         metadata_upgrade_chain_id = str(response_metadata.get("upgrade_chain_id") or "").strip() if isinstance(response_metadata, dict) else ""
@@ -13729,6 +13787,9 @@ class RealtimeAPI:
         metadata["input_event_key"] = str(input_event_key or "").strip()
         metadata["safety_override"] = "true"
         metadata["transcript_upgrade_replacement"] = "true"
+        resolved_visual_actuator, resolved_visual_intent_class = self._resolve_visual_ownership_for_turn(turn_id=turn_id)
+        metadata["visual_actuator"] = resolved_visual_actuator
+        metadata["visual_intent_class"] = resolved_visual_intent_class
         normalized_memory_intent_subtype = str(memory_intent_subtype or "none").strip().lower() or "none"
         if normalized_memory_intent_subtype != "none":
             metadata["memory_intent_subtype"] = normalized_memory_intent_subtype
