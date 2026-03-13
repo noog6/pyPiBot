@@ -449,6 +449,25 @@ async def perform_research(query: str, context: dict[str, Any] | None = None) ->
 tools.append(
     {
         "type": "function",
+        "name": "inspect_current_view",
+        "description": (
+            "Take an explicit fresh look at the current camera view and return "
+            "structured capture status metadata for this turn."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "recenter": {"type": "boolean", "default": False},
+                "delay_ms": {"type": "integer", "minimum": 0, "default": 0},
+            },
+            "required": [],
+        },
+    }
+)
+
+tools.append(
+    {
+        "type": "function",
         "name": "read_battery_voltage",
         "description": (
             "Fetch the current voltage of the onboard 2S LiPo battery. "

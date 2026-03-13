@@ -5,6 +5,7 @@ This document is a derived representation for human review and should stay in pa
 
 | Tool | Governance Tier | Side Effects | Sensitivity | Default Confirmation |
 |---|---|---|---|---|
+| `inspect_current_view` | GUARDED | REVERSIBLE_MOTION | LOW | ASK |
 | `read_battery_voltage` | SAFE | NONE | LOW | NEVER |
 | `read_environment` | SAFE | NONE | LOW | NEVER |
 | `read_imu_data` | SAFE | NONE | LOW | NEVER |

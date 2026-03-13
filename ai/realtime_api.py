@@ -8887,6 +8887,7 @@ class RealtimeAPI:
                 "extended_deadline_until_monotonic": None,
                 "eligible_motion_tool_name": None,
                 "claimed_pending_frame": False,
+                "evidence_source": None,
             }
         return store[turn_id]
 
@@ -9047,6 +9048,7 @@ class RealtimeAPI:
         self,
         *,
         turn_id: str,
+        initial_motion_tool_name: str | None = None,
     ) -> dict[str, Any]:
         state = self._fresh_look_state_for_turn(turn_id=turn_id)
         state["requested"] = True
@@ -9058,6 +9060,11 @@ class RealtimeAPI:
         state["extended_deadline_until_monotonic"] = None
         state["eligible_motion_tool_name"] = None
         state["claimed_pending_frame"] = False
+        state["evidence_source"] = None
+        initial_motion_tool = str(initial_motion_tool_name or "").strip().lower() or None
+        if self._is_fresh_look_motion_service_gesture_tool(tool_name=initial_motion_tool):
+            state["motion_requested_at_monotonic"] = time.monotonic()
+            state["eligible_motion_tool_name"] = initial_motion_tool
         logger.info(
             "fresh_look_requested run_id=%s turn_id=%s reason=explicit_visual_question",
             self._current_run_id() or "",
@@ -9169,6 +9176,7 @@ class RealtimeAPI:
                 state["blocked_reason"] = "none"
                 state["visual_answer_mode"] = "fresh_current"
                 state["last_fresh_capture_age_ms"] = 0
+                state["evidence_source"] = evidence_source
                 capture_before_extended_timeout = True
                 if bool(state.get("motion_settle_extension_used", False)):
                     extended_deadline = state.get("extended_deadline_until_monotonic")
@@ -15007,6 +15015,50 @@ class RealtimeAPI:
             "call_id": call_id,
         }
 
+    async def _inspect_current_view_tool(
+        self,
+        *,
+        recenter: bool = False,
+        delay_ms: int = 0,
+    ) -> dict[str, Any]:
+        """Run an explicit inspect pass using the existing fresh-look pipeline."""
+
+        turn_id = self._current_turn_id_or_unknown()
+        recenter_applied = False
+        initial_motion_tool_name = None
+        if recenter:
+            center_result = await function_map["gesture_look_center"](delay_ms=max(0, int(delay_ms or 0)))
+            recenter_applied = bool(isinstance(center_result, dict) and center_result.get("queued", False))
+            if recenter_applied:
+                initial_motion_tool_name = "gesture_look_center"
+
+        state = await self._attempt_fresh_look_for_turn(
+            turn_id=turn_id,
+            initial_motion_tool_name=initial_motion_tool_name,
+        )
+        vision_state = self.get_vision_state()
+        blocked_reason = str(state.get("blocked_reason") or "none")
+        status = "ok"
+        if not bool(state.get("completed", False)):
+            if blocked_reason == "timeout":
+                status = "timeout"
+            elif blocked_reason in {"camera_missing", "camera_loop_inactive"}:
+                status = "unavailable"
+            else:
+                status = "blocked"
+
+        return {
+            "status": status,
+            "blocked_reason": blocked_reason,
+            "visual_answer_mode": str(state.get("visual_answer_mode") or "unavailable"),
+            "claimed_pending_frame": bool(state.get("claimed_pending_frame", False)),
+            "queued_frame_count": int(vision_state.get("queued_frame_count") or 0),
+            "last_frame_age_ms": vision_state.get("last_frame_age_ms"),
+            "recenter_applied": recenter_applied,
+            "evidence_source": state.get("evidence_source"),
+            "turn_id": turn_id,
+        }
+
     async def execute_function_call(
         self,
         function_name: str,
@@ -15029,7 +15081,23 @@ class RealtimeAPI:
             )
         call_id = normalized_call_id
 
-        if function_name in function_map:
+        if function_name == "inspect_current_view":
+            try:
+                result = await self._inspect_current_view_tool(**args)
+                log_tool_call(function_name, args, result)
+                logger.info(
+                    "tool_result_received run_id=%s turn_id=%s call_id=%s",
+                    self._current_run_id() or "",
+                    self._current_turn_id_or_unknown(),
+                    call_id,
+                )
+            except Exception as exc:
+                error_message = f"Error executing function '{function_name}': {exc}"
+                log_error(error_message)
+                result = {"error": error_message}
+                self._record_intent_state(function_name, args, "failure")
+                await self.send_error_message_to_assistant(error_message, websocket)
+        elif function_name in function_map:
             self._mark_fresh_look_motion_request_for_turn(
                 turn_id=self._current_turn_id_or_unknown(),
                 tool_name=function_name,
