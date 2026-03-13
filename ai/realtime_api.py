@@ -7027,6 +7027,11 @@ class RealtimeAPI:
                 "Do not restate or re-answer semantic memory/preferences content already covered by the parent response. "
                 "Do not narrate environment/vision context in gesture-only followups."
             )
+        if self._is_fresh_look_motion_service_gesture_tool(tool_name=normalized_tool_name):
+            metadata["service_motion_candidate"] = "true"
+            if self._turn_has_inspect_current_view_tool_result(turn_id=turn_id):
+                metadata["service_motion_for_visual_actuator"] = "explicit_inspect"
+                metadata["service_motion_semantic_owner"] = "inspect_current_view"
         if tool_result_has_distinct_info:
             metadata["tool_result_has_distinct_info"] = "true"
         canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_input_event_key)
@@ -7192,6 +7197,15 @@ class RealtimeAPI:
         blocked_by_response_id: str | None,
     ) -> tuple[bool, tuple[str, CanonicalResponseState] | None, str]:
         suppressible = str(response_metadata.get("tool_followup_suppress_if_parent_covered", "")).strip().lower() in {"true", "1", "yes"}
+        turn_id = str(response_metadata.get("turn_id") or "").strip()
+        service_motion_candidate = str(response_metadata.get("service_motion_candidate") or "").strip().lower() in {"true", "1", "yes"}
+        if service_motion_candidate and turn_id and self._turn_has_inspect_current_view_tool_result(turn_id=turn_id):
+            logger.info(
+                "tool_followup_service_motion_suppressed run_id=%s turn_id=%s semantic_owner=inspect_current_view",
+                self._current_run_id() or "",
+                turn_id,
+            )
+            return True, None, "service_motion_for_explicit_inspect"
         tool_name = str(response_metadata.get("tool_name") or "").strip().lower()
         has_distinct_info = str(response_metadata.get("tool_result_has_distinct_info", "")).strip().lower() in {"true", "1", "yes"}
         if not suppressible:
@@ -8890,8 +8904,43 @@ class RealtimeAPI:
                 "evidence_source": None,
                 "visual_actuator": "none",
                 "visual_intent_class": "none",
+                "explicit_inspect_status": "none",
             }
         return store[turn_id]
+
+    def _explicit_inspect_status_for_turn(self, *, turn_id: str) -> str:
+        state = self._fresh_look_state_for_turn(turn_id=turn_id)
+        explicit_status = str(state.get("explicit_inspect_status") or "none").strip().lower() or "none"
+        if explicit_status in {"ok", "blocked", "timeout", "unavailable"}:
+            return explicit_status
+        if str(state.get("visual_actuator") or "").strip().lower() != "explicit_inspect":
+            return "none"
+        if bool(state.get("completed", False)):
+            return "ok"
+        blocked_reason = str(state.get("blocked_reason") or "none").strip().lower()
+        if blocked_reason == "timeout":
+            return "timeout"
+        if blocked_reason in {"camera_missing", "camera_loop_inactive"}:
+            return "unavailable"
+        if blocked_reason != "none":
+            return "blocked"
+        return "none"
+
+    def _explicit_inspect_failed_for_turn(self, *, turn_id: str) -> bool:
+        return self._explicit_inspect_status_for_turn(turn_id=turn_id) in {"blocked", "timeout", "unavailable"}
+
+    def _turn_has_inspect_current_view_tool_result(self, *, turn_id: str) -> bool:
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return False
+        for record in reversed(getattr(self, "_tool_call_records", []) or []):
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("turn_id") or "").strip() != normalized_turn_id:
+                continue
+            if str(record.get("name") or "").strip().lower() == "inspect_current_view":
+                return True
+        return False
 
     @staticmethod
     def _normalize_visual_ownership(
@@ -9146,6 +9195,7 @@ class RealtimeAPI:
         state["evidence_source"] = None
         state["visual_actuator"] = normalized_visual_actuator
         state["visual_intent_class"] = normalized_visual_intent_class
+        state["explicit_inspect_status"] = "none"
         initial_motion_tool = str(initial_motion_tool_name or "").strip().lower() or None
         if self._is_fresh_look_motion_service_gesture_tool(tool_name=initial_motion_tool):
             state["motion_requested_at_monotonic"] = time.monotonic()
@@ -9278,6 +9328,8 @@ class RealtimeAPI:
                 state["visual_answer_mode"] = "fresh_current"
                 state["last_fresh_capture_age_ms"] = 0
                 state["evidence_source"] = evidence_source
+                if normalized_visual_actuator == "explicit_inspect":
+                    state["explicit_inspect_status"] = "ok"
                 capture_before_extended_timeout = True
                 if bool(state.get("motion_settle_extension_used", False)):
                     extended_deadline = state.get("extended_deadline_until_monotonic")
@@ -9308,6 +9360,8 @@ class RealtimeAPI:
             await asyncio.sleep(0.05)
 
         state["blocked_reason"] = "timeout"
+        if normalized_visual_actuator == "explicit_inspect":
+            state["explicit_inspect_status"] = "timeout"
         state["visual_answer_mode"] = self._classify_visual_answer_provenance(
             turn_id=turn_id,
             vision_state=self.get_vision_state(),
@@ -9457,6 +9511,15 @@ class RealtimeAPI:
             camera_available=bool(vision_state.get("available", False) or vision_state.get("can_capture", False)),
             camera_recent=fresh_frame_available,
         )
+        if explicit_inspect_owns_turn and self._explicit_inspect_failed_for_turn(turn_id=turn_id):
+            should_confirm = True
+            reason = "visual_unavailable"
+            logger.info(
+                "explicit_inspect_authoritative_non_ok run_id=%s turn_id=%s inspect_status=%s action=force_visual_unavailable_clarify",
+                self._current_run_id() or "",
+                turn_id,
+                self._explicit_inspect_status_for_turn(turn_id=turn_id),
+            )
         if not should_confirm:
             self._set_response_gating_verdict(
                 turn_id=turn_id,
@@ -15176,6 +15239,7 @@ class RealtimeAPI:
                 status = "unavailable"
             else:
                 status = "blocked"
+        state["explicit_inspect_status"] = status
 
         return {
             "status": status,
@@ -15216,6 +15280,9 @@ class RealtimeAPI:
         if function_name == "inspect_current_view":
             try:
                 result = await self._inspect_current_view_tool(**args)
+                inspect_status = str(result.get("status") or "none").strip().lower()
+                if inspect_status in {"ok", "blocked", "timeout", "unavailable"}:
+                    self._fresh_look_state_for_turn(turn_id=self._current_turn_id_or_unknown())["explicit_inspect_status"] = inspect_status
                 log_tool_call(function_name, args, result)
                 logger.info(
                     "tool_result_received run_id=%s turn_id=%s call_id=%s",
@@ -15336,6 +15403,39 @@ class RealtimeAPI:
                 result=result,
             ),
         )
+        if function_name == "inspect_current_view" and isinstance(result, dict):
+            inspect_status = str(result.get("status") or "none").strip().lower()
+            response_payload = response_create_event.setdefault("response", {})
+            if not isinstance(response_payload, dict):
+                response_payload = {}
+                response_create_event["response"] = response_payload
+            response_metadata = response_payload.setdefault("metadata", {})
+            if not isinstance(response_metadata, dict):
+                response_metadata = {}
+                response_payload["metadata"] = response_metadata
+            response_metadata["explicit_inspect_outcome"] = inspect_status
+            if inspect_status in {"blocked", "timeout", "unavailable"}:
+                turn_id = str(response_metadata.get("turn_id") or self._current_turn_id_or_unknown())
+                clarify_text = self._visual_unavailable_clarify_text_for_turn(
+                    turn_id=turn_id,
+                    vision_state=self.get_vision_state(),
+                )
+                response_metadata["trigger"] = "asr_verify_on_risk"
+                response_metadata["reason"] = "visual_unavailable"
+                response_metadata["clarify_mode"] = "bounded"
+                response_payload["instructions"] = (
+                    "inspect_current_view returned a non-ok status. "
+                    "Output exactly this clarify sentence and nothing else: "
+                    f"{clarify_text!r}. Do not assert or infer scene/object details from stale/ambient context."
+                )
+                response_payload["tool_choice"] = "none"
+                logger.info(
+                    "explicit_inspect_non_ok_followup_forced_clarify run_id=%s turn_id=%s call_id=%s status=%s",
+                    self._current_run_id() or "",
+                    turn_id,
+                    call_id,
+                    inspect_status,
+                )
         if force_no_tools_followup:
             response_payload = response_create_event.setdefault("response", {})
             if not isinstance(response_payload, dict):

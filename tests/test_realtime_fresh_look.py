@@ -5,6 +5,8 @@ import sys
 import time
 import types
 
+import pytest
+
 if "audioop" not in sys.modules:
     sys.modules["audioop"] = types.ModuleType("audioop")
 
@@ -788,3 +790,112 @@ def test_inspect_current_view_recenter_uses_existing_motion_tool() -> None:
     assert result["recenter_applied"] is True
     state = api._fresh_look_state_for_turn(turn_id="turn-inspect-recenter")
     assert state["eligible_motion_tool_name"] == "gesture_look_center"
+
+
+@pytest.mark.parametrize("explicit_status", ["blocked", "timeout", "unavailable"])
+def test_verify_on_risk_forces_visual_unavailable_clarify_when_explicit_inspect_non_ok(explicit_status: str) -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[object()]))
+    state = api._fresh_look_state_for_turn(turn_id="turn-explicit-nonok")
+    state["visual_actuator"] = "explicit_inspect"
+    state["visual_intent_class"] = "explicit_inspect"
+    state["explicit_inspect_status"] = explicit_status
+
+    captured_metadata: list[dict[str, object]] = []
+
+    async def _send_assistant_message(message: str, _websocket: object, *, response_metadata: dict[str, object] | None = None, **_kwargs) -> None:
+        assert message
+        captured_metadata.append(dict(response_metadata or {}))
+
+    api.send_assistant_message = _send_assistant_message
+    api._asr_verify_on_risk_enabled = True
+    api._asr_clarify_asked_input_event_keys = set()
+    api._asr_clarify_count_by_turn = {}
+    api._asr_verify_max_clarify_per_turn = 1
+    api._asr_verify_short_utterance_ms = 300
+    api._asr_verify_min_confidence = 0.6
+    api._response_gating_verdict_by_input_event_key = {}
+    api._pending_server_auto_response_by_turn_id = {}
+    api._canonical_utterance_key = lambda *, turn_id, input_event_key: f"run-test:{turn_id}:{input_event_key}"
+    api._record_cancel_issued_timing = lambda *_args, **_kwargs: None
+    api._stale_response_ids_set = set()
+    api._mark_pending_server_auto_response_cancelled = lambda **_kwargs: None
+    api._suppress_cancelled_response_audio = lambda *_args, **_kwargs: None
+    api._get_or_create_transport = lambda: type("T", (), {"send_json": staticmethod(lambda *_a, **_k: asyncio.sleep(0))})()
+    api.assistant_reply = ""
+    api._assistant_reply_accum = ""
+
+    clarified = asyncio.run(
+        api._maybe_verify_on_risk_clarify(
+            transcript="tell me what object is in front of you",
+            websocket=object(),
+            turn_id="turn-explicit-nonok",
+            input_event_key=f"evt-explicit-{explicit_status}",
+            snapshot={"run_id": "run-test", "asr_confidence": 0.95},
+        )
+    )
+
+    assert clarified is True
+    assert captured_metadata
+    assert captured_metadata[0]["reason"] == "visual_unavailable"
+    verdict = api._get_response_gating_verdict(
+        turn_id="turn-explicit-nonok",
+        input_event_key=f"evt-explicit-{explicit_status}",
+    )
+    assert verdict is not None
+    assert verdict.action == "CLARIFY"
+    assert verdict.reason == "visual_unavailable"
+
+
+@pytest.mark.parametrize("inspect_status", ["blocked", "timeout", "unavailable"])
+def test_execute_function_call_inspect_non_ok_forces_bounded_clarify_followup(inspect_status: str) -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    api._tool_call_records = []
+    api._last_tool_call_results = []
+    api._current_turn_id_or_unknown = lambda: "turn-exec-inspect"
+    api._normalize_realtime_call_id = lambda call_id: call_id
+    api._track_outgoing_event = lambda *_args, **_kwargs: None
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._mark_or_suppress_research_spoken_response = lambda _rid: False
+    api._tool_followup_input_event_key = lambda *, call_id: f"tool:{call_id}"
+    api._active_input_event_key_by_turn_id = {"turn-exec-inspect": "item_parent"}
+
+    sent_events: list[dict[str, object]] = []
+    followup_events: list[dict[str, object]] = []
+
+    class _Transport:
+        async def send_json(self, _ws: object, payload: dict[str, object]) -> None:
+            sent_events.append(payload)
+
+    async def _fake_send_response_create(_ws: object, response_create_event: dict[str, object], **_kwargs) -> bool:
+        followup_events.append(response_create_event)
+        return True
+
+    async def _fake_inspect_current_view_tool(**_kwargs):
+        return {
+            "status": inspect_status,
+            "blocked_reason": "injection_not_ready",
+            "visual_answer_mode": "ambient_stale",
+        }
+
+    api._get_or_create_transport = lambda: _Transport()
+    api._send_response_create = _fake_send_response_create
+    api._inspect_current_view_tool = _fake_inspect_current_view_tool
+
+    asyncio.run(
+        api.execute_function_call(
+            "inspect_current_view",
+            "call-inspect-nonok",
+            {"recenter": False},
+            websocket=object(),
+        )
+    )
+
+    assert sent_events
+    assert followup_events
+    response_payload = followup_events[0].get("response") or {}
+    metadata = response_payload.get("metadata") or {}
+    assert metadata.get("explicit_inspect_outcome") == inspect_status
+    assert metadata.get("reason") == "visual_unavailable"
+    assert metadata.get("trigger") == "asr_verify_on_risk"
+    assert metadata.get("clarify_mode") == "bounded"
+    assert response_payload.get("tool_choice") == "none"
