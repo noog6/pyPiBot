@@ -128,16 +128,10 @@ class ResponseTerminalHandlers:
             turn_id = str(active_metadata.get("turn_id") or api._current_turn_id_or_unknown())
             trigger = str(active_metadata.get("trigger") or "").strip().lower()
             fresh_state = api._fresh_look_state_for_turn(turn_id=turn_id)
-            visual_actuator = str(
-                active_metadata.get("visual_actuator")
-                or fresh_state.get("visual_actuator")
-                or "none"
-            ).strip().lower() or "none"
-            visual_intent_class = str(
-                active_metadata.get("visual_intent_class")
-                or fresh_state.get("visual_intent_class")
-                or "none"
-            ).strip().lower() or "none"
+            visual_actuator, visual_intent_class = api._resolve_visual_ownership_for_turn(
+                turn_id=turn_id,
+                response_metadata=active_metadata,
+            )
             is_visual_turn = bool(snapshot.get("visual_question", False)) or (
                 trigger == "asr_verify_on_risk" and reason == "visual_unavailable"
             ) or bool(fresh_state.get("requested", False))
