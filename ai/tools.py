@@ -451,8 +451,11 @@ tools.append(
         "type": "function",
         "name": "inspect_current_view",
         "description": (
-            "Take an explicit fresh look at the current camera view and return "
-            "structured capture status metadata for this turn."
+            "Use this as the primary visual-semantic tool when the user asks what Theo can "
+            "currently see (for example: what do you see, what am I holding, can you see it now, "
+            "look at this/my hand). This takes an explicit fresh look at the current camera view "
+            "and returns structured capture status metadata for the turn. Set recenter=true when "
+            "you should return to center before describing what is visible."
         ),
         "parameters": {
             "type": "object",
@@ -702,6 +705,8 @@ tools.append(
         "description": (
             "Return the camera to a neutral, centered pan/tilt position. "
             "Use for requests like 'look back to center' or 'return to neutral'. "
+            "This is motion-only setup and does not inspect/describe objects by itself; for "
+            "semantic visual questions use inspect_current_view (optionally with recenter=true). "
             "Provide an optional delay in milliseconds."
         ),
         "parameters": {

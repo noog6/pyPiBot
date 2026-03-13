@@ -17,6 +17,10 @@ _GREETING_TERMS = {"hi", "hello", "hey", "yo", "sup", "howdy"}
 _CLEAR_MOTION_TERMS = {"look", "center", "left", "right", "up", "down", "back"}
 _CURRENT_VISUAL_PATTERNS = (
     r"\bwhat\s+do\s+you\s+see\s*(right\s+now|now)?\b",
+    r"\b(?:go\s+back\s+to\s+center|look\s+back\s+(?:at|to)\s+center|return\s+to\s+center)\b.*\b(?:tell\s+me\s+what\s+i\s+have\s+in\s+my\s+hands|what\s+am\s+i\s+holding)\b",
+    r"\b(?:tell\s+me\s+what\s+i\s+have\s+in\s+my\s+hands|what\s+am\s+i\s+holding)\b",
+    r"\bcan\s+you\s+see\s+it\s+now\b",
+    r"\blook\s+at\s+(?:this|my\s+hand)\b",
     r"\bwhat'?s\s+in\s+front\s+of\s+you\b",
     r"\b(?:tell|let\s+me\s+know)\s+me\s+what\s+you\s+see\s+in\s+front\s+of\s+you\b",
     r"\bwhat\s+are\s+you\s+looking\s+at\s+(?:right\s+now|now)\b",
