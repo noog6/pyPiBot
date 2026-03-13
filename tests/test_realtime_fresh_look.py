@@ -58,6 +58,11 @@ def test_current_visual_question_detection_covers_natural_phrasing() -> None:
     assert is_current_visual_question("what are you looking at right now")
     assert is_current_visual_question("can you look and tell me what's there")
     assert is_current_visual_question("look at what's in front of you and describe it")
+    assert is_current_visual_question("go back to center and then tell me what I have in my hands")
+    assert is_current_visual_question("what am I holding")
+    assert is_current_visual_question("can you see it now")
+    assert is_current_visual_question("look at this")
+    assert is_current_visual_question("look at my hand")
 
 
 def test_mixed_motion_and_visual_utterance_triggers_fresh_look() -> None:
@@ -899,3 +904,18 @@ def test_execute_function_call_inspect_non_ok_forces_bounded_clarify_followup(in
     assert metadata.get("trigger") == "asr_verify_on_risk"
     assert metadata.get("clarify_mode") == "bounded"
     assert response_payload.get("tool_choice") == "none"
+
+
+def test_visual_tool_descriptions_bias_semantic_requests_to_inspect() -> None:
+    from ai.tools import tools
+
+    inspect_spec = next(tool for tool in tools if tool.get("name") == "inspect_current_view")
+    center_spec = next(tool for tool in tools if tool.get("name") == "gesture_look_center")
+
+    inspect_description = str(inspect_spec.get("description") or "").lower()
+    center_description = str(center_spec.get("description") or "").lower()
+
+    assert "primary visual-semantic tool" in inspect_description
+    assert "what am i holding" in inspect_description
+    assert "motion-only setup" in center_description
+    assert "semantic visual questions use inspect_current_view" in center_description
