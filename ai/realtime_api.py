@@ -9231,7 +9231,13 @@ class RealtimeAPI:
             return camera
         return None
 
-    def _fresh_look_gating_decision(self, *, turn_id: str, visual_actuator: str = "heuristic_fresh_look") -> tuple[bool, str]:
+    def _fresh_look_gating_decision(
+        self,
+        *,
+        turn_id: str,
+        visual_actuator: str = "heuristic_fresh_look",
+        allow_explicit_interaction_bypass: bool = True,
+    ) -> tuple[bool, str]:
         if not bool(getattr(self, "_fresh_look_enabled", False)):
             return False, "disabled"
         camera = self._resolve_camera_controller()
@@ -9261,7 +9267,11 @@ class RealtimeAPI:
                 or str(state.get("visual_actuator") or "").strip().lower() == "explicit_inspect"
                 or str(state.get("visual_intent_class") or "").strip().lower() == "explicit_inspect"
             )
-            if explicit_inspect_owner and str(ready_reason).startswith("interaction_state="):
+            if (
+                allow_explicit_interaction_bypass
+                and explicit_inspect_owner
+                and str(ready_reason).startswith("interaction_state=")
+            ):
                 logger.info(
                     "fresh_look_interaction_state_bypass run_id=%s turn_id=%s visual_actuator=%s ready_reason=%s",
                     self._current_run_id() or "",
@@ -14179,6 +14189,57 @@ class RealtimeAPI:
                 explicit_status,
             )
             return False
+
+        vision_state = self.get_vision_state()
+        gate_allowed, gate_reason = self._fresh_look_gating_decision(
+            turn_id=turn_id,
+            visual_actuator="heuristic_fresh_look",
+            allow_explicit_interaction_bypass=False,
+        )
+        if not gate_allowed:
+            state = self._fresh_look_state_for_turn(turn_id=turn_id)
+            state["blocked_reason"] = gate_reason
+            state["visual_answer_mode"] = self._classify_visual_answer_provenance(
+                turn_id=turn_id,
+                vision_state=vision_state,
+            )
+            if gate_reason in {"camera_missing", "camera_loop_inactive"}:
+                state["explicit_inspect_status"] = "unavailable"
+            else:
+                state["explicit_inspect_status"] = "blocked"
+            logger.info(
+                "explicit_inspect_obligation_deferred run_id=%s turn_id=%s inspect_status=%s gate_reason=%s",
+                self._current_run_id() or "",
+                turn_id,
+                explicit_status,
+                gate_reason,
+            )
+            clarify_text = self._visual_unavailable_clarify_text_for_turn(
+                turn_id=turn_id,
+                vision_state=vision_state,
+            )
+            logger.info(
+                "explicit_inspect_obligation_deterministic_clarify_emitted run_id=%s turn_id=%s reason=%s",
+                self._current_run_id() or "",
+                turn_id,
+                gate_reason,
+            )
+            await self.send_assistant_message(
+                clarify_text,
+                websocket,
+                response_metadata={
+                    "trigger": "asr_verify_on_risk",
+                    "reason": "visual_unavailable",
+                    "clarify_mode": "bounded",
+                    "turn_id": turn_id,
+                    "input_event_key": input_event_key,
+                    "visual_actuator": "explicit_inspect",
+                    "visual_intent_class": "explicit_inspect",
+                    "explicit_inspect_outcome": state["explicit_inspect_status"],
+                    "response_origin": "explicit_inspect_obligation_preflight",
+                },
+            )
+            return True
 
         pending = self._pending_server_auto_response_for_turn(turn_id=turn_id)
         if isinstance(pending, PendingServerAutoResponse) and pending.active and pending.response_id:

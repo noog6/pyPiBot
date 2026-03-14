@@ -44,6 +44,7 @@ def _build_api(*, camera: object | None = None) -> RealtimeAPI:
     api._latest_final_transcript_by_turn_id = {}
     api._current_run_id = lambda: "run-test"
     api._last_vision_frame_sent_at_monotonic = None
+    api.is_ready_for_injections = lambda with_reason=False: (True, "ready") if with_reason else True
     return api
 
 
@@ -1911,6 +1912,109 @@ def test_explicit_inspect_obligation_noop_when_inspect_evidence_exists() -> None
 
     assert dispatched_now is False
     assert dispatched == []
+
+
+
+
+def test_explicit_inspect_obligation_does_not_dispatch_when_fresh_evidence_unavailable() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    state = api._fresh_look_state_for_turn(turn_id="turn-preflight-blocked")
+    state["visual_actuator"] = "explicit_inspect"
+    state["visual_intent_class"] = "explicit_inspect"
+    state["explicit_inspect_status"] = "pending"
+    api._tool_call_records = []
+
+    api.is_ready_for_injections = lambda with_reason=False: (False, "interaction_state=speaking") if with_reason else False
+
+    dispatched: list[str] = []
+    sent_messages: list[tuple[str, dict[str, object]]] = []
+
+    async def _fake_execute(function_name: str, *_args, **_kwargs):
+        dispatched.append(function_name)
+
+    async def _fake_send_assistant_message(text: str, _websocket: object, response_metadata: dict[str, object] | None = None):
+        sent_messages.append((text, dict(response_metadata or {})))
+
+    api.execute_function_call = _fake_execute
+    api.send_assistant_message = _fake_send_assistant_message
+
+    handled = asyncio.run(
+        api._maybe_dispatch_explicit_inspect_obligation(
+            websocket=object(),
+            turn_id="turn-preflight-blocked",
+            input_event_key="item-preflight-blocked",
+        )
+    )
+
+    assert handled is True
+    assert dispatched == []
+    assert sent_messages
+    metadata = sent_messages[0][1]
+    assert metadata.get("clarify_mode") == "bounded"
+    assert metadata.get("response_origin") == "explicit_inspect_obligation_preflight"
+    assert state["explicit_inspect_status"] == "blocked"
+
+
+def test_explicit_inspect_obligation_defer_emits_bounded_clarify_without_runtime_non_ok() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    state = api._fresh_look_state_for_turn(turn_id="turn-preflight-camera")
+    state["visual_actuator"] = "explicit_inspect"
+    state["visual_intent_class"] = "explicit_inspect"
+    state["explicit_inspect_status"] = "pending"
+    api._tool_call_records = []
+    api.is_ready_for_injections = lambda with_reason=False: (False, "interaction_state=speaking") if with_reason else False
+
+    sent_messages: list[tuple[str, dict[str, object]]] = []
+
+    async def _fake_send_assistant_message(text: str, _websocket: object, response_metadata: dict[str, object] | None = None):
+        sent_messages.append((text, dict(response_metadata or {})))
+
+    api.send_assistant_message = _fake_send_assistant_message
+
+    handled = asyncio.run(
+        api._maybe_dispatch_explicit_inspect_obligation(
+            websocket=object(),
+            turn_id="turn-preflight-camera",
+            input_event_key="item-preflight-camera",
+        )
+    )
+
+    assert handled is True
+    assert not state["explicit_inspect_obligation_dispatched"]
+    assert state["explicit_inspect_status"] == "blocked"
+    assert sent_messages
+    metadata = sent_messages[0][1]
+    assert metadata.get("clarify_mode") == "bounded"
+    assert metadata.get("response_origin") == "explicit_inspect_obligation_preflight"
+
+
+def test_explicit_inspect_obligation_dispatches_when_evidence_ready() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[{"frame": 1}]))
+    state = api._fresh_look_state_for_turn(turn_id="turn-preflight-ready")
+    state["visual_actuator"] = "explicit_inspect"
+    state["visual_intent_class"] = "explicit_inspect"
+    state["explicit_inspect_status"] = "pending"
+    api._tool_call_records = []
+
+    dispatched: list[tuple[str, str]] = []
+
+    async def _fake_execute(function_name: str, call_id: str, *_args, **_kwargs):
+        dispatched.append((function_name, call_id))
+
+    api.execute_function_call = _fake_execute
+
+    handled = asyncio.run(
+        api._maybe_dispatch_explicit_inspect_obligation(
+            websocket=object(),
+            turn_id="turn-preflight-ready",
+            input_event_key="item-preflight-ready",
+        )
+    )
+
+    assert handled is True
+    assert dispatched
+    assert dispatched[0][0] == "inspect_current_view"
+    assert state["explicit_inspect_obligation_dispatched"] is True
 
 
 def test_transcript_final_obligation_cancels_pending_server_auto_before_dispatch_and_skips_upgrade_path() -> None:
