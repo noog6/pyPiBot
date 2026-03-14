@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
+from contextlib import contextmanager
 import sys
 import time
 import types
@@ -12,7 +14,7 @@ if "audioop" not in sys.modules:
 
 from ai.realtime.asr_trust import is_current_visual_question
 from ai.tools import function_map
-from ai.realtime_api import RealtimeAPI
+from ai.realtime_api import PendingServerAutoResponse, RealtimeAPI
 
 
 class _CameraStub:
@@ -1322,3 +1324,240 @@ def test_resolve_visual_ownership_preserves_frozen_explicit_inspect() -> None:
     assert actuator == "explicit_inspect"
     assert intent == "explicit_inspect"
 
+
+
+@pytest.mark.parametrize("explicit_status", ["none", "pending"])
+def test_explicit_inspect_obligation_dispatches_for_pending_or_none(explicit_status: str) -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    state = api._fresh_look_state_for_turn(turn_id="turn-obligation")
+    state["visual_actuator"] = "explicit_inspect"
+    state["visual_intent_class"] = "explicit_inspect"
+    state["visual_owner_frozen"] = True
+    state["explicit_inspect_status"] = explicit_status
+    api._tool_call_records = []
+
+    dispatched: list[tuple[str, str, dict[str, object]]] = []
+
+    async def _fake_execute(function_name: str, call_id: str, args: dict[str, object], websocket: object, **_kwargs):
+        dispatched.append((function_name, call_id, dict(args)))
+
+    api.execute_function_call = _fake_execute
+
+    dispatched_now = asyncio.run(
+        api._maybe_dispatch_explicit_inspect_obligation(
+            websocket=object(),
+            turn_id="turn-obligation",
+            input_event_key="item-1",
+        )
+    )
+
+    assert dispatched_now is True
+    assert dispatched
+    assert dispatched[0][0] == "inspect_current_view"
+    assert dispatched[0][2] == {}
+
+
+@pytest.mark.parametrize("explicit_status", ["blocked", "timeout", "unavailable"])
+def test_explicit_inspect_obligation_non_ok_does_not_auto_retry(explicit_status: str) -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    state = api._fresh_look_state_for_turn(turn_id="turn-non-ok")
+    state["visual_actuator"] = "explicit_inspect"
+    state["visual_intent_class"] = "explicit_inspect"
+    state["explicit_inspect_status"] = explicit_status
+    api._tool_call_records = []
+
+    dispatched: list[str] = []
+
+    async def _fake_execute(function_name: str, *_args, **_kwargs):
+        dispatched.append(function_name)
+
+    api.execute_function_call = _fake_execute
+
+    dispatched_now = asyncio.run(
+        api._maybe_dispatch_explicit_inspect_obligation(
+            websocket=object(),
+            turn_id="turn-non-ok",
+            input_event_key="item-2",
+        )
+    )
+
+    assert dispatched_now is False
+    assert dispatched == []
+
+
+def test_explicit_inspect_obligation_noop_for_non_visual_turn() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    state = api._fresh_look_state_for_turn(turn_id="turn-normal")
+    state["visual_actuator"] = "none"
+    state["visual_intent_class"] = "none"
+    api._tool_call_records = []
+
+    dispatched: list[str] = []
+
+    async def _fake_execute(function_name: str, *_args, **_kwargs):
+        dispatched.append(function_name)
+
+    api.execute_function_call = _fake_execute
+
+    dispatched_now = asyncio.run(
+        api._maybe_dispatch_explicit_inspect_obligation(
+            websocket=object(),
+            turn_id="turn-normal",
+            input_event_key="item-3",
+        )
+    )
+
+    assert dispatched_now is False
+    assert dispatched == []
+
+
+def test_explicit_inspect_obligation_noop_when_inspect_evidence_exists() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    state = api._fresh_look_state_for_turn(turn_id="turn-evidence")
+    state["visual_actuator"] = "explicit_inspect"
+    state["visual_intent_class"] = "explicit_inspect"
+    state["explicit_inspect_status"] = "ok"
+    api._tool_call_records = [
+        {"turn_id": "turn-evidence", "name": "inspect_current_view", "result": {"status": "ok"}}
+    ]
+
+    dispatched: list[str] = []
+
+    async def _fake_execute(function_name: str, *_args, **_kwargs):
+        dispatched.append(function_name)
+
+    api.execute_function_call = _fake_execute
+
+    dispatched_now = asyncio.run(
+        api._maybe_dispatch_explicit_inspect_obligation(
+            websocket=object(),
+            turn_id="turn-evidence",
+            input_event_key="item-4",
+        )
+    )
+
+    assert dispatched_now is False
+    assert dispatched == []
+
+
+def test_transcript_final_obligation_cancels_pending_server_auto_before_dispatch_and_skips_upgrade_path() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    turn_id = "turn-race"
+    input_event_key = "item-race"
+    transcript = "Theo, what am I holding in my hand?"
+
+    state = api._fresh_look_state_for_turn(turn_id=turn_id)
+    state["visual_actuator"] = "explicit_inspect"
+    state["visual_intent_class"] = "explicit_inspect"
+    state["visual_owner_frozen"] = True
+    state["explicit_inspect_status"] = "pending"
+    api._tool_call_records = []
+
+    pending = PendingServerAutoResponse(
+        turn_id=turn_id,
+        response_id="resp-server-auto",
+        canonical_key="run-test:turn-race:synthetic_server_auto",
+        created_at_ms=1,
+        active=True,
+    )
+
+    ordering: list[str] = []
+    sent_events: list[dict[str, str]] = []
+    upgrade_calls: list[str] = []
+
+    class _Transport:
+        async def send_json(self, _websocket, event: dict[str, str]) -> None:
+            ordering.append("cancel")
+            sent_events.append(event)
+
+    async def _fake_execute(function_name: str, call_id: str, args: dict[str, object], websocket: object, **_kwargs):
+        ordering.append("dispatch")
+        assert function_name == "inspect_current_view"
+        assert call_id
+        assert args == {}
+
+    @contextmanager
+    def _utterance_scope(*, turn_id: str, input_event_key: str):
+        yield type("Ctx", (), {"turn_id": turn_id, "input_event_key": input_event_key})()
+
+    api._current_turn_id_or_unknown = lambda: turn_id
+    api._extract_transcript = lambda _event: transcript
+    api._resolve_input_event_key = lambda _event: input_event_key
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._log_user_transcript = lambda *_args, **_kwargs: None
+    api._attention_on_transcript_finalized = lambda: None
+    api._utterance_context_scope = _utterance_scope
+    api._lifecycle_controller = lambda: type("LC", (), {"on_transcript_final": staticmethod(lambda *_a, **_k: None)})()
+    api._canonical_utterance_key = lambda *, turn_id, input_event_key: f"run-test:{turn_id}:{input_event_key}"
+    api._rebind_active_response_correlation_key = lambda **_kwargs: None
+    api._pending_server_auto_response_for_turn = lambda *, turn_id: pending if turn_id == "turn-race" else None
+    api._clear_stale_pending_server_auto_for_turn = lambda **_kwargs: None
+    api._response_trace_by_id = lambda: {}
+    api._classify_memory_intent = lambda _transcript: "none"
+    api._start_transcript_response_watchdog = lambda **_kwargs: None
+    api._signal_server_auto_transcript_final = lambda **_kwargs: None
+
+    async def _resume_deferred(**_kwargs):
+        return None
+
+    api._resume_deferred_provisional_tool_call_for_turn = _resume_deferred
+    api._has_active_confirmation_token = lambda: False
+    api._is_awaiting_confirmation_phase = lambda: False
+    api._active_utterance = None
+    api._log_utterance_trust_snapshot = lambda **_kwargs: {"word_count": 8}
+    api._evaluate_curiosity_from_trust_snapshot = lambda **_kwargs: None
+    api._prefer_explicit_inspect_owner_for_turn = lambda **_kwargs: True
+
+    async def _never_clarify(**_kwargs):
+        return False
+
+    api._maybe_verify_on_risk_clarify = _never_clarify
+    api._set_response_gating_verdict = lambda **_kwargs: None
+
+    async def _should_not_upgrade(**_kwargs):
+        upgrade_calls.append("called")
+        return True
+
+    api._cancel_and_replace_pending_server_auto_on_transcript_final = _should_not_upgrade
+    api._record_user_input = lambda *_args, **_kwargs: None
+
+    async def _false_async(*_args, **_kwargs):
+        return False
+
+    api._maybe_handle_approval_response = _false_async
+    api._handle_stop_word = _false_async
+    api._maybe_handle_research_permission_response = _false_async
+    api._maybe_handle_research_budget_response = _false_async
+    api._maybe_apply_late_confirmation_decision = _false_async
+    api._maybe_handle_preference_recall_intent = _false_async
+    api._maybe_process_research_intent = _false_async
+    api._record_cancel_issued_timing = lambda *_args, **_kwargs: None
+    stale_ids: set[str] = set()
+    api._stale_response_ids = lambda: stale_ids
+
+    def _mark_pending_cancelled(*, turn_id: str, reason: str):
+        pending.active = False
+
+    api._mark_pending_server_auto_response_cancelled = _mark_pending_cancelled
+    api._suppress_cancelled_response_audio = lambda *_args, **_kwargs: None
+    api._get_or_create_transport = lambda: _Transport()
+    api.execute_function_call = _fake_execute
+    api._pending_server_auto_input_event_keys = deque(maxlen=64)
+    api._active_response_origin = "none"
+    api._active_server_auto_input_event_key = ""
+    api._turn_diagnostic_timestamps = {}
+
+    asyncio.run(
+        api._handle_input_audio_transcription_completed_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": input_event_key,
+                "transcript": transcript,
+            },
+            websocket=object(),
+        )
+    )
+
+    assert sent_events == [{"type": "response.cancel", "response_id": "resp-server-auto"}]
+    assert ordering == ["cancel", "dispatch"]
+    assert upgrade_calls == []

@@ -14126,6 +14126,70 @@ class RealtimeAPI:
         )
         return True
 
+    async def _maybe_dispatch_explicit_inspect_obligation(
+        self,
+        *,
+        websocket: Any,
+        turn_id: str,
+        input_event_key: str,
+    ) -> bool:
+        visual_actuator, _ = self._resolve_visual_ownership_for_turn(turn_id=turn_id, seam="transcript_final")
+        if visual_actuator != "explicit_inspect":
+            return False
+        explicit_status = self._explicit_inspect_status_for_turn(turn_id=turn_id)
+        if self._turn_has_inspect_current_view_tool_result(turn_id=turn_id):
+            logger.info(
+                "explicit_inspect_obligation_satisfied run_id=%s turn_id=%s inspect_status=%s",
+                self._current_run_id() or "",
+                turn_id,
+                explicit_status,
+            )
+            return False
+        if explicit_status not in {"none", "pending"}:
+            logger.info(
+                "explicit_inspect_obligation_non_executable run_id=%s turn_id=%s inspect_status=%s action=skip_auto_dispatch",
+                self._current_run_id() or "",
+                turn_id,
+                explicit_status,
+            )
+            return False
+
+        pending = self._pending_server_auto_response_for_turn(turn_id=turn_id)
+        if isinstance(pending, PendingServerAutoResponse) and pending.active and pending.response_id:
+            cancel_event = {"type": "response.cancel", "response_id": pending.response_id}
+            self._record_cancel_issued_timing(pending.response_id)
+            self._stale_response_ids().add(pending.response_id)
+            self._mark_pending_server_auto_response_cancelled(turn_id=turn_id, reason="explicit_inspect_obligation")
+            self._suppress_cancelled_response_audio(pending.response_id)
+            transport = self._get_or_create_transport()
+            await transport.send_json(websocket, cancel_event)
+            logger.info(
+                "explicit_inspect_obligation_cancelled_pending_response run_id=%s turn_id=%s response_id=%s",
+                self._current_run_id() or "",
+                turn_id,
+                pending.response_id,
+            )
+
+        obligation_call_id = self._normalize_realtime_call_id(
+            f"obl:{turn_id}:{input_event_key}:inspect_current_view"
+        )
+        logger.info(
+            "explicit_inspect_obligation_dispatch run_id=%s turn_id=%s inspect_status=%s call_id=%s",
+            self._current_run_id() or "",
+            turn_id,
+            explicit_status,
+            obligation_call_id,
+        )
+        await self.execute_function_call(
+            "inspect_current_view",
+            obligation_call_id,
+            {},
+            websocket,
+            force_no_tools_followup=False,
+            inject_no_tools_instruction=False,
+        )
+        return True
+
     async def _handle_input_audio_transcription_completed_event(
         self,
         event: dict[str, Any],
@@ -14384,6 +14448,12 @@ class RealtimeAPI:
                 action="ANSWER",
                 reason="transcript_final",
             )
+        if transcript and not confirmation_active and await self._maybe_dispatch_explicit_inspect_obligation(
+            websocket=websocket,
+            turn_id=resolved_turn_id,
+            input_event_key=input_event_key,
+        ):
+            return
         if transcript:
             transcript_upgrade_candidate = bool(
                 pending_server_auto is not None
