@@ -878,6 +878,101 @@ def test_inspect_current_view_returns_timeout_status_without_false_success() -> 
     assert result["visual_answer_mode"] != "fresh_current"
 
 
+def test_explicit_inspect_gating_allows_interaction_state_not_idle() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    state = api._fresh_look_state_for_turn(turn_id="turn-explicit")
+    state["visual_actuator"] = "explicit_inspect"
+    state["visual_intent_class"] = "explicit_inspect"
+    api.is_ready_for_injections = lambda with_reason=False: (False, "interaction_state=thinking") if with_reason else False
+
+    allowed, reason = api._fresh_look_gating_decision(turn_id="turn-explicit")
+
+    assert allowed is True
+    assert reason == "allow"
+
+
+def test_explicit_inspect_gating_allows_interaction_state_not_idle_from_argument() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    api.is_ready_for_injections = lambda with_reason=False: (False, "interaction_state=thinking") if with_reason else False
+
+    allowed, reason = api._fresh_look_gating_decision(
+        turn_id="turn-explicit-arg",
+        visual_actuator="explicit_inspect",
+    )
+
+    assert allowed is True
+    assert reason == "allow"
+
+
+def test_inspect_current_view_tool_allows_interaction_state_bypass_without_injection_not_ready() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[object()]))
+    api.is_ready_for_injections = lambda with_reason=False: (False, "interaction_state=thinking") if with_reason else False
+    api._current_turn_id_or_unknown = lambda: "turn-inspect-interaction-bypass"
+
+    result = asyncio.run(api._inspect_current_view_tool(recenter=False))
+
+    assert result["status"] == "ok"
+    assert result["blocked_reason"] == "none"
+
+
+def test_inspect_current_view_tool_interaction_state_bypass_reaches_wait_path_without_pending_frame() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    api._fresh_look_wait_timeout_s = 0.03
+    api.is_ready_for_injections = lambda with_reason=False: (False, "interaction_state=thinking") if with_reason else False
+    api._current_turn_id_or_unknown = lambda: "turn-inspect-interaction-wait-path"
+
+    result = asyncio.run(api._inspect_current_view_tool(recenter=False))
+
+    assert result["status"] == "timeout"
+    assert result["blocked_reason"] == "timeout"
+
+
+@pytest.mark.parametrize(
+    "ready_reason",
+    [
+        "ready_event_not_set",
+        "websocket_unavailable",
+        "loop_unavailable",
+        "loop_not_running",
+        "awaiting_confirmation_policy",
+    ],
+)
+def test_explicit_inspect_gating_still_blocks_transport_and_policy_not_ready(ready_reason: str) -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    state = api._fresh_look_state_for_turn(turn_id="turn-explicit-blocked")
+    state["visual_actuator"] = "explicit_inspect"
+    state["visual_intent_class"] = "explicit_inspect"
+    api.is_ready_for_injections = lambda with_reason=False: (False, ready_reason) if with_reason else False
+
+    allowed, reason = api._fresh_look_gating_decision(turn_id="turn-explicit-blocked")
+
+    assert allowed is False
+    assert reason == "injection_not_ready"
+
+
+def test_explicit_inspect_gating_allows_response_in_progress() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    state = api._fresh_look_state_for_turn(turn_id="turn-explicit-rip")
+    state["visual_actuator"] = "explicit_inspect"
+    state["visual_intent_class"] = "explicit_inspect"
+    api.is_ready_for_injections = lambda with_reason=False: (False, "response_in_progress") if with_reason else False
+
+    allowed, reason = api._fresh_look_gating_decision(turn_id="turn-explicit-rip")
+
+    assert allowed is True
+    assert reason == "allow"
+
+
+def test_non_explicit_fresh_look_still_blocks_on_interaction_state() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    api.is_ready_for_injections = lambda with_reason=False: (False, "interaction_state=thinking") if with_reason else False
+
+    allowed, reason = api._fresh_look_gating_decision(turn_id="turn-heuristic")
+
+    assert allowed is False
+    assert reason == "injection_not_ready"
+
+
 def test_inspect_current_view_recenter_uses_existing_motion_tool() -> None:
     api = _build_api(camera=_CameraStub(pending_images=[object()]))
     api.is_ready_for_injections = lambda with_reason=False: (True, "ready") if with_reason else True

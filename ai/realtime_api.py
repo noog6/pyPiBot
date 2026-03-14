@@ -9188,7 +9188,7 @@ class RealtimeAPI:
             return camera
         return None
 
-    def _fresh_look_gating_decision(self, *, turn_id: str) -> tuple[bool, str]:
+    def _fresh_look_gating_decision(self, *, turn_id: str, visual_actuator: str = "heuristic_fresh_look") -> tuple[bool, str]:
         if not bool(getattr(self, "_fresh_look_enabled", False)):
             return False, "disabled"
         camera = self._resolve_camera_controller()
@@ -9209,7 +9209,24 @@ class RealtimeAPI:
         if cooldown_s > 0 and isinstance(last_request, (int, float)) and (now - float(last_request)) < cooldown_s:
             return False, "cooldown"
         ready, ready_reason = self.is_ready_for_injections(with_reason=True)
-        if not ready and ready_reason != "response_in_progress":
+        if not ready:
+            if ready_reason == "response_in_progress":
+                return True, "allow"
+            state = self._fresh_look_state_for_turn(turn_id=turn_id)
+            explicit_inspect_owner = (
+                str(visual_actuator or "").strip().lower() == "explicit_inspect"
+                or str(state.get("visual_actuator") or "").strip().lower() == "explicit_inspect"
+                or str(state.get("visual_intent_class") or "").strip().lower() == "explicit_inspect"
+            )
+            if explicit_inspect_owner and str(ready_reason).startswith("interaction_state="):
+                logger.info(
+                    "fresh_look_interaction_state_bypass run_id=%s turn_id=%s visual_actuator=%s ready_reason=%s",
+                    self._current_run_id() or "",
+                    turn_id,
+                    str(visual_actuator or state.get("visual_actuator") or "none").strip().lower() or "none",
+                    str(ready_reason),
+                )
+                return True, "allow"
             return False, "injection_not_ready"
         return True, "allow"
 
@@ -9353,7 +9370,10 @@ class RealtimeAPI:
             int(pre_gate_vision_state.get("queued_frame_count") or 0),
             pre_gate_vision_state.get("last_frame_age_ms"),
         )
-        allowed, gate_reason = self._fresh_look_gating_decision(turn_id=turn_id)
+        allowed, gate_reason = self._fresh_look_gating_decision(
+            turn_id=turn_id,
+            visual_actuator=normalized_visual_actuator,
+        )
         reason_detail = self._fresh_look_gating_reason_detail(
             turn_id=turn_id,
             gate_reason=gate_reason,
