@@ -78,9 +78,6 @@ class ResponseTerminalHandlers:
         reply_text = api._assistant_reply_text_for_response(response_id) if response_id else str(api.assistant_reply or "")
 
         if reply_text:
-            active_metadata = getattr(api, "_active_response_metadata", {})
-            if not isinstance(active_metadata, dict):
-                active_metadata = {}
             active_input_event_key = str(getattr(api, "_active_response_input_event_key", "") or "").strip()
             snapshot = getattr(api, "_utterance_trust_snapshot_by_input_event_key", {}).get(active_input_event_key, {})
             transcript_text = str(snapshot.get("transcript_text") or "")
@@ -109,71 +106,6 @@ class ResponseTerminalHandlers:
                     api.response_in_progress = False
                     return
             normalized_reply = api._normalize_memory_recall_answer(reply_text)
-            trigger = str(active_metadata.get("trigger") or "").strip().lower()
-            reason = str(active_metadata.get("reason") or "").strip().lower()
-            clarify_mode = str(active_metadata.get("clarify_mode") or "").strip().lower()
-            if trigger == "asr_verify_on_risk" and reason == "visual_unavailable" and clarify_mode == "bounded":
-                expected = api._normalize_verify_clarify_message(
-                    message=normalized_reply,
-                    metadata=active_metadata,
-                )
-                logger.info(
-                    "bounded_visual_clarify_expected_vs_final run_id=%s turn_id=%s expected_message=%r final_message=%r",
-                    api._current_run_id() or "",
-                    str(active_metadata.get("turn_id") or api._current_turn_id_or_unknown()),
-                    expected,
-                    normalized_reply,
-                )
-                normalized_reply = expected
-            turn_id = str(active_metadata.get("turn_id") or api._current_turn_id_or_unknown())
-            trigger = str(active_metadata.get("trigger") or "").strip().lower()
-            fresh_state = api._fresh_look_state_for_turn(turn_id=turn_id)
-            visual_actuator, visual_intent_class = api._resolve_visual_ownership_for_turn(
-                turn_id=turn_id,
-                response_metadata=active_metadata,
-                seam="terminal_done",
-            )
-            is_visual_turn = bool(snapshot.get("visual_question", False)) or (
-                trigger == "asr_verify_on_risk" and reason == "visual_unavailable"
-            ) or bool(fresh_state.get("requested", False))
-            if is_visual_turn:
-                provenance = api._classify_visual_answer_provenance(
-                    turn_id=turn_id,
-                    vision_state=api.get_vision_state(),
-                )
-                logger.info(
-                    "visual_answer_provenance_final run_id=%s turn_id=%s mode=%s visual_actuator=%s visual_intent_class=%s",
-                    api._current_run_id() or "",
-                    turn_id,
-                    provenance,
-                    visual_actuator,
-                    visual_intent_class,
-                )
-            logger.info(
-                "visual_actuator_final run_id=%s turn_id=%s visual_actuator=%s visual_intent_class=%s",
-                api._current_run_id() or "",
-                turn_id,
-                visual_actuator,
-                visual_intent_class,
-            )
-            explicit_inspect_status = api._explicit_inspect_status_for_turn(turn_id=turn_id)
-            has_explicit_inspect_result = api._turn_has_inspect_current_view_tool_result(turn_id=turn_id)
-            explicit_inspect_parent_final_allowed = (
-                explicit_inspect_status == "ok" and has_explicit_inspect_result
-            )
-            if visual_actuator == "explicit_inspect" and not explicit_inspect_parent_final_allowed:
-                normalized_reply = api._visual_unavailable_clarify_text_for_turn(
-                    turn_id=turn_id,
-                    vision_state=api.get_vision_state(),
-                )
-                logger.info(
-                    "explicit_inspect_terminal_answer_blocked run_id=%s turn_id=%s inspect_status=%s has_inspect_result=%s allow_parent_normal_final=%s action=bounded_clarify",
-                    api._current_run_id() or "",
-                    turn_id,
-                    explicit_inspect_status,
-                    str(has_explicit_inspect_result).lower(),
-                    str(explicit_inspect_parent_final_allowed).lower(),
-                )
             log_info(f"Assistant Response: {normalized_reply}", style="bold blue")
             if response_id:
                 per_response = getattr(api, "_assistant_reply_by_response_id", None)

@@ -179,11 +179,6 @@ realtime:
     strict: false
     regression_warning_threshold: 3
     debug_samples: false
-  fresh_look:
-    enabled: true
-    cooldown_s: 8.0
-    wait_timeout_s: 1.0
-    motion_settle_extension_s: 1.5
   curiosity:
     enabled: true
     max_recent_candidates: 24
@@ -302,20 +297,6 @@ governance:
   #   sensitivity: LOW | MEDIUM | HIGH
   #   default_confirmation: NEVER | ASK | ALWAYS
   tool_specs:
-    inspect_current_view:
-      tier: 1
-      reversible: true
-      cost_hint: "cheap"
-      safety_tags: ["vision", "camera"]
-      confirm_required: false
-      confirm_reason: "explicit visual inspect request"
-      confirm_prompt: null
-      cooldown_seconds: 0
-      dry_run_supported: false
-      governance_tier: "GUARDED"
-      side_effects: "NONE"
-      sensitivity: "LOW"
-      default_confirmation: "ASK"
     read_battery_voltage:
       tier: 0
       reversible: true

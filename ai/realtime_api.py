@@ -67,7 +67,7 @@ from ai.realtime.research_runtime import ResearchRuntime
 from ai.realtime.response_create_runtime import ResponseCreateRuntime
 from ai.realtime.response_lifecycle import ResponseLifecycleTracker
 from ai.realtime.response_terminal_handlers import ResponseTerminalHandlers
-from ai.realtime.asr_trust import build_utterance_trust_snapshot, is_current_visual_question, should_clarify
+from ai.realtime.asr_trust import build_utterance_trust_snapshot, should_clarify
 from ai.curiosity_engine import CuriosityEngine
 from ai.opportunistic_arbitration import (
     OpportunisticActionCandidate,
@@ -657,7 +657,6 @@ class RealtimeAPI:
         self._assistant_reply_accum = ""
         self._assistant_reply_response_id: str | None = None
         self._assistant_reply_by_response_id: dict[str, str] = {}
-        self._active_response_metadata: dict[str, Any] = {}
         self._audio_accum = bytearray()
         self._audio_accum_response_id: str | None = None
         self._audio_accum_bytes_target = 9600
@@ -692,8 +691,6 @@ class RealtimeAPI:
         }
         self.response_start_time: float | None = None
         self.websocket = None
-        self.camera_controller = None
-        self.camera_instance = None
         self.profile_manager = ProfileManager.get_instance()
         self._memory_manager = MemoryManager.get_instance()
         self.state_manager = InteractionStateManager()
@@ -993,7 +990,6 @@ class RealtimeAPI:
         self._research_suppressed_fingerprints: dict[str, str] = {}
         self._research_pending_call_ids: set[str] = set()
         self._deferred_research_tool_call: dict[str, Any] | None = None
-        self._deferred_provisional_tool_call_by_turn_id: dict[str, dict[str, Any]] = {}
         self._tool_call_dedupe_ttl_s = float(research_cfg.get("tool_call_dedupe_ttl_s", 30.0))
         self._research_spoken_response_dedupe_ttl_s = float(
             research_cfg.get("spoken_response_dedupe_ttl_s", 60.0)
@@ -1071,7 +1067,6 @@ class RealtimeAPI:
         }
         self._response_gating_verdict_by_input_event_key: dict[str, ResponseGatingVerdict] = {}
         self._latest_partial_transcript_by_turn_id: dict[str, str] = {}
-        self._latest_final_transcript_by_turn_id: dict[str, str] = {}
         self._server_auto_audio_waiters_by_turn_id: dict[str, asyncio.Event] = {}
         self._server_auto_audio_defer_tasks_by_turn_id: dict[str, asyncio.Task[Any]] = {}
         self._server_auto_pre_audio_hold_by_turn_id: dict[str, ServerAutoPreAudioHoldRecord] = {}
@@ -1167,17 +1162,6 @@ class RealtimeAPI:
         self._asr_clarify_count_by_turn: dict[str, int] = {}
         self._asr_clarify_asked_input_event_keys: set[str] = set()
         self._utterance_trust_snapshot_by_input_event_key: dict[str, dict[str, Any]] = {}
-        fresh_look_cfg = (realtime_cfg.get("fresh_look") or {}) if isinstance(realtime_cfg, dict) else {}
-        self._fresh_look_enabled = bool(fresh_look_cfg.get("enabled", True))
-        self._fresh_look_cooldown_s = max(0.0, float(fresh_look_cfg.get("cooldown_s", 8.0)))
-        self._fresh_look_wait_timeout_s = max(0.1, float(fresh_look_cfg.get("wait_timeout_s", 1.0)))
-        self._fresh_look_motion_settle_extension_s = min(
-            2.0,
-            max(0.1, float(fresh_look_cfg.get("motion_settle_extension_s", 1.5))),
-        )
-        self._last_fresh_look_request_at_monotonic: float | None = None
-        self._last_fresh_look_completed_at_monotonic: float | None = None
-        self._fresh_look_by_turn_id: dict[str, dict[str, Any]] = {}
         curiosity_cfg = realtime_cfg.get("curiosity") or {}
         self._curiosity_engine = CuriosityEngine(
             enabled=bool(curiosity_cfg.get("enabled", True)),
@@ -5684,45 +5668,6 @@ class RealtimeAPI:
             return False
         return self._server_auto_pre_audio_hold_active(turn_id=turn_id, response_id=active_response_id)
 
-    def _record_deferred_provisional_tool_call(self, *, turn_id: str, function_name: str, call_id: str, args: dict[str, Any]) -> None:
-        normalized_turn_id = str(turn_id or "").strip()
-        if not normalized_turn_id:
-            return
-        store = getattr(self, "_deferred_provisional_tool_call_by_turn_id", None)
-        if not isinstance(store, dict):
-            store = {}
-            self._deferred_provisional_tool_call_by_turn_id = store
-        store[normalized_turn_id] = {
-            "function_name": str(function_name or "").strip(),
-            "call_id": str(call_id or "").strip(),
-            "args": dict(args or {}),
-        }
-
-    async def _resume_deferred_provisional_tool_call_for_turn(self, *, turn_id: str, websocket: Any) -> bool:
-        normalized_turn_id = str(turn_id or "").strip()
-        if not normalized_turn_id:
-            return False
-        store = getattr(self, "_deferred_provisional_tool_call_by_turn_id", None)
-        if not isinstance(store, dict):
-            return False
-        pending = store.pop(normalized_turn_id, None)
-        if not isinstance(pending, dict):
-            return False
-        function_name = str(pending.get("function_name") or "").strip()
-        call_id = str(pending.get("call_id") or "").strip()
-        args = pending.get("args") if isinstance(pending.get("args"), dict) else {}
-        if function_name != "inspect_current_view" or not call_id:
-            return False
-        logger.info(
-            "provisional_tool_call_resumed run_id=%s turn_id=%s tool=%s call_id=%s",
-            self._current_run_id() or "",
-            normalized_turn_id,
-            function_name,
-            call_id,
-        )
-        await self.execute_function_call(function_name, call_id, dict(args), websocket)
-        return True
-
     def _is_cancelled_response_event(self, event: dict[str, Any]) -> bool:
         response_id = self._response_id_from_event(event)
         return self._response_status(response_id) == "cancelled"
@@ -6827,10 +6772,6 @@ class RealtimeAPI:
     def _tool_followup_input_event_key(self, *, call_id: str) -> str:
         return f"tool:{str(call_id or '').strip() or 'unknown'}"
 
-    def _explicit_inspect_obligation_followup_input_event_key(self, *, call_id: str) -> str:
-        normalized_call_id = str(call_id or "").strip() or "unknown"
-        return f"obligation_followup:{normalized_call_id}"
-
     def _tool_followup_state(self, *, canonical_key: str) -> str:
         normalized_canonical_key = str(canonical_key or "").strip()
         if not normalized_canonical_key:
@@ -7072,11 +7013,6 @@ class RealtimeAPI:
                 "Do not restate or re-answer semantic memory/preferences content already covered by the parent response. "
                 "Do not narrate environment/vision context in gesture-only followups."
             )
-        if self._is_fresh_look_motion_service_gesture_tool(tool_name=normalized_tool_name):
-            metadata["service_motion_candidate"] = "true"
-            if self._turn_has_inspect_current_view_tool_result(turn_id=turn_id):
-                metadata["service_motion_for_visual_actuator"] = "explicit_inspect"
-                metadata["service_motion_semantic_owner"] = "inspect_current_view"
         if tool_result_has_distinct_info:
             metadata["tool_result_has_distinct_info"] = "true"
         canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_input_event_key)
@@ -7242,15 +7178,6 @@ class RealtimeAPI:
         blocked_by_response_id: str | None,
     ) -> tuple[bool, tuple[str, CanonicalResponseState] | None, str]:
         suppressible = str(response_metadata.get("tool_followup_suppress_if_parent_covered", "")).strip().lower() in {"true", "1", "yes"}
-        turn_id = str(response_metadata.get("turn_id") or "").strip()
-        service_motion_candidate = str(response_metadata.get("service_motion_candidate") or "").strip().lower() in {"true", "1", "yes"}
-        if service_motion_candidate and turn_id and self._turn_has_inspect_current_view_tool_result(turn_id=turn_id):
-            logger.info(
-                "tool_followup_service_motion_suppressed run_id=%s turn_id=%s semantic_owner=inspect_current_view",
-                self._current_run_id() or "",
-                turn_id,
-            )
-            return True, None, "service_motion_for_explicit_inspect"
         tool_name = str(response_metadata.get("tool_name") or "").strip().lower()
         has_distinct_info = str(response_metadata.get("tool_result_has_distinct_info", "")).strip().lower() in {"true", "1", "yes"}
         if not suppressible:
@@ -7417,28 +7344,13 @@ class RealtimeAPI:
             and not bool(transcript_final_seen)
         ):
             return False, "provisional_server_auto_awaiting_transcript_final"
-        origin_normalized = str(origin or "").strip().lower()
-        pending_tool_followup = self._turn_has_pending_tool_followup(turn_id=turn_id)
-        if origin_normalized == "server_auto" and pending_tool_followup:
+        if (
+            str(origin or "").strip().lower() == "server_auto"
+            and self._turn_has_pending_tool_followup(turn_id=turn_id)
+        ):
             return False, "tool_followup_precedence"
         if self._turn_contract_exact_phrase_open(turn_id=turn_id):
             return False, "exact_phrase_obligation_open"
-        visual_actuator, _ = self._resolve_visual_ownership_for_turn(turn_id=turn_id, seam="response_done_selection")
-        if visual_actuator == "explicit_inspect" and pending_tool_followup:
-            return False, "tool_followup_precedence"
-        explicit_status = self._explicit_inspect_status_for_turn(turn_id=turn_id)
-        has_inspect_result = self._turn_has_inspect_current_view_tool_result(turn_id=turn_id)
-        explicit_inspect_parent_final_allowed = explicit_status == "ok" and has_inspect_result
-        if visual_actuator == "explicit_inspect" and not explicit_inspect_parent_final_allowed:
-            logger.info(
-                "explicit_inspect_deliverable_selection_blocked run_id=%s turn_id=%s inspect_status=%s has_inspect_result=%s allow_parent_normal_final=%s action=block_normal_final",
-                self._current_run_id() or "",
-                turn_id,
-                explicit_status,
-                str(has_inspect_result).lower(),
-                str(explicit_inspect_parent_final_allowed).lower(),
-            )
-            return False, "explicit_inspect_missing_evidence"
         return True, "normal"
 
     def _terminal_deliverable_selection_store(self) -> dict[str, dict[str, Any]]:
@@ -8943,661 +8855,9 @@ class RealtimeAPI:
 
         tasks[turn_id] = asyncio.create_task(_wait_for_upgrade_decision())
 
-    def _fresh_look_state_for_turn(self, *, turn_id: str) -> dict[str, Any]:
-        store = getattr(self, "_fresh_look_by_turn_id", None)
-        if not isinstance(store, dict):
-            store = {}
-            self._fresh_look_by_turn_id = store
-        if turn_id not in store:
-            store[turn_id] = {
-                "requested": False,
-                "completed": False,
-                "blocked_reason": "none",
-                "visual_answer_mode": "unavailable",
-                "last_fresh_capture_age_ms": None,
-                "is_current_visual_turn": False,
-                "motion_requested_at_monotonic": None,
-                "motion_settle_extension_used": False,
-                "extended_deadline_until_monotonic": None,
-                "eligible_motion_tool_name": None,
-                "claimed_pending_frame": False,
-                "evidence_source": None,
-                "visual_actuator": "none",
-                "visual_intent_class": "none",
-                "explicit_inspect_status": "none",
-                "visual_owner_frozen": False,
-                "explicit_inspect_obligation_dispatched": False,
-                "explicit_inspect_obligation_call_id": "",
-                "explicit_inspect_obligation_dispatched_at_monotonic": None,
-            }
-        return store[turn_id]
-
-    def _explicit_inspect_retry_override_requested(self, *, args: dict[str, Any]) -> bool:
-        if not isinstance(args, dict):
-            return False
-        return bool(args.get("retry") or args.get("explicit_retry") or args.get("retry_explicit_inspect"))
-
-    def _should_suppress_duplicate_model_explicit_inspect(
-        self,
-        *,
-        turn_id: str,
-        function_name: str,
-        args: dict[str, Any],
-    ) -> bool:
-        if str(function_name or "").strip().lower() != "inspect_current_view":
-            return False
-        if self._explicit_inspect_retry_override_requested(args=args):
-            return False
-        state = self._fresh_look_state_for_turn(turn_id=turn_id)
-        return bool(state.get("explicit_inspect_obligation_dispatched", False))
-
-    def _explicit_inspect_status_for_turn(self, *, turn_id: str) -> str:
-        state = self._fresh_look_state_for_turn(turn_id=turn_id)
-        explicit_status = str(state.get("explicit_inspect_status") or "none").strip().lower() or "none"
-        if explicit_status in {"ok", "blocked", "timeout", "unavailable"}:
-            return explicit_status
-        if str(state.get("visual_actuator") or "").strip().lower() != "explicit_inspect":
-            return "none"
-        if bool(state.get("completed", False)):
-            return "ok"
-        blocked_reason = str(state.get("blocked_reason") or "none").strip().lower()
-        if blocked_reason == "timeout":
-            return "timeout"
-        if blocked_reason in {"camera_missing", "camera_loop_inactive"}:
-            return "unavailable"
-        if blocked_reason != "none":
-            return "blocked"
-        return "none"
-
-    def _explicit_inspect_failed_for_turn(self, *, turn_id: str) -> bool:
-        return self._explicit_inspect_status_for_turn(turn_id=turn_id) in {"blocked", "timeout", "unavailable"}
-
-    def _prefer_explicit_inspect_owner_for_turn(self, *, turn_id: str, transcript: str, seam: str) -> bool:
-        normalized_transcript = " ".join((transcript or "").split())
-        explicit_visual_question = is_current_visual_question(normalized_transcript)
-        if not explicit_visual_question:
-            logger.info(
-                "visual_question_classification_miss run_id=%s turn_id=%s seam=%s transcript=%r",
-                self._current_run_id() or "",
-                turn_id,
-                seam,
-                normalized_transcript[:160],
-            )
-            return False
-        logger.info(
-            "visual_question_classified_explicit run_id=%s turn_id=%s seam=%s transcript=%r",
-            self._current_run_id() or "",
-            turn_id,
-            seam,
-            normalized_transcript[:160],
-        )
-        fresh_state = self._fresh_look_state_for_turn(turn_id=turn_id)
-        visual_actuator, _ = self._resolve_visual_ownership_for_turn(turn_id=turn_id, seam=f"{seam}_eval")
-        explicit_status = self._explicit_inspect_status_for_turn(turn_id=turn_id)
-        if visual_actuator == "explicit_inspect":
-            logger.info(
-                "visual_ownership_preserved_frozen run_id=%s turn_id=%s seam=%s inspect_status=%s",
-                self._current_run_id() or "",
-                turn_id,
-                seam,
-                explicit_status,
-            )
-            return True
-        if explicit_status in {"blocked", "timeout", "unavailable"}:
-            logger.info(
-                "explicit_inspect_preference_skipped_failed run_id=%s turn_id=%s seam=%s inspect_status=%s",
-                self._current_run_id() or "",
-                turn_id,
-                seam,
-                explicit_status,
-            )
-            return False
-        fresh_state["visual_actuator"] = "explicit_inspect"
-        fresh_state["visual_intent_class"] = "explicit_inspect"
-        fresh_state["visual_owner_frozen"] = True
-        if str(fresh_state.get("explicit_inspect_status") or "none").strip().lower() == "none":
-            fresh_state["explicit_inspect_status"] = "pending"
-        logger.info(
-            "visual_ownership_frozen run_id=%s turn_id=%s seam=%s prior_visual_actuator=%s",
-            self._current_run_id() or "",
-            turn_id,
-            seam,
-            visual_actuator,
-        )
-        logger.info(
-            "explicit_inspect_preferred_owner_set run_id=%s turn_id=%s seam=%s prior_visual_actuator=%s",
-            self._current_run_id() or "",
-            turn_id,
-            seam,
-            visual_actuator,
-        )
-        return True
-
-    def _turn_has_inspect_current_view_tool_result(self, *, turn_id: str) -> bool:
-        normalized_turn_id = str(turn_id or "").strip()
-        if not normalized_turn_id:
-            return False
-        for record in reversed(getattr(self, "_tool_call_records", []) or []):
-            if not isinstance(record, dict):
-                continue
-            if str(record.get("turn_id") or "").strip() != normalized_turn_id:
-                continue
-            if str(record.get("name") or "").strip().lower() == "inspect_current_view":
-                return True
-        return False
-
-    def _latest_transcript_for_turn(self, *, turn_id: str) -> str:
-        transcripts_by_turn = getattr(self, "_latest_final_transcript_by_turn_id", None)
-        if isinstance(transcripts_by_turn, dict):
-            transcript = str(transcripts_by_turn.get(str(turn_id or "").strip()) or "").strip()
-            if transcript:
-                return transcript
-        return str(getattr(self, "_last_user_input_text", "") or "")
-
-    @staticmethod
-    def _normalize_visual_ownership(
-        *,
-        visual_actuator: str | None,
-        visual_intent_class: str | None,
-    ) -> tuple[str, str]:
-        normalized_visual_actuator = str(visual_actuator or "none").strip().lower() or "none"
-        if normalized_visual_actuator not in {"explicit_inspect", "heuristic_fresh_look", "none"}:
-            normalized_visual_actuator = "none"
-        normalized_visual_intent_class = str(visual_intent_class or "none").strip().lower() or "none"
-        if normalized_visual_intent_class not in {"explicit_inspect", "fallback_visual_question", "none"}:
-            normalized_visual_intent_class = "none"
-        return normalized_visual_actuator, normalized_visual_intent_class
-
-    def _resolve_visual_ownership_for_turn(
-        self,
-        *,
-        turn_id: str,
-        response_metadata: dict[str, Any] | None = None,
-        seam: str | None = None,
-    ) -> tuple[str, str]:
-        metadata = response_metadata if isinstance(response_metadata, dict) else {}
-        metadata_actuator, metadata_intent_class = self._normalize_visual_ownership(
-            visual_actuator=metadata.get("visual_actuator"),
-            visual_intent_class=metadata.get("visual_intent_class"),
-        )
-        fresh_state = self._fresh_look_state_for_turn(turn_id=turn_id)
-        state_actuator, state_intent_class = self._normalize_visual_ownership(
-            visual_actuator=fresh_state.get("visual_actuator"),
-            visual_intent_class=fresh_state.get("visual_intent_class"),
-        )
-        metadata_owned = metadata_actuator != "none" or metadata_intent_class != "none"
-        state_owned = state_actuator != "none" or state_intent_class != "none"
-        source = (
-            "merged"
-            if metadata_owned and state_owned
-            else "metadata"
-            if metadata_owned
-            else "turn_state"
-            if state_owned
-            else "none"
-        )
-        resolved_actuator = metadata_actuator if metadata_actuator != "none" else state_actuator
-        resolved_intent_class = metadata_intent_class if metadata_intent_class != "none" else state_intent_class
-        if resolved_actuator == "explicit_inspect":
-            resolved_intent_class = "explicit_inspect"
-        elif resolved_intent_class == "explicit_inspect":
-            resolved_actuator = "explicit_inspect"
-        if resolved_actuator == "none" and resolved_intent_class != "none":
-            resolved_actuator = "heuristic_fresh_look"
-        if resolved_intent_class == "none" and resolved_actuator == "heuristic_fresh_look":
-            resolved_intent_class = "fallback_visual_question"
-        owner_frozen = bool(fresh_state.get("visual_owner_frozen", False))
-        if owner_frozen and state_actuator == "explicit_inspect" and resolved_actuator != "explicit_inspect":
-            logger.info(
-                "visual_ownership_preserved_frozen run_id=%s turn_id=%s seam=%s candidate_visual_actuator=%s candidate_visual_intent_class=%s",
-                self._current_run_id() or "",
-                turn_id,
-                str(seam or ""),
-                resolved_actuator,
-                resolved_intent_class,
-            )
-            resolved_actuator = "explicit_inspect"
-            resolved_intent_class = "explicit_inspect"
-        if resolved_actuator != state_actuator or resolved_intent_class != state_intent_class:
-            fresh_state["visual_actuator"] = resolved_actuator
-            fresh_state["visual_intent_class"] = resolved_intent_class
-        if isinstance(response_metadata, dict):
-            response_metadata.setdefault("visual_actuator", resolved_actuator)
-            response_metadata.setdefault("visual_intent_class", resolved_intent_class)
-        normalized_seam = str(seam or "").strip().lower()
-        if normalized_seam in {"response_created", "replacement_scheduled", "verify_on_risk", "terminal_done"}:
-            logger.info(
-                "visual_ownership_resolved run_id=%s turn_id=%s visual_actuator=%s visual_intent_class=%s source=%s seam=%s",
-                self._current_run_id() or "",
-                turn_id,
-                resolved_actuator,
-                resolved_intent_class,
-                source,
-                normalized_seam,
-            )
-        return resolved_actuator, resolved_intent_class
-
-    @staticmethod
-    def _is_fresh_look_motion_service_gesture_tool(*, tool_name: str | None) -> bool:
-        normalized_tool_name = str(tool_name or "").strip().lower()
-        return normalized_tool_name in {
-            "gesture_look_center",
-            "gesture_look_left",
-            "gesture_look_right",
-            "gesture_look_up",
-            "gesture_look_down",
-            "gesture_look_around",
-        }
-
-    def _mark_fresh_look_motion_request_for_turn(
-        self,
-        *,
-        turn_id: str,
-        tool_name: str | None,
-        source: str = "unknown",
-    ) -> None:
-        normalized_turn_id = str(turn_id or "").strip()
-        if not normalized_turn_id:
-            return
-        if not self._is_fresh_look_motion_service_gesture_tool(tool_name=tool_name):
-            return
-        state = self._fresh_look_state_for_turn(turn_id=normalized_turn_id)
-        if not bool(state.get("requested", False)) or bool(state.get("completed", False)):
-            return
-        if not bool(state.get("is_current_visual_turn", False)):
-            return
-        first_motion_ts = state.get("motion_requested_at_monotonic")
-        is_first_observation = not isinstance(first_motion_ts, (int, float))
-        if is_first_observation:
-            first_motion_ts = time.monotonic()
-            state["motion_requested_at_monotonic"] = first_motion_ts
-        state["eligible_motion_tool_name"] = str(tool_name or "").strip().lower() or None
-        logger.info(
-            "fresh_look_motion_intent_observed run_id=%s turn_id=%s tool=%s source=%s motion_requested_at_monotonic=%.6f first_observation_preserved=%s",
-            self._current_run_id() or "",
-            normalized_turn_id,
-            state.get("eligible_motion_tool_name") or "unknown",
-            str(source or "unknown"),
-            float(first_motion_ts),
-            str(bool(not is_first_observation)).lower(),
-        )
-
-    def _resolve_camera_controller(self) -> Any:
-        camera = getattr(self, "camera_controller", None)
-        if camera is not None:
-            return camera
-        camera = getattr(self, "camera_instance", None)
-        if camera is not None:
-            return camera
-        return None
-
-    def _fresh_look_gating_decision(
-        self,
-        *,
-        turn_id: str,
-        visual_actuator: str = "heuristic_fresh_look",
-        allow_explicit_interaction_bypass: bool = True,
-    ) -> tuple[bool, str]:
-        if not bool(getattr(self, "_fresh_look_enabled", False)):
-            return False, "disabled"
-        camera = self._resolve_camera_controller()
-        if camera is None:
-            return False, "camera_missing"
-        if not bool(getattr(camera, "is_vision_loop_alive", lambda: True)()):
-            return False, "camera_loop_inactive"
-        pending = getattr(camera, "_pending_images", None)
-        if pending is not None:
-            try:
-                if len(pending) > 0:
-                    return True, "allow"
-            except Exception:
-                pass
-        now = time.monotonic()
-        cooldown_s = max(0.0, float(getattr(self, "_fresh_look_cooldown_s", 0.0) or 0.0))
-        last_request = getattr(self, "_last_fresh_look_request_at_monotonic", None)
-        if cooldown_s > 0 and isinstance(last_request, (int, float)) and (now - float(last_request)) < cooldown_s:
-            return False, "cooldown"
-        ready, ready_reason = self.is_ready_for_injections(with_reason=True)
-        if not ready:
-            if ready_reason == "response_in_progress":
-                return True, "allow"
-            state = self._fresh_look_state_for_turn(turn_id=turn_id)
-            explicit_inspect_owner = (
-                str(visual_actuator or "").strip().lower() == "explicit_inspect"
-                or str(state.get("visual_actuator") or "").strip().lower() == "explicit_inspect"
-                or str(state.get("visual_intent_class") or "").strip().lower() == "explicit_inspect"
-            )
-            if (
-                allow_explicit_interaction_bypass
-                and explicit_inspect_owner
-                and str(ready_reason).startswith("interaction_state=")
-            ):
-                logger.info(
-                    "fresh_look_interaction_state_bypass run_id=%s turn_id=%s visual_actuator=%s ready_reason=%s",
-                    self._current_run_id() or "",
-                    turn_id,
-                    str(visual_actuator or state.get("visual_actuator") or "none").strip().lower() or "none",
-                    str(ready_reason),
-                )
-                return True, "allow"
-            return False, "injection_not_ready"
-        return True, "allow"
-
-    def _fresh_look_gating_reason_detail(self, *, turn_id: str, gate_reason: str, vision_state: dict[str, Any]) -> str:
-        reason = str(gate_reason or "unknown").strip().lower()
-        legacy_bucket = self._fresh_look_legacy_reason_bucket(reason)
-        details = {
-            "camera_missing": "camera_controller_absent",
-            "camera_loop_inactive": "camera_loop_not_alive",
-            "cooldown": "fresh_look_cooldown_active",
-            "injection_not_ready": "injection_lane_not_ready",
-            "allow": "allow",
-        }
-        detail = details.get(reason, "unknown")
-        logger.info(
-            "fresh_look_gating_reason_detail run_id=%s turn_id=%s reason=%s legacy_bucket=%s detail=%s camera_active=%s can_capture=%s queued_frame_count=%s",
-            self._current_run_id() or "",
-            turn_id,
-            reason,
-            legacy_bucket,
-            detail,
-            str(bool(vision_state.get("camera_active", False))).lower(),
-            str(bool(vision_state.get("can_capture", False))).lower(),
-            int(vision_state.get("queued_frame_count") or 0),
-        )
-        return detail
-
-    def _fresh_look_legacy_reason_bucket(self, reason: str) -> str:
-        normalized = str(reason or "unknown").strip().lower()
-        if normalized in {"camera_missing", "camera_loop_inactive"}:
-            return "camera_unavailable"
-        return normalized
-
-    def _claim_one_pending_image_for_active_fresh_look(self, *, turn_id: str) -> tuple[bool, str]:
-        camera = self._resolve_camera_controller()
-        if camera is None:
-            return False, "camera_missing"
-
-        claim_one = getattr(camera, "claim_one_pending_image_for_active_fresh_look", None)
-        if callable(claim_one):
-            claimed_frame = claim_one()
-            if claimed_frame is None:
-                return False, "no_pending"
-            return True, "camera_claim_method"
-
-        pending = getattr(camera, "_pending_images", None)
-        if pending is None:
-            return False, "pending_queue_unavailable"
-
-        pending_lock = getattr(camera, "_pending_lock", None)
-        try:
-            if pending_lock is not None:
-                with pending_lock:
-                    if len(pending) <= 0:
-                        return False, "no_pending"
-                    pending.popleft()
-            else:
-                if len(pending) <= 0:
-                    return False, "no_pending"
-                pending.pop(0)
-        except Exception:
-            return False, "claim_error"
-        return True, "camera_pending_fallback"
-
-    def _classify_visual_answer_provenance(self, *, turn_id: str, vision_state: dict[str, Any]) -> str:
-        fresh_state = self._fresh_look_state_for_turn(turn_id=turn_id)
-        if bool(fresh_state.get("completed", False)):
-            return "fresh_current"
-        if int(vision_state.get("queued_frame_count") or 0) > 0:
-            return "ambient_recent"
-        last_age_ms = vision_state.get("last_frame_age_ms")
-        if isinstance(last_age_ms, int) and last_age_ms <= 5000:
-            return "ambient_recent"
-        if bool(vision_state.get("can_capture", False) or vision_state.get("camera_active", False)):
-            return "ambient_stale"
-        return "historical"
-
-    async def _attempt_fresh_look_for_turn(
-        self,
-        *,
-        turn_id: str,
-        initial_motion_tool_name: str | None = None,
-        visual_actuator: str = "heuristic_fresh_look",
-        visual_intent_class: str = "fallback_visual_question",
-    ) -> dict[str, Any]:
-        state = self._fresh_look_state_for_turn(turn_id=turn_id)
-        normalized_visual_actuator, normalized_visual_intent_class = self._normalize_visual_ownership(
-            visual_actuator=visual_actuator,
-            visual_intent_class=visual_intent_class,
-        )
-        if normalized_visual_actuator == "none":
-            normalized_visual_actuator = "heuristic_fresh_look"
-        if normalized_visual_intent_class == "none":
-            normalized_visual_intent_class = "fallback_visual_question"
-        state["requested"] = True
-        state["completed"] = False
-        state["blocked_reason"] = "none"
-        state["is_current_visual_turn"] = True
-        state["motion_requested_at_monotonic"] = None
-        state["motion_settle_extension_used"] = False
-        state["extended_deadline_until_monotonic"] = None
-        state["eligible_motion_tool_name"] = None
-        state["claimed_pending_frame"] = False
-        state["evidence_source"] = None
-        state["visual_actuator"] = normalized_visual_actuator
-        state["visual_intent_class"] = normalized_visual_intent_class
-        state["explicit_inspect_status"] = "none"
-        initial_motion_tool = str(initial_motion_tool_name or "").strip().lower() or None
-        if self._is_fresh_look_motion_service_gesture_tool(tool_name=initial_motion_tool):
-            state["motion_requested_at_monotonic"] = time.monotonic()
-            state["eligible_motion_tool_name"] = initial_motion_tool
-        logger.info(
-            "fresh_look_requested run_id=%s turn_id=%s reason=explicit_visual_question visual_actuator=%s visual_intent_class=%s",
-            self._current_run_id() or "",
-            turn_id,
-            normalized_visual_actuator,
-            normalized_visual_intent_class,
-        )
-        if normalized_visual_actuator == "explicit_inspect":
-            logger.info(
-                "visual_actuator_explicit_inspect_selected run_id=%s turn_id=%s visual_intent_class=%s",
-                self._current_run_id() or "",
-                turn_id,
-                normalized_visual_intent_class,
-            )
-        else:
-            logger.info(
-                "visual_actuator_heuristic_fallback_selected run_id=%s turn_id=%s visual_intent_class=%s",
-                self._current_run_id() or "",
-                turn_id,
-                normalized_visual_intent_class,
-            )
-        pre_gate_vision_state = self.get_vision_state()
-        logger.info(
-            "visual_state_snapshot_for_fresh_look run_id=%s turn_id=%s can_capture=%s camera_active=%s available=%s queued_frame_count=%s last_frame_age_ms=%s",
-            self._current_run_id() or "",
-            turn_id,
-            str(bool(pre_gate_vision_state.get("can_capture", False))).lower(),
-            str(bool(pre_gate_vision_state.get("camera_active", False))).lower(),
-            str(bool(pre_gate_vision_state.get("available", False))).lower(),
-            int(pre_gate_vision_state.get("queued_frame_count") or 0),
-            pre_gate_vision_state.get("last_frame_age_ms"),
-        )
-        allowed, gate_reason = self._fresh_look_gating_decision(
-            turn_id=turn_id,
-            visual_actuator=normalized_visual_actuator,
-        )
-        reason_detail = self._fresh_look_gating_reason_detail(
-            turn_id=turn_id,
-            gate_reason=gate_reason,
-            vision_state=pre_gate_vision_state,
-        )
-        legacy_bucket = self._fresh_look_legacy_reason_bucket(gate_reason)
-        logger.info(
-            "fresh_look_gating_decision run_id=%s turn_id=%s action=%s reason=%s legacy_bucket=%s detail=%s",
-            self._current_run_id() or "",
-            turn_id,
-            "allow" if allowed else "deny",
-            gate_reason,
-            legacy_bucket,
-            reason_detail,
-        )
-        if not allowed:
-            state["blocked_reason"] = gate_reason
-            state["visual_answer_mode"] = self._classify_visual_answer_provenance(
-                turn_id=turn_id,
-                vision_state=pre_gate_vision_state,
-            )
-            logger.info(
-                "fresh_look_fallback run_id=%s turn_id=%s reason=%s",
-                self._current_run_id() or "",
-                turn_id,
-                gate_reason,
-            )
-            return state
-
-        self._last_fresh_look_request_at_monotonic = time.monotonic()
-        logger.info(
-            "fresh_look_capture_started run_id=%s turn_id=%s",
-            self._current_run_id() or "",
-            turn_id,
-        )
-        base_deadline = time.monotonic() + max(0.1, float(getattr(self, "_fresh_look_wait_timeout_s", 1.0)))
-        deadline = base_deadline
-        logger.info(
-            "fresh_look_base_deadline run_id=%s turn_id=%s deadline_monotonic=%.6f",
-            self._current_run_id() or "",
-            turn_id,
-            base_deadline,
-        )
-        while True:
-            now = time.monotonic()
-            motion_ts = state.get("motion_requested_at_monotonic")
-            motion_before_base_timeout = isinstance(motion_ts, (int, float)) and float(motion_ts) <= float(base_deadline)
-            if (
-                motion_before_base_timeout
-                and bool(state.get("is_current_visual_turn", False))
-                and not bool(state.get("motion_settle_extension_used", False))
-            ):
-                extension_s = max(0.1, float(getattr(self, "_fresh_look_motion_settle_extension_s", 1.5) or 1.5))
-                deadline += extension_s
-                state["motion_settle_extension_used"] = True
-                state["extended_deadline_until_monotonic"] = deadline
-                logger.info(
-                    "fresh_look_motion_extension_applied run_id=%s turn_id=%s tool=%s extension_s=%.3f extended_deadline_monotonic=%.6f before_base_timeout_expired=%s observed_after_base_timeout=%s",
-                    self._current_run_id() or "",
-                    turn_id,
-                    state.get("eligible_motion_tool_name") or "unknown",
-                    extension_s,
-                    deadline,
-                    str(bool(motion_before_base_timeout)).lower(),
-                    str(bool(now > base_deadline)).lower(),
-                )
-
-            if now > deadline:
-                break
-
-            vision_state = self.get_vision_state()
-            evidence_source = None
-            if int(vision_state.get("queued_frame_count") or 0) > 0:
-                injection_ready, injection_reason = self.is_ready_for_injections(with_reason=True)
-                if not injection_ready and injection_reason == "response_in_progress":
-                    claimed, claim_source = self._claim_one_pending_image_for_active_fresh_look(turn_id=turn_id)
-                    if claimed:
-                        state["claimed_pending_frame"] = True
-                        evidence_source = claim_source
-                        logger.info(
-                            "fresh_look_pending_frame_claimed run_id=%s turn_id=%s source=%s",
-                            self._current_run_id() or "",
-                            turn_id,
-                            claim_source,
-                        )
-                else:
-                    evidence_source = "pending_queue_visible"
-            if evidence_source is not None:
-                completion_ts = time.monotonic()
-                self._last_fresh_look_completed_at_monotonic = completion_ts
-                state["completed"] = True
-                state["blocked_reason"] = "none"
-                state["visual_answer_mode"] = "fresh_current"
-                state["last_fresh_capture_age_ms"] = 0
-                state["evidence_source"] = evidence_source
-                if normalized_visual_actuator == "explicit_inspect":
-                    state["explicit_inspect_status"] = "ok"
-                capture_before_extended_timeout = True
-                if bool(state.get("motion_settle_extension_used", False)):
-                    extended_deadline = state.get("extended_deadline_until_monotonic")
-                    capture_before_extended_timeout = (
-                        isinstance(extended_deadline, (int, float)) and completion_ts <= float(extended_deadline)
-                    )
-                logger.info(
-                    "fresh_look_capture_completed run_id=%s turn_id=%s frame_id=%s age_ms=%s extension_used=%s capture_before_extended_timeout=%s",
-                    self._current_run_id() or "",
-                    turn_id,
-                    evidence_source,
-                    0,
-                    str(bool(state.get("motion_settle_extension_used", False))).lower(),
-                    str(bool(capture_before_extended_timeout)).lower(),
-                )
-                logger.info(
-                    "fresh_look_context_attached run_id=%s turn_id=%s source=fresh_frame",
-                    self._current_run_id() or "",
-                    turn_id,
-                )
-                logger.info(
-                    "visual_answer_provenance run_id=%s turn_id=%s mode=%s",
-                    self._current_run_id() or "",
-                    turn_id,
-                    state["visual_answer_mode"],
-                )
-                return state
-            await asyncio.sleep(0.05)
-
-        state["blocked_reason"] = "timeout"
-        if normalized_visual_actuator == "explicit_inspect":
-            state["explicit_inspect_status"] = "timeout"
-        state["visual_answer_mode"] = self._classify_visual_answer_provenance(
-            turn_id=turn_id,
-            vision_state=self.get_vision_state(),
-        )
-        logger.info(
-            "fresh_look_timeout run_id=%s turn_id=%s extension_used=%s extended_deadline_monotonic=%s",
-            self._current_run_id() or "",
-            turn_id,
-            str(bool(state.get("motion_settle_extension_used", False))).lower(),
-            state.get("extended_deadline_until_monotonic"),
-        )
-        logger.info(
-            "fresh_look_fallback run_id=%s turn_id=%s reason=%s",
-            self._current_run_id() or "",
-            turn_id,
-            "timeout",
-        )
-        logger.info(
-            "visual_answer_provenance run_id=%s turn_id=%s mode=%s",
-            self._current_run_id() or "",
-            turn_id,
-            state["visual_answer_mode"],
-        )
-        return state
-
-    def _visual_unavailable_clarify_text_for_turn(self, *, turn_id: str, vision_state: dict[str, Any]) -> str:
-        fresh_state = self._fresh_look_state_for_turn(turn_id=turn_id)
-        if bool(fresh_state.get("requested", False)) and not bool(fresh_state.get("completed", False)):
-            reason = str(fresh_state.get("blocked_reason") or "none")
-            if reason == "cooldown":
-                return "I can’t take a brand-new look yet because I just checked. I can answer from my most recent view or try again in a moment."
-            if reason == "injection_not_ready":
-                return "I can’t take a fresh look this instant because vision is busy. I can answer from my recent view or try again shortly."
-            if reason == "timeout":
-                return "I tried to take a fresh look, but the frame is still pending. I can answer from recent context or retry."
-            if reason in {"camera_missing", "camera_loop_inactive"}:
-                return "I can’t take a fresh look right now because the camera isn’t available."
-        return self._visual_unavailable_clarify_text(vision_state)
-
     def get_vision_state(self, now: float | None = None) -> dict[str, Any]:
         ts = time.monotonic() if now is None else float(now)
-        camera = self._resolve_camera_controller()
+        camera = getattr(self, "camera_controller", None)
         can_capture = bool(camera)
         camera_active = bool(can_capture and getattr(camera, "is_vision_loop_alive", lambda: True)())
         queued_frame_count = 0
@@ -9645,51 +8905,6 @@ class RealtimeAPI:
         if self._asr_clarify_count_by_turn.get(turn_id, 0) >= self._asr_verify_max_clarify_per_turn:
             return False
         vision_state = self.get_vision_state()
-        requires_fresh_look = is_current_visual_question(transcript)
-        if requires_fresh_look:
-            self._prefer_explicit_inspect_owner_for_turn(
-                turn_id=turn_id,
-                transcript=transcript,
-                seam="verify_on_risk",
-            )
-        fresh_state = self._fresh_look_state_for_turn(turn_id=turn_id)
-        visual_actuator, _ = self._resolve_visual_ownership_for_turn(turn_id=turn_id, seam="verify_on_risk")
-        explicit_inspect_owns_turn = visual_actuator == "explicit_inspect"
-        logger.info(
-            "fresh_look_trigger_eval run_id=%s turn_id=%s matched=%s transcript=%r",
-            self._current_run_id() or "",
-            turn_id,
-            str(bool(requires_fresh_look)).lower(),
-            " ".join((transcript or "").split())[:160],
-        )
-        if requires_fresh_look and explicit_inspect_owns_turn:
-            logger.info(
-                "visual_heuristic_fallback_skipped_explicit_owner run_id=%s turn_id=%s visual_actuator=explicit_inspect visual_intent_class=%s",
-                self._current_run_id() or "",
-                turn_id,
-                str(fresh_state.get("visual_intent_class") or "explicit_inspect"),
-            )
-        elif requires_fresh_look:
-            await self._attempt_fresh_look_for_turn(
-                turn_id=turn_id,
-                visual_actuator="heuristic_fresh_look",
-                visual_intent_class="fallback_visual_question",
-            )
-            vision_state = self.get_vision_state()
-            fresh_state = self._fresh_look_state_for_turn(turn_id=turn_id)
-            if bool(fresh_state.get("completed", False)):
-                logger.info(
-                    "visual_unavailable_clarify_suppressed_after_successful_fresh_capture run_id=%s turn_id=%s visual_actuator=%s",
-                    self._current_run_id() or "",
-                    turn_id,
-                    str(fresh_state.get("visual_actuator") or "heuristic_fresh_look"),
-                )
-        else:
-            logger.info(
-                "fresh_look_bypass_reason run_id=%s turn_id=%s reason=not_current_visual_question",
-                self._current_run_id() or "",
-                turn_id,
-            )
         fresh_frame_available = bool(
             isinstance(vision_state.get("last_frame_age_ms"), int)
             and int(vision_state["last_frame_age_ms"]) <= 5000
@@ -9719,39 +8934,6 @@ class RealtimeAPI:
             camera_available=bool(vision_state.get("available", False) or vision_state.get("can_capture", False)),
             camera_recent=fresh_frame_available,
         )
-        if bool(fresh_state.get("completed", False)) and reason == "visual_unavailable":
-            should_confirm = False
-            reason = "none"
-            logger.info(
-                "visual_unavailable_clarify_suppressed_after_successful_fresh_capture run_id=%s turn_id=%s visual_actuator=%s",
-                self._current_run_id() or "",
-                turn_id,
-                str(fresh_state.get("visual_actuator") or "heuristic_fresh_look"),
-            )
-        explicit_status = self._explicit_inspect_status_for_turn(turn_id=turn_id)
-        if explicit_inspect_owns_turn and explicit_status in {"none", "pending"} and not self._turn_has_inspect_current_view_tool_result(turn_id=turn_id):
-            self._set_response_gating_verdict(
-                turn_id=turn_id,
-                input_event_key=input_event_key,
-                action="ANSWER",
-                reason="explicit_inspect_pending",
-            )
-            logger.info(
-                "explicit_inspect_verify_clarify_deferred run_id=%s turn_id=%s inspect_status=%s reason=awaiting_inspect_outcome",
-                self._current_run_id() or "",
-                turn_id,
-                explicit_status,
-            )
-            return False
-        if explicit_inspect_owns_turn and explicit_status in {"blocked", "timeout", "unavailable"}:
-            should_confirm = True
-            reason = "visual_unavailable"
-            logger.info(
-                "explicit_inspect_authoritative_non_ok run_id=%s turn_id=%s inspect_status=%s action=force_visual_unavailable_clarify",
-                self._current_run_id() or "",
-                turn_id,
-                explicit_status,
-            )
         if not should_confirm:
             self._set_response_gating_verdict(
                 turn_id=turn_id,
@@ -9780,29 +8962,12 @@ class RealtimeAPI:
         self._clear_assistant_reply_buffers()
         clarify_key = f"{input_event_key}:clarify"
         clarify_text = (
-            self._visual_unavailable_clarify_text_for_turn(turn_id=turn_id, vision_state=vision_state)
+            self._visual_unavailable_clarify_text(vision_state)
             if reason == "visual_unavailable"
             else "I heard you, but I’m not sure what you mean yet. Could you be a bit more specific?"
             if reason in {"low_semantic_confidence", "short_utterance"}
             else f"Quick check: did you ask \"{snapshot.get('transcript_text') or transcript.strip()}\"?"
         )
-        if reason == "visual_unavailable":
-            logger.info(
-                "visual_clarify_text_selected run_id=%s turn_id=%s camera_active=%s message=%r",
-                self._current_run_id() or "",
-                turn_id,
-                str(bool(vision_state.get("camera_active", False) or vision_state.get("can_capture", False))).lower(),
-                clarify_text,
-            )
-            logger.info(
-                "camera_active_unavailable_consistency run_id=%s turn_id=%s blocked_reason=%s camera_active=%s can_capture=%s available=%s",
-                self._current_run_id() or "",
-                turn_id,
-                str(self._fresh_look_state_for_turn(turn_id=turn_id).get("blocked_reason") or "none"),
-                str(bool(vision_state.get("camera_active", False))).lower(),
-                str(bool(vision_state.get("can_capture", False))).lower(),
-                str(bool(vision_state.get("available", False))).lower(),
-            )
         if reason in {"low_semantic_confidence", "short_utterance"}:
             logger.info(
                 "short_utterance_policy_applied run_id=%s turn_id=%s input_event_key=%s reason=%s words=%s",
@@ -9828,7 +8993,6 @@ class RealtimeAPI:
                     input_event_key,
                     reason,
                 )
-        resolved_visual_actuator, resolved_visual_intent_class = self._resolve_visual_ownership_for_turn(turn_id=turn_id, seam="verify_on_risk")
         await self.send_assistant_message(
             clarify_text,
             websocket,
@@ -9837,8 +9001,6 @@ class RealtimeAPI:
                 "reason": reason,
                 "input_event_key": clarify_key,
                 "clarify_mode": "bounded",
-                "visual_actuator": resolved_visual_actuator,
-                "visual_intent_class": resolved_visual_intent_class,
             },
         )
         logger.info(
@@ -9893,23 +9055,7 @@ class RealtimeAPI:
         turn_id = str(metadata.get("turn_id") or self._current_turn_id_or_unknown())
         if self._has_camera_tool_result_for_turn(turn_id):
             return message
-        expected = self._visual_unavailable_clarify_text_for_turn(turn_id=turn_id, vision_state=self.get_vision_state())
-        if message != expected:
-            logger.info(
-                "visual_clarify_drift_detected run_id=%s turn_id=%s emitted_message=%r expected_message=%r",
-                self._current_run_id() or "",
-                turn_id,
-                message,
-                expected,
-            )
-        logger.info(
-            "bounded_visual_clarify_expected_vs_final run_id=%s turn_id=%s expected_message=%r final_message=%r",
-            self._current_run_id() or "",
-            turn_id,
-            expected,
-            message,
-        )
-        return expected
+        return self._visual_unavailable_clarify_text(self.get_vision_state())
 
     def _is_bounded_clarify_mode(self, metadata: dict[str, Any]) -> bool:
         trigger = str(metadata.get("trigger") or "").strip().lower()
@@ -9937,13 +9083,6 @@ class RealtimeAPI:
                 f"nothing else: {message!r}. Do not assert or describe any scene, objects, camera results, memory, "
                 "or inferred visual details. Do not add a second sentence, follow-on elaboration, or any extra text. "
                 "Keep the response short and non-assertive."
-            )
-            response_payload["tool_choice"] = "none"
-            logger.info(
-                "bounded_visual_clarify_enforced run_id=%s turn_id=%s exact_message=%r",
-                self._current_run_id() or "",
-                str(metadata.get("turn_id") or self._current_turn_id_or_unknown()),
-                message,
             )
             return response_create_event
         response_payload["instructions"] = (
@@ -13395,14 +12534,6 @@ class RealtimeAPI:
         log_info(f"response.created: origin={origin}")
         response = event.get("response") or {}
         response_metadata = response.get("metadata") if isinstance(response, dict) else None
-        self._active_response_metadata = dict(response_metadata) if isinstance(response_metadata, dict) else {}
-        metadata_visual_turn_id = str((response_metadata or {}).get("turn_id") or "").strip() if isinstance(response_metadata, dict) else ""
-        if metadata_visual_turn_id:
-            self._resolve_visual_ownership_for_turn(
-                turn_id=metadata_visual_turn_id,
-                response_metadata=self._active_response_metadata,
-                seam="response_created",
-            )
         metadata_turn_id = str(response_metadata.get("turn_id") or "").strip() if isinstance(response_metadata, dict) else ""
         metadata_input_event_key = str(response_metadata.get("input_event_key") or "").strip() if isinstance(response_metadata, dict) else ""
         metadata_upgrade_chain_id = str(response_metadata.get("upgrade_chain_id") or "").strip() if isinstance(response_metadata, dict) else ""
@@ -14106,9 +13237,6 @@ class RealtimeAPI:
         metadata["input_event_key"] = str(input_event_key or "").strip()
         metadata["safety_override"] = "true"
         metadata["transcript_upgrade_replacement"] = "true"
-        resolved_visual_actuator, resolved_visual_intent_class = self._resolve_visual_ownership_for_turn(turn_id=turn_id, seam="replacement_scheduled")
-        metadata["visual_actuator"] = resolved_visual_actuator
-        metadata["visual_intent_class"] = resolved_visual_intent_class
         normalized_memory_intent_subtype = str(memory_intent_subtype or "none").strip().lower() or "none"
         if normalized_memory_intent_subtype != "none":
             metadata["memory_intent_subtype"] = normalized_memory_intent_subtype
@@ -14162,126 +13290,6 @@ class RealtimeAPI:
         )
         return True
 
-    async def _maybe_dispatch_explicit_inspect_obligation(
-        self,
-        *,
-        websocket: Any,
-        turn_id: str,
-        input_event_key: str,
-    ) -> bool:
-        visual_actuator, _ = self._resolve_visual_ownership_for_turn(turn_id=turn_id, seam="transcript_final")
-        if visual_actuator != "explicit_inspect":
-            return False
-        explicit_status = self._explicit_inspect_status_for_turn(turn_id=turn_id)
-        if self._turn_has_inspect_current_view_tool_result(turn_id=turn_id):
-            logger.info(
-                "explicit_inspect_obligation_satisfied run_id=%s turn_id=%s inspect_status=%s",
-                self._current_run_id() or "",
-                turn_id,
-                explicit_status,
-            )
-            return False
-        if explicit_status not in {"none", "pending"}:
-            logger.info(
-                "explicit_inspect_obligation_non_executable run_id=%s turn_id=%s inspect_status=%s action=skip_auto_dispatch",
-                self._current_run_id() or "",
-                turn_id,
-                explicit_status,
-            )
-            return False
-
-        vision_state = self.get_vision_state()
-        gate_allowed, gate_reason = self._fresh_look_gating_decision(
-            turn_id=turn_id,
-            visual_actuator="heuristic_fresh_look",
-            allow_explicit_interaction_bypass=False,
-        )
-        if not gate_allowed:
-            state = self._fresh_look_state_for_turn(turn_id=turn_id)
-            state["blocked_reason"] = gate_reason
-            state["visual_answer_mode"] = self._classify_visual_answer_provenance(
-                turn_id=turn_id,
-                vision_state=vision_state,
-            )
-            if gate_reason in {"camera_missing", "camera_loop_inactive"}:
-                state["explicit_inspect_status"] = "unavailable"
-            else:
-                state["explicit_inspect_status"] = "blocked"
-            logger.info(
-                "explicit_inspect_obligation_deferred run_id=%s turn_id=%s inspect_status=%s gate_reason=%s",
-                self._current_run_id() or "",
-                turn_id,
-                explicit_status,
-                gate_reason,
-            )
-            clarify_text = self._visual_unavailable_clarify_text_for_turn(
-                turn_id=turn_id,
-                vision_state=vision_state,
-            )
-            logger.info(
-                "explicit_inspect_obligation_deterministic_clarify_emitted run_id=%s turn_id=%s reason=%s",
-                self._current_run_id() or "",
-                turn_id,
-                gate_reason,
-            )
-            await self.send_assistant_message(
-                clarify_text,
-                websocket,
-                response_metadata={
-                    "trigger": "asr_verify_on_risk",
-                    "reason": "visual_unavailable",
-                    "clarify_mode": "bounded",
-                    "turn_id": turn_id,
-                    "input_event_key": input_event_key,
-                    "visual_actuator": "explicit_inspect",
-                    "visual_intent_class": "explicit_inspect",
-                    "explicit_inspect_outcome": state["explicit_inspect_status"],
-                    "response_origin": "explicit_inspect_obligation_preflight",
-                },
-            )
-            return True
-
-        pending = self._pending_server_auto_response_for_turn(turn_id=turn_id)
-        if isinstance(pending, PendingServerAutoResponse) and pending.active and pending.response_id:
-            cancel_event = {"type": "response.cancel", "response_id": pending.response_id}
-            self._record_cancel_issued_timing(pending.response_id)
-            self._stale_response_ids().add(pending.response_id)
-            self._mark_pending_server_auto_response_cancelled(turn_id=turn_id, reason="explicit_inspect_obligation")
-            self._suppress_cancelled_response_audio(pending.response_id)
-            transport = self._get_or_create_transport()
-            await transport.send_json(websocket, cancel_event)
-            logger.info(
-                "explicit_inspect_obligation_cancelled_pending_response run_id=%s turn_id=%s response_id=%s",
-                self._current_run_id() or "",
-                turn_id,
-                pending.response_id,
-            )
-
-        obligation_call_id = self._normalize_realtime_call_id(
-            f"obl:{turn_id}:{input_event_key}:inspect_current_view"
-        )
-        logger.info(
-            "explicit_inspect_obligation_dispatch run_id=%s turn_id=%s inspect_status=%s call_id=%s",
-            self._current_run_id() or "",
-            turn_id,
-            explicit_status,
-            obligation_call_id,
-        )
-        state = self._fresh_look_state_for_turn(turn_id=turn_id)
-        state["explicit_inspect_obligation_dispatched"] = True
-        state["explicit_inspect_obligation_call_id"] = obligation_call_id
-        state["explicit_inspect_obligation_dispatched_at_monotonic"] = time.monotonic()
-        await self.execute_function_call(
-            "inspect_current_view",
-            obligation_call_id,
-            {},
-            websocket,
-            force_no_tools_followup=False,
-            inject_no_tools_instruction=False,
-            conversation_backed_call=False,
-        )
-        return True
-
     async def _handle_input_audio_transcription_completed_event(
         self,
         event: dict[str, Any],
@@ -14305,11 +13313,6 @@ class RealtimeAPI:
             active_by_turn = {}
             self._active_input_event_key_by_turn_id = active_by_turn
         active_by_turn[resolved_turn_id] = input_event_key
-        final_by_turn = getattr(self, "_latest_final_transcript_by_turn_id", None)
-        if not isinstance(final_by_turn, dict):
-            final_by_turn = {}
-            self._latest_final_transcript_by_turn_id = final_by_turn
-        final_by_turn[resolved_turn_id] = transcript or ""
         self._lifecycle_controller().on_transcript_final(
             self._canonical_utterance_key(turn_id=resolved_turn_id, input_event_key=input_event_key)
         )
@@ -14416,10 +13419,6 @@ class RealtimeAPI:
         turn_timestamps = turn_timestamps_store.setdefault(resolved_turn_id, {})
         turn_timestamps["transcript_final"] = time.monotonic()
         self._signal_server_auto_transcript_final(turn_id=resolved_turn_id)
-        await self._resume_deferred_provisional_tool_call_for_turn(
-            turn_id=resolved_turn_id,
-            websocket=websocket,
-        )
         partial_store = getattr(self, "_latest_partial_transcript_by_turn_id", None)
         if isinstance(partial_store, dict):
             partial_store.pop(resolved_turn_id, None)
@@ -14519,12 +13518,6 @@ class RealtimeAPI:
             if hasattr(self, "state_manager") and self.state_manager is not None:
                 self.state_manager.update_state(InteractionState.LISTENING, "empty transcript blocked")
             return
-        if transcript and not confirmation_active:
-            self._prefer_explicit_inspect_owner_for_turn(
-                turn_id=resolved_turn_id,
-                transcript=transcript,
-                seam="transcript_final",
-            )
         if transcript and not confirmation_active and await self._maybe_verify_on_risk_clarify(
             transcript=transcript,
             websocket=websocket,
@@ -14540,12 +13533,6 @@ class RealtimeAPI:
                 action="ANSWER",
                 reason="transcript_final",
             )
-        if transcript and not confirmation_active and await self._maybe_dispatch_explicit_inspect_obligation(
-            websocket=websocket,
-            turn_id=resolved_turn_id,
-            input_event_key=input_event_key,
-        ):
-            return
         if transcript:
             transcript_upgrade_candidate = bool(
                 pending_server_auto is not None
@@ -14940,49 +13927,12 @@ class RealtimeAPI:
                 call_id,
                 args_parsed,
             )
-            turn_id = str(self._current_turn_id_or_unknown() or "").strip()
-            if self._should_suppress_duplicate_model_explicit_inspect(
-                turn_id=turn_id,
-                function_name=str(function_name or ""),
-                args=args if isinstance(args, dict) else {},
-            ):
-                fresh_state = self._fresh_look_state_for_turn(turn_id=turn_id)
-                logger.info(
-                    "explicit_inspect_duplicate_model_call_suppressed run_id=%s turn_id=%s call_id=%s obligation_call_id=%s",
-                    self._current_run_id() or "",
-                    turn_id or "turn-unknown",
-                    call_id,
-                    str(fresh_state.get("explicit_inspect_obligation_call_id") or "none"),
-                )
-                await self._send_noop_tool_output(
-                    websocket,
-                    call_id=call_id,
-                    status="suppressed_duplicate_explicit_inspect",
-                    message=(
-                        "No action taken. Explicit inspect runtime obligation already dispatched for this turn; "
-                        "model-originated duplicate inspect suppressed."
-                    ),
-                    tool_name=str(function_name or ""),
-                    reason="explicit_inspect_obligation_already_dispatched",
-                    category="suppression",
-                    include_response_create=False,
-                )
-                self.function_call = None
-                self.function_call_args = ""
-                return
             if self._should_defer_provisional_server_auto_tool_call():
                 logger.info(
                     "Function call deferred | tool=%s call_id=%s reason=provisional_server_auto_pre_audio_hold",
                     function_name,
                     call_id,
                 )
-                if str(function_name or "").strip().lower() == "inspect_current_view":
-                    self._record_deferred_provisional_tool_call(
-                        turn_id=str(getattr(self, "_current_response_turn_id", "") or "").strip(),
-                        function_name=str(function_name or ""),
-                        call_id=str(call_id or ""),
-                        args=args if isinstance(args, dict) else {},
-                    )
                 await self._send_noop_tool_output(
                     websocket,
                     call_id=call_id,
@@ -15616,45 +14566,6 @@ class RealtimeAPI:
             "call_id": call_id,
         }
 
-    async def _inspect_current_view_tool(
-        self,
-        *,
-        delay_ms: int = 0,
-    ) -> dict[str, Any]:
-        """Run an explicit inspect pass using the existing fresh-look pipeline."""
-
-        turn_id = self._current_turn_id_or_unknown()
-        state = await self._attempt_fresh_look_for_turn(
-            turn_id=turn_id,
-            initial_motion_tool_name=None,
-            visual_actuator="explicit_inspect",
-            visual_intent_class="explicit_inspect",
-        )
-        vision_state = self.get_vision_state()
-        blocked_reason = str(state.get("blocked_reason") or "none")
-        status = "ok"
-        if not bool(state.get("completed", False)):
-            if blocked_reason == "timeout":
-                status = "timeout"
-            elif blocked_reason in {"camera_missing", "camera_loop_inactive"}:
-                status = "unavailable"
-            else:
-                status = "blocked"
-        state["explicit_inspect_status"] = status
-
-        return {
-            "status": status,
-            "blocked_reason": blocked_reason,
-            "visual_answer_mode": str(state.get("visual_answer_mode") or "unavailable"),
-            "claimed_pending_frame": bool(state.get("claimed_pending_frame", False)),
-            "queued_frame_count": int(vision_state.get("queued_frame_count") or 0),
-            "last_frame_age_ms": vision_state.get("last_frame_age_ms"),
-            "evidence_source": state.get("evidence_source"),
-            "visual_actuator": state.get("visual_actuator"),
-            "visual_intent_class": state.get("visual_intent_class"),
-            "turn_id": turn_id,
-        }
-
     async def execute_function_call(
         self,
         function_name: str,
@@ -15666,7 +14577,6 @@ class RealtimeAPI:
         staging: dict[str, Any] | None = None,
         force_no_tools_followup: bool = False,
         inject_no_tools_instruction: bool = False,
-        conversation_backed_call: bool = True,
     ) -> None:
         normalized_call_id = self._normalize_realtime_call_id(call_id)
         if normalized_call_id != call_id:
@@ -15678,33 +14588,7 @@ class RealtimeAPI:
             )
         call_id = normalized_call_id
 
-        if function_name == "inspect_current_view":
-            args = dict(args)
-            args.pop("recenter", None)
-            try:
-                result = await self._inspect_current_view_tool(**args)
-                inspect_status = str(result.get("status") or "none").strip().lower()
-                if inspect_status in {"ok", "blocked", "timeout", "unavailable"}:
-                    self._fresh_look_state_for_turn(turn_id=self._current_turn_id_or_unknown())["explicit_inspect_status"] = inspect_status
-                log_tool_call(function_name, args, result)
-                logger.info(
-                    "tool_result_received run_id=%s turn_id=%s call_id=%s",
-                    self._current_run_id() or "",
-                    self._current_turn_id_or_unknown(),
-                    call_id,
-                )
-            except Exception as exc:
-                error_message = f"Error executing function '{function_name}': {exc}"
-                log_error(error_message)
-                result = {"error": error_message}
-                self._record_intent_state(function_name, args, "failure")
-                await self.send_error_message_to_assistant(error_message, websocket)
-        elif function_name in function_map:
-            self._mark_fresh_look_motion_request_for_turn(
-                turn_id=self._current_turn_id_or_unknown(),
-                tool_name=function_name,
-                source="execute_function_call_commit",
-            )
+        if function_name in function_map:
             try:
                 result = await function_map[function_name](**args)
                 log_tool_call(function_name, args, result)
@@ -15714,12 +14598,6 @@ class RealtimeAPI:
                     self._current_turn_id_or_unknown(),
                     call_id,
                 )
-                if isinstance(result, dict) and bool(result.get("queued", False)):
-                    self._mark_fresh_look_motion_request_for_turn(
-                        turn_id=self._current_turn_id_or_unknown(),
-                        tool_name=function_name,
-                        source="tool_result_queued",
-                    )
             except Exception as exc:
                 error_message = f"Error executing function '{function_name}': {exc}"
                 log_error(error_message)
@@ -15772,29 +14650,23 @@ class RealtimeAPI:
                 len(sources),
             )
 
-        if conversation_backed_call:
-            function_call_output = {
-                "type": "conversation.item.create",
-                "item": {
-                    "type": "function_call_output",
-                    "call_id": call_id,
-                    "output": json.dumps(output_payload),
-                },
-            }
-            log_ws_event("Outgoing", function_call_output)
-            self._track_outgoing_event(function_call_output)
-            transport = self._get_or_create_transport()
-            await transport.send_json(websocket, function_call_output)
-            logger.info(
-                "tool_result_enqueued_to_realtime call_id=%s conversation_item_id=%s",
-                call_id,
-                None,
-            )
-        else:
-            logger.info(
-                "tool_result_internal_only call_id=%s reason=runtime_obligation_not_conversation_backed",
-                call_id,
-            )
+        function_call_output = {
+            "type": "conversation.item.create",
+            "item": {
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": json.dumps(output_payload),
+            },
+        }
+        log_ws_event("Outgoing", function_call_output)
+        self._track_outgoing_event(function_call_output)
+        transport = self._get_or_create_transport()
+        await transport.send_json(websocket, function_call_output)
+        logger.info(
+            "tool_result_enqueued_to_realtime call_id=%s conversation_item_id=%s",
+            call_id,
+            None,
+        )
         self._mark_utterance_info_summary(deliverable_seen=True)
         if inject_no_tools_instruction:
             await self._add_no_tools_follow_up_instruction(websocket)
@@ -15812,146 +14684,6 @@ class RealtimeAPI:
                 result=result,
             ),
         )
-        if function_name == "inspect_current_view" and isinstance(result, dict):
-            inspect_status = str(result.get("status") or "none").strip().lower()
-            response_payload = response_create_event.setdefault("response", {})
-            if not isinstance(response_payload, dict):
-                response_payload = {}
-                response_create_event["response"] = response_payload
-            response_metadata = response_payload.setdefault("metadata", {})
-            if not isinstance(response_metadata, dict):
-                response_metadata = {}
-                response_payload["metadata"] = response_metadata
-            response_metadata["explicit_inspect_outcome"] = inspect_status
-            if inspect_status in {"blocked", "timeout", "unavailable"}:
-                metadata_turn_id = str(response_metadata.get("turn_id") or "").strip()
-                result_turn_id = str(result.get("turn_id") or "").strip() if isinstance(result, dict) else ""
-                record_turn_id = ""
-                for record in reversed(self._tool_call_records):
-                    if str(record.get("call_id") or "").strip() == call_id:
-                        record_turn_id = str(record.get("turn_id") or "").strip()
-                        break
-                obligation_turn_id = ""
-                if not conversation_backed_call:
-                    fresh_look_store = getattr(self, "_fresh_look_by_turn_id", None)
-                    if isinstance(fresh_look_store, dict):
-                        for candidate_turn_id, candidate_state in fresh_look_store.items():
-                            if not isinstance(candidate_state, dict):
-                                continue
-                            candidate_call_id = str(candidate_state.get("explicit_inspect_obligation_call_id") or "").strip()
-                            if candidate_call_id == call_id and bool(candidate_state.get("explicit_inspect_obligation_dispatched", False)):
-                                obligation_turn_id = str(candidate_turn_id or "").strip()
-                                break
-                turn_id = (
-                    obligation_turn_id
-                    or metadata_turn_id
-                    or result_turn_id
-                    or record_turn_id
-                    or self._current_turn_id_or_unknown()
-                )
-                response_metadata["turn_id"] = turn_id
-
-                result_visual_actuator, result_visual_intent_class = self._normalize_visual_ownership(
-                    visual_actuator=result.get("visual_actuator") if isinstance(result, dict) else None,
-                    visual_intent_class=result.get("visual_intent_class") if isinstance(result, dict) else None,
-                )
-                metadata_visual_actuator, metadata_visual_intent_class = self._normalize_visual_ownership(
-                    visual_actuator=response_metadata.get("visual_actuator"),
-                    visual_intent_class=response_metadata.get("visual_intent_class"),
-                )
-                visual_actuator = (
-                    result_visual_actuator if result_visual_actuator != "none" else metadata_visual_actuator
-                )
-                visual_intent_class = (
-                    result_visual_intent_class
-                    if result_visual_intent_class != "none"
-                    else metadata_visual_intent_class
-                )
-                if visual_actuator == "none" and visual_intent_class == "none":
-                    visual_actuator = metadata_visual_actuator
-                    visual_intent_class = metadata_visual_intent_class
-
-                state = self._fresh_look_state_for_turn(turn_id=turn_id)
-                obligation_call_id = str(state.get("explicit_inspect_obligation_call_id") or "").strip()
-                obligation_lineage_match = (
-                    bool(state.get("explicit_inspect_obligation_dispatched", False)) and obligation_call_id == call_id
-                ) or bool(obligation_turn_id)
-                if obligation_lineage_match:
-                    visual_actuator = "explicit_inspect"
-                    visual_intent_class = "explicit_inspect"
-                response_metadata["visual_actuator"] = visual_actuator
-                response_metadata["visual_intent_class"] = visual_intent_class
-
-                runtime_obligation_call = not conversation_backed_call
-                explicit_inspect_owned = (
-                    visual_actuator == "explicit_inspect"
-                    or visual_intent_class == "explicit_inspect"
-                    or obligation_lineage_match
-                )
-                clarify_text = self._visual_unavailable_clarify_text_for_turn(
-                    turn_id=turn_id,
-                    vision_state=self.get_vision_state(),
-                )
-                if runtime_obligation_call and explicit_inspect_owned:
-                    obligation_followup_input_event_key = self._explicit_inspect_obligation_followup_input_event_key(
-                        call_id=call_id,
-                    )
-                    logger.info(
-                        "explicit_inspect_runtime_obligation_non_ok_detected run_id=%s turn_id=%s call_id=%s status=%s obligation_lineage_match=%s",
-                        self._current_run_id() or "",
-                        turn_id,
-                        call_id,
-                        inspect_status,
-                        str(obligation_lineage_match).lower(),
-                    )
-                    logger.info(
-                        "explicit_inspect_runtime_obligation_deterministic_clarify_emitted run_id=%s turn_id=%s call_id=%s",
-                        self._current_run_id() or "",
-                        turn_id,
-                        call_id,
-                    )
-                    await self.send_assistant_message(
-                        clarify_text,
-                        websocket,
-                        response_metadata={
-                            "trigger": "asr_verify_on_risk",
-                            "reason": "visual_unavailable",
-                            "clarify_mode": "bounded",
-                            "turn_id": turn_id,
-                            "input_event_key": obligation_followup_input_event_key,
-                            "visual_actuator": visual_actuator,
-                            "visual_intent_class": visual_intent_class,
-                            "explicit_inspect_outcome": inspect_status,
-                            "response_origin": "explicit_inspect_obligation_followup",
-                            "obligation_call_id": call_id,
-                        },
-                    )
-                    logger.info(
-                        "explicit_inspect_runtime_obligation_model_followup_skipped run_id=%s turn_id=%s call_id=%s status=%s",
-                        self._current_run_id() or "",
-                        turn_id,
-                        call_id,
-                        inspect_status,
-                    )
-                    self.function_call = None
-                    self.function_call_args = ""
-                    return
-                response_metadata["trigger"] = "asr_verify_on_risk"
-                response_metadata["reason"] = "visual_unavailable"
-                response_metadata["clarify_mode"] = "bounded"
-                response_payload["instructions"] = (
-                    "inspect_current_view returned a non-ok status. "
-                    "Output exactly this clarify sentence and nothing else: "
-                    f"{clarify_text!r}. Do not assert or infer scene/object details from stale/ambient context."
-                )
-                response_payload["tool_choice"] = "none"
-                logger.info(
-                    "explicit_inspect_non_ok_followup_forced_clarify run_id=%s turn_id=%s call_id=%s status=%s",
-                    self._current_run_id() or "",
-                    turn_id,
-                    call_id,
-                    inspect_status,
-                )
         if force_no_tools_followup:
             response_payload = response_create_event.setdefault("response", {})
             if not isinstance(response_payload, dict):

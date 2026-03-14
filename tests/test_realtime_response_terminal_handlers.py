@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import pytest
 import sys
 import types
 from types import SimpleNamespace
@@ -61,8 +60,6 @@ def _make_api() -> RealtimeAPI:
     api._preference_recall_suppressed_input_event_keys = set()
     api._pending_image_stimulus = None
     api._pending_image_flush_after_playback = False
-    api._active_response_metadata = {}
-    api._fresh_look_by_turn_id = {}
 
     api._current_turn_id_or_unknown = lambda: "turn_1"
     api._canonical_utterance_key = lambda turn_id, input_event_key: f"{turn_id}::{input_event_key or 'none'}"
@@ -625,31 +622,6 @@ def test_handle_transcribe_response_done_logs_from_per_response_buffer_prefix() 
     assert "I can see rows of games stacked at different levels." in rendered
 
 
-def test_handle_transcribe_response_done_enforces_bounded_visual_clarify_exact_message() -> None:
-    api = _make_api()
-    api._assistant_reply_by_response_id = {
-        "resp_1": "Once the camera is available, I'll help describe what's in front."
-    }
-    api._assistant_reply_response_id = "resp_1"
-    api._maybe_enqueue_reflection = Mock()
-    api.assistant_reply = ""
-    api._assistant_reply_accum = ""
-    api._active_response_metadata = {
-        "trigger": "asr_verify_on_risk",
-        "reason": "visual_unavailable",
-        "clarify_mode": "bounded",
-        "turn_id": "turn_1",
-    }
-    api._normalize_memory_recall_answer = lambda text: text
-    api._normalize_verify_clarify_message = lambda *, message, metadata: "I can’t take a fresh look right now because the camera isn’t available."
-
-    with patch("ai.realtime.response_terminal_handlers.log_info") as info_log:
-        asyncio.run(api.handle_transcribe_response_done())
-
-    rendered = " ".join(str(arg) for arg in info_log.call_args.args)
-    assert "I can’t take a fresh look right now because the camera isn’t available." in rendered
-
-
 def test_clear_assistant_reply_buffers_for_other_response_preserves_active_prefix() -> None:
     api = _make_api()
     api._assistant_reply_by_response_id = {
@@ -665,107 +637,3 @@ def test_clear_assistant_reply_buffers_for_other_response_preserves_active_prefi
     assert api._assistant_reply_text_for_response("resp_stale") == ""
     assert api._assistant_reply_text_for_response("resp_1") == "surviving prefix"
     assert api.assistant_reply == "surviving prefix"
-
-
-
-
-def test_handle_transcribe_response_done_prefers_fresh_state_visual_ownership_when_metadata_missing() -> None:
-    api = _make_api()
-    api._assistant_reply_response_id = "resp_1"
-    api._assistant_reply_by_response_id = {"resp_1": "I can see enough to answer."}
-    api.assistant_reply = ""
-    api._active_response_metadata = {"turn_id": "turn_1", "trigger": "asr_verify_on_risk", "reason": "visual_unavailable"}
-    state = api._fresh_look_state_for_turn(turn_id="turn_1")
-    state["requested"] = True
-    state["visual_actuator"] = "explicit_inspect"
-    state["visual_intent_class"] = "explicit_inspect"
-    api._normalize_memory_recall_answer = lambda text: text
-    api._normalize_verify_clarify_message = lambda **kwargs: kwargs["message"]
-    api._classify_visual_answer_provenance = Mock(return_value="fresh_current")
-    api.get_vision_state = lambda: {"available": True, "can_capture": True, "camera_active": True}
-    api._clear_assistant_reply_buffers = lambda **_kwargs: None
-    api._maybe_enqueue_reflection = lambda *_args, **_kwargs: None
-
-    with patch("ai.realtime.response_terminal_handlers.logger.info") as info_log:
-        asyncio.run(api.handle_transcribe_response_done())
-
-    info_log.assert_any_call(
-        "visual_actuator_final run_id=%s turn_id=%s visual_actuator=%s visual_intent_class=%s",
-        "run-test",
-        "turn_1",
-        "explicit_inspect",
-        "explicit_inspect",
-    )
-
-
-@pytest.mark.parametrize("inspect_status", ["pending", "blocked", "timeout", "unavailable"])
-def test_handle_transcribe_response_done_blocks_non_ok_explicit_inspect_answer(inspect_status: str) -> None:
-    api = _make_api()
-    api._assistant_reply_response_id = "resp_1"
-    api._assistant_reply_by_response_id = {"resp_1": "I think that is a folded paper."}
-    api.assistant_reply = ""
-    api._active_response_metadata = {"turn_id": "turn_1", "trigger": "asr_verify_on_risk", "reason": "visual_unavailable"}
-    state = api._fresh_look_state_for_turn(turn_id="turn_1")
-    state["requested"] = True
-    state["visual_actuator"] = "explicit_inspect"
-    state["visual_intent_class"] = "explicit_inspect"
-    state["explicit_inspect_status"] = inspect_status
-    api._tool_call_records = []
-    api._normalize_memory_recall_answer = lambda text: text
-    api._normalize_verify_clarify_message = lambda **kwargs: kwargs["message"]
-    api._classify_visual_answer_provenance = Mock(return_value="historical")
-    api.get_vision_state = lambda: {"available": False, "can_capture": True, "camera_active": True, "queued_frame_count": 0}
-    api._clear_assistant_reply_buffers = lambda **_kwargs: None
-    api._maybe_enqueue_reflection = lambda *_args, **_kwargs: None
-
-    with patch("ai.realtime.response_terminal_handlers.log_info") as info_log:
-        asyncio.run(api.handle_transcribe_response_done())
-
-    rendered = " ".join(str(arg) for arg in info_log.call_args.args)
-    assert "The camera is on, but I don’t have a fresh frame yet. Want me to take a new look now?" in rendered
-
-
-def test_handle_transcribe_response_done_uses_none_visual_ownership_when_absent_everywhere() -> None:
-    api = _make_api()
-    api._assistant_reply_response_id = "resp_1"
-    api._assistant_reply_by_response_id = {"resp_1": "Ready."}
-    api.assistant_reply = ""
-    api._active_response_metadata = {"turn_id": "turn_1", "trigger": "asr_verify_on_risk", "reason": "visual_unavailable"}
-    api._normalize_memory_recall_answer = lambda text: text
-    api._normalize_verify_clarify_message = lambda **kwargs: kwargs["message"]
-    api._classify_visual_answer_provenance = Mock(return_value="historical")
-    api.get_vision_state = lambda: {"available": False, "can_capture": False, "camera_active": False}
-    api._clear_assistant_reply_buffers = lambda **_kwargs: None
-    api._maybe_enqueue_reflection = lambda *_args, **_kwargs: None
-
-    with patch("ai.realtime.response_terminal_handlers.logger.info") as info_log:
-        asyncio.run(api.handle_transcribe_response_done())
-
-    info_log.assert_any_call(
-        "visual_actuator_final run_id=%s turn_id=%s visual_actuator=%s visual_intent_class=%s",
-        "run-test",
-        "turn_1",
-        "none",
-        "none",
-    )
-
-
-def test_handle_transcribe_response_done_skips_visual_provenance_for_non_visual_startup_prompt() -> None:
-    api = _make_api()
-    api._assistant_reply_response_id = "resp_1"
-    api._assistant_reply_by_response_id = {"resp_1": "Ready!"}
-    api.assistant_reply = "Ready!"
-    api._active_response_metadata = {"turn_id": "turn_1", "trigger": "startup_prompt"}
-    api._utterance_trust_snapshot_by_input_event_key = {"input_evt_1": {"transcript_text": "", "visual_question": False}}
-    api._normalize_memory_recall_answer = lambda text: text
-    api._normalize_verify_clarify_message = lambda **kwargs: kwargs["message"]
-    api._classify_visual_answer_provenance = Mock(return_value="historical")
-    api.get_vision_state = lambda: {"available": False, "can_capture": False, "camera_active": False}
-    api._clear_assistant_reply_buffers = lambda **_kwargs: None
-    api._maybe_enqueue_reflection = lambda *_args, **_kwargs: None
-
-    with patch("ai.realtime.response_terminal_handlers.logger.info") as info_log:
-        asyncio.run(api.handle_transcribe_response_done())
-
-    api._classify_visual_answer_provenance.assert_not_called()
-    assert not any(call.args and call.args[0] == "visual_answer_provenance_final run_id=%s turn_id=%s mode=%s" for call in info_log.call_args_list)

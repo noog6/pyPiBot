@@ -27,7 +27,7 @@ def test_all_registered_tools_have_governance_metadata() -> None:
     tool_names = _registered_tool_names()
     tool_specs = _tool_specs()
 
-    assert len(tool_names) == 22
+    assert len(tool_names) == 21
     assert set(tool_names) <= set(tool_specs)
 
     required = {"governance_tier", "side_effects", "sensitivity", "default_confirmation"}
