@@ -1541,6 +1541,87 @@ def test_curiosity_surface_seam_ignores_unrelated_obligation_on_other_turn() -> 
     assert "turn_1" in api._curiosity_surface_candidate_by_turn_id
 
 
+def test_response_done_decision_blocks_explicit_inspect_without_inspect_result() -> None:
+    api = _make_api()
+    api._is_empty_response_done = lambda **_kwargs: False
+    api._fresh_look_by_turn_id = {
+        "turn_3": {
+            "visual_actuator": "explicit_inspect",
+            "visual_intent_class": "explicit_inspect",
+            "explicit_inspect_status": "pending",
+            "completed": False,
+            "blocked_reason": "none",
+        }
+    }
+    api._tool_call_records = []
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id="turn_3",
+        origin="upgraded_response",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id="turn_3", input_event_key="item_3"),
+        transcript_final_seen=True,
+    )
+
+    assert selected is False
+    assert reason == "explicit_inspect_missing_evidence"
+
+
+def test_response_done_decision_allows_explicit_inspect_with_non_ok_status() -> None:
+    api = _make_api()
+    api._is_empty_response_done = lambda **_kwargs: False
+    api._fresh_look_by_turn_id = {
+        "turn_3": {
+            "visual_actuator": "explicit_inspect",
+            "visual_intent_class": "explicit_inspect",
+            "explicit_inspect_status": "timeout",
+            "completed": False,
+            "blocked_reason": "timeout",
+        }
+    }
+    api._tool_call_records = []
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id="turn_3",
+        origin="upgraded_response",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id="turn_3", input_event_key="item_3"),
+        transcript_final_seen=True,
+    )
+
+    assert selected is True
+    assert reason == "normal"
+
+
+def test_response_done_decision_allows_explicit_inspect_with_tool_result() -> None:
+    api = _make_api()
+    api._is_empty_response_done = lambda **_kwargs: False
+    api._fresh_look_by_turn_id = {
+        "turn_3": {
+            "visual_actuator": "explicit_inspect",
+            "visual_intent_class": "explicit_inspect",
+            "explicit_inspect_status": "ok",
+            "completed": True,
+            "blocked_reason": "none",
+        }
+    }
+    api._tool_call_records = [{"turn_id": "turn_3", "name": "inspect_current_view"}]
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id="turn_3",
+        origin="upgraded_response",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id="turn_3", input_event_key="item_3"),
+        transcript_final_seen=True,
+    )
+
+    assert selected is True
+    assert reason == "normal"
+
+
 def test_response_done_decision_marks_provisional_server_auto_pre_final_as_non_deliverable() -> None:
     api = _make_api()
     api._is_empty_response_done = lambda **_kwargs: False
@@ -1556,3 +1637,19 @@ def test_response_done_decision_marks_provisional_server_auto_pre_final_as_non_d
 
     assert selected is False
     assert reason == "provisional_server_auto_awaiting_transcript_final"
+
+
+def test_response_done_decision_non_visual_turn_remains_normal() -> None:
+    api = _make_api()
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id="turn_1",
+        origin="upgraded_response",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id="turn_1", input_event_key="item_1"),
+        transcript_final_seen=True,
+    )
+
+    assert selected is True
+    assert reason == "normal"

@@ -697,6 +697,32 @@ def test_handle_transcribe_response_done_prefers_fresh_state_visual_ownership_wh
     )
 
 
+def test_handle_transcribe_response_done_blocks_evidence_free_explicit_inspect_answer() -> None:
+    api = _make_api()
+    api._assistant_reply_response_id = "resp_1"
+    api._assistant_reply_by_response_id = {"resp_1": "I think that is a folded paper."}
+    api.assistant_reply = ""
+    api._active_response_metadata = {"turn_id": "turn_1", "trigger": "asr_verify_on_risk", "reason": "visual_unavailable"}
+    state = api._fresh_look_state_for_turn(turn_id="turn_1")
+    state["requested"] = True
+    state["visual_actuator"] = "explicit_inspect"
+    state["visual_intent_class"] = "explicit_inspect"
+    state["explicit_inspect_status"] = "pending"
+    api._tool_call_records = []
+    api._normalize_memory_recall_answer = lambda text: text
+    api._normalize_verify_clarify_message = lambda **kwargs: kwargs["message"]
+    api._classify_visual_answer_provenance = Mock(return_value="historical")
+    api.get_vision_state = lambda: {"available": False, "can_capture": True, "camera_active": True, "queued_frame_count": 0}
+    api._clear_assistant_reply_buffers = lambda **_kwargs: None
+    api._maybe_enqueue_reflection = lambda *_args, **_kwargs: None
+
+    with patch("ai.realtime.response_terminal_handlers.log_info") as info_log:
+        asyncio.run(api.handle_transcribe_response_done())
+
+    rendered = " ".join(str(arg) for arg in info_log.call_args.args)
+    assert "The camera is on, but I don’t have a fresh frame yet. Want me to take a new look now?" in rendered
+
+
 def test_handle_transcribe_response_done_uses_none_visual_ownership_when_absent_everywhere() -> None:
     api = _make_api()
     api._assistant_reply_response_id = "resp_1"
@@ -741,4 +767,3 @@ def test_handle_transcribe_response_done_skips_visual_provenance_for_non_visual_
 
     api._classify_visual_answer_provenance.assert_not_called()
     assert not any(call.args and call.args[0] == "visual_answer_provenance_final run_id=%s turn_id=%s mode=%s" for call in info_log.call_args_list)
-

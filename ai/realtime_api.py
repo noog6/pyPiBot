@@ -7420,6 +7420,22 @@ class RealtimeAPI:
             return False, "tool_followup_precedence"
         if self._turn_contract_exact_phrase_open(turn_id=turn_id):
             return False, "exact_phrase_obligation_open"
+        visual_actuator, _ = self._resolve_visual_ownership_for_turn(turn_id=turn_id, seam="response_done_selection")
+        explicit_status = self._explicit_inspect_status_for_turn(turn_id=turn_id)
+        has_inspect_result = self._turn_has_inspect_current_view_tool_result(turn_id=turn_id)
+        if (
+            visual_actuator == "explicit_inspect"
+            and explicit_status in {"none", "pending"}
+            and not has_inspect_result
+        ):
+            logger.info(
+                "explicit_inspect_deliverable_selection_blocked run_id=%s turn_id=%s inspect_status=%s has_inspect_result=%s action=block_normal_final",
+                self._current_run_id() or "",
+                turn_id,
+                explicit_status,
+                str(has_inspect_result).lower(),
+            )
+            return False, "explicit_inspect_missing_evidence"
         return True, "normal"
 
     def _terminal_deliverable_selection_store(self) -> dict[str, dict[str, Any]]:
