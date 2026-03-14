@@ -66,6 +66,14 @@ def test_current_visual_question_detection_covers_natural_phrasing() -> None:
     assert is_current_visual_question("look at my hand")
 
 
+
+
+def test_current_visual_question_detection_explicit_hold_and_front_variants() -> None:
+    assert is_current_visual_question("Hey Theo, can you see what I'm holding in my hand?")
+    assert is_current_visual_question("Do you see what's in front of you?")
+    assert is_current_visual_question("Look at this and tell me what you see.")
+    assert not is_current_visual_question("What percentage is your battery level?")
+
 def test_mixed_motion_and_visual_utterance_triggers_fresh_look() -> None:
     assert is_current_visual_question("go back to center and tell me what you see in front of you")
 
@@ -1296,3 +1304,21 @@ def test_execute_function_call_inspect_ignores_legacy_recenter_arg() -> None:
 
     assert seen_args
     assert "recenter" not in seen_args[0]
+
+
+def test_resolve_visual_ownership_preserves_frozen_explicit_inspect() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    state = api._fresh_look_state_for_turn(turn_id="turn-freeze")
+    state["visual_actuator"] = "explicit_inspect"
+    state["visual_intent_class"] = "explicit_inspect"
+    state["visual_owner_frozen"] = True
+
+    actuator, intent = api._resolve_visual_ownership_for_turn(
+        turn_id="turn-freeze",
+        response_metadata={"visual_actuator": "none", "visual_intent_class": "none"},
+        seam="terminal_done",
+    )
+
+    assert actuator == "explicit_inspect"
+    assert intent == "explicit_inspect"
+
