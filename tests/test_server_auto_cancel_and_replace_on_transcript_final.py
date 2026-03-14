@@ -945,7 +945,7 @@ def test_deferred_provisional_inspect_call_resumes_for_same_turn() -> None:
         "turn_3": {
             "function_name": "inspect_current_view",
             "call_id": "call-provisional",
-            "args": {"recenter": False},
+            "args": {},
         }
     }
     executed: list[tuple[str, str, dict[str, object]]] = []
@@ -963,7 +963,7 @@ def test_deferred_provisional_inspect_call_resumes_for_same_turn() -> None:
     )
 
     assert resumed is True
-    assert executed == [("inspect_current_view", "call-provisional", {"recenter": False})]
+    assert executed == [("inspect_current_view", "call-provisional", {})]
     assert api._deferred_provisional_tool_call_by_turn_id == {}
 
 
@@ -975,7 +975,7 @@ def test_provisional_server_auto_inspect_call_is_recorded_for_resume(monkeypatch
     api._active_response_id = "resp-server-auto"
     api._active_server_auto_input_event_key = "synthetic_server_auto_3"
     api.function_call = {"name": "inspect_current_view", "call_id": "call-provisional-inspect"}
-    api.function_call_args = '{"recenter": false}'
+    api.function_call_args = '{}'
 
     async def _fake_noop(_websocket, **_kwargs):
         return None
@@ -989,7 +989,7 @@ def test_provisional_server_auto_inspect_call_is_recorded_for_resume(monkeypatch
     pending = api._deferred_provisional_tool_call_by_turn_id["turn_3"]
     assert pending["function_name"] == "inspect_current_view"
     assert pending["call_id"] == "call-provisional-inspect"
-    assert pending["args"] == {"recenter": False}
+    assert pending["args"] == {}
 
 def test_transcript_final_handoff_invalidates_provisional_tool_followup_lineage() -> None:
     api = _build_api_stub()

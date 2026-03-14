@@ -457,7 +457,7 @@ def test_explicit_inspect_marks_visual_actuator_metadata() -> None:
     original = function_map.get("gesture_look_center")
     function_map["gesture_look_center"] = _center
     try:
-        result = asyncio.run(api._inspect_current_view_tool(recenter=True, delay_ms=5))
+        result = asyncio.run(api._inspect_current_view_tool(delay_ms=5))
     finally:
         if original is None:
             function_map.pop("gesture_look_center", None)
@@ -848,7 +848,7 @@ def test_explicit_inspect_tool_registered() -> None:
     inspect_spec = next((tool for tool in tools if tool.get("name") == "inspect_current_view"), None)
 
     assert inspect_spec is not None
-    assert inspect_spec["parameters"]["properties"]["recenter"]["type"] == "boolean"
+    assert "recenter" not in inspect_spec["parameters"]["properties"]
 
 
 def test_inspect_current_view_returns_structured_success_contract() -> None:
@@ -856,12 +856,11 @@ def test_inspect_current_view_returns_structured_success_contract() -> None:
     api.is_ready_for_injections = lambda with_reason=False: (True, "ready") if with_reason else True
     api._current_turn_id_or_unknown = lambda: "turn-inspect-ok"
 
-    result = asyncio.run(api._inspect_current_view_tool(recenter=False))
+    result = asyncio.run(api._inspect_current_view_tool())
 
     assert result["status"] == "ok"
     assert result["visual_answer_mode"] == "fresh_current"
     assert result["claimed_pending_frame"] is False
-    assert result["recenter_applied"] is False
     assert result["evidence_source"] == "pending_queue_visible"
 
 
@@ -871,7 +870,7 @@ def test_inspect_current_view_returns_timeout_status_without_false_success() -> 
     api.is_ready_for_injections = lambda with_reason=False: (True, "ready") if with_reason else True
     api._current_turn_id_or_unknown = lambda: "turn-inspect-timeout"
 
-    result = asyncio.run(api._inspect_current_view_tool(recenter=False))
+    result = asyncio.run(api._inspect_current_view_tool())
 
     assert result["status"] == "timeout"
     assert result["blocked_reason"] == "timeout"
@@ -909,7 +908,7 @@ def test_inspect_current_view_tool_allows_interaction_state_bypass_without_injec
     api.is_ready_for_injections = lambda with_reason=False: (False, "interaction_state=thinking") if with_reason else False
     api._current_turn_id_or_unknown = lambda: "turn-inspect-interaction-bypass"
 
-    result = asyncio.run(api._inspect_current_view_tool(recenter=False))
+    result = asyncio.run(api._inspect_current_view_tool())
 
     assert result["status"] == "ok"
     assert result["blocked_reason"] == "none"
@@ -921,7 +920,7 @@ def test_inspect_current_view_tool_interaction_state_bypass_reaches_wait_path_wi
     api.is_ready_for_injections = lambda with_reason=False: (False, "interaction_state=thinking") if with_reason else False
     api._current_turn_id_or_unknown = lambda: "turn-inspect-interaction-wait-path"
 
-    result = asyncio.run(api._inspect_current_view_tool(recenter=False))
+    result = asyncio.run(api._inspect_current_view_tool())
 
     assert result["status"] == "timeout"
     assert result["blocked_reason"] == "timeout"
@@ -973,10 +972,10 @@ def test_non_explicit_fresh_look_still_blocks_on_interaction_state() -> None:
     assert reason == "injection_not_ready"
 
 
-def test_inspect_current_view_recenter_uses_existing_motion_tool() -> None:
+def test_inspect_current_view_does_not_invoke_motion_tools() -> None:
     api = _build_api(camera=_CameraStub(pending_images=[object()]))
     api.is_ready_for_injections = lambda with_reason=False: (True, "ready") if with_reason else True
-    api._current_turn_id_or_unknown = lambda: "turn-inspect-recenter"
+    api._current_turn_id_or_unknown = lambda: "turn-inspect-only"
 
     from ai import realtime_api as realtime_module
 
@@ -989,14 +988,14 @@ def test_inspect_current_view_recenter_uses_existing_motion_tool() -> None:
 
     realtime_module.function_map["gesture_look_center"] = _fake_center
     try:
-        result = asyncio.run(api._inspect_current_view_tool(recenter=True, delay_ms=120))
+        result = asyncio.run(api._inspect_current_view_tool(delay_ms=120))
     finally:
         realtime_module.function_map["gesture_look_center"] = original
 
-    assert calls == [("gesture_look_center", 120)]
-    assert result["recenter_applied"] is True
-    state = api._fresh_look_state_for_turn(turn_id="turn-inspect-recenter")
-    assert state["eligible_motion_tool_name"] == "gesture_look_center"
+    assert calls == []
+    state = api._fresh_look_state_for_turn(turn_id="turn-inspect-only")
+    assert state["visual_actuator"] == "explicit_inspect"
+    assert result["status"] == "ok"
 
 
 @pytest.mark.parametrize("explicit_status", ["blocked", "timeout", "unavailable"])
@@ -1092,7 +1091,7 @@ def test_execute_function_call_inspect_non_ok_forces_bounded_clarify_followup(in
         api.execute_function_call(
             "inspect_current_view",
             "call-inspect-nonok",
-            {"recenter": False},
+            {},
             websocket=object(),
         )
     )
@@ -1119,8 +1118,10 @@ def test_visual_tool_descriptions_bias_semantic_requests_to_inspect() -> None:
 
     assert "primary visual-semantic tool" in inspect_description
     assert "what am i holding" in inspect_description
+    assert "does not move or recenter the camera" in inspect_description
+    assert "call the appropriate motion tool" in inspect_description
     assert "motion-only setup" in center_description
-    assert "semantic visual questions use inspect_current_view" in center_description
+    assert "separate follow-up step" in center_description
 
 
 def test_transcript_final_visual_turn_prefers_explicit_inspect_owner() -> None:
@@ -1256,7 +1257,7 @@ def test_verify_on_risk_successful_fresh_capture_not_overridden_by_clarify() -> 
     assert sent == []
 
 
-def test_execute_function_call_inspect_suppresses_spurious_recenter() -> None:
+def test_execute_function_call_inspect_ignores_legacy_recenter_arg() -> None:
     api = _build_api(camera=_CameraStub(pending_images=[]))
     api._tool_call_records = []
     api._last_tool_call_results = []
@@ -1288,10 +1289,10 @@ def test_execute_function_call_inspect_suppresses_spurious_recenter() -> None:
         api.execute_function_call(
             "inspect_current_view",
             "call-recenter",
-            {"recenter": True, "delay_ms": 0},
+            {"delay_ms": 0},
             websocket=object(),
         )
     )
 
     assert seen_args
-    assert seen_args[0]["recenter"] is False
+    assert "recenter" not in seen_args[0]

@@ -9022,26 +9022,6 @@ class RealtimeAPI:
         )
         return True
 
-    @staticmethod
-    def _transcript_requests_recenter(transcript: str) -> bool:
-        normalized = " ".join((transcript or "").lower().split())
-        if not normalized:
-            return False
-        if "recenter" in normalized:
-            return True
-        recenter_patterns = (
-            "look center",
-            "look to center",
-            "look at center",
-            "look back to center",
-            "look back at center",
-            "go back to center",
-            "return to center",
-            "back to center",
-            "center first",
-        )
-        return any(pattern in normalized for pattern in recenter_patterns)
-
     def _turn_has_inspect_current_view_tool_result(self, *, turn_id: str) -> bool:
         normalized_turn_id = str(turn_id or "").strip()
         if not normalized_turn_id:
@@ -15410,23 +15390,14 @@ class RealtimeAPI:
     async def _inspect_current_view_tool(
         self,
         *,
-        recenter: bool = False,
         delay_ms: int = 0,
     ) -> dict[str, Any]:
         """Run an explicit inspect pass using the existing fresh-look pipeline."""
 
         turn_id = self._current_turn_id_or_unknown()
-        recenter_applied = False
-        initial_motion_tool_name = None
-        if recenter:
-            center_result = await function_map["gesture_look_center"](delay_ms=max(0, int(delay_ms or 0)))
-            recenter_applied = bool(isinstance(center_result, dict) and center_result.get("queued", False))
-            if recenter_applied:
-                initial_motion_tool_name = "gesture_look_center"
-
         state = await self._attempt_fresh_look_for_turn(
             turn_id=turn_id,
-            initial_motion_tool_name=initial_motion_tool_name,
+            initial_motion_tool_name=None,
             visual_actuator="explicit_inspect",
             visual_intent_class="explicit_inspect",
         )
@@ -15449,7 +15420,6 @@ class RealtimeAPI:
             "claimed_pending_frame": bool(state.get("claimed_pending_frame", False)),
             "queued_frame_count": int(vision_state.get("queued_frame_count") or 0),
             "last_frame_age_ms": vision_state.get("last_frame_age_ms"),
-            "recenter_applied": recenter_applied,
             "evidence_source": state.get("evidence_source"),
             "visual_actuator": state.get("visual_actuator"),
             "visual_intent_class": state.get("visual_intent_class"),
@@ -15479,16 +15449,8 @@ class RealtimeAPI:
         call_id = normalized_call_id
 
         if function_name == "inspect_current_view":
-            turn_id = self._current_turn_id_or_unknown()
-            turn_transcript = self._latest_transcript_for_turn(turn_id=turn_id)
-            if bool(args.get("recenter", False)) and not self._transcript_requests_recenter(turn_transcript):
-                logger.info(
-                    "inspect_current_view_recenter_suppressed run_id=%s turn_id=%s reason=no_recenter_intent",
-                    self._current_run_id() or "",
-                    turn_id,
-                )
-                args = dict(args)
-                args["recenter"] = False
+            args = dict(args)
+            args.pop("recenter", None)
             try:
                 result = await self._inspect_current_view_tool(**args)
                 inspect_status = str(result.get("status") or "none").strip().lower()
