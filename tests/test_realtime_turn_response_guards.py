@@ -1568,7 +1568,7 @@ def test_response_done_decision_blocks_explicit_inspect_without_inspect_result()
     assert reason == "explicit_inspect_missing_evidence"
 
 
-def test_response_done_decision_allows_explicit_inspect_with_non_ok_status() -> None:
+def test_response_done_decision_blocks_explicit_inspect_with_timeout_status() -> None:
     api = _make_api()
     api._is_empty_response_done = lambda **_kwargs: False
     api._fresh_look_by_turn_id = {
@@ -1591,8 +1591,120 @@ def test_response_done_decision_allows_explicit_inspect_with_non_ok_status() -> 
         transcript_final_seen=True,
     )
 
+    assert selected is False
+    assert reason == "explicit_inspect_missing_evidence"
+
+
+
+
+def test_response_done_decision_blocks_explicit_inspect_with_blocked_status() -> None:
+    api = _make_api()
+    api._is_empty_response_done = lambda **_kwargs: False
+    api._fresh_look_by_turn_id = {
+        "turn_3": {
+            "visual_actuator": "explicit_inspect",
+            "visual_intent_class": "explicit_inspect",
+            "explicit_inspect_status": "blocked",
+            "completed": False,
+            "blocked_reason": "injection_not_ready",
+        }
+    }
+    api._tool_call_records = []
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id="turn_3",
+        origin="upgraded_response",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id="turn_3", input_event_key="item_3"),
+        transcript_final_seen=True,
+    )
+
+    assert selected is False
+    assert reason == "explicit_inspect_missing_evidence"
+
+
+def test_response_done_decision_blocks_explicit_inspect_with_unavailable_status() -> None:
+    api = _make_api()
+    api._is_empty_response_done = lambda **_kwargs: False
+    api._fresh_look_by_turn_id = {
+        "turn_3": {
+            "visual_actuator": "explicit_inspect",
+            "visual_intent_class": "explicit_inspect",
+            "explicit_inspect_status": "unavailable",
+            "completed": False,
+            "blocked_reason": "camera_missing",
+        }
+    }
+    api._tool_call_records = []
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id="turn_3",
+        origin="upgraded_response",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id="turn_3", input_event_key="item_3"),
+        transcript_final_seen=True,
+    )
+
+    assert selected is False
+    assert reason == "explicit_inspect_missing_evidence"
+
+
+def test_response_done_decision_non_visual_turn_unchanged() -> None:
+    api = _make_api()
+    api._is_empty_response_done = lambda **_kwargs: False
+    api._fresh_look_by_turn_id = {
+        "turn_3": {
+            "visual_actuator": "none",
+            "visual_intent_class": "none",
+            "explicit_inspect_status": "none",
+            "completed": False,
+            "blocked_reason": "none",
+        }
+    }
+    api._tool_call_records = []
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id="turn_3",
+        origin="upgraded_response",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id="turn_3", input_event_key="item_3"),
+        transcript_final_seen=True,
+    )
+
     assert selected is True
     assert reason == "normal"
+
+
+def test_response_done_decision_explicit_inspect_pending_tool_followup_blocks_parent_normal() -> None:
+    api = _make_api()
+    api._is_empty_response_done = lambda **_kwargs: False
+    api._fresh_look_by_turn_id = {
+        "turn_3": {
+            "visual_actuator": "explicit_inspect",
+            "visual_intent_class": "explicit_inspect",
+            "explicit_inspect_status": "blocked",
+            "completed": False,
+            "blocked_reason": "injection_not_ready",
+        }
+    }
+    api._tool_followup_state_by_canonical_key = {
+        "run-test:turn_3:tool:call_1": "scheduled"
+    }
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id="turn_3",
+        origin="upgraded_response",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id="turn_3", input_event_key="item_3"),
+        transcript_final_seen=True,
+    )
+
+    assert selected is False
+    assert reason == "tool_followup_precedence"
 
 
 def test_response_done_decision_allows_explicit_inspect_with_tool_result() -> None:

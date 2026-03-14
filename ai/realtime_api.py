@@ -7413,27 +7413,26 @@ class RealtimeAPI:
             and not bool(transcript_final_seen)
         ):
             return False, "provisional_server_auto_awaiting_transcript_final"
-        if (
-            str(origin or "").strip().lower() == "server_auto"
-            and self._turn_has_pending_tool_followup(turn_id=turn_id)
-        ):
+        origin_normalized = str(origin or "").strip().lower()
+        pending_tool_followup = self._turn_has_pending_tool_followup(turn_id=turn_id)
+        if origin_normalized == "server_auto" and pending_tool_followup:
             return False, "tool_followup_precedence"
         if self._turn_contract_exact_phrase_open(turn_id=turn_id):
             return False, "exact_phrase_obligation_open"
         visual_actuator, _ = self._resolve_visual_ownership_for_turn(turn_id=turn_id, seam="response_done_selection")
+        if visual_actuator == "explicit_inspect" and pending_tool_followup:
+            return False, "tool_followup_precedence"
         explicit_status = self._explicit_inspect_status_for_turn(turn_id=turn_id)
         has_inspect_result = self._turn_has_inspect_current_view_tool_result(turn_id=turn_id)
-        if (
-            visual_actuator == "explicit_inspect"
-            and explicit_status in {"none", "pending"}
-            and not has_inspect_result
-        ):
+        explicit_inspect_parent_final_allowed = explicit_status == "ok" and has_inspect_result
+        if visual_actuator == "explicit_inspect" and not explicit_inspect_parent_final_allowed:
             logger.info(
-                "explicit_inspect_deliverable_selection_blocked run_id=%s turn_id=%s inspect_status=%s has_inspect_result=%s action=block_normal_final",
+                "explicit_inspect_deliverable_selection_blocked run_id=%s turn_id=%s inspect_status=%s has_inspect_result=%s allow_parent_normal_final=%s action=block_normal_final",
                 self._current_run_id() or "",
                 turn_id,
                 explicit_status,
                 str(has_inspect_result).lower(),
+                str(explicit_inspect_parent_final_allowed).lower(),
             )
             return False, "explicit_inspect_missing_evidence"
         return True, "normal"
