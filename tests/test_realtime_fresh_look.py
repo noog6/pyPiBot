@@ -39,6 +39,7 @@ def _build_api(*, camera: object | None = None) -> RealtimeAPI:
     api._last_fresh_look_request_at_monotonic = None
     api._last_fresh_look_completed_at_monotonic = None
     api._fresh_look_by_turn_id = {}
+    api._latest_final_transcript_by_turn_id = {}
     api._current_run_id = lambda: "run-test"
     api._last_vision_frame_sent_at_monotonic = None
     return api
@@ -130,7 +131,7 @@ def test_non_current_visual_question_does_not_trigger_fresh_look(monkeypatch) ->
     assert called == []
 
 
-def test_verify_on_risk_prefers_explicit_owner_before_visual_unavailable_clarify() -> None:
+def test_verify_on_risk_defers_clarify_while_explicit_inspect_pending() -> None:
     api = _build_api(camera=_CameraStub(pending_images=[]))
     call_order: list[str] = []
 
@@ -179,11 +180,61 @@ def test_verify_on_risk_prefers_explicit_owner_before_visual_unavailable_clarify
         )
     )
 
-    assert call_order == ["clarify"]
+    assert call_order == []
     assert capture_kwargs == []
     state = api._fresh_look_state_for_turn(turn_id="turn-7")
     assert state["visual_actuator"] == "explicit_inspect"
 
+
+
+
+def test_verify_on_risk_clarifies_when_explicit_inspect_failed() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    call_order: list[str] = []
+
+    async def _capture(**_kwargs):
+        call_order.append("fresh_look")
+        return {}
+
+    async def _send_assistant_message(*_args, **_kwargs):
+        call_order.append("clarify")
+        return None
+
+    api._attempt_fresh_look_for_turn = _capture
+    api.send_assistant_message = _send_assistant_message
+    api._asr_verify_on_risk_enabled = True
+    api._asr_clarify_asked_input_event_keys = set()
+    api._asr_clarify_count_by_turn = {}
+    api._asr_verify_max_clarify_per_turn = 1
+    api._asr_verify_short_utterance_ms = 300
+    api._asr_verify_min_confidence = 0.6
+    api._response_gating_verdict_by_input_event_key = {}
+    api._pending_server_auto_response_by_turn_id = {}
+    api._canonical_utterance_key = lambda *, turn_id, input_event_key: f"run-test:{turn_id}:{input_event_key}"
+    api._record_cancel_issued_timing = lambda *_args, **_kwargs: None
+    api._stale_response_ids_set = set()
+    api._mark_pending_server_auto_response_cancelled = lambda **_kwargs: None
+    api._suppress_cancelled_response_audio = lambda *_args, **_kwargs: None
+    api._get_or_create_transport = lambda: type("T", (), {"send_json": staticmethod(lambda *_a, **_k: asyncio.sleep(0))})()
+    api.assistant_reply = ""
+    api._assistant_reply_accum = ""
+
+    state = api._fresh_look_state_for_turn(turn_id="turn-failed")
+    state["visual_actuator"] = "explicit_inspect"
+    state["visual_intent_class"] = "explicit_inspect"
+    state["explicit_inspect_status"] = "timeout"
+
+    asyncio.run(
+        api._maybe_verify_on_risk_clarify(
+            transcript="Can you see it now?",
+            websocket=object(),
+            turn_id="turn-failed",
+            input_event_key="evt-failed",
+            snapshot={"run_id": "run-test", "asr_confidence": 0.95},
+        )
+    )
+
+    assert call_order == ["clarify"]
 
 def test_verify_on_risk_skips_heuristic_when_explicit_inspect_already_selected() -> None:
     api = _build_api(camera=_CameraStub(pending_images=[]))
@@ -229,6 +280,52 @@ def test_verify_on_risk_skips_heuristic_when_explicit_inspect_already_selected()
         )
     )
 
+    assert called == []
+
+
+def test_verify_on_risk_seeds_explicit_owner_before_fallback() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    called = []
+
+    async def _capture(**_kwargs):
+        called.append(True)
+        return {}
+
+    api._attempt_fresh_look_for_turn = _capture
+    api._asr_verify_on_risk_enabled = True
+    api._asr_clarify_asked_input_event_keys = set()
+    api._asr_clarify_count_by_turn = {}
+    api._asr_verify_max_clarify_per_turn = 1
+    api._asr_verify_short_utterance_ms = 300
+    api._asr_verify_min_confidence = 0.6
+    api._response_gating_verdict_by_input_event_key = {}
+    api._pending_server_auto_response_by_turn_id = {}
+    api._canonical_utterance_key = lambda *, turn_id, input_event_key: f"run-test:{turn_id}:{input_event_key}"
+    api._record_cancel_issued_timing = lambda *_args, **_kwargs: None
+    api._stale_response_ids_set = set()
+    api._mark_pending_server_auto_response_cancelled = lambda **_kwargs: None
+    api._suppress_cancelled_response_audio = lambda *_args, **_kwargs: None
+    api._get_or_create_transport = lambda: type("T", (), {"send_json": staticmethod(lambda *_a, **_k: asyncio.sleep(0))})()
+    api.assistant_reply = ""
+    api._assistant_reply_accum = ""
+
+    async def _send_assistant_message(*_args, **_kwargs):
+        return None
+
+    api.send_assistant_message = _send_assistant_message
+
+    asyncio.run(
+        api._maybe_verify_on_risk_clarify(
+            transcript="Can you see it now?",
+            websocket=object(),
+            turn_id="turn-seeded",
+            input_event_key="evt-seeded",
+            snapshot={"run_id": "run-test", "asr_confidence": 0.95},
+        )
+    )
+
+    state = api._fresh_look_state_for_turn(turn_id="turn-seeded")
+    assert state["visual_actuator"] == "explicit_inspect"
     assert called == []
 
 
@@ -1075,6 +1172,7 @@ def test_execute_function_call_inspect_suppresses_spurious_recenter() -> None:
     api._mark_or_suppress_research_spoken_response = lambda _rid: False
     api._tool_followup_input_event_key = lambda *, call_id: f"tool:{call_id}"
     api._active_input_event_key_by_turn_id = {"turn-recenter": "item_parent"}
+    api._latest_final_transcript_by_turn_id = {"turn-recenter": "Can you see it now?"}
     api._send_response_create = lambda *_args, **_kwargs: asyncio.sleep(0, result=True)
     api._get_or_create_transport = lambda: type("T", (), {"send_json": staticmethod(lambda *_a, **_k: asyncio.sleep(0))})()
     api._last_user_input_text = "Can you see it now?"

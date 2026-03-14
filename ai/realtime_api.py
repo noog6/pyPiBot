@@ -993,6 +993,7 @@ class RealtimeAPI:
         self._research_suppressed_fingerprints: dict[str, str] = {}
         self._research_pending_call_ids: set[str] = set()
         self._deferred_research_tool_call: dict[str, Any] | None = None
+        self._deferred_provisional_tool_call_by_turn_id: dict[str, dict[str, Any]] = {}
         self._tool_call_dedupe_ttl_s = float(research_cfg.get("tool_call_dedupe_ttl_s", 30.0))
         self._research_spoken_response_dedupe_ttl_s = float(
             research_cfg.get("spoken_response_dedupe_ttl_s", 60.0)
@@ -1070,6 +1071,7 @@ class RealtimeAPI:
         }
         self._response_gating_verdict_by_input_event_key: dict[str, ResponseGatingVerdict] = {}
         self._latest_partial_transcript_by_turn_id: dict[str, str] = {}
+        self._latest_final_transcript_by_turn_id: dict[str, str] = {}
         self._server_auto_audio_waiters_by_turn_id: dict[str, asyncio.Event] = {}
         self._server_auto_audio_defer_tasks_by_turn_id: dict[str, asyncio.Task[Any]] = {}
         self._server_auto_pre_audio_hold_by_turn_id: dict[str, ServerAutoPreAudioHoldRecord] = {}
@@ -5682,6 +5684,45 @@ class RealtimeAPI:
             return False
         return self._server_auto_pre_audio_hold_active(turn_id=turn_id, response_id=active_response_id)
 
+    def _record_deferred_provisional_tool_call(self, *, turn_id: str, function_name: str, call_id: str, args: dict[str, Any]) -> None:
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return
+        store = getattr(self, "_deferred_provisional_tool_call_by_turn_id", None)
+        if not isinstance(store, dict):
+            store = {}
+            self._deferred_provisional_tool_call_by_turn_id = store
+        store[normalized_turn_id] = {
+            "function_name": str(function_name or "").strip(),
+            "call_id": str(call_id or "").strip(),
+            "args": dict(args or {}),
+        }
+
+    async def _resume_deferred_provisional_tool_call_for_turn(self, *, turn_id: str, websocket: Any) -> bool:
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return False
+        store = getattr(self, "_deferred_provisional_tool_call_by_turn_id", None)
+        if not isinstance(store, dict):
+            return False
+        pending = store.pop(normalized_turn_id, None)
+        if not isinstance(pending, dict):
+            return False
+        function_name = str(pending.get("function_name") or "").strip()
+        call_id = str(pending.get("call_id") or "").strip()
+        args = pending.get("args") if isinstance(pending.get("args"), dict) else {}
+        if function_name != "inspect_current_view" or not call_id:
+            return False
+        logger.info(
+            "provisional_tool_call_resumed run_id=%s turn_id=%s tool=%s call_id=%s",
+            self._current_run_id() or "",
+            normalized_turn_id,
+            function_name,
+            call_id,
+        )
+        await self.execute_function_call(function_name, call_id, dict(args), websocket)
+        return True
+
     def _is_cancelled_response_event(self, event: dict[str, Any]) -> bool:
         response_id = self._response_id_from_event(event)
         return self._response_status(response_id) == "cancelled"
@@ -8999,6 +9040,14 @@ class RealtimeAPI:
                 return True
         return False
 
+    def _latest_transcript_for_turn(self, *, turn_id: str) -> str:
+        transcripts_by_turn = getattr(self, "_latest_final_transcript_by_turn_id", None)
+        if isinstance(transcripts_by_turn, dict):
+            transcript = str(transcripts_by_turn.get(str(turn_id or "").strip()) or "").strip()
+            if transcript:
+                return transcript
+        return str(getattr(self, "_last_user_input_text", "") or "")
+
     @staticmethod
     def _normalize_visual_ownership(
         *,
@@ -9509,6 +9558,12 @@ class RealtimeAPI:
             return False
         vision_state = self.get_vision_state()
         requires_fresh_look = is_current_visual_question(transcript)
+        if requires_fresh_look:
+            self._prefer_explicit_inspect_owner_for_turn(
+                turn_id=turn_id,
+                transcript=transcript,
+                seam="verify_on_risk",
+            )
         fresh_state = self._fresh_look_state_for_turn(turn_id=turn_id)
         visual_actuator, _ = self._resolve_visual_ownership_for_turn(turn_id=turn_id, seam="verify_on_risk")
         explicit_inspect_owns_turn = visual_actuator == "explicit_inspect"
@@ -9585,14 +9640,29 @@ class RealtimeAPI:
                 turn_id,
                 str(fresh_state.get("visual_actuator") or "heuristic_fresh_look"),
             )
-        if explicit_inspect_owns_turn and self._explicit_inspect_failed_for_turn(turn_id=turn_id):
+        explicit_status = self._explicit_inspect_status_for_turn(turn_id=turn_id)
+        if explicit_inspect_owns_turn and explicit_status in {"none", "pending"} and not self._turn_has_inspect_current_view_tool_result(turn_id=turn_id):
+            self._set_response_gating_verdict(
+                turn_id=turn_id,
+                input_event_key=input_event_key,
+                action="ANSWER",
+                reason="explicit_inspect_pending",
+            )
+            logger.info(
+                "explicit_inspect_verify_clarify_deferred run_id=%s turn_id=%s inspect_status=%s reason=awaiting_inspect_outcome",
+                self._current_run_id() or "",
+                turn_id,
+                explicit_status,
+            )
+            return False
+        if explicit_inspect_owns_turn and explicit_status in {"blocked", "timeout", "unavailable"}:
             should_confirm = True
             reason = "visual_unavailable"
             logger.info(
                 "explicit_inspect_authoritative_non_ok run_id=%s turn_id=%s inspect_status=%s action=force_visual_unavailable_clarify",
                 self._current_run_id() or "",
                 turn_id,
-                self._explicit_inspect_status_for_turn(turn_id=turn_id),
+                explicit_status,
             )
         if not should_confirm:
             self._set_response_gating_verdict(
@@ -14027,6 +14097,11 @@ class RealtimeAPI:
             active_by_turn = {}
             self._active_input_event_key_by_turn_id = active_by_turn
         active_by_turn[resolved_turn_id] = input_event_key
+        final_by_turn = getattr(self, "_latest_final_transcript_by_turn_id", None)
+        if not isinstance(final_by_turn, dict):
+            final_by_turn = {}
+            self._latest_final_transcript_by_turn_id = final_by_turn
+        final_by_turn[resolved_turn_id] = transcript or ""
         self._lifecycle_controller().on_transcript_final(
             self._canonical_utterance_key(turn_id=resolved_turn_id, input_event_key=input_event_key)
         )
@@ -14133,6 +14208,10 @@ class RealtimeAPI:
         turn_timestamps = turn_timestamps_store.setdefault(resolved_turn_id, {})
         turn_timestamps["transcript_final"] = time.monotonic()
         self._signal_server_auto_transcript_final(turn_id=resolved_turn_id)
+        await self._resume_deferred_provisional_tool_call_for_turn(
+            turn_id=resolved_turn_id,
+            websocket=websocket,
+        )
         partial_store = getattr(self, "_latest_partial_transcript_by_turn_id", None)
         if isinstance(partial_store, dict):
             partial_store.pop(resolved_turn_id, None)
@@ -14653,6 +14732,13 @@ class RealtimeAPI:
                     function_name,
                     call_id,
                 )
+                if str(function_name or "").strip().lower() == "inspect_current_view":
+                    self._record_deferred_provisional_tool_call(
+                        turn_id=str(getattr(self, "_current_response_turn_id", "") or "").strip(),
+                        function_name=str(function_name or ""),
+                        call_id=str(call_id or ""),
+                        args=args if isinstance(args, dict) else {},
+                    )
                 await self._send_noop_tool_output(
                     websocket,
                     call_id=call_id,
@@ -15358,11 +15444,13 @@ class RealtimeAPI:
         call_id = normalized_call_id
 
         if function_name == "inspect_current_view":
-            if bool(args.get("recenter", False)) and not self._transcript_requests_recenter(self._last_user_input_text or ""):
+            turn_id = self._current_turn_id_or_unknown()
+            turn_transcript = self._latest_transcript_for_turn(turn_id=turn_id)
+            if bool(args.get("recenter", False)) and not self._transcript_requests_recenter(turn_transcript):
                 logger.info(
                     "inspect_current_view_recenter_suppressed run_id=%s turn_id=%s reason=no_recenter_intent",
                     self._current_run_id() or "",
-                    self._current_turn_id_or_unknown(),
+                    turn_id,
                 )
                 args = dict(args)
                 args["recenter"] = False

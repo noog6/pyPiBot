@@ -46,6 +46,7 @@ def _build_api_stub() -> RealtimeAPI:
     lifecycle_controller = InteractionLifecycleController()
     api._lifecycle_controller = lambda: lifecycle_controller
     api._cancel_micro_ack = lambda **_kwargs: None
+    api._deferred_provisional_tool_call_by_turn_id = {}
     api._canonical_first_audio_started = lambda _canonical_key: True
     return api
 
@@ -458,6 +459,7 @@ def test_server_auto_audio_does_not_start_before_gating() -> None:
     api._lifecycle_controller = lambda: type("LC", (), {"on_audio_delta": staticmethod(lambda *_a, **_k: type("D", (), {"action": __import__("ai.interaction_lifecycle_controller", fromlist=["LifecycleDecisionAction"]).LifecycleDecisionAction.ALLOW, "reason": "ok"})())})()
     api._log_lifecycle_event = lambda **_kwargs: None
     api._cancel_micro_ack = lambda **_kwargs: None
+    api._deferred_provisional_tool_call_by_turn_id = {}
     api._canonical_response_state_mutate = lambda **_kwargs: None
     sent = []
     api._get_or_create_transport = lambda: type("T", (), {"send_json": staticmethod(lambda _ws, event: sent.append(event) or __import__("asyncio").sleep(0))})()
@@ -930,9 +932,64 @@ def test_provisional_server_auto_tool_call_is_deferred_before_transcript_final(m
 
     assert captured["reason"] == "provisional_server_auto_pre_audio_hold"
     assert captured["status"] == "deferred"
+    assert "turn_3" not in api._deferred_provisional_tool_call_by_turn_id
     assert api.function_call is None
     assert api.function_call_args == ""
 
+
+
+
+def test_deferred_provisional_inspect_call_resumes_for_same_turn() -> None:
+    api = _build_api_stub()
+    api._deferred_provisional_tool_call_by_turn_id = {
+        "turn_3": {
+            "function_name": "inspect_current_view",
+            "call_id": "call-provisional",
+            "args": {"recenter": False},
+        }
+    }
+    executed: list[tuple[str, str, dict[str, object]]] = []
+
+    async def _fake_execute(function_name, call_id, args, _websocket, **_kwargs):
+        executed.append((function_name, call_id, dict(args)))
+
+    api.execute_function_call = _fake_execute
+
+    resumed = asyncio.run(
+        api._resume_deferred_provisional_tool_call_for_turn(
+            turn_id="turn_3",
+            websocket=object(),
+        )
+    )
+
+    assert resumed is True
+    assert executed == [("inspect_current_view", "call-provisional", {"recenter": False})]
+    assert api._deferred_provisional_tool_call_by_turn_id == {}
+
+
+
+def test_provisional_server_auto_inspect_call_is_recorded_for_resume(monkeypatch) -> None:
+    api = _build_api_stub()
+    api._active_response_origin = "server_auto"
+    api._current_response_turn_id = "turn_3"
+    api._active_response_id = "resp-server-auto"
+    api._active_server_auto_input_event_key = "synthetic_server_auto_3"
+    api.function_call = {"name": "inspect_current_view", "call_id": "call-provisional-inspect"}
+    api.function_call_args = '{"recenter": false}'
+
+    async def _fake_noop(_websocket, **_kwargs):
+        return None
+
+    monkeypatch.setattr(api, "_send_noop_tool_output", _fake_noop)
+
+    api._server_auto_pre_audio_hold_active = lambda **_kwargs: True
+
+    asyncio.run(api.handle_function_call({}, object()))
+
+    pending = api._deferred_provisional_tool_call_by_turn_id["turn_3"]
+    assert pending["function_name"] == "inspect_current_view"
+    assert pending["call_id"] == "call-provisional-inspect"
+    assert pending["args"] == {"recenter": False}
 
 def test_transcript_final_handoff_invalidates_provisional_tool_followup_lineage() -> None:
     api = _build_api_stub()
@@ -1152,9 +1209,7 @@ def test_visual_ownership_replay_explicit_inspect_survives_verify_replacement_an
     )
 
     assert attempted_fresh_look == []
-    assert captured_clarify_metadata
-    assert captured_clarify_metadata[0]["visual_actuator"] == "explicit_inspect"
-    assert captured_clarify_metadata[0]["visual_intent_class"] == "explicit_inspect"
+    assert captured_clarify_metadata == []
 
     api._pending_server_auto_response_by_turn_id["turn_replay"] = PendingServerAutoResponse(
         turn_id="turn_replay",
