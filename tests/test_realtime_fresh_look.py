@@ -1213,6 +1213,55 @@ def test_execute_function_call_model_originated_inspect_still_emits_conversation
     assert sent_events[0]["item"]["type"] == "function_call_output"
 
 
+def test_duplicate_model_inspect_suppressed_after_runtime_obligation_dispatch(monkeypatch) -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    turn_id = "turn-dup-inspect"
+    api._current_turn_id_or_unknown = lambda: turn_id
+    state = api._fresh_look_state_for_turn(turn_id=turn_id)
+    state["explicit_inspect_obligation_dispatched"] = True
+    state["explicit_inspect_obligation_call_id"] = "oblturn_123"
+    state["explicit_inspect_obligation_dispatched_at_monotonic"] = time.monotonic()
+    api.function_call = {"name": "inspect_current_view", "call_id": "call_model_1"}
+    api.function_call_args = "{}"
+
+    suppressed: list[dict[str, str]] = []
+    executed: list[str] = []
+
+    async def _fake_noop(_websocket, **kwargs):
+        suppressed.append({k: str(v) for k, v in kwargs.items()})
+
+    async def _fake_execute(*_args, **_kwargs):
+        executed.append("inspect_current_view")
+
+    monkeypatch.setattr(api, "_send_noop_tool_output", _fake_noop)
+    monkeypatch.setattr(api, "execute_function_call", _fake_execute)
+
+    asyncio.run(api.handle_function_call({}, object()))
+
+    assert executed == []
+    assert suppressed
+    assert suppressed[0]["status"] == "suppressed_duplicate_explicit_inspect"
+    assert suppressed[0]["reason"] == "explicit_inspect_obligation_already_dispatched"
+
+
+def test_duplicate_model_inspect_suppression_honors_retry_override() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    turn_id = "turn-retry-inspect"
+    state = api._fresh_look_state_for_turn(turn_id=turn_id)
+    state["explicit_inspect_obligation_dispatched"] = True
+    state["explicit_inspect_obligation_call_id"] = "oblturn_456"
+    state["explicit_inspect_obligation_dispatched_at_monotonic"] = time.monotonic()
+
+    assert (
+        api._should_suppress_duplicate_model_explicit_inspect(
+            turn_id=turn_id,
+            function_name="inspect_current_view",
+            args={"retry": True},
+        )
+        is False
+    )
+
+
 def test_execute_function_call_model_originated_non_inspect_tool_lifecycle_unchanged() -> None:
     api = _build_api(camera=_CameraStub(pending_images=[]))
     api._tool_call_records = []
@@ -1497,6 +1546,9 @@ def test_explicit_inspect_obligation_dispatches_for_pending_or_none(explicit_sta
     assert dispatched[0][0] == "inspect_current_view"
     assert dispatched[0][2] == {}
     assert dispatched[0][3].get("conversation_backed_call") is False
+    assert state["explicit_inspect_obligation_dispatched"] is True
+    assert state["explicit_inspect_obligation_call_id"]
+    assert isinstance(state["explicit_inspect_obligation_dispatched_at_monotonic"], float)
 
 
 @pytest.mark.parametrize("explicit_status", ["blocked", "timeout", "unavailable"])
