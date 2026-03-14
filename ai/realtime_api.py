@@ -8929,6 +8929,63 @@ class RealtimeAPI:
     def _explicit_inspect_failed_for_turn(self, *, turn_id: str) -> bool:
         return self._explicit_inspect_status_for_turn(turn_id=turn_id) in {"blocked", "timeout", "unavailable"}
 
+    def _prefer_explicit_inspect_owner_for_turn(self, *, turn_id: str, transcript: str, seam: str) -> bool:
+        if not is_current_visual_question(transcript):
+            return False
+        fresh_state = self._fresh_look_state_for_turn(turn_id=turn_id)
+        visual_actuator, _ = self._resolve_visual_ownership_for_turn(turn_id=turn_id, seam=f"{seam}_eval")
+        explicit_status = self._explicit_inspect_status_for_turn(turn_id=turn_id)
+        if visual_actuator == "explicit_inspect":
+            logger.info(
+                "explicit_inspect_preferred_owner_preserved run_id=%s turn_id=%s seam=%s inspect_status=%s",
+                self._current_run_id() or "",
+                turn_id,
+                seam,
+                explicit_status,
+            )
+            return True
+        if explicit_status in {"blocked", "timeout", "unavailable"}:
+            logger.info(
+                "explicit_inspect_preference_skipped_failed run_id=%s turn_id=%s seam=%s inspect_status=%s",
+                self._current_run_id() or "",
+                turn_id,
+                seam,
+                explicit_status,
+            )
+            return False
+        fresh_state["visual_actuator"] = "explicit_inspect"
+        fresh_state["visual_intent_class"] = "explicit_inspect"
+        if str(fresh_state.get("explicit_inspect_status") or "none").strip().lower() == "none":
+            fresh_state["explicit_inspect_status"] = "pending"
+        logger.info(
+            "explicit_inspect_preferred_owner_set run_id=%s turn_id=%s seam=%s prior_visual_actuator=%s",
+            self._current_run_id() or "",
+            turn_id,
+            seam,
+            visual_actuator,
+        )
+        return True
+
+    @staticmethod
+    def _transcript_requests_recenter(transcript: str) -> bool:
+        normalized = " ".join((transcript or "").lower().split())
+        if not normalized:
+            return False
+        if "recenter" in normalized:
+            return True
+        recenter_patterns = (
+            "look center",
+            "look to center",
+            "look at center",
+            "look back to center",
+            "look back at center",
+            "go back to center",
+            "return to center",
+            "back to center",
+            "center first",
+        )
+        return any(pattern in normalized for pattern in recenter_patterns)
+
     def _turn_has_inspect_current_view_tool_result(self, *, turn_id: str) -> bool:
         normalized_turn_id = str(turn_id or "").strip()
         if not normalized_turn_id:
@@ -9476,6 +9533,14 @@ class RealtimeAPI:
                 visual_intent_class="fallback_visual_question",
             )
             vision_state = self.get_vision_state()
+            fresh_state = self._fresh_look_state_for_turn(turn_id=turn_id)
+            if bool(fresh_state.get("completed", False)):
+                logger.info(
+                    "visual_unavailable_clarify_suppressed_after_successful_fresh_capture run_id=%s turn_id=%s visual_actuator=%s",
+                    self._current_run_id() or "",
+                    turn_id,
+                    str(fresh_state.get("visual_actuator") or "heuristic_fresh_look"),
+                )
         else:
             logger.info(
                 "fresh_look_bypass_reason run_id=%s turn_id=%s reason=not_current_visual_question",
@@ -9511,6 +9576,15 @@ class RealtimeAPI:
             camera_available=bool(vision_state.get("available", False) or vision_state.get("can_capture", False)),
             camera_recent=fresh_frame_available,
         )
+        if bool(fresh_state.get("completed", False)) and reason == "visual_unavailable":
+            should_confirm = False
+            reason = "none"
+            logger.info(
+                "visual_unavailable_clarify_suppressed_after_successful_fresh_capture run_id=%s turn_id=%s visual_actuator=%s",
+                self._current_run_id() or "",
+                turn_id,
+                str(fresh_state.get("visual_actuator") or "heuristic_fresh_look"),
+            )
         if explicit_inspect_owns_turn and self._explicit_inspect_failed_for_turn(turn_id=turn_id):
             should_confirm = True
             reason = "visual_unavailable"
@@ -14158,6 +14232,12 @@ class RealtimeAPI:
             if hasattr(self, "state_manager") and self.state_manager is not None:
                 self.state_manager.update_state(InteractionState.LISTENING, "empty transcript blocked")
             return
+        if transcript and not confirmation_active:
+            self._prefer_explicit_inspect_owner_for_turn(
+                turn_id=resolved_turn_id,
+                transcript=transcript,
+                seam="transcript_final",
+            )
         if transcript and not confirmation_active and await self._maybe_verify_on_risk_clarify(
             transcript=transcript,
             websocket=websocket,
@@ -15278,6 +15358,14 @@ class RealtimeAPI:
         call_id = normalized_call_id
 
         if function_name == "inspect_current_view":
+            if bool(args.get("recenter", False)) and not self._transcript_requests_recenter(self._last_user_input_text or ""):
+                logger.info(
+                    "inspect_current_view_recenter_suppressed run_id=%s turn_id=%s reason=no_recenter_intent",
+                    self._current_run_id() or "",
+                    self._current_turn_id_or_unknown(),
+                )
+                args = dict(args)
+                args["recenter"] = False
             try:
                 result = await self._inspect_current_view_tool(**args)
                 inspect_status = str(result.get("status") or "none").strip().lower()
