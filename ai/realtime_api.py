@@ -15759,11 +15759,117 @@ class RealtimeAPI:
                 response_payload["metadata"] = response_metadata
             response_metadata["explicit_inspect_outcome"] = inspect_status
             if inspect_status in {"blocked", "timeout", "unavailable"}:
-                turn_id = str(response_metadata.get("turn_id") or self._current_turn_id_or_unknown())
+                metadata_turn_id = str(response_metadata.get("turn_id") or "").strip()
+                result_turn_id = str(result.get("turn_id") or "").strip() if isinstance(result, dict) else ""
+                record_turn_id = ""
+                for record in reversed(self._tool_call_records):
+                    if str(record.get("call_id") or "").strip() == call_id:
+                        record_turn_id = str(record.get("turn_id") or "").strip()
+                        break
+                obligation_turn_id = ""
+                if not conversation_backed_call:
+                    fresh_look_store = getattr(self, "_fresh_look_by_turn_id", None)
+                    if isinstance(fresh_look_store, dict):
+                        for candidate_turn_id, candidate_state in fresh_look_store.items():
+                            if not isinstance(candidate_state, dict):
+                                continue
+                            candidate_call_id = str(candidate_state.get("explicit_inspect_obligation_call_id") or "").strip()
+                            if candidate_call_id == call_id and bool(candidate_state.get("explicit_inspect_obligation_dispatched", False)):
+                                obligation_turn_id = str(candidate_turn_id or "").strip()
+                                break
+                turn_id = (
+                    obligation_turn_id
+                    or metadata_turn_id
+                    or result_turn_id
+                    or record_turn_id
+                    or self._current_turn_id_or_unknown()
+                )
+                response_metadata["turn_id"] = turn_id
+
+                result_visual_actuator, result_visual_intent_class = self._normalize_visual_ownership(
+                    visual_actuator=result.get("visual_actuator") if isinstance(result, dict) else None,
+                    visual_intent_class=result.get("visual_intent_class") if isinstance(result, dict) else None,
+                )
+                metadata_visual_actuator, metadata_visual_intent_class = self._normalize_visual_ownership(
+                    visual_actuator=response_metadata.get("visual_actuator"),
+                    visual_intent_class=response_metadata.get("visual_intent_class"),
+                )
+                visual_actuator = (
+                    result_visual_actuator if result_visual_actuator != "none" else metadata_visual_actuator
+                )
+                visual_intent_class = (
+                    result_visual_intent_class
+                    if result_visual_intent_class != "none"
+                    else metadata_visual_intent_class
+                )
+                if visual_actuator == "none" and visual_intent_class == "none":
+                    visual_actuator = metadata_visual_actuator
+                    visual_intent_class = metadata_visual_intent_class
+
+                state = self._fresh_look_state_for_turn(turn_id=turn_id)
+                obligation_call_id = str(state.get("explicit_inspect_obligation_call_id") or "").strip()
+                obligation_lineage_match = (
+                    bool(state.get("explicit_inspect_obligation_dispatched", False)) and obligation_call_id == call_id
+                ) or bool(obligation_turn_id)
+                if obligation_lineage_match:
+                    visual_actuator = "explicit_inspect"
+                    visual_intent_class = "explicit_inspect"
+                response_metadata["visual_actuator"] = visual_actuator
+                response_metadata["visual_intent_class"] = visual_intent_class
+
+                runtime_obligation_call = not conversation_backed_call
+                explicit_inspect_owned = (
+                    visual_actuator == "explicit_inspect"
+                    or visual_intent_class == "explicit_inspect"
+                    or obligation_lineage_match
+                )
                 clarify_text = self._visual_unavailable_clarify_text_for_turn(
                     turn_id=turn_id,
                     vision_state=self.get_vision_state(),
                 )
+                if runtime_obligation_call and explicit_inspect_owned:
+                    logger.info(
+                        "explicit_inspect_runtime_obligation_non_ok_detected run_id=%s turn_id=%s call_id=%s status=%s obligation_lineage_match=%s",
+                        self._current_run_id() or "",
+                        turn_id,
+                        call_id,
+                        inspect_status,
+                        str(obligation_lineage_match).lower(),
+                    )
+                    logger.info(
+                        "explicit_inspect_runtime_obligation_deterministic_clarify_emitted run_id=%s turn_id=%s call_id=%s",
+                        self._current_run_id() or "",
+                        turn_id,
+                        call_id,
+                    )
+                    await self.send_assistant_message(
+                        clarify_text,
+                        websocket,
+                        response_metadata={
+                            "trigger": "asr_verify_on_risk",
+                            "reason": "visual_unavailable",
+                            "clarify_mode": "bounded",
+                            "turn_id": turn_id,
+                            "input_event_key": str(
+                                self._active_input_event_key_by_turn_id.get(turn_id)
+                                or response_metadata.get("input_event_key")
+                                or self._tool_followup_input_event_key(call_id=call_id)
+                            ),
+                            "visual_actuator": visual_actuator,
+                            "visual_intent_class": visual_intent_class,
+                            "explicit_inspect_outcome": inspect_status,
+                        },
+                    )
+                    logger.info(
+                        "explicit_inspect_runtime_obligation_model_followup_skipped run_id=%s turn_id=%s call_id=%s status=%s",
+                        self._current_run_id() or "",
+                        turn_id,
+                        call_id,
+                        inspect_status,
+                    )
+                    self.function_call = None
+                    self.function_call_args = ""
+                    return
                 response_metadata["trigger"] = "asr_verify_on_risk"
                 response_metadata["reason"] = "visual_unavailable"
                 response_metadata["clarify_mode"] = "bounded"
