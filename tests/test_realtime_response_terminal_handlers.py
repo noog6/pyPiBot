@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import pytest
 import sys
 import types
 from types import SimpleNamespace
@@ -697,7 +698,8 @@ def test_handle_transcribe_response_done_prefers_fresh_state_visual_ownership_wh
     )
 
 
-def test_handle_transcribe_response_done_blocks_evidence_free_explicit_inspect_answer() -> None:
+@pytest.mark.parametrize("inspect_status", ["pending", "blocked", "timeout", "unavailable"])
+def test_handle_transcribe_response_done_blocks_non_ok_explicit_inspect_answer(inspect_status: str) -> None:
     api = _make_api()
     api._assistant_reply_response_id = "resp_1"
     api._assistant_reply_by_response_id = {"resp_1": "I think that is a folded paper."}
@@ -707,7 +709,7 @@ def test_handle_transcribe_response_done_blocks_evidence_free_explicit_inspect_a
     state["requested"] = True
     state["visual_actuator"] = "explicit_inspect"
     state["visual_intent_class"] = "explicit_inspect"
-    state["explicit_inspect_status"] = "pending"
+    state["explicit_inspect_status"] = inspect_status
     api._tool_call_records = []
     api._normalize_memory_recall_answer = lambda text: text
     api._normalize_verify_clarify_message = lambda **kwargs: kwargs["message"]
