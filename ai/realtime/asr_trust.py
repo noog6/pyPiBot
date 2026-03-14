@@ -33,11 +33,16 @@ _CURRENT_VISUAL_PATTERNS = (
     r"\bdo\s+you\s+see\b.*\bin\s+your\s+field\s+of\s+view\b",
     r"\bcan\s+you\s+check\s+whether\s+there\s+is\b.*\b(?:in\s+front\s+of\s+you|ahead\s+of\s+you)\b",
     r"\blook\s+back\s+(?:at|to)\s+center\b.*\b(?:tell\s+me\s+if\s+you\s+see|do\s+you\s+see)\b",
+    r"\bcan\s+you\s+see\s+what\s+i(?:'m|\s+am)\s+holding\b",
+    r"\bcan\s+you\s+see\s+what\s+i(?:'m|\s+am)\s+holding\s+in\s+my\s+hand\b",
+    r"\bdo\s+you\s+see\s+this\b",
+    r"\blook\s+at\s+this\s+and\s+tell\s+me\s+what\s+you\s+see\b",
 )
 
 _VISUAL_ACTION_TERMS = {"see", "look", "looking", "check", "describe"}
 _VISUAL_TARGET_TERMS = {"front", "there"}
 _VISUAL_PRESENT_TERMS = {"now", "current", "currently", "right"}
+_EXPLICIT_VISUAL_SUBJECT_TERMS = {"this", "holding", "hand", "front"}
 _VISUAL_NEGATIVE_PATTERNS = (
     r"\b(earlier|before|previously|yesterday|last\s+(?:time|night|week))\b",
     r"\bwhat\s+did\s+you\s+see\b",
@@ -174,6 +179,9 @@ def is_current_visual_question(text: str) -> bool:
         or "field of view" in normalized
     )
     if has_visual_action and has_current_target and has_present_hint:
+        return True
+    has_explicit_visual_subject = bool(token_set & _EXPLICIT_VISUAL_SUBJECT_TERMS)
+    if has_visual_action and has_explicit_visual_subject:
         return True
     return False
 
