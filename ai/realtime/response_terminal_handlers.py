@@ -156,6 +156,24 @@ class ResponseTerminalHandlers:
                 visual_actuator,
                 visual_intent_class,
             )
+            explicit_inspect_status = api._explicit_inspect_status_for_turn(turn_id=turn_id)
+            has_explicit_inspect_result = api._turn_has_inspect_current_view_tool_result(turn_id=turn_id)
+            if (
+                visual_actuator == "explicit_inspect"
+                and explicit_inspect_status in {"none", "pending"}
+                and not has_explicit_inspect_result
+            ):
+                normalized_reply = api._visual_unavailable_clarify_text_for_turn(
+                    turn_id=turn_id,
+                    vision_state=api.get_vision_state(),
+                )
+                logger.info(
+                    "explicit_inspect_terminal_answer_blocked run_id=%s turn_id=%s inspect_status=%s has_inspect_result=%s action=bounded_clarify",
+                    api._current_run_id() or "",
+                    turn_id,
+                    explicit_inspect_status,
+                    str(has_explicit_inspect_result).lower(),
+                )
             log_info(f"Assistant Response: {normalized_reply}", style="bold blue")
             if response_id:
                 per_response = getattr(api, "_assistant_reply_by_response_id", None)
