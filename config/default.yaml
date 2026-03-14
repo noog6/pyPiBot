@@ -306,14 +306,14 @@ governance:
       tier: 1
       reversible: true
       cost_hint: "cheap"
-      safety_tags: ["vision", "camera", "motion"]
+      safety_tags: ["vision", "camera"]
       confirm_required: false
       confirm_reason: "explicit visual inspect request"
       confirm_prompt: null
       cooldown_seconds: 0
       dry_run_supported: false
       governance_tier: "GUARDED"
-      side_effects: "REVERSIBLE_MOTION"
+      side_effects: "NONE"
       sensitivity: "LOW"
       default_confirmation: "ASK"
     read_battery_voltage:
