@@ -8962,8 +8962,30 @@ class RealtimeAPI:
                 "visual_intent_class": "none",
                 "explicit_inspect_status": "none",
                 "visual_owner_frozen": False,
+                "explicit_inspect_obligation_dispatched": False,
+                "explicit_inspect_obligation_call_id": "",
+                "explicit_inspect_obligation_dispatched_at_monotonic": None,
             }
         return store[turn_id]
+
+    def _explicit_inspect_retry_override_requested(self, *, args: dict[str, Any]) -> bool:
+        if not isinstance(args, dict):
+            return False
+        return bool(args.get("retry") or args.get("explicit_retry") or args.get("retry_explicit_inspect"))
+
+    def _should_suppress_duplicate_model_explicit_inspect(
+        self,
+        *,
+        turn_id: str,
+        function_name: str,
+        args: dict[str, Any],
+    ) -> bool:
+        if str(function_name or "").strip().lower() != "inspect_current_view":
+            return False
+        if self._explicit_inspect_retry_override_requested(args=args):
+            return False
+        state = self._fresh_look_state_for_turn(turn_id=turn_id)
+        return bool(state.get("explicit_inspect_obligation_dispatched", False))
 
     def _explicit_inspect_status_for_turn(self, *, turn_id: str) -> str:
         state = self._fresh_look_state_for_turn(turn_id=turn_id)
@@ -14180,6 +14202,10 @@ class RealtimeAPI:
             explicit_status,
             obligation_call_id,
         )
+        state = self._fresh_look_state_for_turn(turn_id=turn_id)
+        state["explicit_inspect_obligation_dispatched"] = True
+        state["explicit_inspect_obligation_call_id"] = obligation_call_id
+        state["explicit_inspect_obligation_dispatched_at_monotonic"] = time.monotonic()
         await self.execute_function_call(
             "inspect_current_view",
             obligation_call_id,
@@ -14849,6 +14875,36 @@ class RealtimeAPI:
                 call_id,
                 args_parsed,
             )
+            turn_id = str(self._current_turn_id_or_unknown() or "").strip()
+            if self._should_suppress_duplicate_model_explicit_inspect(
+                turn_id=turn_id,
+                function_name=str(function_name or ""),
+                args=args if isinstance(args, dict) else {},
+            ):
+                fresh_state = self._fresh_look_state_for_turn(turn_id=turn_id)
+                logger.info(
+                    "explicit_inspect_duplicate_model_call_suppressed run_id=%s turn_id=%s call_id=%s obligation_call_id=%s",
+                    self._current_run_id() or "",
+                    turn_id or "turn-unknown",
+                    call_id,
+                    str(fresh_state.get("explicit_inspect_obligation_call_id") or "none"),
+                )
+                await self._send_noop_tool_output(
+                    websocket,
+                    call_id=call_id,
+                    status="suppressed_duplicate_explicit_inspect",
+                    message=(
+                        "No action taken. Explicit inspect runtime obligation already dispatched for this turn; "
+                        "model-originated duplicate inspect suppressed."
+                    ),
+                    tool_name=str(function_name or ""),
+                    reason="explicit_inspect_obligation_already_dispatched",
+                    category="suppression",
+                    include_response_create=False,
+                )
+                self.function_call = None
+                self.function_call_args = ""
+                return
             if self._should_defer_provisional_server_auto_tool_call():
                 logger.info(
                     "Function call deferred | tool=%s call_id=%s reason=provisional_server_auto_pre_audio_hold",
