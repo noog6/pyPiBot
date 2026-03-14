@@ -14187,6 +14187,7 @@ class RealtimeAPI:
             websocket,
             force_no_tools_followup=False,
             inject_no_tools_instruction=False,
+            conversation_backed_call=False,
         )
         return True
 
@@ -15544,6 +15545,7 @@ class RealtimeAPI:
         staging: dict[str, Any] | None = None,
         force_no_tools_followup: bool = False,
         inject_no_tools_instruction: bool = False,
+        conversation_backed_call: bool = True,
     ) -> None:
         normalized_call_id = self._normalize_realtime_call_id(call_id)
         if normalized_call_id != call_id:
@@ -15649,23 +15651,29 @@ class RealtimeAPI:
                 len(sources),
             )
 
-        function_call_output = {
-            "type": "conversation.item.create",
-            "item": {
-                "type": "function_call_output",
-                "call_id": call_id,
-                "output": json.dumps(output_payload),
-            },
-        }
-        log_ws_event("Outgoing", function_call_output)
-        self._track_outgoing_event(function_call_output)
-        transport = self._get_or_create_transport()
-        await transport.send_json(websocket, function_call_output)
-        logger.info(
-            "tool_result_enqueued_to_realtime call_id=%s conversation_item_id=%s",
-            call_id,
-            None,
-        )
+        if conversation_backed_call:
+            function_call_output = {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": json.dumps(output_payload),
+                },
+            }
+            log_ws_event("Outgoing", function_call_output)
+            self._track_outgoing_event(function_call_output)
+            transport = self._get_or_create_transport()
+            await transport.send_json(websocket, function_call_output)
+            logger.info(
+                "tool_result_enqueued_to_realtime call_id=%s conversation_item_id=%s",
+                call_id,
+                None,
+            )
+        else:
+            logger.info(
+                "tool_result_internal_only call_id=%s reason=runtime_obligation_not_conversation_backed",
+                call_id,
+            )
         self._mark_utterance_info_summary(deliverable_seen=True)
         if inject_no_tools_instruction:
             await self._add_no_tools_follow_up_instruction(websocket)

@@ -1117,6 +1117,147 @@ def test_execute_function_call_inspect_non_ok_forces_bounded_clarify_followup(in
     assert response_payload.get("tool_choice") == "none"
 
 
+def test_execute_function_call_runtime_obligation_skips_conversation_item_output() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    api._tool_call_records = []
+    api._last_tool_call_results = []
+    api._current_turn_id_or_unknown = lambda: "turn-runtime-obligation"
+    api._normalize_realtime_call_id = lambda call_id: call_id
+    api._track_outgoing_event = lambda *_args, **_kwargs: None
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._mark_or_suppress_research_spoken_response = lambda _rid: False
+    api._tool_followup_input_event_key = lambda *, call_id: f"tool:{call_id}"
+    api._active_input_event_key_by_turn_id = {"turn-runtime-obligation": "item_parent"}
+
+    sent_events: list[dict[str, object]] = []
+    followup_events: list[dict[str, object]] = []
+
+    class _Transport:
+        async def send_json(self, _ws: object, payload: dict[str, object]) -> None:
+            sent_events.append(payload)
+
+    async def _fake_send_response_create(_ws: object, response_create_event: dict[str, object], **_kwargs) -> bool:
+        followup_events.append(response_create_event)
+        return True
+
+    async def _fake_inspect_current_view_tool(**_kwargs):
+        return {
+            "status": "timeout",
+            "blocked_reason": "timeout",
+            "visual_answer_mode": "ambient_stale",
+        }
+
+    api._get_or_create_transport = lambda: _Transport()
+    api._send_response_create = _fake_send_response_create
+    api._inspect_current_view_tool = _fake_inspect_current_view_tool
+
+    asyncio.run(
+        api.execute_function_call(
+            "inspect_current_view",
+            "oblturn_test_call",
+            {},
+            websocket=object(),
+            conversation_backed_call=False,
+        )
+    )
+
+    assert sent_events == []
+    assert followup_events
+    metadata = (followup_events[0].get("response") or {}).get("metadata") or {}
+    assert metadata.get("explicit_inspect_outcome") == "timeout"
+
+
+def test_execute_function_call_model_originated_inspect_still_emits_conversation_item_output() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    api._tool_call_records = []
+    api._last_tool_call_results = []
+    api._current_turn_id_or_unknown = lambda: "turn-model-inspect"
+    api._normalize_realtime_call_id = lambda call_id: call_id
+    api._track_outgoing_event = lambda *_args, **_kwargs: None
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._mark_or_suppress_research_spoken_response = lambda _rid: False
+    api._tool_followup_input_event_key = lambda *, call_id: f"tool:{call_id}"
+    api._active_input_event_key_by_turn_id = {"turn-model-inspect": "item_parent"}
+
+    sent_events: list[dict[str, object]] = []
+
+    class _Transport:
+        async def send_json(self, _ws: object, payload: dict[str, object]) -> None:
+            sent_events.append(payload)
+
+    async def _fake_send_response_create(_ws: object, _event: dict[str, object], **_kwargs) -> bool:
+        return True
+
+    async def _fake_inspect_current_view_tool(**_kwargs):
+        return {
+            "status": "ok",
+            "blocked_reason": "none",
+            "visual_answer_mode": "fresh",
+        }
+
+    api._get_or_create_transport = lambda: _Transport()
+    api._send_response_create = _fake_send_response_create
+    api._inspect_current_view_tool = _fake_inspect_current_view_tool
+
+    asyncio.run(
+        api.execute_function_call(
+            "inspect_current_view",
+            "call-model-inspect",
+            {},
+            websocket=object(),
+        )
+    )
+
+    assert sent_events
+    assert sent_events[0]["type"] == "conversation.item.create"
+    assert sent_events[0]["item"]["type"] == "function_call_output"
+
+
+def test_execute_function_call_model_originated_non_inspect_tool_lifecycle_unchanged() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    api._tool_call_records = []
+    api._last_tool_call_results = []
+    api._current_turn_id_or_unknown = lambda: "turn-model-tool"
+    api._normalize_realtime_call_id = lambda call_id: call_id
+    api._track_outgoing_event = lambda *_args, **_kwargs: None
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._mark_or_suppress_research_spoken_response = lambda _rid: False
+    api._tool_followup_input_event_key = lambda *, call_id: f"tool:{call_id}"
+    api._active_input_event_key_by_turn_id = {"turn-model-tool": "item_parent"}
+
+    sent_events: list[dict[str, object]] = []
+
+    class _Transport:
+        async def send_json(self, _ws: object, payload: dict[str, object]) -> None:
+            sent_events.append(payload)
+
+    async def _fake_send_response_create(_ws: object, _event: dict[str, object], **_kwargs) -> bool:
+        return True
+
+    async def _fake_center(delay_ms: int = 0) -> dict[str, object]:
+        return {"queued": True, "delay_ms": delay_ms}
+
+    original = function_map["gesture_look_center"]
+    function_map["gesture_look_center"] = _fake_center
+    api._get_or_create_transport = lambda: _Transport()
+    api._send_response_create = _fake_send_response_create
+    try:
+        asyncio.run(
+            api.execute_function_call(
+                "gesture_look_center",
+                "call-model-center",
+                {},
+                websocket=object(),
+            )
+        )
+    finally:
+        function_map["gesture_look_center"] = original
+
+    assert sent_events
+    assert sent_events[0]["type"] == "conversation.item.create"
+    assert api._tool_call_records[-1]["name"] == "gesture_look_center"
+
+
 def test_visual_tool_descriptions_bias_semantic_requests_to_inspect() -> None:
     from ai.tools import tools
 
@@ -1336,10 +1477,10 @@ def test_explicit_inspect_obligation_dispatches_for_pending_or_none(explicit_sta
     state["explicit_inspect_status"] = explicit_status
     api._tool_call_records = []
 
-    dispatched: list[tuple[str, str, dict[str, object]]] = []
+    dispatched: list[tuple[str, str, dict[str, object], dict[str, object]]] = []
 
     async def _fake_execute(function_name: str, call_id: str, args: dict[str, object], websocket: object, **_kwargs):
-        dispatched.append((function_name, call_id, dict(args)))
+        dispatched.append((function_name, call_id, dict(args), dict(_kwargs)))
 
     api.execute_function_call = _fake_execute
 
@@ -1355,6 +1496,7 @@ def test_explicit_inspect_obligation_dispatches_for_pending_or_none(explicit_sta
     assert dispatched
     assert dispatched[0][0] == "inspect_current_view"
     assert dispatched[0][2] == {}
+    assert dispatched[0][3].get("conversation_backed_call") is False
 
 
 @pytest.mark.parametrize("explicit_status", ["blocked", "timeout", "unavailable"])
