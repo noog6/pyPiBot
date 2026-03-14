@@ -6827,6 +6827,10 @@ class RealtimeAPI:
     def _tool_followup_input_event_key(self, *, call_id: str) -> str:
         return f"tool:{str(call_id or '').strip() or 'unknown'}"
 
+    def _explicit_inspect_obligation_followup_input_event_key(self, *, call_id: str) -> str:
+        normalized_call_id = str(call_id or "").strip() or "unknown"
+        return f"obligation_followup:{normalized_call_id}"
+
     def _tool_followup_state(self, *, canonical_key: str) -> str:
         normalized_canonical_key = str(canonical_key or "").strip()
         if not normalized_canonical_key:
@@ -15828,6 +15832,9 @@ class RealtimeAPI:
                     vision_state=self.get_vision_state(),
                 )
                 if runtime_obligation_call and explicit_inspect_owned:
+                    obligation_followup_input_event_key = self._explicit_inspect_obligation_followup_input_event_key(
+                        call_id=call_id,
+                    )
                     logger.info(
                         "explicit_inspect_runtime_obligation_non_ok_detected run_id=%s turn_id=%s call_id=%s status=%s obligation_lineage_match=%s",
                         self._current_run_id() or "",
@@ -15850,14 +15857,12 @@ class RealtimeAPI:
                             "reason": "visual_unavailable",
                             "clarify_mode": "bounded",
                             "turn_id": turn_id,
-                            "input_event_key": str(
-                                self._active_input_event_key_by_turn_id.get(turn_id)
-                                or response_metadata.get("input_event_key")
-                                or self._tool_followup_input_event_key(call_id=call_id)
-                            ),
+                            "input_event_key": obligation_followup_input_event_key,
                             "visual_actuator": visual_actuator,
                             "visual_intent_class": visual_intent_class,
                             "explicit_inspect_outcome": inspect_status,
+                            "response_origin": "explicit_inspect_obligation_followup",
+                            "obligation_call_id": call_id,
                         },
                     )
                     logger.info(

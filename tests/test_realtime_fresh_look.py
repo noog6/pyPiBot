@@ -1180,6 +1180,9 @@ def test_execute_function_call_runtime_obligation_non_ok_emits_deterministic_ass
     assert metadata.get("reason") == "visual_unavailable"
     assert metadata.get("trigger") == "asr_verify_on_risk"
     assert metadata.get("clarify_mode") == "bounded"
+    assert metadata.get("input_event_key") == f"obligation_followup:oblturn_test_call_{inspect_status}"
+    assert metadata.get("response_origin") == "explicit_inspect_obligation_followup"
+    assert metadata.get("obligation_call_id") == f"oblturn_test_call_{inspect_status}"
     assert response_payload.get("instructions") is not None
     assert "exactly this clarify sentence" in str(response_payload.get("instructions") or "")
     assert response_payload.get("tool_choice") == "none"
@@ -1198,6 +1201,61 @@ def test_execute_function_call_runtime_obligation_non_ok_emits_deterministic_ass
         and (payload.get("item") or {}).get("type") == "function_call_output"
     ]
     assert function_outputs == []
+
+
+def test_runtime_obligation_clarify_uses_dedicated_followup_key_not_parent_server_auto_key() -> None:
+    api = _build_api(camera=_CameraStub(pending_images=[]))
+    api._tool_call_records = []
+    api._last_tool_call_results = []
+    api._current_turn_id_or_unknown = lambda: "turn-obligation-key"
+    api._normalize_realtime_call_id = lambda call_id: call_id
+    api._track_outgoing_event = lambda *_args, **_kwargs: None
+    api._is_awaiting_confirmation_phase = lambda: False
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._mark_or_suppress_research_spoken_response = lambda _rid: False
+    api._tool_followup_input_event_key = lambda *, call_id: f"tool:{call_id}"
+    api._active_input_event_key_by_turn_id = {"turn-obligation-key": "item_parent_server_auto"}
+    runtime_state = api._fresh_look_state_for_turn(turn_id="turn-obligation-key")
+    runtime_state["visual_actuator"] = "explicit_inspect"
+    runtime_state["visual_intent_class"] = "explicit_inspect"
+
+    followup_events: list[dict[str, object]] = []
+
+    class _Transport:
+        async def send_json(self, _ws: object, _payload: dict[str, object]) -> None:
+            return None
+
+    async def _fake_send_response_create(_ws: object, response_create_event: dict[str, object], **_kwargs) -> bool:
+        followup_events.append(response_create_event)
+        return True
+
+    async def _fake_inspect_current_view_tool(**_kwargs):
+        return {
+            "status": "timeout",
+            "blocked_reason": "timeout",
+            "visual_answer_mode": "ambient_recent",
+            "visual_actuator": "explicit_inspect",
+            "visual_intent_class": "explicit_inspect",
+        }
+
+    api._get_or_create_transport = lambda: _Transport()
+    api._send_response_create = _fake_send_response_create
+    api._inspect_current_view_tool = _fake_inspect_current_view_tool
+
+    asyncio.run(
+        api.execute_function_call(
+            "inspect_current_view",
+            "oblturn_keyed_call",
+            {},
+            websocket=object(),
+            conversation_backed_call=False,
+        )
+    )
+
+    assert len(followup_events) == 1
+    response_metadata = ((followup_events[0].get("response") or {}).get("metadata") or {})
+    assert response_metadata.get("input_event_key") == "obligation_followup:oblturn_keyed_call"
+    assert response_metadata.get("input_event_key") != "item_parent_server_auto"
 
 
 def test_execute_function_call_model_originated_inspect_non_ok_preserves_tool_output_followup() -> None:
