@@ -211,6 +211,20 @@ _MEMORY_REASSURANCE_SUFFIX_PATTERNS = (
     re.compile(r"^would you like me to (?:save|remember|pin|rename|update) .*\?$", re.IGNORECASE),
 )
 _MEMORY_RECALL_CONCISE_FOLLOWUP = "Want me to save or update that memory?"
+_DESCRIPTIVE_TURN_REQUEST_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bwhat\s+(?:is|s)\s+(?:it|this|that)\b", re.IGNORECASE),
+    re.compile(r"\bwhat\s+do\s+you\s+see\b", re.IGNORECASE),
+    re.compile(r"\btell\s+me\s+what\s+(?:it\s+is|you\s+see)\b", re.IGNORECASE),
+    re.compile(r"\bdescribe\s+(?:it|this|that|what\s+you\s+see)\b", re.IGNORECASE),
+    re.compile(r"\bidentify\s+(?:it|this|that)\b", re.IGNORECASE),
+    re.compile(r"\bwhat\s+(?:am\s+i|i(?:'|\u2019)?m)\s+holding\b", re.IGNORECASE),
+)
+_GESTURE_ONLY_TOOL_OUTPUT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^(?:just\s+)?nodded(?:\s+to\s+confirm(?:\s+that)?(?:\s+for\s+you)?)?\.?$", re.IGNORECASE),
+    re.compile(r"^(?:i\s+)?(?:just\s+)?(?:nodded|confirmed|acknowledged)(?:\s+that)?(?:\s+for\s+you)?\.?$", re.IGNORECASE),
+    re.compile(r"^(?:gesture\s+)?(?:done|completed)\.?$", re.IGNORECASE),
+    re.compile(r"^(?:all\s+set|ok(?:ay)?|confirmed)\.?$", re.IGNORECASE),
+)
 _MICRO_ACK_CONFIRMATION_ALLOWLIST: frozenset[str] = frozenset(
     {
         "watchdog_confirmation_pending",
@@ -7369,7 +7383,41 @@ class RealtimeAPI:
             return False, "tool_followup_precedence"
         if self._turn_contract_exact_phrase_open(turn_id=turn_id):
             return False, "exact_phrase_obligation_open"
-        if self._turn_has_visual_obligation(turn_id=turn_id, input_event_key=input_event_key):
+        if normalized_origin == "tool_output":
+            descriptive_turn, descriptive_context = self._is_descriptive_identification_turn(
+                turn_id=turn_id,
+                input_event_key=input_event_key,
+                origin=normalized_origin,
+                response_id=response_id,
+            )
+            if descriptive_turn:
+                response_text = self._terminal_response_text(response_id)
+                gesture_only = self._is_gesture_only_tool_output_text(response_text)
+                logger.info(
+                    "tool_output_descriptive_turn_eval run_id=%s turn_id=%s response_id=%s canonical_key=%s descriptive_turn=%s gesture_only=%s effective_parent_input_event_key=%s",
+                    self._current_run_id() or "",
+                    turn_id,
+                    str(response_id or "").strip() or "none",
+                    done_canonical_key,
+                    str(descriptive_turn).lower(),
+                    str(gesture_only).lower(),
+                    descriptive_context.get("effective_parent_input_event_key", "none"),
+                )
+                if gesture_only:
+                    logger.info(
+                        "tool_output_terminal_candidate_rejected run_id=%s turn_id=%s input_event_key=%s response_id=%s reason=descriptive_turn_gesture_only",
+                        self._current_run_id() or "",
+                        turn_id,
+                        str(input_event_key or "").strip() or "none",
+                        str(response_id or "").strip() or "none",
+                    )
+                    return False, "tool_output_descriptive_gesture_only"
+        if self._turn_has_visual_obligation(
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            origin=normalized_origin,
+            response_id=response_id,
+        ):
             allowed, invalid_reason, validation_context = self._visual_turn_terminal_candidate_allowed(
                 turn_id=turn_id,
                 input_event_key=input_event_key,
@@ -7399,16 +7447,30 @@ class RealtimeAPI:
                 return False, "visual_turn_invalid_response_class"
         return True, "normal"
 
-    def _turn_has_visual_obligation(self, *, turn_id: str, input_event_key: str | None) -> bool:
+    def _turn_has_visual_obligation(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str | None,
+        origin: str = "",
+        response_id: str | None = None,
+    ) -> bool:
         snapshots = getattr(self, "_utterance_trust_snapshot_by_input_event_key", None)
         if not isinstance(snapshots, dict):
             return False
+        parent_context = self._resolve_visual_validation_context(
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            origin=origin,
+            response_id=response_id,
+        )
         candidate_keys = [
+            str(parent_context.get("effective_parent_input_event_key") or "").strip(),
             str(self._active_input_event_key_for_turn(turn_id) or "").strip(),
             str(input_event_key or "").strip(),
         ]
-        if candidate_keys[1].endswith(":clarify"):
-            candidate_keys.append(candidate_keys[1][: -len(":clarify")])
+        if candidate_keys[2].endswith(":clarify"):
+            candidate_keys.append(candidate_keys[2][: -len(":clarify")])
         for key in candidate_keys:
             if not key:
                 continue
@@ -7455,6 +7517,37 @@ class RealtimeAPI:
             "effective_parent_input_event_key": effective_parent_input_event_key or "none",
             "transcript_text": transcript_text,
         }
+
+    def _is_descriptive_identification_turn(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str | None,
+        origin: str,
+        response_id: str | None,
+    ) -> tuple[bool, dict[str, str]]:
+        validation_context = self._resolve_visual_validation_context(
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            origin=origin,
+            response_id=response_id,
+        )
+        transcript_text = str(validation_context.get("transcript_text") or "").strip()
+        if not transcript_text:
+            return False, validation_context
+        for pattern in _DESCRIPTIVE_TURN_REQUEST_PATTERNS:
+            if pattern.search(transcript_text):
+                return True, validation_context
+        return False, validation_context
+
+    def _is_gesture_only_tool_output_text(self, response_text: str) -> bool:
+        normalized_text = " ".join(str(response_text or "").strip().split())
+        if not normalized_text:
+            return True
+        for pattern in _GESTURE_ONLY_TOOL_OUTPUT_PATTERNS:
+            if pattern.match(normalized_text):
+                return True
+        return False
 
     def _visual_turn_terminal_candidate_allowed(
         self,
