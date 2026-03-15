@@ -7370,12 +7370,24 @@ class RealtimeAPI:
         if self._turn_contract_exact_phrase_open(turn_id=turn_id):
             return False, "exact_phrase_obligation_open"
         if self._turn_has_visual_obligation(turn_id=turn_id, input_event_key=input_event_key):
-            if not self._visual_turn_terminal_candidate_allowed(
+            allowed, invalid_reason, validation_context = self._visual_turn_terminal_candidate_allowed(
                 turn_id=turn_id,
                 input_event_key=input_event_key,
                 origin=normalized_origin,
                 response_id=response_id,
-            ):
+            )
+            logger.info(
+                "visual_turn_terminal_candidate_eval run_id=%s turn_id=%s origin=%s response_id=%s effective_parent_input_event_key=%s effective_parent_turn_id=%s verdict=%s reason=%s",
+                self._current_run_id() or "",
+                turn_id,
+                normalized_origin or "unknown",
+                str(response_id or "").strip() or "none",
+                validation_context.get("effective_parent_input_event_key", "none"),
+                validation_context.get("effective_parent_turn_id", "none"),
+                "allow" if allowed else "reject",
+                invalid_reason,
+            )
+            if not allowed:
                 logger.info(
                     "visual_turn_terminal_candidate_rejected run_id=%s turn_id=%s input_event_key=%s response_id=%s origin=%s reason=invalid_response_class",
                     self._current_run_id() or "",
@@ -7405,6 +7417,45 @@ class RealtimeAPI:
                 return True
         return False
 
+    def _resolve_visual_validation_context(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str | None,
+        origin: str,
+        response_id: str | None,
+    ) -> dict[str, str]:
+        normalized_turn_id = str(turn_id or "").strip()
+        normalized_origin = str(origin or "").strip().lower()
+        normalized_input_key = str(input_event_key or "").strip()
+        normalized_response_id = str(response_id or "").strip()
+        effective_parent_turn_id = normalized_turn_id
+        effective_parent_input_event_key = str(self._active_input_event_key_for_turn(normalized_turn_id) or "").strip()
+        trace_context = self._response_trace_by_id().get(normalized_response_id, {})
+        if normalized_origin == "tool_output":
+            trace_parent_turn_id = str(trace_context.get("parent_turn_id") or "").strip()
+            trace_parent_input_event_key = str(trace_context.get("parent_input_event_key") or "").strip()
+            if trace_parent_turn_id:
+                effective_parent_turn_id = trace_parent_turn_id
+            if trace_parent_input_event_key:
+                effective_parent_input_event_key = trace_parent_input_event_key
+        if not effective_parent_input_event_key:
+            fallback_input_key = normalized_input_key.removesuffix(":clarify")
+            if fallback_input_key and not fallback_input_key.startswith("tool:"):
+                effective_parent_input_event_key = fallback_input_key
+        snapshots = getattr(self, "_utterance_trust_snapshot_by_input_event_key", {})
+        transcript_snapshot = (
+            snapshots.get(effective_parent_input_event_key)
+            if isinstance(snapshots, dict) and effective_parent_input_event_key
+            else {}
+        )
+        transcript_text = str((transcript_snapshot or {}).get("transcript_text") or "")
+        return {
+            "effective_parent_turn_id": effective_parent_turn_id or "none",
+            "effective_parent_input_event_key": effective_parent_input_event_key or "none",
+            "transcript_text": transcript_text,
+        }
+
     def _visual_turn_terminal_candidate_allowed(
         self,
         *,
@@ -7412,33 +7463,40 @@ class RealtimeAPI:
         input_event_key: str | None,
         origin: str,
         response_id: str | None,
-    ) -> bool:
+    ) -> tuple[bool, str, dict[str, str]]:
         normalized_origin = str(origin or "").strip().lower()
         trace_context = self._response_trace_by_id().get(str(response_id or "").strip(), {})
         trigger = str(trace_context.get("trigger") or "").strip().lower()
         reason = str(trace_context.get("reason") or "").strip().lower()
         response_text = self._terminal_response_text(response_id)
         if trigger == "asr_verify_on_risk" and reason == "visual_unavailable":
-            return self._is_approved_visual_unavailable_fallback_text(response_text)
+            fallback_allowed = self._is_approved_visual_unavailable_fallback_text(response_text)
+            verdict_reason = "approved_visual_unavailable_fallback" if fallback_allowed else "unapproved_visual_unavailable_fallback"
+            return fallback_allowed, verdict_reason, {
+                "effective_parent_turn_id": str(turn_id or "").strip() or "none",
+                "effective_parent_input_event_key": str(input_event_key or "").strip() or "none",
+            }
         if normalized_origin == "assistant_message":
-            return False
-        transcript_key = str(self._active_input_event_key_for_turn(turn_id) or "").strip()
-        snapshots = getattr(self, "_utterance_trust_snapshot_by_input_event_key", {})
-        transcript_snapshot = snapshots.get(transcript_key) if isinstance(snapshots, dict) else {}
-        transcript_text = ""
-        if isinstance(transcript_snapshot, dict):
-            transcript_text = str(transcript_snapshot.get("transcript_text") or "")
-        if not transcript_text:
-            fallback_input_key = str(input_event_key or "").strip().removesuffix(":clarify")
-            fallback_snapshot = snapshots.get(fallback_input_key) if isinstance(snapshots, dict) else {}
-            transcript_text = str((fallback_snapshot or {}).get("transcript_text") or "")
+            return False, "assistant_message_disallowed", {
+                "effective_parent_turn_id": str(turn_id or "").strip() or "none",
+                "effective_parent_input_event_key": str(input_event_key or "").strip() or "none",
+            }
+        validation_context = self._resolve_visual_validation_context(
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            origin=normalized_origin,
+            response_id=response_id,
+        )
+        transcript_text = str(validation_context.get("transcript_text") or "")
         if not transcript_text or not response_text:
-            return False
+            return False, "missing_transcript_or_response_text", validation_context
         transcript_anchors = set(extract_topic_anchors(transcript_text))
         response_anchors = set(extract_topic_anchors(response_text))
         if not transcript_anchors or not response_anchors:
-            return False
-        return bool(transcript_anchors & response_anchors)
+            return False, "missing_topic_anchors", validation_context
+        if not bool(transcript_anchors & response_anchors):
+            return False, "anchor_mismatch", validation_context
+        return True, "anchor_overlap", validation_context
 
     def _normalize_visual_fallback_text(self, text: str) -> str:
         normalized = " ".join(str(text or "").strip().split()).lower()
@@ -12985,6 +13043,8 @@ class RealtimeAPI:
                 upgrade_chain_id=upgrade_chain_id,
                 trigger=metadata_trigger,
                 reason=metadata_reason,
+                parent_turn_id=str((response_metadata or {}).get("parent_turn_id") or ""),
+                parent_input_event_key=str((response_metadata or {}).get("parent_input_event_key") or ""),
             )
         self._emit_response_lifecycle_trace(
             event_type="response.created",

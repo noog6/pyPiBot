@@ -374,6 +374,9 @@ class ResponseTerminalHandlers:
                 close_reason = "exact_phrase_obligation_open"
             else:
                 close_reason = "exact_phrase_repair_not_scheduled"
+        if close_action == "allow" and selection_reason == "visual_turn_invalid_response_class":
+            close_action = "defer"
+            close_reason = "visual_turn_invalid_response_class"
         if (
             close_action == "allow"
             and active_response_was_provisional
@@ -578,6 +581,14 @@ class ResponseTerminalHandlers:
         if provisional_server_auto_close_deferred:
             logger.info(
                 "turn_terminal_close_deferred run_id=%s turn_id=%s response_id=%s reason=provisional_server_auto_awaiting_transcript_final",
+                api._current_run_id() or "",
+                turn_id,
+                str(active_response_id_before_clear or "none"),
+            )
+            return
+        if selection_reason == "visual_turn_invalid_response_class":
+            logger.info(
+                "turn_terminal_close_deferred run_id=%s turn_id=%s response_id=%s reason=visual_turn_invalid_response_class",
                 api._current_run_id() or "",
                 turn_id,
                 str(active_response_id_before_clear or "none"),

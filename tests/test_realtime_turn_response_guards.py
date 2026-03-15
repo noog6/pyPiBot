@@ -1858,3 +1858,74 @@ def test_visual_turn_allows_valid_replacement_when_response_is_grounded() -> Non
 
     assert selected is True
     assert reason == "normal"
+
+
+def test_visual_turn_tool_output_uses_parent_context_for_terminal_selection() -> None:
+    api = _make_api()
+    turn_id = "turn_5"
+    parent_input_event_key = "item_visual_parent"
+    tool_input_event_key = "tool:call_123"
+    response_id = "resp_tool_visual"
+    api._active_input_event_key_by_turn_id[turn_id] = tool_input_event_key
+    api._utterance_trust_snapshot_by_input_event_key = {
+        parent_input_event_key: {
+            "visual_question": True,
+            "transcript_text": "can you see it now in my hand",
+        }
+    }
+    api._terminal_response_text_by_response_id = {
+        response_id: "The tool in your hand is clearly visible now.",
+    }
+    api._record_response_trace_context(
+        response_id,
+        turn_id=turn_id,
+        input_event_key=tool_input_event_key,
+        origin="tool_output",
+        parent_turn_id=turn_id,
+        parent_input_event_key=parent_input_event_key,
+    )
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id=turn_id,
+        origin="tool_output",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_input_event_key),
+        transcript_final_seen=True,
+        input_event_key=tool_input_event_key,
+        response_id=response_id,
+    )
+
+    assert selected is True
+    assert reason == "normal"
+
+
+def test_non_visual_tool_output_remains_unaffected_by_visual_guard() -> None:
+    api = _make_api()
+    turn_id = "turn_6"
+    input_event_key = "item_non_visual"
+    response_id = "resp_tool_non_visual"
+    api._active_input_event_key_by_turn_id[turn_id] = input_event_key
+    api._utterance_trust_snapshot_by_input_event_key = {
+        input_event_key: {
+            "visual_question": False,
+            "transcript_text": "gesture complete",
+        }
+    }
+    api._terminal_response_text_by_response_id = {
+        response_id: "Done. Gesture completed.",
+    }
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id=turn_id,
+        origin="tool_output",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key),
+        transcript_final_seen=True,
+        input_event_key=input_event_key,
+        response_id=response_id,
+    )
+
+    assert selected is True
+    assert reason == "normal"
