@@ -15,6 +15,8 @@ _STOPWORDS = {
 _VISUAL_TERMS = {"pants", "shirt", "hat", "wearing", "wear", "color", "see"}
 _GREETING_TERMS = {"hi", "hello", "hey", "yo", "sup", "howdy"}
 _CLEAR_MOTION_TERMS = {"look", "center", "left", "right", "up", "down", "back"}
+_COMPOUND_MOTION_TERMS = {"move", "turn", "look", "return", "go"}
+_DIRECTION_TERMS = {"center", "left", "right", "up", "down", "back", "front", "forward"}
 
 
 def extract_topic_anchors(text: str, *, top_k: int = 5) -> list[str]:
@@ -112,6 +114,12 @@ def should_clarify(
     token_set = set(re.findall(r"[a-zA-Z0-9']+", (transcript_text or "").lower()))
     greeting_only = bool(token_set) and token_set <= _GREETING_TERMS
     clear_motion_command = {"look", "center"} <= token_set or bool(token_set & _CLEAR_MOTION_TERMS and "look" in token_set)
+    compound_motion_visual_request = (
+        snapshot.visual_question
+        and camera_available
+        and bool(token_set & _COMPOUND_MOTION_TERMS)
+        and bool(token_set & _DIRECTION_TERMS)
+    )
 
     if snapshot.asr_confidence is not None and snapshot.asr_confidence < min_confidence:
         return True, "low_conf"
@@ -122,6 +130,8 @@ def should_clarify(
     if snapshot.contains_rare_terms and not known_domain:
         return True, "rare_terms"
     if snapshot.visual_question and (not camera_available or not camera_recent):
+        if compound_motion_visual_request:
+            return False, "compound_motion_visual_defer"
         return True, "visual_unavailable"
     if tool_risk in {"high", "critical"} and snapshot.asr_confidence is not None and snapshot.asr_confidence < 0.8:
         return True, "high_risk_confirmation"

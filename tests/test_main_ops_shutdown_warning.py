@@ -447,3 +447,41 @@ def test_main_returns_nonzero_when_runtime_records_session_failure(monkeypatch) 
     exit_code = main.main([])
 
     assert exit_code == 1
+
+
+def test_main_binds_camera_controller_on_realtime_api(monkeypatch) -> None:
+    class RecordingRealtime(_FakeRealtimeAPI):
+        last_instance = None
+
+        def __init__(self, prompts) -> None:
+            super().__init__(prompts)
+            RecordingRealtime.last_instance = self
+
+    class RecordingCamera(_FakeCameraController):
+        last_instance = None
+
+        def __init__(self) -> None:
+            RecordingCamera.last_instance = self
+            self.bound_realtime = None
+
+        def set_realtime_instance(self, instance) -> None:
+            self.bound_realtime = instance
+
+    monkeypatch.setattr(main.ConfigController, "get_instance", lambda: _FakeConfigController())
+    monkeypatch.setattr(main.StorageController, "get_instance", lambda: _FakeStorageController())
+    monkeypatch.setattr(main.MemoryManager, "get_instance", lambda: _FakeMemoryManager())
+    monkeypatch.setattr(main, "RealtimeAPI", RecordingRealtime)
+    monkeypatch.setattr(main.MotionController, "get_instance", lambda: _FakeMotionController())
+    monkeypatch.setattr(main.CameraController, "get_instance", lambda: RecordingCamera())
+    monkeypatch.setattr(main.ImuMonitor, "get_instance", lambda: _FakeMonitor())
+    monkeypatch.setattr(main.BatteryMonitor, "get_instance", lambda: _FakeMonitor())
+    monkeypatch.setattr(main.OpsOrchestrator, "get_instance", lambda: _FakeOpsOrchestrator())
+    monkeypatch.setattr(main, "suppress_noisy_stderr", lambda *args, **kwargs: nullcontext())
+
+    exit_code = main.main([])
+
+    assert exit_code == 0
+    assert RecordingRealtime.last_instance is not None
+    assert RecordingCamera.last_instance is not None
+    assert RecordingCamera.last_instance.bound_realtime is RecordingRealtime.last_instance
+    assert RecordingRealtime.last_instance.camera_controller is RecordingCamera.last_instance

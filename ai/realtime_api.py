@@ -691,6 +691,7 @@ class RealtimeAPI:
         }
         self.response_start_time: float | None = None
         self.websocket = None
+        self.camera_controller = None
         self.profile_manager = ProfileManager.get_instance()
         self._memory_manager = MemoryManager.get_instance()
         self.state_manager = InteractionStateManager()

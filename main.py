@@ -371,6 +371,7 @@ def main(argv: list[str] | None = None) -> int:
         ):
             camera_instance = CameraController.get_instance()
         camera_instance.set_realtime_instance(realtime_api_instance)
+        realtime_api_instance.camera_controller = camera_instance
         camera_instance.start_vision_loop(vision_loop_period_ms=1000)
         log_startup_status("camera_controller", "optional", "ready")
     except Exception as exc:
