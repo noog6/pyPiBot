@@ -218,6 +218,14 @@ _MICRO_ACK_CONFIRMATION_ALLOWLIST: frozenset[str] = frozenset(
         "watchdog_approval_pending",
     }
 )
+_ASSISTANT_MESSAGE_SAME_TURN_OWNERSHIP_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "asr_verify_on_risk",
+        "turn_contract_exact_phrase_repair",
+        "confirmation_prompt",
+        "confirmation_reminder",
+    }
+)
 _MICRO_ACK_CONFIRMATION_DECLINE_GUARD_S = 5.0
 CURIOSITY_PRIORITY_BUSY = 70
 CURIOSITY_PRIORITY_LISTENING = 80
@@ -7340,22 +7348,22 @@ class RealtimeAPI:
         done_canonical_key: str,
         transcript_final_seen: bool,
     ) -> tuple[bool, str]:
+        normalized_origin = str(origin or "").strip().lower()
         if delivery_state_before_done == "cancelled":
             return False, "cancelled"
-        if str(origin or "").strip().lower() == "micro_ack":
+        if normalized_origin == "micro_ack":
             return False, "micro_ack_non_deliverable"
         if active_response_was_provisional and self._is_empty_response_done(canonical_key=done_canonical_key):
             return False, "provisional_empty_non_deliverable"
         if (
             active_response_was_provisional
-            and str(origin or "").strip().lower() == "server_auto"
+            and normalized_origin == "server_auto"
             and not bool(transcript_final_seen)
         ):
             return False, "provisional_server_auto_awaiting_transcript_final"
-        if (
-            str(origin or "").strip().lower() == "server_auto"
-            and self._turn_has_pending_tool_followup(turn_id=turn_id)
-        ):
+        # Pending tool-followup turns must terminate on the queued tool-result path.
+        # `upgraded_response` is a transcript-final answer replacement, not a tool-result origin.
+        if self._turn_has_pending_tool_followup(turn_id=turn_id) and normalized_origin != "tool_output":
             return False, "tool_followup_precedence"
         if self._turn_contract_exact_phrase_open(turn_id=turn_id):
             return False, "exact_phrase_obligation_open"
@@ -7624,6 +7632,17 @@ class RealtimeAPI:
                 return "active_response_owned"
 
         return None
+
+    def _assistant_message_same_turn_ownership_allowlisted(self, *, metadata: dict[str, Any]) -> bool:
+        trigger = str(metadata.get("trigger") or "").strip().lower()
+        if trigger in _ASSISTANT_MESSAGE_SAME_TURN_OWNERSHIP_ALLOWLIST:
+            return True
+        approval_flow = str(metadata.get("approval_flow", "")).strip().lower() in {"1", "true", "yes"}
+        if approval_flow:
+            return True
+        if self._is_bounded_clarify_mode(metadata):
+            return True
+        return False
 
     def _release_blocked_tool_followups_for_response_done(self, *, response_id: str) -> None:
         normalized_response_id = str(response_id or "").strip()
@@ -15057,6 +15076,32 @@ class RealtimeAPI:
         metadata.setdefault("turn_id", context_hint.turn_id)
         if context_hint.input_event_key:
             metadata.setdefault("input_event_key", context_hint.input_event_key)
+        if not self._assistant_message_same_turn_ownership_allowlisted(metadata=metadata):
+            canonical_key = self._canonical_utterance_key(
+                turn_id=str(metadata.get("turn_id") or "").strip(),
+                input_event_key=str(metadata.get("input_event_key") or "").strip(),
+            )
+            owner_reason = self._assistant_message_same_turn_owner_reason(
+                turn_id=str(metadata.get("turn_id") or "").strip(),
+                input_event_key=str(metadata.get("input_event_key") or "").strip() or None,
+                canonical_key=canonical_key,
+            )
+            if owner_reason is not None:
+                logger.info(
+                    "assistant_message_same_turn_suppressed run_id=%s turn_id=%s input_event_key=%s reason=%s",
+                    self._current_run_id() or "",
+                    str(metadata.get("turn_id") or "").strip() or "turn-unknown",
+                    str(metadata.get("input_event_key") or "").strip() or "unknown",
+                    owner_reason,
+                )
+                self._mark_transcript_response_outcome(
+                    input_event_key=str(metadata.get("input_event_key") or "").strip(),
+                    turn_id=str(metadata.get("turn_id") or "").strip() or self._current_turn_id_or_unknown(),
+                    outcome="response_not_scheduled",
+                    reason="same_turn_already_owned",
+                    details=f"origin=assistant_message owner_reason={owner_reason}",
+                )
+                return
         message = self._normalize_verify_clarify_message(message=message, metadata=metadata)
         assistant_item = {
             "type": "conversation.item.create",

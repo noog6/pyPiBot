@@ -1556,3 +1556,64 @@ def test_response_done_decision_marks_provisional_server_auto_pre_final_as_non_d
 
     assert selected is False
     assert reason == "provisional_server_auto_awaiting_transcript_final"
+
+
+def test_response_done_decision_rejects_assistant_message_when_tool_followup_pending() -> None:
+    api = _make_api()
+    turn_id = "turn_1"
+    api._tool_followup_state_by_canonical_key = {
+        f"{api._current_run_id()}:{turn_id}:item_1:tool:call_1": "created",
+    }
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id=turn_id,
+        origin="assistant_message",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id=turn_id, input_event_key="item_1"),
+        transcript_final_seen=True,
+    )
+
+    assert selected is False
+    assert reason == "tool_followup_precedence"
+
+
+def test_response_done_decision_allows_tool_output_when_tool_followup_pending() -> None:
+    api = _make_api()
+    turn_id = "turn_1"
+    api._tool_followup_state_by_canonical_key = {
+        f"{api._current_run_id()}:{turn_id}:item_1:tool:call_1": "created",
+    }
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id=turn_id,
+        origin="tool_output",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id=turn_id, input_event_key="item_1"),
+        transcript_final_seen=True,
+    )
+
+    assert selected is True
+    assert reason == "normal"
+
+
+
+def test_response_done_decision_rejects_upgraded_response_when_tool_followup_pending() -> None:
+    api = _make_api()
+    turn_id = "turn_1"
+    api._tool_followup_state_by_canonical_key = {
+        f"{api._current_run_id()}:{turn_id}:item_1:tool:call_1": "created",
+    }
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id=turn_id,
+        origin="upgraded_response",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id=turn_id, input_event_key="item_1"),
+        transcript_final_seen=True,
+    )
+
+    assert selected is False
+    assert reason == "tool_followup_precedence"
