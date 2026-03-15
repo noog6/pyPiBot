@@ -67,7 +67,7 @@ from ai.realtime.research_runtime import ResearchRuntime
 from ai.realtime.response_create_runtime import ResponseCreateRuntime
 from ai.realtime.response_lifecycle import ResponseLifecycleTracker
 from ai.realtime.response_terminal_handlers import ResponseTerminalHandlers
-from ai.realtime.asr_trust import build_utterance_trust_snapshot, should_clarify
+from ai.realtime.asr_trust import build_utterance_trust_snapshot, extract_topic_anchors, should_clarify
 from ai.curiosity_engine import CuriosityEngine
 from ai.opportunistic_arbitration import (
     OpportunisticActionCandidate,
@@ -7347,6 +7347,8 @@ class RealtimeAPI:
         active_response_was_provisional: bool,
         done_canonical_key: str,
         transcript_final_seen: bool,
+        input_event_key: str | None = None,
+        response_id: str | None = None,
     ) -> tuple[bool, str]:
         normalized_origin = str(origin or "").strip().lower()
         if delivery_state_before_done == "cancelled":
@@ -7367,7 +7369,128 @@ class RealtimeAPI:
             return False, "tool_followup_precedence"
         if self._turn_contract_exact_phrase_open(turn_id=turn_id):
             return False, "exact_phrase_obligation_open"
+        if self._turn_has_visual_obligation(turn_id=turn_id, input_event_key=input_event_key):
+            if not self._visual_turn_terminal_candidate_allowed(
+                turn_id=turn_id,
+                input_event_key=input_event_key,
+                origin=normalized_origin,
+                response_id=response_id,
+            ):
+                logger.info(
+                    "visual_turn_terminal_candidate_rejected run_id=%s turn_id=%s input_event_key=%s response_id=%s origin=%s reason=invalid_response_class",
+                    self._current_run_id() or "",
+                    turn_id,
+                    str(input_event_key or "").strip() or "none",
+                    str(response_id or "").strip() or "none",
+                    normalized_origin or "unknown",
+                )
+                return False, "visual_turn_invalid_response_class"
         return True, "normal"
+
+    def _turn_has_visual_obligation(self, *, turn_id: str, input_event_key: str | None) -> bool:
+        snapshots = getattr(self, "_utterance_trust_snapshot_by_input_event_key", None)
+        if not isinstance(snapshots, dict):
+            return False
+        candidate_keys = [
+            str(self._active_input_event_key_for_turn(turn_id) or "").strip(),
+            str(input_event_key or "").strip(),
+        ]
+        if candidate_keys[1].endswith(":clarify"):
+            candidate_keys.append(candidate_keys[1][: -len(":clarify")])
+        for key in candidate_keys:
+            if not key:
+                continue
+            snapshot = snapshots.get(key)
+            if isinstance(snapshot, dict) and bool(snapshot.get("visual_question", False)):
+                return True
+        return False
+
+    def _visual_turn_terminal_candidate_allowed(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str | None,
+        origin: str,
+        response_id: str | None,
+    ) -> bool:
+        normalized_origin = str(origin or "").strip().lower()
+        trace_context = self._response_trace_by_id().get(str(response_id or "").strip(), {})
+        trigger = str(trace_context.get("trigger") or "").strip().lower()
+        reason = str(trace_context.get("reason") or "").strip().lower()
+        response_text = self._terminal_response_text(response_id)
+        if trigger == "asr_verify_on_risk" and reason == "visual_unavailable":
+            return self._is_approved_visual_unavailable_fallback_text(response_text)
+        if normalized_origin == "assistant_message":
+            return False
+        transcript_key = str(self._active_input_event_key_for_turn(turn_id) or "").strip()
+        snapshots = getattr(self, "_utterance_trust_snapshot_by_input_event_key", {})
+        transcript_snapshot = snapshots.get(transcript_key) if isinstance(snapshots, dict) else {}
+        transcript_text = ""
+        if isinstance(transcript_snapshot, dict):
+            transcript_text = str(transcript_snapshot.get("transcript_text") or "")
+        if not transcript_text:
+            fallback_input_key = str(input_event_key or "").strip().removesuffix(":clarify")
+            fallback_snapshot = snapshots.get(fallback_input_key) if isinstance(snapshots, dict) else {}
+            transcript_text = str((fallback_snapshot or {}).get("transcript_text") or "")
+        if not transcript_text or not response_text:
+            return False
+        transcript_anchors = set(extract_topic_anchors(transcript_text))
+        response_anchors = set(extract_topic_anchors(response_text))
+        if not transcript_anchors or not response_anchors:
+            return False
+        return bool(transcript_anchors & response_anchors)
+
+    def _normalize_visual_fallback_text(self, text: str) -> str:
+        normalized = " ".join(str(text or "").strip().split()).lower()
+        return normalized.replace("’", "'")
+
+    def _is_approved_visual_unavailable_fallback_text(self, response_text: str) -> bool:
+        normalized_response = self._normalize_visual_fallback_text(response_text)
+        if not normalized_response:
+            return False
+        approved_exact = self._normalize_visual_fallback_text(
+            self._visual_unavailable_clarify_text(self.get_vision_state())
+        )
+        if normalized_response == approved_exact:
+            return True
+        approved_variants = {
+            self._normalize_visual_fallback_text(
+                "The camera is on, but I’m still waiting for a fresh frame to finish processing."
+            ),
+            self._normalize_visual_fallback_text(
+                "The camera is on, but I don’t have a fresh frame yet. Want me to take a new look now?"
+            ),
+            self._normalize_visual_fallback_text(
+                "I can’t see right now. Want me to take a quick look with the camera?"
+            ),
+        }
+        return normalized_response in approved_variants
+
+    def _terminal_response_text_store(self) -> dict[str, str]:
+        store = getattr(self, "_terminal_response_text_by_response_id", None)
+        if not isinstance(store, dict):
+            store = {}
+            self._terminal_response_text_by_response_id = store
+        return store
+
+    def _record_terminal_response_text(self, *, response_id: str | None, text: str | None) -> None:
+        normalized_response_id = str(response_id or "").strip()
+        normalized_text = str(text or "").strip()
+        if not normalized_response_id or not normalized_text:
+            return
+        self._terminal_response_text_store()[normalized_response_id] = normalized_text
+
+    def _terminal_response_text(self, response_id: str | None) -> str:
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            return ""
+        return str(self._terminal_response_text_store().get(normalized_response_id) or "")
+
+    def _clear_terminal_response_text(self, *, response_id: str | None) -> None:
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            return
+        self._terminal_response_text_store().pop(normalized_response_id, None)
 
     def _terminal_deliverable_selection_store(self) -> dict[str, dict[str, Any]]:
         store = getattr(self, "_terminal_deliverable_selection_by_response_id", None)
@@ -12851,6 +12974,8 @@ class RealtimeAPI:
             response_metadata=response_metadata,
         )
         if self._active_response_id:
+            metadata_trigger = str((response_metadata or {}).get("trigger") or "").strip().lower()
+            metadata_reason = str((response_metadata or {}).get("reason") or "").strip().lower()
             self._record_response_trace_context(
                 self._active_response_id,
                 turn_id=turn_id,
@@ -12858,6 +12983,8 @@ class RealtimeAPI:
                 canonical_key=lifecycle_canonical_key,
                 origin=origin,
                 upgrade_chain_id=upgrade_chain_id,
+                trigger=metadata_trigger,
+                reason=metadata_reason,
             )
         self._emit_response_lifecycle_trace(
             event_type="response.created",
