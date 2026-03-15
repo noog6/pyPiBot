@@ -1929,3 +1929,153 @@ def test_non_visual_tool_output_remains_unaffected_by_visual_guard() -> None:
 
     assert selected is True
     assert reason == "normal"
+
+
+def test_descriptive_turn_rejects_gesture_only_tool_output_terminal_selection() -> None:
+    api = _make_api()
+    turn_id = "turn_7"
+    parent_input_event_key = "item_descriptive_parent"
+    tool_input_event_key = "tool:call_777"
+    response_id = "resp_tool_gesture_only"
+    api._active_input_event_key_by_turn_id[turn_id] = tool_input_event_key
+    api._utterance_trust_snapshot_by_input_event_key = {
+        parent_input_event_key: {
+            "visual_question": False,
+            "transcript_text": "I'd like you to tell me what it is.",
+        }
+    }
+    api._terminal_response_text_by_response_id = {
+        response_id: "Just nodded to confirm that for you.",
+    }
+    api._record_response_trace_context(
+        response_id,
+        turn_id=turn_id,
+        input_event_key=tool_input_event_key,
+        origin="tool_output",
+        parent_turn_id=turn_id,
+        parent_input_event_key=parent_input_event_key,
+    )
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id=turn_id,
+        origin="tool_output",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_input_event_key),
+        transcript_final_seen=True,
+        input_event_key=tool_input_event_key,
+        response_id=response_id,
+    )
+
+    assert selected is False
+    assert reason == "tool_output_descriptive_gesture_only"
+
+
+def test_descriptive_turn_allows_substantive_tool_output_terminal_selection() -> None:
+    api = _make_api()
+    turn_id = "turn_8"
+    parent_input_event_key = "item_descriptive_parent"
+    tool_input_event_key = "tool:call_888"
+    response_id = "resp_tool_substantive"
+    api._active_input_event_key_by_turn_id[turn_id] = tool_input_event_key
+    api._utterance_trust_snapshot_by_input_event_key = {
+        parent_input_event_key: {
+            "visual_question": False,
+            "transcript_text": "Tell me what it is.",
+        }
+    }
+    api._terminal_response_text_by_response_id = {
+        response_id: "It looks like a small handheld device with a nozzle.",
+    }
+    api._record_response_trace_context(
+        response_id,
+        turn_id=turn_id,
+        input_event_key=tool_input_event_key,
+        origin="tool_output",
+        parent_turn_id=turn_id,
+        parent_input_event_key=parent_input_event_key,
+    )
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id=turn_id,
+        origin="tool_output",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_input_event_key),
+        transcript_final_seen=True,
+        input_event_key=tool_input_event_key,
+        response_id=response_id,
+    )
+
+    assert selected is True
+    assert reason == "normal"
+
+
+def test_non_descriptive_turn_allows_confirmation_style_tool_output_terminal_selection() -> None:
+    api = _make_api()
+    turn_id = "turn_9"
+    parent_input_event_key = "item_non_descriptive_parent"
+    tool_input_event_key = "tool:call_999"
+    response_id = "resp_tool_confirmation_ok"
+    api._active_input_event_key_by_turn_id[turn_id] = tool_input_event_key
+    api._utterance_trust_snapshot_by_input_event_key = {
+        parent_input_event_key: {
+            "visual_question": False,
+            "transcript_text": "Please nod if you got that.",
+        }
+    }
+    api._terminal_response_text_by_response_id = {
+        response_id: "Confirmed.",
+    }
+    api._record_response_trace_context(
+        response_id,
+        turn_id=turn_id,
+        input_event_key=tool_input_event_key,
+        origin="tool_output",
+        parent_turn_id=turn_id,
+        parent_input_event_key=parent_input_event_key,
+    )
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id=turn_id,
+        origin="tool_output",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_input_event_key),
+        transcript_final_seen=True,
+        input_event_key=tool_input_event_key,
+        response_id=response_id,
+    )
+
+    assert selected is True
+    assert reason == "normal"
+
+
+def test_turn_has_visual_obligation_uses_tool_output_parent_trace_context() -> None:
+    api = _make_api()
+    turn_id = "turn_10"
+    parent_input_event_key = "item_visual_parent_trace"
+    tool_input_event_key = "tool:call_trace"
+    response_id = "resp_tool_trace"
+    api._active_input_event_key_by_turn_id[turn_id] = tool_input_event_key
+    api._utterance_trust_snapshot_by_input_event_key = {
+        parent_input_event_key: {
+            "visual_question": True,
+            "transcript_text": "what do you see",
+        }
+    }
+    api._record_response_trace_context(
+        response_id,
+        turn_id=turn_id,
+        input_event_key=tool_input_event_key,
+        origin="tool_output",
+        parent_turn_id=turn_id,
+        parent_input_event_key=parent_input_event_key,
+    )
+
+    assert api._turn_has_visual_obligation(
+        turn_id=turn_id,
+        input_event_key=tool_input_event_key,
+        origin="tool_output",
+        response_id=response_id,
+    ) is True
