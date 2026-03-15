@@ -9035,21 +9035,6 @@ class RealtimeAPI:
             )
         return True
 
-    def _has_camera_tool_result_for_turn(self, turn_id: str) -> bool:
-        records = getattr(self, "_tool_call_records", None)
-        if not isinstance(records, list) or not turn_id:
-            return False
-        normalized_turn_id = str(turn_id)
-        for record in records:
-            if not isinstance(record, dict):
-                continue
-            if str(record.get("turn_id") or "") != normalized_turn_id:
-                continue
-            tool_name = str(record.get("name") or "").strip().lower()
-            if "camera" in tool_name:
-                return True
-        return False
-
     def _normalize_verify_clarify_message(
         self,
         *,
@@ -9059,9 +9044,6 @@ class RealtimeAPI:
         trigger = str(metadata.get("trigger") or "").strip().lower()
         reason = str(metadata.get("reason") or "").strip().lower()
         if trigger != "asr_verify_on_risk" or reason != "visual_unavailable":
-            return message
-        turn_id = str(metadata.get("turn_id") or self._current_turn_id_or_unknown())
-        if self._has_camera_tool_result_for_turn(turn_id):
             return message
         return self._visual_unavailable_clarify_text(self.get_vision_state())
 

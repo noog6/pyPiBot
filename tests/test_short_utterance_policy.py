@@ -275,6 +275,50 @@ def test_is_bounded_clarify_mode_includes_visual_unavailable() -> None:
     )
 
 
+def test_normalize_verify_clarify_message_visual_unavailable_uses_live_vision_state() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api.get_vision_state = lambda: {
+        "available": False,
+        "last_frame_age_ms": None,
+        "queued_frame_count": 0,
+        "can_capture": False,
+        "camera_active": False,
+    }
+
+    normalized = api._normalize_verify_clarify_message(
+        message="stale text",
+        metadata={
+            "trigger": "asr_verify_on_risk",
+            "reason": "visual_unavailable",
+            "turn_id": "turn-legacy",
+        },
+    )
+
+    assert normalized == "I can’t see right now. Want me to take a quick look with the camera?"
+
+
+def test_normalize_verify_clarify_message_non_visual_unavailable_is_unchanged() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api.get_vision_state = lambda: {
+        "available": False,
+        "last_frame_age_ms": None,
+        "queued_frame_count": 0,
+        "can_capture": False,
+        "camera_active": False,
+    }
+
+    message = "I heard you, but I’m not sure what you mean yet. Could you be a bit more specific?"
+    normalized = api._normalize_verify_clarify_message(
+        message=message,
+        metadata={
+            "trigger": "asr_verify_on_risk",
+            "reason": "low_semantic_confidence",
+        },
+    )
+
+    assert normalized == message
+
+
 def test_visual_unavailable_clarify_uses_dedicated_bounded_instruction_guardrail() -> None:
     api = RealtimeAPI.__new__(RealtimeAPI)
 
