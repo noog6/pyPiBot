@@ -106,6 +106,24 @@ def test_handle_response_done_still_schedules_empty_retry() -> None:
     api._maybe_schedule_empty_response_retry.assert_awaited_once()
 
 
+def test_handle_response_done_clears_terminal_response_text_store() -> None:
+    api = _make_api()
+    api._terminal_response_text_by_response_id = {"resp_1": "stale text"}
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=False,
+            close_reason="confirmation_hold",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_1"}}))
+
+    assert "resp_1" not in api._terminal_response_text_by_response_id
+
+
 def test_handle_response_done_still_runs_confirmation_transition_logic() -> None:
     api = _make_api()
     api._maybe_schedule_empty_response_retry = AsyncMock()
@@ -129,6 +147,24 @@ def test_handle_response_done_still_runs_confirmation_transition_logic() -> None
         (OrchestrationPhase.REFLECT, "response done"),
         (OrchestrationPhase.IDLE, "response done reflection"),
     ]
+
+
+def test_handle_response_completed_clears_terminal_response_text_store() -> None:
+    api = _make_api()
+    api._terminal_response_text_by_response_id = {"resp_1": "stale text"}
+    api._clear_cancelled_response_tracking = lambda *_args, **_kwargs: None
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=False,
+            close_reason="confirmation_hold",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+
+    asyncio.run(api.handle_response_completed({"type": "response.completed", "response": {"id": "resp_1"}}))
+
+    assert "resp_1" not in api._terminal_response_text_by_response_id
 
 
 def test_handle_response_done_logs_normal_deliverable_selection() -> None:

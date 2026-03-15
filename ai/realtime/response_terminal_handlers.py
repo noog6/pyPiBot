@@ -112,6 +112,10 @@ class ResponseTerminalHandlers:
                 if isinstance(per_response, dict):
                     per_response[response_id] = normalized_reply
             api.assistant_reply = normalized_reply
+            api._record_terminal_response_text(
+                response_id=response_id,
+                text=normalized_reply,
+            )
             api._clear_assistant_reply_buffers(response_id=response_id or None)
 
         api.response_in_progress = False
@@ -281,6 +285,8 @@ class ResponseTerminalHandlers:
             active_response_was_provisional=active_response_was_provisional,
             done_canonical_key=done_canonical_key,
             transcript_final_seen=transcript_final_linked,
+            input_event_key=done_input_event_key,
+            response_id=active_response_id_before_clear,
         )
         exact_phrase_close_deferred = False
         if selection_reason == "exact_phrase_obligation_open":
@@ -500,6 +506,7 @@ class ResponseTerminalHandlers:
                 "Skipping IDLE transition for response.done while still listening; deferring until speech stop."
             )
         logger.info("Received response.done event.")
+        api._clear_terminal_response_text(response_id=active_response_id)
         if str(active_response_origin_before_clear or "").strip().lower() == "prompt":
             startup_terminal_state = "completed"
             startup_terminal_reason = "response_done"
@@ -675,6 +682,7 @@ class ResponseTerminalHandlers:
                 "Skipping IDLE transition for response.completed while still listening; deferring until speech stop."
             )
         logger.info("Received response.completed event.")
+        api._clear_terminal_response_text(response_id=response_id)
         if active_response_origin_before_clear == "prompt":
             startup_terminal_state = "completed"
             startup_terminal_reason = "response_done"

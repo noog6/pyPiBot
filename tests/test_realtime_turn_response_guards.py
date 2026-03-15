@@ -1617,3 +1617,244 @@ def test_response_done_decision_rejects_upgraded_response_when_tool_followup_pen
 
     assert selected is False
     assert reason == "tool_followup_precedence"
+
+
+def test_visual_turn_rejects_upgraded_response_generic_terminal_selection() -> None:
+    api = _make_api()
+    turn_id = "turn_2"
+    input_event_key = "item_visual"
+    response_id = "resp_visual_generic"
+    api._active_input_event_key_by_turn_id[turn_id] = input_event_key
+    api._utterance_trust_snapshot_by_input_event_key = {
+        input_event_key: {
+            "visual_question": True,
+            "transcript_text": "do you see it now",
+        }
+    }
+    api._terminal_response_text_by_response_id = {
+        response_id: "it looks ready for use and you can start your project",
+    }
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id=turn_id,
+        origin="upgraded_response",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key),
+        transcript_final_seen=True,
+        input_event_key=input_event_key,
+        response_id=response_id,
+    )
+
+    assert selected is False
+    assert reason == "visual_turn_invalid_response_class"
+
+
+def test_visual_turn_rejects_unrelated_assistant_message_terminal_selection() -> None:
+    api = _make_api()
+    turn_id = "turn_2"
+    input_event_key = "item_visual"
+    response_id = "resp_visual_chat"
+    api._active_input_event_key_by_turn_id[turn_id] = input_event_key
+    api._utterance_trust_snapshot_by_input_event_key = {
+        input_event_key: {
+            "visual_question": True,
+            "transcript_text": "what do you see in my hand",
+        }
+    }
+    api._terminal_response_text_by_response_id = {
+        response_id: "we can work on a project together later",
+    }
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id=turn_id,
+        origin="assistant_message",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id=turn_id, input_event_key=f"{input_event_key}:clarify"),
+        transcript_final_seen=True,
+        input_event_key=f"{input_event_key}:clarify",
+        response_id=response_id,
+    )
+
+    assert selected is False
+    assert reason == "visual_turn_invalid_response_class"
+
+
+def test_visual_turn_allows_truthful_visual_unavailable_fallback_terminal_selection() -> None:
+    api = _make_api()
+    turn_id = "turn_2"
+    input_event_key = "item_visual"
+    response_id = "resp_visual_fallback"
+    api._active_input_event_key_by_turn_id[turn_id] = input_event_key
+    api._utterance_trust_snapshot_by_input_event_key = {
+        input_event_key: {
+            "visual_question": True,
+            "transcript_text": "what do you see in my hand",
+        }
+    }
+    api._response_trace_context_by_id = {
+        response_id: {
+            "trigger": "asr_verify_on_risk",
+            "reason": "visual_unavailable",
+        }
+    }
+    api._terminal_response_text_by_response_id = {
+        response_id: "The camera is on, but I don’t have a fresh frame yet. Want me to take a new look now?",
+    }
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id=turn_id,
+        origin="assistant_message",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id=turn_id, input_event_key=f"{input_event_key}:clarify"),
+        transcript_final_seen=True,
+        input_event_key=f"{input_event_key}:clarify",
+        response_id=response_id,
+    )
+
+    assert selected is True
+    assert reason == "normal"
+
+
+def test_visual_turn_allows_truthful_visual_unavailable_fallback_from_trace_context_recording() -> None:
+    api = _make_api()
+    turn_id = "turn_2"
+    input_event_key = "item_visual"
+    response_id = "resp_visual_fallback_trace"
+    api._active_input_event_key_by_turn_id[turn_id] = input_event_key
+    api._utterance_trust_snapshot_by_input_event_key = {
+        input_event_key: {
+            "visual_question": True,
+            "transcript_text": "what do you see in my hand",
+        }
+    }
+    api._record_response_trace_context(
+        response_id,
+        turn_id=turn_id,
+        input_event_key=f"{input_event_key}:clarify",
+        canonical_key=api._canonical_utterance_key(turn_id=turn_id, input_event_key=f"{input_event_key}:clarify"),
+        origin="assistant_message",
+        trigger="asr_verify_on_risk",
+        reason="visual_unavailable",
+    )
+    api._terminal_response_text_by_response_id = {
+        response_id: "I can’t see right now. Want me to take a quick look with the camera?",
+    }
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id=turn_id,
+        origin="assistant_message",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id=turn_id, input_event_key=f"{input_event_key}:clarify"),
+        transcript_final_seen=True,
+        input_event_key=f"{input_event_key}:clarify",
+        response_id=response_id,
+    )
+
+    assert selected is True
+    assert reason == "normal"
+
+
+def test_visual_turn_rejects_generic_assistant_fallback_even_when_trace_marks_visual_unavailable() -> None:
+    api = _make_api()
+    turn_id = "turn_2"
+    input_event_key = "item_visual"
+    response_id = "resp_visual_fallback_generic"
+    api._active_input_event_key_by_turn_id[turn_id] = input_event_key
+    api._utterance_trust_snapshot_by_input_event_key = {
+        input_event_key: {
+            "visual_question": True,
+            "transcript_text": "what do you see in my hand",
+        }
+    }
+    api._record_response_trace_context(
+        response_id,
+        turn_id=turn_id,
+        input_event_key=f"{input_event_key}:clarify",
+        canonical_key=api._canonical_utterance_key(turn_id=turn_id, input_event_key=f"{input_event_key}:clarify"),
+        origin="assistant_message",
+        trigger="asr_verify_on_risk",
+        reason="visual_unavailable",
+    )
+    api._terminal_response_text_by_response_id = {
+        response_id: "We can check together when you're ready. Just let me know, and I'll refresh the view.",
+    }
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id=turn_id,
+        origin="assistant_message",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id=turn_id, input_event_key=f"{input_event_key}:clarify"),
+        transcript_final_seen=True,
+        input_event_key=f"{input_event_key}:clarify",
+        response_id=response_id,
+    )
+
+    assert selected is False
+    assert reason == "visual_turn_invalid_response_class"
+
+
+def test_non_visual_turn_remains_unaffected_by_visual_guard() -> None:
+    api = _make_api()
+    turn_id = "turn_2"
+    input_event_key = "item_non_visual"
+    response_id = "resp_non_visual"
+    api._active_input_event_key_by_turn_id[turn_id] = input_event_key
+    api._utterance_trust_snapshot_by_input_event_key = {
+        input_event_key: {
+            "visual_question": False,
+            "transcript_text": "tell me a joke",
+        }
+    }
+    api._terminal_response_text_by_response_id = {
+        response_id: "Here is a joke for you.",
+    }
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id=turn_id,
+        origin="upgraded_response",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key),
+        transcript_final_seen=True,
+        input_event_key=input_event_key,
+        response_id=response_id,
+    )
+
+    assert selected is True
+    assert reason == "normal"
+
+
+def test_visual_turn_allows_valid_replacement_when_response_is_grounded() -> None:
+    api = _make_api()
+    turn_id = "turn_3"
+    input_event_key = "item_visual"
+    response_id = "resp_visual_valid_replacement"
+    api._active_input_event_key_by_turn_id[turn_id] = input_event_key
+    api._utterance_trust_snapshot_by_input_event_key = {
+        input_event_key: {
+            "visual_question": True,
+            "transcript_text": "do you see it now",
+        }
+    }
+    api._terminal_response_text_by_response_id = {
+        response_id: "I can see it now.",
+    }
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id=turn_id,
+        origin="upgraded_response",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key),
+        transcript_final_seen=True,
+        input_event_key=input_event_key,
+        response_id=response_id,
+    )
+
+    assert selected is True
+    assert reason == "normal"
