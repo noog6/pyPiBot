@@ -213,7 +213,6 @@ def test_visual_unavailable_clarify_uses_dedicated_bounded_instruction_guardrail
     assert "do not assert or describe any scene" in instructions.lower()
     assert "do not add a second sentence" in instructions.lower()
     assert "short and non-assertive" in instructions.lower()
-    assert event["response"].get("tool_choice") == "none"
 
 
 def test_low_semantic_bounded_clarify_instruction_is_unchanged() -> None:

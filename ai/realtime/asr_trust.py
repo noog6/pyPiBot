@@ -15,38 +15,6 @@ _STOPWORDS = {
 _VISUAL_TERMS = {"pants", "shirt", "hat", "wearing", "wear", "color", "see"}
 _GREETING_TERMS = {"hi", "hello", "hey", "yo", "sup", "howdy"}
 _CLEAR_MOTION_TERMS = {"look", "center", "left", "right", "up", "down", "back"}
-_CURRENT_VISUAL_PATTERNS = (
-    r"\bwhat\s+do\s+you\s+see\s*(right\s+now|now)?\b",
-    r"\b(?:go\s+back\s+to\s+center|look\s+back\s+(?:at|to)\s+center|return\s+to\s+center)\b.*\b(?:tell\s+me\s+what\s+i\s+have\s+in\s+my\s+hands|what\s+am\s+i\s+holding)\b",
-    r"\b(?:tell\s+me\s+what\s+i\s+have\s+in\s+my\s+hands|what\s+am\s+i\s+holding)\b",
-    r"\bcan\s+you\s+see\s+it\s+now\b",
-    r"\blook\s+at\s+(?:this|my\s+hand)\b",
-    r"\bwhat'?s\s+in\s+front\s+of\s+you\b",
-    r"\b(?:tell|let\s+me\s+know)\s+me\s+what\s+you\s+see\s+in\s+front\s+of\s+you\b",
-    r"\bwhat\s+are\s+you\s+looking\s+at\s+(?:right\s+now|now)\b",
-    r"\bcan\s+you\s+look\s+and\s+tell\s+me\s+what(?:'?s|\s+is)?\s+(?:there|in\s+front\s+of\s+you)\b",
-    r"\blook\s+at\s+what'?s\s+in\s+front\s+of\s+you\s+and\s+describe\s+it\b",
-    r"\btake\s+a\s+look\b",
-    r"\bcan\s+you\s+check\b.*\b(now|right\s+now)\b",
-    r"\blook\s+(now|right\s+now)\b",
-    r"\b(?:tell\s+me\s+if|can\s+you\s+tell\s+me\s+if|let\s+me\s+know\s+if)\s+you\s+see\b",
-    r"\bdo\s+you\s+see\b.*\bin\s+your\s+field\s+of\s+view\b",
-    r"\bcan\s+you\s+check\s+whether\s+there\s+is\b.*\b(?:in\s+front\s+of\s+you|ahead\s+of\s+you)\b",
-    r"\blook\s+back\s+(?:at|to)\s+center\b.*\b(?:tell\s+me\s+if\s+you\s+see|do\s+you\s+see)\b",
-    r"\bcan\s+you\s+see\s+what\s+i(?:'m|\s+am)\s+holding\b",
-    r"\bcan\s+you\s+see\s+what\s+i(?:'m|\s+am)\s+holding\s+in\s+my\s+hand\b",
-    r"\bdo\s+you\s+see\s+this\b",
-    r"\blook\s+at\s+this\s+and\s+tell\s+me\s+what\s+you\s+see\b",
-)
-
-_VISUAL_ACTION_TERMS = {"see", "look", "looking", "check", "describe"}
-_VISUAL_TARGET_TERMS = {"front", "there"}
-_VISUAL_PRESENT_TERMS = {"now", "current", "currently", "right"}
-_EXPLICIT_VISUAL_SUBJECT_TERMS = {"this", "holding", "hand", "front"}
-_VISUAL_NEGATIVE_PATTERNS = (
-    r"\b(earlier|before|previously|yesterday|last\s+(?:time|night|week))\b",
-    r"\bwhat\s+did\s+you\s+see\b",
-)
 
 
 def extract_topic_anchors(text: str, *, top_k: int = 5) -> list[str]:
@@ -158,32 +126,6 @@ def should_clarify(
     if tool_risk in {"high", "critical"} and snapshot.asr_confidence is not None and snapshot.asr_confidence < 0.8:
         return True, "high_risk_confirmation"
     return False, "none"
-
-
-def is_current_visual_question(text: str) -> bool:
-    normalized = " ".join((text or "").lower().split())
-    if not normalized:
-        return False
-    for pattern in _VISUAL_NEGATIVE_PATTERNS:
-        if re.search(pattern, normalized):
-            return False
-    for pattern in _CURRENT_VISUAL_PATTERNS:
-        if re.search(pattern, normalized):
-            return True
-    token_set = set(re.findall(r"[a-zA-Z0-9']+", normalized))
-    has_visual_action = bool(token_set & _VISUAL_ACTION_TERMS)
-    has_current_target = bool(token_set & _VISUAL_TARGET_TERMS) or "field of view" in normalized
-    has_present_hint = (
-        bool(token_set & _VISUAL_PRESENT_TERMS)
-        or "in front of you" in normalized
-        or "field of view" in normalized
-    )
-    if has_visual_action and has_current_target and has_present_hint:
-        return True
-    has_explicit_visual_subject = bool(token_set & _EXPLICIT_VISUAL_SUBJECT_TERMS)
-    if has_visual_action and has_explicit_visual_subject:
-        return True
-    return False
 
 
 def topic_mismatch_detected(transcript_text: str, response_text: str, *, threshold: float = 0.2) -> bool:

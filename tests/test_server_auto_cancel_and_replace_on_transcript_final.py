@@ -46,7 +46,6 @@ def _build_api_stub() -> RealtimeAPI:
     lifecycle_controller = InteractionLifecycleController()
     api._lifecycle_controller = lambda: lifecycle_controller
     api._cancel_micro_ack = lambda **_kwargs: None
-    api._deferred_provisional_tool_call_by_turn_id = {}
     api._canonical_first_audio_started = lambda _canonical_key: True
     return api
 
@@ -459,7 +458,6 @@ def test_server_auto_audio_does_not_start_before_gating() -> None:
     api._lifecycle_controller = lambda: type("LC", (), {"on_audio_delta": staticmethod(lambda *_a, **_k: type("D", (), {"action": __import__("ai.interaction_lifecycle_controller", fromlist=["LifecycleDecisionAction"]).LifecycleDecisionAction.ALLOW, "reason": "ok"})())})()
     api._log_lifecycle_event = lambda **_kwargs: None
     api._cancel_micro_ack = lambda **_kwargs: None
-    api._deferred_provisional_tool_call_by_turn_id = {}
     api._canonical_response_state_mutate = lambda **_kwargs: None
     sent = []
     api._get_or_create_transport = lambda: type("T", (), {"send_json": staticmethod(lambda _ws, event: sent.append(event) or __import__("asyncio").sleep(0))})()
@@ -781,46 +779,6 @@ def test_upgrade_chain_id_propagates_into_replacement_metadata() -> None:
     assert metadata["upgrade_chain_id"] == "run-464:turn_8:synthetic_server_auto_8"
 
 
-
-
-def test_cancel_and_replace_propagates_explicit_inspect_visual_ownership_metadata() -> None:
-    api = _build_api_stub()
-    transport = _Transport()
-    replacement_calls: list[dict[str, object]] = []
-
-    api._fresh_look_state_for_turn(turn_id="turn_55")["visual_actuator"] = "explicit_inspect"
-    api._fresh_look_state_for_turn(turn_id="turn_55")["visual_intent_class"] = "explicit_inspect"
-    api._pending_server_auto_response_by_turn_id["turn_55"] = PendingServerAutoResponse(
-        turn_id="turn_55",
-        response_id="resp-server-auto",
-        canonical_key="run-464:turn_55:synthetic_server_auto_55",
-        created_at_ms=1,
-        active=True,
-    )
-    api._get_or_create_transport = lambda: transport
-    api._peek_pending_preference_memory_context_payload = lambda **_kwargs: None
-
-    async def _fake_send_response_create(_websocket, event, **kwargs):
-        replacement_calls.append({"event": event, **kwargs})
-        return True
-
-    api._send_response_create = _fake_send_response_create
-
-    replaced = asyncio.run(
-        api._cancel_and_replace_pending_server_auto_on_transcript_final(
-            websocket=object(),
-            turn_id="turn_55",
-            input_event_key="item_555",
-            origin_label="upgraded_response",
-        )
-    )
-
-    assert replaced is True
-    metadata = replacement_calls[0]["event"]["response"]["metadata"]
-    assert metadata["visual_actuator"] == "explicit_inspect"
-    assert metadata["visual_intent_class"] == "explicit_inspect"
-
-
 def test_mark_pending_server_auto_response_replaced_is_idempotent_after_upgrade(monkeypatch) -> None:
     api = _build_api_stub()
     api._pending_server_auto_response_by_turn_id["turn_20"] = PendingServerAutoResponse(
@@ -932,64 +890,9 @@ def test_provisional_server_auto_tool_call_is_deferred_before_transcript_final(m
 
     assert captured["reason"] == "provisional_server_auto_pre_audio_hold"
     assert captured["status"] == "deferred"
-    assert "turn_3" not in api._deferred_provisional_tool_call_by_turn_id
     assert api.function_call is None
     assert api.function_call_args == ""
 
-
-
-
-def test_deferred_provisional_inspect_call_resumes_for_same_turn() -> None:
-    api = _build_api_stub()
-    api._deferred_provisional_tool_call_by_turn_id = {
-        "turn_3": {
-            "function_name": "inspect_current_view",
-            "call_id": "call-provisional",
-            "args": {},
-        }
-    }
-    executed: list[tuple[str, str, dict[str, object]]] = []
-
-    async def _fake_execute(function_name, call_id, args, _websocket, **_kwargs):
-        executed.append((function_name, call_id, dict(args)))
-
-    api.execute_function_call = _fake_execute
-
-    resumed = asyncio.run(
-        api._resume_deferred_provisional_tool_call_for_turn(
-            turn_id="turn_3",
-            websocket=object(),
-        )
-    )
-
-    assert resumed is True
-    assert executed == [("inspect_current_view", "call-provisional", {})]
-    assert api._deferred_provisional_tool_call_by_turn_id == {}
-
-
-
-def test_provisional_server_auto_inspect_call_is_recorded_for_resume(monkeypatch) -> None:
-    api = _build_api_stub()
-    api._active_response_origin = "server_auto"
-    api._current_response_turn_id = "turn_3"
-    api._active_response_id = "resp-server-auto"
-    api._active_server_auto_input_event_key = "synthetic_server_auto_3"
-    api.function_call = {"name": "inspect_current_view", "call_id": "call-provisional-inspect"}
-    api.function_call_args = '{}'
-
-    async def _fake_noop(_websocket, **_kwargs):
-        return None
-
-    monkeypatch.setattr(api, "_send_noop_tool_output", _fake_noop)
-
-    api._server_auto_pre_audio_hold_active = lambda **_kwargs: True
-
-    asyncio.run(api.handle_function_call({}, object()))
-
-    pending = api._deferred_provisional_tool_call_by_turn_id["turn_3"]
-    assert pending["function_name"] == "inspect_current_view"
-    assert pending["call_id"] == "call-provisional-inspect"
-    assert pending["args"] == {}
 
 def test_transcript_final_handoff_invalidates_provisional_tool_followup_lineage() -> None:
     api = _build_api_stub()
@@ -1146,147 +1049,3 @@ def test_audio_transcript_done_reconstructs_full_sentence_from_multiple_deltas()
         asyncio.run(api._handle_event_legacy(event, websocket=None))
 
     assert api._assistant_reply_text_for_response("resp-final") == "I can see a shelf of games."
-
-def test_visual_ownership_replay_explicit_inspect_survives_verify_replacement_and_terminal(monkeypatch) -> None:
-    api = _build_api_stub()
-    transport = _Transport()
-    replacement_calls: list[dict[str, object]] = []
-    captured_logs: list[str] = []
-    attempted_fresh_look: list[str] = []
-
-    def _capture_info(message, *args):
-        captured_logs.append(message % args if args else str(message))
-
-    monkeypatch.setattr("ai.realtime_api.logger.info", _capture_info)
-
-    state = api._fresh_look_state_for_turn(turn_id="turn_replay")
-    state["visual_actuator"] = "explicit_inspect"
-    state["visual_intent_class"] = "explicit_inspect"
-
-    async def _attempt_fresh_look_for_turn(**_kwargs):
-        attempted_fresh_look.append("called")
-        return {"requested": True, "completed": False, "blocked_reason": "timeout"}
-
-    captured_clarify_metadata: list[dict[str, str]] = []
-
-    async def _send_assistant_message(_message, _websocket, response_metadata=None, **_kwargs):
-        if isinstance(response_metadata, dict):
-            captured_clarify_metadata.append(dict(response_metadata))
-        return None
-
-    api._attempt_fresh_look_for_turn = _attempt_fresh_look_for_turn
-    api.send_assistant_message = _send_assistant_message
-    api.get_vision_state = lambda: {
-        "available": False,
-        "last_frame_age_ms": None,
-        "queued_frame_count": 0,
-        "can_capture": False,
-        "camera_active": False,
-    }
-    api._asr_verify_on_risk_enabled = True
-    api._asr_clarify_asked_input_event_keys = set()
-    api._asr_clarify_count_by_turn = {}
-    api._asr_verify_max_clarify_per_turn = 1
-    api._asr_verify_short_utterance_ms = 300
-    api._asr_verify_min_confidence = 0.6
-    api._response_gating_verdict_by_input_event_key = {}
-    api._record_cancel_issued_timing = lambda *_args, **_kwargs: None
-    api._stale_response_ids_set = set()
-    api._mark_pending_server_auto_response_cancelled = lambda **_kwargs: None
-    api._suppress_cancelled_response_audio = lambda *_args, **_kwargs: None
-    api._get_or_create_transport = lambda: type("T", (), {"send_json": staticmethod(lambda *_a, **_k: asyncio.sleep(0))})()
-    api.assistant_reply = ""
-    api._assistant_reply_accum = ""
-
-    asyncio.run(
-        api._maybe_verify_on_risk_clarify(
-            transcript="what do you see right now",
-            websocket=object(),
-            turn_id="turn_replay",
-            input_event_key="evt-replay",
-            snapshot={"run_id": "run-464", "asr_confidence": 0.95},
-        )
-    )
-
-    assert attempted_fresh_look == []
-    assert captured_clarify_metadata == []
-
-    api._pending_server_auto_response_by_turn_id["turn_replay"] = PendingServerAutoResponse(
-        turn_id="turn_replay",
-        response_id="resp-server-auto",
-        canonical_key="run-464:turn_replay:synthetic_server_auto_replay",
-        created_at_ms=1,
-        active=True,
-    )
-    api._get_or_create_transport = lambda: transport
-    api._peek_pending_preference_memory_context_payload = lambda **_kwargs: None
-
-    async def _fake_send_response_create(_websocket, event, **kwargs):
-        replacement_calls.append({"event": event, **kwargs})
-        return True
-
-    api._send_response_create = _fake_send_response_create
-
-    replaced = asyncio.run(
-        api._cancel_and_replace_pending_server_auto_on_transcript_final(
-            websocket=object(),
-            turn_id="turn_replay",
-            input_event_key="item-replay",
-            origin_label="upgraded_response",
-        )
-    )
-
-    assert replaced is True
-    metadata = replacement_calls[0]["event"]["response"]["metadata"]
-    assert metadata["transcript_upgrade_replacement"] == "true"
-    assert metadata["visual_actuator"] == "explicit_inspect"
-    assert metadata["visual_intent_class"] == "explicit_inspect"
-
-    response_created_metadata = {
-        "turn_id": "turn_replay",
-        "visual_actuator": metadata["visual_actuator"],
-        "visual_intent_class": metadata["visual_intent_class"],
-    }
-    created_actuator, created_intent = api._resolve_visual_ownership_for_turn(
-        turn_id="turn_replay",
-        response_metadata=response_created_metadata,
-        seam="response_created",
-    )
-    assert created_actuator == "explicit_inspect"
-    assert created_intent == "explicit_inspect"
-
-    final_actuator, final_intent = api._resolve_visual_ownership_for_turn(
-        turn_id="turn_replay",
-        response_metadata=metadata,
-        seam="terminal_done",
-    )
-    assert final_actuator == "explicit_inspect"
-    assert final_intent == "explicit_inspect"
-
-    resolved_logs = [line for line in captured_logs if line.startswith("visual_ownership_resolved run_id=")]
-    assert any("seam=verify_on_risk" in line and "visual_actuator=explicit_inspect" in line for line in resolved_logs)
-    assert any("seam=replacement_scheduled" in line and "visual_actuator=explicit_inspect" in line for line in resolved_logs)
-    assert any("seam=response_created" in line and "visual_actuator=explicit_inspect" in line for line in resolved_logs)
-    assert any("seam=terminal_done" in line and "visual_actuator=explicit_inspect" in line for line in resolved_logs)
-    assert any("seam=response_created" in line and "source=merged" in line for line in resolved_logs)
-
-
-def test_visual_ownership_resolved_source_none_when_no_state_or_metadata(monkeypatch) -> None:
-    api = _build_api_stub()
-    captured_logs: list[str] = []
-
-    def _capture_info(message, *args):
-        captured_logs.append(message % args if args else str(message))
-
-    monkeypatch.setattr("ai.realtime_api.logger.info", _capture_info)
-
-    resolved_actuator, resolved_intent = api._resolve_visual_ownership_for_turn(
-        turn_id="turn_none",
-        response_metadata={},
-        seam="terminal_done",
-    )
-
-    assert resolved_actuator == "none"
-    assert resolved_intent == "none"
-    resolved_logs = [line for line in captured_logs if line.startswith("visual_ownership_resolved run_id=")]
-    assert any("turn_id=turn_none" in line and "source=none" in line and "seam=terminal_done" in line for line in resolved_logs)

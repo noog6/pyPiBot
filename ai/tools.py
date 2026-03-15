@@ -449,29 +449,6 @@ async def perform_research(query: str, context: dict[str, Any] | None = None) ->
 tools.append(
     {
         "type": "function",
-        "name": "inspect_current_view",
-        "description": (
-            "Use this as the primary visual-semantic tool when the user asks what Theo can "
-            "currently see (for example: what do you see, what am I holding, can you see it now, "
-            "look at this/my hand). This takes an explicit fresh look at the current camera view "
-            "and returns structured capture status metadata for the turn. This tool does not "
-            "move or recenter the camera. If the user asks to center/recenter first, call the "
-            "appropriate motion tool (for example gesture_look_center) before calling "
-            "inspect_current_view."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "delay_ms": {"type": "integer", "minimum": 0, "default": 0},
-            },
-            "required": [],
-        },
-    }
-)
-
-tools.append(
-    {
-        "type": "function",
         "name": "read_battery_voltage",
         "description": (
             "Fetch the current voltage of the onboard 2S LiPo battery. "
@@ -706,8 +683,6 @@ tools.append(
         "description": (
             "Return the camera to a neutral, centered pan/tilt position. "
             "Use for requests like 'look back to center' or 'return to neutral'. "
-            "This is motion-only setup and does not inspect/describe objects by itself; for "
-            "semantic visual questions use inspect_current_view as a separate follow-up step. "
             "Provide an optional delay in milliseconds."
         ),
         "parameters": {
