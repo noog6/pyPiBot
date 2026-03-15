@@ -2464,7 +2464,7 @@ def test_tool_followup_release_not_suppressed_when_parent_only_has_unclassified_
     assert should_drop is False
     assert reason == "parent_not_deliverable"
 
-def test_tool_followup_create_seam_does_not_use_terminal_selection_without_substantive_parent_output() -> None:
+def test_tool_followup_create_seam_uses_terminal_selection_as_parent_coverage_source() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
     ws = _RecordingWs()
@@ -2524,8 +2524,8 @@ def test_tool_followup_create_seam_does_not_use_terminal_selection_without_subst
 
     asyncio.run(api._drain_response_create_queue(source_trigger="playback_complete"))
 
-    assert len([event for event in ws.sent if event.get("type") == "response.create"]) == 1
-    assert api._tool_followup_state(canonical_key=canonical_key) in {"creating", "created", "released_on_response_done"}
+    assert len([event for event in ws.sent if event.get("type") == "response.create"]) == 0
+    assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
 
 
 def test_tool_followup_pruned_when_parent_has_substantive_audio_output() -> None:
@@ -2629,7 +2629,7 @@ def test_tool_followup_blocked_by_active_parent_is_released_and_drained_after_pa
     assert len([event for event in ws.sent if event.get("type") == "response.create"]) == 1
 
 
-def test_terminal_prune_path_is_idempotent_without_substantive_parent_output() -> None:
+def test_terminal_prune_path_is_idempotent_for_terminal_selected_parent() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
 
@@ -2694,12 +2694,12 @@ def test_terminal_prune_path_is_idempotent_without_substantive_parent_output() -
         selected_response_id=parent_response_id,
     )
 
-    assert first_pending is not None
-    assert first_queue_size == 1
-    assert first_state == "new"
-    assert api._pending_response_create is not None
-    assert len(api._response_create_queue) == 1
-    assert api._tool_followup_state(canonical_key=canonical_key) == "new"
+    assert first_pending is None
+    assert first_queue_size == 0
+    assert first_state == "dropped"
+    assert api._pending_response_create is None
+    assert len(api._response_create_queue) == 0
+    assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
 
 
 def test_gesture_followup_dropped_on_response_done_and_playback_complete_when_parent_already_spoke_action() -> None:
@@ -3491,16 +3491,22 @@ def test_upgraded_response_still_suppresses_redundant_tool_followup_after_pendin
     metadata["parent_turn_id"] = turn_id
     metadata["parent_input_event_key"] = parent_input_event_key
 
-    should_drop, _entry, reason = api._should_suppress_queued_tool_followup_release(
+    should_drop, entry, reason = api._should_suppress_queued_tool_followup_release(
         response_metadata=metadata,
         blocked_by_response_id=parent_response_id,
     )
 
     assert should_drop is True
     assert reason == "parent_covered_tool_result"
+    assert entry is not None
+    parent_covered, coverage_source, _observed, _klass, _selected, _sel_reason = api._parent_response_coverage_state(
+        parent_state=entry[1],
+    )
+    assert parent_covered is True
+    assert coverage_source == "terminal_selection"
 
 
-def test_provisional_server_auto_parent_progression_holds_then_deterministically_suppresses_followup() -> None:
+def test_provisional_server_auto_parent_progression_holds_then_suppresses_followup_after_terminal_selection() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
 
@@ -3582,7 +3588,7 @@ def test_provisional_server_auto_parent_progression_holds_then_deterministically
         selection_reason="normal",
     )
 
-    # 6) without substantive parent output, followup is released after completion
+    # 6) once terminal-selected as normal, followup is suppressed even without substantive parent output
     api._release_blocked_tool_followups_for_response_done(response_id=parent_response_id)
-    assert api._tool_followup_state(canonical_key=tool_canonical_key) == "scheduled_release"
-    assert followup_metadata.get("tool_followup_release") == "true"
+    assert api._tool_followup_state(canonical_key=tool_canonical_key) == "dropped"
+    assert followup_metadata.get("tool_followup_release") != "true"

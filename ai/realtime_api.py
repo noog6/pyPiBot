@@ -7213,6 +7213,13 @@ class RealtimeAPI:
             str(terminal_selected).lower(),
             terminal_reason,
         )
+        logger.info(
+            "parent_deliverable_verdict response_id=%s covered=%s class=%s source=%s",
+            str(getattr(parent_state, "response_id", "") or "").strip() or "none",
+            str(parent_covered).lower(),
+            deliverable_class or "unknown",
+            coverage_source,
+        )
         if not parent_covered:
             if self._parent_deliverable_classification_pending(
                 parent_state=parent_state,
@@ -7532,10 +7539,10 @@ class RealtimeAPI:
                 terminal_selected = bool(selection_entry.get("selected", False))
                 terminal_reason = str(selection_entry.get("reason") or "unknown").strip().lower() or "unknown"
         covered = canonical_covered
-        if canonical_covered:
-            source = "canonical"
-        else:
-            source = "none"
+        source = "canonical" if canonical_covered else "none"
+        if not covered and terminal_selected and terminal_reason == "normal":
+            covered = True
+            source = "terminal_selection"
         return covered, source, deliverable_observed, deliverable_class, terminal_selected, terminal_reason
 
     def _parent_deliverable_classification_pending(
