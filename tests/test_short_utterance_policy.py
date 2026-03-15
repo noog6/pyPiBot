@@ -83,6 +83,87 @@ def test_short_clear_command_not_blocked() -> None:
     assert reason == "none"
 
 
+def test_visual_question_snapshot_lexical_detection_matches_current_api() -> None:
+    positive_cases = [
+        "what do you see right now",
+        "can you see it now",
+        "what color shirt",
+    ]
+    negative_cases = [
+        "what did you hear earlier",
+        "what percentage is your battery level",
+        "favorite editor",
+    ]
+
+    for transcript in positive_cases:
+        snapshot = build_utterance_trust_snapshot(
+            run_id="run-526",
+            turn_id="turn-visual",
+            input_event_key="item-positive",
+            transcript_text=transcript,
+            utterance_duration_ms=1500,
+            asr_meta={},
+            short_utterance_ms=450,
+        )
+        assert snapshot.visual_question is True
+
+    for transcript in negative_cases:
+        snapshot = build_utterance_trust_snapshot(
+            run_id="run-526",
+            turn_id="turn-non-visual",
+            input_event_key="item-negative",
+            transcript_text=transcript,
+            utterance_duration_ms=1500,
+            asr_meta={},
+            short_utterance_ms=450,
+        )
+        assert snapshot.visual_question is False
+
+
+def test_should_clarify_visual_question_paths_cover_visual_unavailable_and_defer() -> None:
+    snapshot = build_utterance_trust_snapshot(
+        run_id="run-526",
+        turn_id="turn-visual-1",
+        input_event_key="item-visual-1",
+        transcript_text="what do you see right now",
+        utterance_duration_ms=1700,
+        asr_meta={},
+        short_utterance_ms=450,
+    )
+
+    clarify, reason = should_clarify(
+        transcript_text=snapshot.transcript_text,
+        snapshot=snapshot,
+        min_confidence=0.65,
+        camera_available=False,
+        camera_recent=False,
+    )
+
+    assert clarify is True
+    assert reason == "visual_unavailable"
+
+    compound_snapshot = build_utterance_trust_snapshot(
+        run_id="run-526",
+        turn_id="turn-visual-2",
+        input_event_key="item-visual-2",
+        transcript_text="go back to center and tell me what you see",
+        utterance_duration_ms=1700,
+        asr_meta={},
+        short_utterance_ms=450,
+    )
+
+    clarify, reason = should_clarify(
+        transcript_text=compound_snapshot.transcript_text,
+        snapshot=compound_snapshot,
+        min_confidence=0.65,
+        camera_available=True,
+        camera_recent=False,
+    )
+
+    assert clarify is False
+    assert reason == "compound_motion_visual_defer"
+
+
 def test_preference_recall_query_not_treated_as_ambiguous() -> None:
     api = RealtimeAPI.__new__(RealtimeAPI)
     api._asr_verify_on_risk_enabled = True
