@@ -165,6 +165,81 @@ def test_turn_contract_exact_phrase_repair_scheduled_when_parent_missing_phrase(
     metadata = sent_events[0]["event"]["response"]["metadata"]
     assert metadata["turn_contract_exact_phrase_repair"] == "true"
     assert metadata["input_event_key"] == "item_1:exact_phrase_repair"
+    assert (
+        sent_events[0]["event"]["response"]["instructions"]
+        == "Exact phrase repair mode. Speak exactly this sentence and nothing else: 'Sentinel Theo online.'."
+    )
+
+
+def test_turn_contract_required_phrase_repair_uses_exact_phrase_instruction() -> None:
+    api = _make_api()
+    api._turn_contracts_by_turn_id = {
+        "turn_1": {
+            "required_phrase": "Ready!",
+            "exact_phrase": "",
+            "exact_phrase_repair_scheduled": False,
+        }
+    }
+    api._assistant_reply_accum = ""
+    sent_events: list[dict[str, object]] = []
+
+    async def _capture_send_response_create(_websocket, event, **kwargs):
+        sent_events.append({"event": event, **kwargs})
+        return True
+
+    api._send_response_create = _capture_send_response_create
+
+    scheduled = asyncio.run(
+        api._schedule_turn_contract_exact_phrase_repair_response(
+            turn_id="turn_1",
+            input_event_key="item_1",
+            websocket=object(),
+        )
+    )
+
+    assert scheduled is True
+    assert sent_events[0]["event"]["response"]["instructions"] == (
+        "Exact phrase repair mode. Speak exactly this sentence and nothing else: 'Ready!'."
+    )
+
+
+def test_turn_contract_exact_phrase_repair_counts_queued_pending_as_scheduled() -> None:
+    api = _make_api()
+    api._update_turn_contract_from_input(
+        "Say exactly: Sentinel Theo online.",
+        source="input_audio_transcription",
+    )
+    api._assistant_reply_accum = ""
+
+    async def _queue_but_do_not_send(_websocket, event, **_kwargs):
+        api._pending_response_create = PendingResponseCreate(
+            websocket=None,
+            event=event,
+            origin="assistant_message",
+            turn_id="turn_1",
+            created_at=time.monotonic(),
+            reason="audio_playback_busy",
+            record_ai_call=False,
+            debug_context=None,
+            memory_brief_note=None,
+            queued_reminder_key=None,
+            enqueued_done_serial=0,
+            enqueue_seq=1,
+        )
+        return False
+
+    api._send_response_create = _queue_but_do_not_send
+
+    scheduled = asyncio.run(
+        api._schedule_turn_contract_exact_phrase_repair_response(
+            turn_id="turn_1",
+            input_event_key="item_1",
+            websocket=object(),
+        )
+    )
+
+    assert scheduled is True
+    assert api._turn_contracts_by_turn_id["turn_1"]["exact_phrase_repair_scheduled"] is True
 
 
 def test_turn_contract_exact_phrase_repair_schedules_at_most_once() -> None:
