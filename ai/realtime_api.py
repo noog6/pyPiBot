@@ -5444,6 +5444,7 @@ class RealtimeAPI:
         normalized_response_id = str(response_id or "").strip()
         if not normalized_response_id:
             return
+        self._clear_visual_upgraded_pre_audio_tracking(response_id=normalized_response_id)
         cancelled_ids = getattr(self, "_cancelled_response_ids", None)
         if not isinstance(cancelled_ids, set):
             cancelled_ids = set()
@@ -6022,10 +6023,22 @@ class RealtimeAPI:
         )
         state["race_logged"] = True
 
+    def _clear_visual_upgraded_pre_audio_tracking(self, *, response_id: str | None) -> None:
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            return
+        gate_store = getattr(self, "_visual_upgraded_pre_audio_gate_by_response_id", None)
+        if isinstance(gate_store, dict):
+            gate_store.pop(normalized_response_id, None)
+        buffer_store = getattr(self, "_visual_upgraded_pre_audio_buffer_by_response_id", None)
+        if isinstance(buffer_store, dict):
+            buffer_store.pop(normalized_response_id, None)
+
     def _clear_cancelled_response_tracking(self, response_id: str) -> None:
         normalized_response_id = str(response_id or "").strip()
         if not normalized_response_id:
             return
+        self._clear_visual_upgraded_pre_audio_tracking(response_id=normalized_response_id)
         cancelled_ids = getattr(self, "_cancelled_response_ids", None)
         if isinstance(cancelled_ids, set):
             cancelled_ids.discard(normalized_response_id)
@@ -7643,6 +7656,151 @@ class RealtimeAPI:
             ),
         }
         return normalized_response in approved_variants
+
+    def _visual_upgraded_pre_audio_gate_store(self) -> dict[str, str]:
+        store = getattr(self, "_visual_upgraded_pre_audio_gate_by_response_id", None)
+        if not isinstance(store, dict):
+            store = {}
+            self._visual_upgraded_pre_audio_gate_by_response_id = store
+        return store
+
+    def _visual_upgraded_pre_audio_gate_state(self, response_id: str | None) -> str:
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            return "allow"
+        return str(self._visual_upgraded_pre_audio_gate_store().get(normalized_response_id) or "pending").strip().lower() or "pending"
+
+    def _set_visual_upgraded_pre_audio_gate_state(self, *, response_id: str | None, state: str) -> None:
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            return
+        normalized_state = str(state or "pending").strip().lower() or "pending"
+        self._visual_upgraded_pre_audio_gate_store()[normalized_response_id] = normalized_state
+
+    def _visual_upgraded_pre_audio_buffer_store(self) -> dict[str, bytearray]:
+        store = getattr(self, "_visual_upgraded_pre_audio_buffer_by_response_id", None)
+        if not isinstance(store, dict):
+            store = {}
+            self._visual_upgraded_pre_audio_buffer_by_response_id = store
+        return store
+
+    def _append_visual_upgraded_pre_audio_buffer(self, *, response_id: str, audio_bytes: bytes) -> None:
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id or not audio_bytes:
+            return
+        store = self._visual_upgraded_pre_audio_buffer_store()
+        chunk = store.get(normalized_response_id)
+        if not isinstance(chunk, bytearray):
+            chunk = bytearray()
+            store[normalized_response_id] = chunk
+        chunk.extend(audio_bytes)
+
+    def _pop_visual_upgraded_pre_audio_buffer(self, *, response_id: str | None) -> bytes:
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            return b""
+        store = self._visual_upgraded_pre_audio_buffer_store()
+        chunk = store.pop(normalized_response_id, None)
+        if isinstance(chunk, bytearray):
+            return bytes(chunk)
+        return b""
+
+    def _should_cancel_visual_upgraded_pre_audio(self, *, transcript_prefix: str) -> tuple[bool, str]:
+        normalized = self._normalize_visual_fallback_text(transcript_prefix)
+        if not normalized:
+            return False, "insufficient_prefix"
+        generic_markers = (
+            "let's start with",
+            "quick check",
+            "are you planning",
+            "just testing it out",
+            "help me guide you",
+            "that'll help me guide you",
+            "specific right now",
+            "project",
+        )
+        visual_markers = (
+            "see",
+            "look",
+            "camera",
+            "image",
+            "picture",
+            "holding",
+            "hand",
+            "color",
+            "object",
+        )
+        has_generic = any(marker in normalized for marker in generic_markers)
+        has_visual = any(marker in normalized for marker in visual_markers)
+        if has_generic and not has_visual:
+            return True, "obvious_non_visual_pivot"
+        return False, "prefix_not_obviously_invalid"
+
+    async def _evaluate_visual_upgraded_pre_audio_gate_on_transcript_delta(
+        self,
+        *,
+        response_id: str | None,
+        transcript_delta: str,
+        websocket: Any,
+    ) -> None:
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            return
+        if self._visual_upgraded_pre_audio_gate_state(normalized_response_id) != "pending":
+            return
+        active_turn_id = self._current_turn_id_or_unknown()
+        active_input_event_key = str(getattr(self, "_active_response_input_event_key", "") or "").strip()
+        active_origin = str(getattr(self, "_active_response_origin", "") or "").strip().lower()
+        if active_origin != "upgraded_response":
+            self._set_visual_upgraded_pre_audio_gate_state(response_id=normalized_response_id, state="allow")
+            return
+        if not self._turn_has_visual_obligation(
+            turn_id=active_turn_id,
+            input_event_key=active_input_event_key,
+            origin=active_origin,
+            response_id=normalized_response_id,
+        ):
+            self._set_visual_upgraded_pre_audio_gate_state(response_id=normalized_response_id, state="allow")
+            return
+        transcript_prefix = self._assistant_reply_text_for_response(normalized_response_id) or str(transcript_delta or "")
+        should_cancel, reason = self._should_cancel_visual_upgraded_pre_audio(transcript_prefix=transcript_prefix)
+        if should_cancel:
+            self._set_visual_upgraded_pre_audio_gate_state(response_id=normalized_response_id, state="cancel")
+            self._quarantine_cancelled_response_id(
+                response_id=normalized_response_id,
+                turn_id=active_turn_id,
+                input_event_key=active_input_event_key,
+                origin=active_origin,
+                reason=f"visual_turn_pre_audio_{reason}",
+            )
+            self._pop_visual_upgraded_pre_audio_buffer(response_id=normalized_response_id)
+            transport = self._get_or_create_transport()
+            await transport.send_json(websocket, {"type": "response.cancel", "response_id": normalized_response_id})
+            logger.info(
+                "visual_turn_pre_audio_cancel run_id=%s turn_id=%s input_event_key=%s response_id=%s reason=%s",
+                self._current_run_id() or "",
+                active_turn_id,
+                active_input_event_key or "none",
+                normalized_response_id,
+                reason,
+            )
+            return
+        self._set_visual_upgraded_pre_audio_gate_state(response_id=normalized_response_id, state="allow")
+        held_audio = self._pop_visual_upgraded_pre_audio_buffer(response_id=normalized_response_id)
+        if held_audio:
+            logger.debug(
+                "visual_turn_pre_audio_release run_id=%s turn_id=%s input_event_key=%s response_id=%s reason=pre_audio_allow_after_prefix_check bytes=%s",
+                self._current_run_id() or "",
+                active_turn_id,
+                active_input_event_key or "none",
+                normalized_response_id,
+                len(held_audio),
+            )
+            self._deliver_active_response_audio_bytes(
+                response_id=normalized_response_id,
+                audio_data=held_audio,
+            )
+
 
     def _terminal_response_text_store(self) -> dict[str, str]:
         store = getattr(self, "_terminal_response_text_by_response_id", None)
@@ -13364,32 +13522,7 @@ class RealtimeAPI:
                 "Skipping THINKING transition for response.created while still listening."
             )
 
-    async def _handle_response_output_audio_delta_event(self, event: dict[str, Any], websocket: Any) -> None:
-        _ = websocket
-        response_id = self._response_id_from_event(event)
-        if not self._should_process_response_event_ingress(event, source="audio_delta"):
-            return
-        if self._is_active_response_guarded():
-            return
-        active_input_event_key = str(getattr(self, "_active_response_input_event_key", "") or "").strip()
-        active_turn_id = self._current_turn_id_or_unknown()
-        if str(getattr(self, "_active_response_origin", "") or "").strip().lower() == "server_auto" and active_input_event_key:
-            verdict = self._get_response_gating_verdict(turn_id=active_turn_id, input_event_key=active_input_event_key)
-            if verdict is None or verdict.action == "NOOP":
-                return
-            if verdict.action in {"CLARIFY", "UPGRADE"}:
-                if response_id:
-                    self._quarantine_cancelled_response_id(
-                        response_id=response_id,
-                        turn_id=active_turn_id,
-                        input_event_key=active_input_event_key,
-                        origin=str(getattr(self, "_active_response_origin", "unknown") or "unknown"),
-                        reason=f"audio_delta_{verdict.action.lower()}",
-                    )
-                    cancel_event = {"type": "response.cancel", "response_id": response_id}
-                    transport = self._get_or_create_transport()
-                    await transport.send_json(websocket, cancel_event)
-                return
+    def _deliver_active_response_audio_bytes(self, *, response_id: str | None, audio_data: bytes) -> None:
         self._mark_utterance_info_summary(deliverable_seen=True)
         active_canonical_key = str(getattr(self, "_active_response_canonical_key", "") or "").strip()
         if active_canonical_key:
@@ -13436,15 +13569,15 @@ class RealtimeAPI:
                 ),
             )
         self._audio_playback_busy = True
-        audio_data = base64.b64decode(event["delta"])
         if not str(getattr(self, "_audio_accum_response_id", "") or "").strip():
             self._audio_accum_response_id = str(response_id or "").strip() or None
         self._audio_accum.extend(audio_data)
 
-        if self._mic_receive_on_first_audio and not self.mic.is_receiving:
+        mic = getattr(self, "mic", None)
+        if self._mic_receive_on_first_audio and mic is not None and not mic.is_receiving:
             self._mic_receive_on_first_audio = False
             log_info("Starting mic receiving on first audio delta.")
-            self.mic.start_receiving()
+            mic.start_receiving()
 
         if not self._speaking_started:
             self._speaking_started = True
@@ -13455,6 +13588,68 @@ class RealtimeAPI:
                 self.audio_player.play_audio(bytes(self._audio_accum))
             self._audio_accum.clear()
             self._audio_accum_response_id = None
+
+    async def _handle_response_output_audio_delta_event(self, event: dict[str, Any], websocket: Any) -> None:
+        _ = websocket
+        response_id = self._response_id_from_event(event)
+        if not self._should_process_response_event_ingress(event, source="audio_delta"):
+            return
+        if self._is_active_response_guarded():
+            return
+        active_input_event_key = str(getattr(self, "_active_response_input_event_key", "") or "").strip()
+        active_turn_id = self._current_turn_id_or_unknown()
+        active_origin = str(getattr(self, "_active_response_origin", "") or "").strip().lower()
+        if (
+            active_origin == "upgraded_response"
+            and response_id
+            and self._turn_has_visual_obligation(
+                turn_id=active_turn_id,
+                input_event_key=active_input_event_key,
+                origin=active_origin,
+                response_id=response_id,
+            )
+        ):
+            gate_state = self._visual_upgraded_pre_audio_gate_state(response_id)
+            if gate_state == "cancel":
+                return
+            if gate_state == "pending":
+                try:
+                    pending_audio = base64.b64decode(event["delta"])
+                except Exception:
+                    pending_audio = b""
+                if pending_audio:
+                    self._append_visual_upgraded_pre_audio_buffer(response_id=response_id, audio_bytes=pending_audio)
+                logger.debug(
+                    "visual_turn_pre_audio_hold run_id=%s turn_id=%s input_event_key=%s response_id=%s reason=awaiting_transcript_prefix",
+                    self._current_run_id() or "",
+                    active_turn_id,
+                    active_input_event_key or "none",
+                    response_id,
+                )
+                return
+        if active_origin == "server_auto" and active_input_event_key:
+            verdict = self._get_response_gating_verdict(turn_id=active_turn_id, input_event_key=active_input_event_key)
+            if verdict is None or verdict.action == "NOOP":
+                return
+            if verdict.action in {"CLARIFY", "UPGRADE"}:
+                if response_id:
+                    self._quarantine_cancelled_response_id(
+                        response_id=response_id,
+                        turn_id=active_turn_id,
+                        input_event_key=active_input_event_key,
+                        origin=str(getattr(self, "_active_response_origin", "unknown") or "unknown"),
+                        reason=f"audio_delta_{verdict.action.lower()}",
+                    )
+                    cancel_event = {"type": "response.cancel", "response_id": response_id}
+                    transport = self._get_or_create_transport()
+                    await transport.send_json(websocket, cancel_event)
+                return
+        audio_data = base64.b64decode(event["delta"])
+        if response_id:
+            held_audio = self._pop_visual_upgraded_pre_audio_buffer(response_id=response_id)
+            if held_audio:
+                audio_data = held_audio + audio_data
+        self._deliver_active_response_audio_bytes(response_id=response_id, audio_data=audio_data)
 
     async def _handle_response_done_event(self, event: dict[str, Any], websocket: Any) -> None:
         _ = websocket
@@ -14044,6 +14239,11 @@ class RealtimeAPI:
             delta = event.get("delta", "")
             self._mark_first_assistant_utterance_observed_if_needed(delta)
             self._append_assistant_reply_text(delta, allow_separator=False, response_id=response_id)
+            await self._evaluate_visual_upgraded_pre_audio_gate_on_transcript_delta(
+                response_id=response_id,
+                transcript_delta=delta,
+                websocket=websocket,
+            )
         elif event_type == "response.output_audio_transcript.done":
             await self.handle_transcribe_response_done()
             self.state_manager.update_state(

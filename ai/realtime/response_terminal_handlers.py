@@ -510,6 +510,8 @@ class ResponseTerminalHandlers:
             )
         logger.info("Received response.done event.")
         api._clear_terminal_response_text(response_id=active_response_id)
+        api._clear_visual_upgraded_pre_audio_tracking(response_id=active_response_id)
+        api._clear_visual_upgraded_pre_audio_tracking(response_id=response_id)
         if str(active_response_origin_before_clear or "").strip().lower() == "prompt":
             startup_terminal_state = "completed"
             startup_terminal_reason = "response_done"
@@ -694,6 +696,7 @@ class ResponseTerminalHandlers:
             )
         logger.info("Received response.completed event.")
         api._clear_terminal_response_text(response_id=response_id)
+        api._clear_visual_upgraded_pre_audio_tracking(response_id=response_id)
         if active_response_origin_before_clear == "prompt":
             startup_terminal_state = "completed"
             startup_terminal_reason = "response_done"

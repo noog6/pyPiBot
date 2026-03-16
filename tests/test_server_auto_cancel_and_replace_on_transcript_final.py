@@ -468,6 +468,211 @@ def test_server_auto_audio_does_not_start_before_gating() -> None:
     assert api._audio_playback_busy is False
 
 
+def test_visual_invalid_upgraded_response_is_cancelled_pre_audio() -> None:
+    api = _build_api_stub()
+    api._active_response_origin = "upgraded_response"
+    api._active_response_input_event_key = "item_1"
+    api._current_turn_id_or_unknown = lambda: "turn_2"
+    api._audio_playback_busy = False
+    api._is_active_response_guarded = lambda: False
+    api._turn_has_visual_obligation = lambda **_kwargs: True
+    quarantined: list[dict[str, str]] = []
+    api._quarantine_cancelled_response_id = lambda **kwargs: quarantined.append(kwargs)
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._canonical_lifecycle_state = lambda _key: {}
+    api._active_response_canonical_key = "run-464:turn_2:item_1"
+    api._lifecycle_controller = lambda: type("LC", (), {"on_audio_delta": staticmethod(lambda *_a, **_k: type("D", (), {"action": __import__("ai.interaction_lifecycle_controller", fromlist=["LifecycleDecisionAction"]).LifecycleDecisionAction.ALLOW, "reason": "ok"})())})()
+    api._log_lifecycle_event = lambda **_kwargs: None
+    api._cancel_micro_ack = lambda **_kwargs: None
+    api._canonical_response_state_mutate = lambda **_kwargs: None
+    api._audio_accum_bytes_target = 999999
+    api._assistant_reply_text_for_response = lambda _rid: "Let's start with a quick check. Are you planning to glue something specific right now?"
+    sent: list[dict[str, str]] = []
+    api._get_or_create_transport = lambda: type("T", (), {"send_json": staticmethod(lambda _ws, event: sent.append(event) or __import__("asyncio").sleep(0))})()
+
+    audio_delta = {"response_id": "resp-upgraded", "delta": base64.b64encode(b"abc").decode()}
+    asyncio.run(api._handle_response_output_audio_delta_event(audio_delta, object()))
+
+    assert sent == []
+    assert api._audio_playback_busy is False
+
+    asyncio.run(
+        api._evaluate_visual_upgraded_pre_audio_gate_on_transcript_delta(
+            response_id="resp-upgraded",
+            transcript_delta="Let's start with a quick check.",
+            websocket=object(),
+        )
+    )
+
+    assert sent == [{"type": "response.cancel", "response_id": "resp-upgraded"}]
+    assert len(quarantined) == 1
+    assert quarantined[0]["reason"] == "visual_turn_pre_audio_obvious_non_visual_pivot"
+
+
+def test_visual_upgraded_pre_audio_gate_allows_visual_prefix() -> None:
+    api = _build_api_stub()
+    api._active_response_origin = "upgraded_response"
+    api._active_response_input_event_key = "item_1"
+    api._current_turn_id_or_unknown = lambda: "turn_2"
+    api._turn_has_visual_obligation = lambda **_kwargs: True
+    api._assistant_reply_text_for_response = lambda _rid: "I can see what looks like tape in your hand."
+    api._get_or_create_transport = lambda: type("T", (), {"send_json": staticmethod(lambda _ws, _event: __import__("asyncio").sleep(0))})()
+
+    asyncio.run(
+        api._evaluate_visual_upgraded_pre_audio_gate_on_transcript_delta(
+            response_id="resp-upgraded",
+            transcript_delta="I can see what looks like tape in your hand.",
+            websocket=object(),
+        )
+    )
+
+    assert api._visual_upgraded_pre_audio_gate_state("resp-upgraded") == "allow"
+
+
+
+
+def test_visual_upgraded_pre_audio_release_on_allow_without_second_delta() -> None:
+    api = _build_api_stub()
+    api._active_response_origin = "upgraded_response"
+    api._active_response_input_event_key = "item_1"
+    api._active_response_canonical_key = "run-464:turn_2:item_1"
+    api._active_response_id = "resp-upgraded"
+    api._current_turn_id_or_unknown = lambda: "turn_2"
+    api._turn_has_visual_obligation = lambda **_kwargs: True
+    api._is_active_response_guarded = lambda: False
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._canonical_lifecycle_state = lambda _key: {}
+    api._log_lifecycle_event = lambda **_kwargs: None
+    api._cancel_micro_ack = lambda **_kwargs: None
+    api._canonical_response_state_mutate = lambda **_kwargs: None
+    api._assistant_reply_text_for_response = lambda _rid: "I can see a red object in your hand."
+    api._audio_accum_bytes_target = 1
+    api._mic_receive_on_first_audio = False
+    api._speaking_started = False
+    api._audio_playback_busy = False
+
+    class _State:
+        def __init__(self) -> None:
+            self.state = "thinking"
+            self.transitions: list[tuple[object, str]] = []
+
+        def update_state(self, state, reason: str) -> None:
+            self.state = state
+            self.transitions.append((state, reason))
+
+    class _Player:
+        def __init__(self) -> None:
+            self.played: list[bytes] = []
+
+        def play_audio(self, data: bytes) -> None:
+            self.played.append(data)
+
+    api.state_manager = _State()
+    api.audio_player = _Player()
+
+    first = {"response_id": "resp-upgraded", "delta": base64.b64encode(b"abc").decode()}
+    asyncio.run(api._handle_response_output_audio_delta_event(first, object()))
+
+    assert api.audio_player.played == []
+    assert api._speaking_started is False
+    assert api._audio_playback_busy is False
+
+    asyncio.run(
+        api._evaluate_visual_upgraded_pre_audio_gate_on_transcript_delta(
+            response_id="resp-upgraded",
+            transcript_delta="I can see a red object in your hand.",
+            websocket=object(),
+        )
+    )
+
+    assert api.audio_player.played == [b"abc"]
+    assert api._speaking_started is True
+    assert api._audio_playback_busy is True
+    assert api._pop_visual_upgraded_pre_audio_buffer(response_id="resp-upgraded") == b""
+
+    # Idempotency check: re-evaluating after allow should not replay held bytes.
+    asyncio.run(
+        api._evaluate_visual_upgraded_pre_audio_gate_on_transcript_delta(
+            response_id="resp-upgraded",
+            transcript_delta="I can see a red object in your hand.",
+            websocket=object(),
+        )
+    )
+    assert api.audio_player.played == [b"abc"]
+def test_visual_upgraded_pre_audio_release_after_allow_prefix() -> None:
+    api = _build_api_stub()
+    api._active_response_origin = "upgraded_response"
+    api._active_response_input_event_key = "item_1"
+    api._active_response_canonical_key = "run-464:turn_2:item_1"
+    api._active_response_id = "resp-upgraded"
+    api._current_turn_id_or_unknown = lambda: "turn_2"
+    api._turn_has_visual_obligation = lambda **_kwargs: True
+    api._is_active_response_guarded = lambda: False
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._canonical_lifecycle_state = lambda _key: {}
+    api._log_lifecycle_event = lambda **_kwargs: None
+    api._cancel_micro_ack = lambda **_kwargs: None
+    api._canonical_response_state_mutate = lambda **_kwargs: None
+    api._assistant_reply_text_for_response = lambda _rid: "I can see a red object in your hand."
+    api._audio_accum_bytes_target = 1
+    api._mic_receive_on_first_audio = False
+    api._speaking_started = False
+    api._audio_playback_busy = False
+
+    class _State:
+        def __init__(self) -> None:
+            self.state = "thinking"
+            self.transitions: list[tuple[object, str]] = []
+
+        def update_state(self, state, reason: str) -> None:
+            self.state = state
+            self.transitions.append((state, reason))
+
+    class _Player:
+        def __init__(self) -> None:
+            self.played: list[bytes] = []
+
+        def play_audio(self, data: bytes) -> None:
+            self.played.append(data)
+
+    api.state_manager = _State()
+    api.audio_player = _Player()
+
+    first = {"response_id": "resp-upgraded", "delta": base64.b64encode(b"abc").decode()}
+    asyncio.run(api._handle_response_output_audio_delta_event(first, object()))
+
+    assert api.audio_player.played == []
+    assert api._speaking_started is False
+    assert api._audio_playback_busy is False
+
+    asyncio.run(
+        api._evaluate_visual_upgraded_pre_audio_gate_on_transcript_delta(
+            response_id="resp-upgraded",
+            transcript_delta="I can see a red object in your hand.",
+            websocket=object(),
+        )
+    )
+
+    second = {"response_id": "resp-upgraded", "delta": base64.b64encode(b"XYZ").decode()}
+    asyncio.run(api._handle_response_output_audio_delta_event(second, object()))
+
+    assert api.audio_player.played == [b"abc", b"XYZ"]
+    assert api._speaking_started is True
+    assert api._visual_upgraded_pre_audio_gate_state("resp-upgraded") == "allow"
+    assert api._pop_visual_upgraded_pre_audio_buffer(response_id="resp-upgraded") == b""
+
+
+def test_clear_cancelled_tracking_clears_visual_pre_audio_state() -> None:
+    api = _build_api_stub()
+    api._set_visual_upgraded_pre_audio_gate_state(response_id="resp-upgraded", state="pending")
+    api._append_visual_upgraded_pre_audio_buffer(response_id="resp-upgraded", audio_bytes=b"abc")
+
+    api._clear_cancelled_response_tracking("resp-upgraded")
+
+    assert "resp-upgraded" not in api._visual_upgraded_pre_audio_gate_store()
+    assert "resp-upgraded" not in api._visual_upgraded_pre_audio_buffer_store()
+
+
 def test_cancel_and_replace_conversation_item_added_uses_output_item_response_mapping(monkeypatch) -> None:
     api = _build_api_stub()
     api._response_trace_context_by_id = {}
