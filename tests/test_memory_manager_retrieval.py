@@ -1806,6 +1806,129 @@ def test_canary_path_bypasses_timeout_backoff(tmp_path) -> None:
     assert provider.calls == 1
 
 
+def test_canary_path_logs_stage_timing_on_success(tmp_path, caplog) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._semantic_config = SimpleNamespace(
+        enabled=True,
+        rerank_enabled=False,
+        max_candidates_for_semantic=8,
+        min_similarity=0.0,
+        rerank_influence_min_cosine=0.0,
+        dedupe_strong_match_cosine=0.9,
+        background_embedding_enabled=False,
+        provider="openai",
+        write_timeout_ms=75,
+        query_timeout_ms=2000,
+        startup_canary_timeout_ms=5000,
+        max_writes_per_minute=120,
+        max_queries_per_minute=240,
+    )
+    manager._semantic_canary_bypass = False
+
+    class _ReadyProvider:
+        def embed_text(self, text: str, *, timeout_s: float | None = None):
+            return SimpleNamespace(status="ready", dimension=2, vector=_encode_vector([1.0, 0.0]), vector_norm=1.0)
+
+    manager._embedding_provider = _ReadyProvider()
+
+    caplog.set_level(logging.INFO)
+    canary = manager._run_embedding_canary()
+
+    assert canary["canary_success"] is True
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("canary_submit_start" in message for message in messages)
+    assert any("canary_provider_call_start" in message for message in messages)
+    assert any("canary_provider_call_end" in message for message in messages)
+    assert any("canary_future_wait_start" in message for message in messages)
+    assert any("canary_future_wait_end" in message for message in messages)
+    assert any("canary_timing_summary" in message and "failing_stage=none" in message for message in messages)
+
+
+def test_canary_path_timeout_reports_provider_request_stage_when_future_stalls(tmp_path, caplog) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._semantic_config = SimpleNamespace(
+        enabled=True,
+        rerank_enabled=False,
+        max_candidates_for_semantic=8,
+        min_similarity=0.0,
+        rerank_influence_min_cosine=0.0,
+        dedupe_strong_match_cosine=0.9,
+        background_embedding_enabled=False,
+        provider="openai",
+        provider_timeout_s=10.0,
+        write_timeout_ms=75,
+        query_timeout_ms=2000,
+        startup_canary_timeout_ms=120,
+        max_writes_per_minute=120,
+        max_queries_per_minute=240,
+    )
+    manager._semantic_canary_bypass = False
+
+    class _SlowProvider:
+        def embed_text(self, text: str, *, timeout_s: float | None = None):
+            time.sleep(0.25)
+            return SimpleNamespace(status="ready", dimension=2, vector=_encode_vector([1.0, 0.0]), vector_norm=1.0)
+
+    manager._embedding_provider = _SlowProvider()
+
+    caplog.set_level(logging.INFO)
+    canary = manager._run_embedding_canary()
+
+    assert canary["canary_success"] is False
+    assert canary["error_code"] == "timeout_wrapper"
+    assert canary["queue_delay_ms"] is not None
+    assert int(canary["queue_delay_ms"]) >= 0
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("canary_timeout_fire" in message for message in messages)
+    assert any("canary_exception_class=TimeoutError code=timeout_wrapper source=wrapper" in message for message in messages)
+    assert any(
+        "canary_timing_summary" in message and "failing_stage=provider_request" in message
+        for message in messages
+    )
+
+
+def test_run_embedding_canary_timeout_degrades_readiness_without_raising(tmp_path) -> None:
+    store = MemoryStore(db_path=tmp_path / "memories.db")
+    manager = _make_memory_manager(store)
+    manager._semantic_config = SimpleNamespace(
+        enabled=True,
+        rerank_enabled=True,
+        max_candidates_for_semantic=8,
+        min_similarity=0.0,
+        rerank_influence_min_cosine=0.0,
+        dedupe_strong_match_cosine=0.9,
+        background_embedding_enabled=False,
+        provider="openai",
+        provider_timeout_s=10.0,
+        write_timeout_ms=75,
+        query_timeout_ms=2000,
+        startup_canary_timeout_ms=120,
+        max_writes_per_minute=120,
+        max_queries_per_minute=240,
+    )
+    manager._semantic_canary_bypass = False
+
+    class _SlowProvider:
+        def embed_text(self, text: str, *, timeout_s: float | None = None):
+            time.sleep(0.25)
+            return SimpleNamespace(status="ready", dimension=2, vector=_encode_vector([1.0, 0.0]), vector_norm=1.0)
+
+    manager._embedding_provider = _SlowProvider()
+
+    canary = manager._run_embedding_canary()
+    ready, reason = manager._is_semantic_provider_ready()
+
+    assert canary["canary_success"] is False
+    assert canary["error_code"] == "timeout_wrapper"
+    assert canary["timer_start"] == "future_wait_start"
+    assert canary["queue_delay_ms"] is not None
+    assert int(canary["queue_delay_ms"]) >= 0
+    assert ready is False
+    assert reason == "canary_failed:timeout_wrapper"
+
+
 def test_find_semantic_duplicate_respects_write_rate_limit(tmp_path) -> None:
     store = MemoryStore(db_path=tmp_path / "memories.db")
     manager = _make_memory_manager(store)
