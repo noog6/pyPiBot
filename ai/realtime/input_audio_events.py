@@ -140,6 +140,9 @@ class InputAudioEventHandlers:
         )
         self._api._attention_on_speech_stopped(reason="speech_stopped")
         self._api.state_manager.update_state(InteractionState.THINKING, "speech stopped")
+        if self._api._pending_response_create is not None or self._api._response_create_queue:
+            self._api._response_create_queue_drain_source = "active_cleared"
+            await self._api._drain_response_create_queue(source_trigger="active_cleared")
 
     async def handle_input_audio_buffer_committed(
         self, event: dict[str, Any], websocket: Any
