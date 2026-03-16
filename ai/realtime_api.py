@@ -4137,12 +4137,7 @@ class RealtimeAPI:
         repair_input_event_key = f"{str(input_event_key or 'unknown').strip()}:exact_phrase_repair"
         instructions = (
             "Exact phrase repair mode. Speak exactly this sentence and nothing else: "
-            f"{exact_phrase!r}."
-            if exact_phrase
-            else (
-                "Speech obligation repair mode. Respond with one short sentence that includes "
-                f"this phrase verbatim: {required_phrase!r}."
-            )
+            f"{phrase!r}."
         )
         response_event = {
             "type": "response.create",
@@ -4170,8 +4165,13 @@ class RealtimeAPI:
             ),
         )
         if not sent:
-            contract["exact_phrase_repair_scheduled"] = False
-            return False
+            repair_enqueued = self._has_queued_exact_phrase_repair(
+                turn_id=turn_id,
+                input_event_key=repair_input_event_key,
+            )
+            if not repair_enqueued:
+                contract["exact_phrase_repair_scheduled"] = False
+                return False
         logger.info(
             "turn_contract_exact_phrase_repair_scheduled run_id=%s turn_id=%s input_event_key=%s",
             self._current_run_id() or "",
@@ -4179,6 +4179,33 @@ class RealtimeAPI:
             repair_input_event_key,
         )
         return True
+
+    def _has_queued_exact_phrase_repair(self, *, turn_id: str, input_event_key: str) -> bool:
+        normalized_turn_id = str(turn_id or "").strip()
+        normalized_input_event_key = str(input_event_key or "").strip()
+        if not normalized_turn_id or not normalized_input_event_key:
+            return False
+
+        def _is_exact_phrase_repair_event(event: dict[str, Any] | None) -> bool:
+            if not isinstance(event, dict):
+                return False
+            metadata = self._extract_response_create_metadata(event)
+            return (
+                str(metadata.get("turn_id") or "").strip() == normalized_turn_id
+                and str(metadata.get("input_event_key") or "").strip() == normalized_input_event_key
+                and str(metadata.get("turn_contract_exact_phrase_repair") or "").strip().lower()
+                in {"1", "true", "yes"}
+            )
+
+        pending = getattr(self, "_pending_response_create", None)
+        if pending is not None and _is_exact_phrase_repair_event(getattr(pending, "event", None)):
+            return True
+        for queued in list(getattr(self, "_response_create_queue", deque()) or ()):  # pragma: no branch - tiny queue scan
+            if not isinstance(queued, dict):
+                continue
+            if _is_exact_phrase_repair_event(queued.get("event")):
+                return True
+        return False
 
     def _classify_memory_intent(self, text: str) -> str:
         return self._get_memory_runtime().classify_memory_intent(text)

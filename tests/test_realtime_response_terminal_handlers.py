@@ -577,6 +577,51 @@ def test_handle_response_done_skips_repair_reschedule_when_already_latched() -> 
     assert api.orchestration_state.transitions == []
 
 
+def test_handle_response_done_defers_close_when_exact_phrase_repair_is_queued_pending() -> None:
+    api = _make_api()
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    api._response_done_deliverable_decision = Mock(return_value=(False, "exact_phrase_obligation_open"))
+    api._turn_contracts_by_turn_id = {
+        "turn_1": {
+            "exact_phrase": "Sentinel Theo online.",
+            "exact_phrase_repair_scheduled": False,
+        }
+    }
+
+    async def _queued_schedule(**_kwargs):
+        api._turn_contracts_by_turn_id["turn_1"]["exact_phrase_repair_scheduled"] = True
+        return False
+
+    api._schedule_turn_contract_exact_phrase_repair_response = AsyncMock(side_effect=_queued_schedule)
+    api._log_turn_conversation_efficiency = Mock()
+
+    with patch("ai.realtime.response_terminal_handlers.logger.info") as info_log:
+        asyncio.run(api.handle_response_done({"type": "response.done"}))
+
+    api._schedule_turn_contract_exact_phrase_repair_response.assert_awaited_once()
+    api._log_turn_conversation_efficiency.assert_not_called()
+    assert api.orchestration_state.transitions == []
+    info_log.assert_any_call(
+        "turn_terminal_close_eval run_id=%s turn_id=%s response_id=%s origin=%s transcript_final_seen=%s obligation_open=%s action=%s reason=%s",
+        "run-test",
+        "turn_1",
+        "resp_1",
+        "assistant_message",
+        "false",
+        "false",
+        "defer",
+        "exact_phrase_obligation_open",
+    )
+
+
 def test_terminal_substantive_reconcile_skips_when_create_time_already_counted() -> None:
     api = _make_api()
     api._reconcile_terminal_substantive_response = RealtimeAPI._reconcile_terminal_substantive_response.__get__(api, RealtimeAPI)
