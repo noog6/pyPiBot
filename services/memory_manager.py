@@ -330,6 +330,7 @@ def _invoke_embed_text(
     timeout_ms: int,
     operation: str,
     submitted_monotonic: float | None = None,
+    trace_state: dict[str, object] | None = None,
 ):
     embed_text = getattr(provider, "embed_text")
     try:
@@ -348,6 +349,17 @@ def _invoke_embed_text(
         if accepts_kwargs or "operation" in params:
             kwargs["operation"] = operation
     provider_request_started_monotonic = time.monotonic()
+    trace_enabled = bool(trace_state and trace_state.get("enabled"))
+    if trace_enabled:
+        trace_state["provider_call_started_monotonic"] = provider_request_started_monotonic
+        elapsed_ms = int(
+            max(
+                0.0,
+                (provider_request_started_monotonic - float(trace_state.get("submit_started_monotonic", 0.0) or 0.0))
+                * 1000.0,
+            )
+        )
+        logger.info("canary_provider_call_start elapsed_ms=%s", elapsed_ms)
     submit_to_worker_delay_ms: int | None = None
     if submitted_monotonic is not None:
         submit_to_worker_delay_ms = int(max(0.0, (provider_request_started_monotonic - submitted_monotonic) * 1000.0))
@@ -358,6 +370,17 @@ def _invoke_embed_text(
     else:
         response = embed_text(text)
     provider_elapsed_ms = int(max(0.0, (time.perf_counter() - provider_started_perf) * 1000.0))
+    provider_request_ended_monotonic = time.monotonic()
+    if trace_enabled:
+        trace_state["provider_call_ended_monotonic"] = provider_request_ended_monotonic
+        elapsed_ms = int(
+            max(
+                0.0,
+                (provider_request_ended_monotonic - float(trace_state.get("submit_started_monotonic", 0.0) or 0.0))
+                * 1000.0,
+            )
+        )
+        logger.info("canary_provider_call_end elapsed_ms=%s provider_elapsed_ms=%s", elapsed_ms, provider_elapsed_ms)
 
     payload: dict[str, object] = {}
     if hasattr(response, "__dict__"):
@@ -365,6 +388,7 @@ def _invoke_embed_text(
     payload["submit_to_worker_delay_ms"] = submit_to_worker_delay_ms
     payload["provider_elapsed_ms"] = provider_elapsed_ms
     payload["provider_request_started_monotonic"] = provider_request_started_monotonic
+    payload["provider_request_ended_monotonic"] = provider_request_ended_monotonic
     payload["raw_provider_error_code"] = str(getattr(response, "error_code", "") or "")
     return SimpleNamespace(**payload)
 
@@ -1413,6 +1437,7 @@ class MemoryManager:
         timeout_override_ms: int | None = None,
         suppress_canary_refresh: bool = False,
     ):
+        is_canary_path = bool(suppress_canary_refresh and operation == "query" and timeout_override_ms is not None)
         provider = getattr(self, "_embedding_provider", None)
         if provider is None:
             provider = build_embedding_provider(ConfigController.get_instance().get_config())
@@ -1467,6 +1492,12 @@ class MemoryManager:
 
         executor = self._get_embedding_executor()
         started_monotonic = time.monotonic()
+        canary_trace: dict[str, object] = {
+            "enabled": is_canary_path,
+            "submit_started_monotonic": started_monotonic,
+        }
+        if is_canary_path:
+            logger.info("canary_submit_start elapsed_ms=0")
         future = executor.submit(
             _invoke_embed_text,
             provider,
@@ -1475,6 +1506,7 @@ class MemoryManager:
             timeout_ms=timeout_ms,
             operation=operation,
             submitted_monotonic=started_monotonic,
+            trace_state=canary_trace,
         )
 
         future_wait_started_monotonic = time.monotonic()
@@ -1512,8 +1544,47 @@ class MemoryManager:
 
         try:
             future_wait_started_monotonic = time.monotonic()
+            if is_canary_path:
+                canary_trace["future_wait_started_monotonic"] = future_wait_started_monotonic
+                elapsed_ms = int(max(0.0, (future_wait_started_monotonic - started_monotonic) * 1000.0))
+                logger.info("canary_future_wait_start elapsed_ms=%s", elapsed_ms)
             result = future.result(timeout=timeout_s)
+            if is_canary_path:
+                future_wait_ended_monotonic = time.monotonic()
+                canary_trace["future_wait_ended_monotonic"] = future_wait_ended_monotonic
+                elapsed_ms = int(max(0.0, (future_wait_ended_monotonic - started_monotonic) * 1000.0))
+                logger.info("canary_future_wait_end elapsed_ms=%s", elapsed_ms)
             _attach_timing_metadata(result)
+            if is_canary_path:
+                submit_start = float(canary_trace.get("submit_started_monotonic", started_monotonic))
+                provider_start = canary_trace.get("provider_call_started_monotonic")
+                provider_end = canary_trace.get("provider_call_ended_monotonic")
+                future_wait_start = canary_trace.get("future_wait_started_monotonic")
+                future_wait_end = canary_trace.get("future_wait_ended_monotonic")
+                queue_delay_ms = (
+                    int(max(0.0, (float(provider_start) - submit_start) * 1000.0))
+                    if provider_start is not None
+                    else None
+                )
+                provider_elapsed_stage_ms = (
+                    int(max(0.0, (float(provider_end) - float(provider_start)) * 1000.0))
+                    if provider_start is not None and provider_end is not None
+                    else None
+                )
+                future_wait_elapsed_stage_ms = (
+                    int(max(0.0, (float(future_wait_end) - float(future_wait_start)) * 1000.0))
+                    if future_wait_start is not None and future_wait_end is not None
+                    else None
+                )
+                total_elapsed_ms = int(max(0.0, (time.monotonic() - submit_start) * 1000.0))
+                logger.info(
+                    "canary_timing_summary queue_delay_ms=%s provider_elapsed_ms=%s future_wait_elapsed_ms=%s total_elapsed_ms=%s failing_stage=%s",
+                    queue_delay_ms,
+                    provider_elapsed_stage_ms,
+                    future_wait_elapsed_stage_ms,
+                    total_elapsed_ms,
+                    "none",
+                )
             self._semantic_timeout_consecutive_count = 0
             status = str(getattr(result, "status", ""))
             ready = status == "ready" and bool(getattr(result, "vector", b""))
@@ -1523,6 +1594,17 @@ class MemoryManager:
             return result
         except FutureTimeoutError:
             future.cancel()
+            timeout_fired_monotonic = time.monotonic()
+            timeout_submit_to_worker_delay_ms = None
+            provider_started_monotonic = canary_trace.get("provider_call_started_monotonic")
+            if provider_started_monotonic is not None:
+                timeout_submit_to_worker_delay_ms = int(
+                    max(0.0, (float(provider_started_monotonic) - started_monotonic) * 1000.0)
+                )
+            if is_canary_path:
+                canary_trace["timeout_fired_monotonic"] = timeout_fired_monotonic
+                elapsed_ms = int(max(0.0, (timeout_fired_monotonic - started_monotonic) * 1000.0))
+                logger.info("canary_timeout_fire elapsed_ms=%s timeout_budget_ms=%s", elapsed_ms, timeout_ms)
             self._semantic_timeout_count = max(0, int(getattr(self, "_semantic_timeout_count", 0))) + 1
             previous_timeout_streak = max(0, int(getattr(self, "_semantic_timeout_consecutive_count", 0)))
             timeout_streak = previous_timeout_streak + 1
@@ -1551,11 +1633,48 @@ class MemoryManager:
                 observed_elapsed_ms_at_timeout=observed_elapsed_ms_at_timeout,
                 timeout_budget_ms=timeout_ms,
                 timer_start="future_wait_start",
-                submit_to_worker_delay_ms=None,
+                submit_to_worker_delay_ms=timeout_submit_to_worker_delay_ms,
                 provider_elapsed_ms=None,
                 raw_provider_error_code="",
             )
             _attach_timing_metadata(result)
+            if is_canary_path:
+                submit_start = float(canary_trace.get("submit_started_monotonic", started_monotonic))
+                provider_start = canary_trace.get("provider_call_started_monotonic")
+                provider_end = canary_trace.get("provider_call_ended_monotonic")
+                future_wait_start = canary_trace.get("future_wait_started_monotonic")
+                timeout_fire = canary_trace.get("timeout_fired_monotonic")
+                queue_delay_ms = (
+                    int(max(0.0, (float(provider_start) - submit_start) * 1000.0))
+                    if provider_start is not None
+                    else None
+                )
+                provider_elapsed_stage_ms = (
+                    int(max(0.0, (float(provider_end) - float(provider_start)) * 1000.0))
+                    if provider_start is not None and provider_end is not None
+                    else None
+                )
+                future_wait_elapsed_stage_ms = (
+                    int(max(0.0, (float(timeout_fire) - float(future_wait_start)) * 1000.0))
+                    if future_wait_start is not None and timeout_fire is not None
+                    else None
+                )
+                total_elapsed_ms = int(max(0.0, (time.monotonic() - submit_start) * 1000.0))
+                failing_stage = "provider_request" if provider_start is not None and provider_end is None else "future_wait"
+                logger.info(
+                    "canary_timing_summary queue_delay_ms=%s provider_elapsed_ms=%s future_wait_elapsed_ms=%s total_elapsed_ms=%s failing_stage=%s",
+                    queue_delay_ms,
+                    provider_elapsed_stage_ms,
+                    future_wait_elapsed_stage_ms,
+                    total_elapsed_ms,
+                    failing_stage,
+                )
+                logger.info(
+                    "canary_exception_class=%s code=%s source=%s",
+                    FutureTimeoutError.__name__,
+                    "timeout_wrapper",
+                    "wrapper",
+                )
             self._semantic_provider_ready_last = False
             self._semantic_provider_last_error_code = "timeout_wrapper"
             return result
