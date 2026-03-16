@@ -124,6 +124,26 @@ def test_handle_response_done_clears_terminal_response_text_store() -> None:
     assert "resp_1" not in api._terminal_response_text_by_response_id
 
 
+def test_handle_response_done_clears_visual_pre_audio_tracking_store() -> None:
+    api = _make_api()
+    api._visual_upgraded_pre_audio_gate_by_response_id = {"resp_1": "pending"}
+    api._visual_upgraded_pre_audio_buffer_by_response_id = {"resp_1": bytearray(b"abc")}
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=False,
+            close_reason="confirmation_hold",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_1"}}))
+
+    assert "resp_1" not in api._visual_upgraded_pre_audio_gate_by_response_id
+    assert "resp_1" not in api._visual_upgraded_pre_audio_buffer_by_response_id
+
+
 def test_handle_response_done_still_runs_confirmation_transition_logic() -> None:
     api = _make_api()
     api._maybe_schedule_empty_response_retry = AsyncMock()
