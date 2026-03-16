@@ -154,7 +154,7 @@ def _api_stub() -> RealtimeAPI:
     api._queued_confirmation_reminder_keys = set()
     api._response_done_serial = 0
     api._response_create_turn_counter = 0
-    api._drain_response_create_queue = lambda: asyncio.sleep(0)
+    api._drain_response_create_queue = lambda *args, **kwargs: asyncio.sleep(0)
     api._flush_pending_image_stimulus = lambda *_args, **_kwargs: asyncio.sleep(0)
     api._pending_image_stimulus = None
     api._pending_image_flush_after_playback = False
@@ -199,6 +199,23 @@ def test_speech_stopped_schedules_micro_ack() -> None:
     api._active_input_event_key_by_turn_id = {"turn-1": "input-1"}
     asyncio.run(api.handle_event({"type": "input_audio_buffer.speech_stopped"}, api.websocket))
     assert ("turn-1", "start_of_work", "speech_stopped", 700) in api._micro_ack_manager.scheduled
+    api.loop.close()
+
+
+def test_speech_stopped_triggers_response_create_queue_drain_when_pending() -> None:
+    api = _api_stub()
+    api.state_manager.state = InteractionState.LISTENING
+    api._pending_response_create = object()
+    drain_calls: list[str] = []
+
+    async def _drain(*, source_trigger: str | None = None) -> None:
+        drain_calls.append(source_trigger or "")
+
+    api._drain_response_create_queue = _drain
+
+    asyncio.run(api.handle_event({"type": "input_audio_buffer.speech_stopped"}, api.websocket))
+
+    assert drain_calls == ["active_cleared"]
     api.loop.close()
 
 

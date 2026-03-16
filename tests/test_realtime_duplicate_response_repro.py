@@ -2623,7 +2623,7 @@ def test_tool_followup_blocked_by_active_parent_is_released_and_drained_after_pa
     api._set_tool_followup_state(canonical_key=canonical_key, state="blocked_active_response", reason="test_seed")
 
     api._release_blocked_tool_followups_for_response_done(response_id=parent_response_id)
-    assert api._tool_followup_state(canonical_key=canonical_key) == "scheduled_release"
+    assert api._tool_followup_state(canonical_key=tool_canonical_key) == "scheduled_release"
 
     asyncio.run(api._drain_response_create_queue(source_trigger="response_done"))
     assert len([event for event in ws.sent if event.get("type") == "response.create"]) == 1
@@ -3592,3 +3592,139 @@ def test_provisional_server_auto_parent_progression_holds_then_suppresses_follow
     api._release_blocked_tool_followups_for_response_done(response_id=parent_response_id)
     assert api._tool_followup_state(canonical_key=tool_canonical_key) == "dropped"
     assert followup_metadata.get("tool_followup_release") != "true"
+
+
+def test_tool_followup_release_after_response_done_drains_for_nonsubstantive_parent() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+
+    turn_id = "turn_2"
+    parent_input_event_key = "item_parent_2"
+    parent_response_id = "resp_parent_2"
+
+    parent_canonical_key = api._canonical_utterance_key(
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+    )
+    api._canonical_response_state_mutate(
+        canonical_key=parent_canonical_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "upgraded_response"),
+            setattr(record, "response_id", parent_response_id),
+            setattr(record, "deliverable_observed", False),
+            setattr(record, "deliverable_class", "unknown"),
+            setattr(record, "done", True),
+        ),
+    )
+
+    followup_event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_Au1PiLqWAAgpbHwW",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_around",
+    )
+    followup_metadata = ((followup_event.get("response") or {}).get("metadata") or {})
+    followup_metadata["blocked_by_response_id"] = parent_response_id
+    followup_metadata["parent_turn_id"] = turn_id
+    followup_metadata["parent_input_event_key"] = parent_input_event_key
+    api._response_create_queue.append(
+        {
+            "websocket": ws,
+            "event": followup_event,
+            "origin": "tool_output",
+            "turn_id": turn_id,
+            "record_ai_call": False,
+            "debug_context": None,
+        }
+    )
+    tool_canonical_key = api._canonical_utterance_key(
+        turn_id=turn_id,
+        input_event_key=str(followup_metadata.get("input_event_key") or ""),
+    )
+    api._set_tool_followup_state(
+        canonical_key=tool_canonical_key,
+        state="blocked_active_response",
+        reason="test_seed_blocked",
+    )
+
+    api._release_blocked_tool_followups_for_response_done(response_id=parent_response_id)
+    assert api._tool_followup_state(canonical_key=tool_canonical_key) == "scheduled_release"
+    assert followup_metadata.get("tool_followup_release") == "true"
+
+    asyncio.run(api._drain_response_create_queue(source_trigger="response_done"))
+
+    response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert len(response_create_events) == 1
+
+
+def test_tool_followup_release_after_response_done_drains_after_listening_clears() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+
+    turn_id = "turn_2"
+    parent_input_event_key = "item_parent_2"
+    parent_response_id = "resp_parent_2"
+
+    parent_canonical_key = api._canonical_utterance_key(
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+    )
+    api._canonical_response_state_mutate(
+        canonical_key=parent_canonical_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "upgraded_response"),
+            setattr(record, "response_id", parent_response_id),
+            setattr(record, "deliverable_observed", False),
+            setattr(record, "deliverable_class", "unknown"),
+            setattr(record, "done", True),
+        ),
+    )
+
+    followup_event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_Au1PiLqWAAgpbHwW",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_around",
+    )
+    followup_metadata = ((followup_event.get("response") or {}).get("metadata") or {})
+    followup_metadata["blocked_by_response_id"] = parent_response_id
+    followup_metadata["parent_turn_id"] = turn_id
+    followup_metadata["parent_input_event_key"] = parent_input_event_key
+    api._response_create_queue.append(
+        {
+            "websocket": ws,
+            "event": followup_event,
+            "origin": "tool_output",
+            "turn_id": turn_id,
+            "record_ai_call": False,
+            "debug_context": None,
+        }
+    )
+    tool_canonical_key = api._canonical_utterance_key(
+        turn_id=turn_id,
+        input_event_key=str(followup_metadata.get("input_event_key") or ""),
+    )
+    api._set_tool_followup_state(
+        canonical_key=tool_canonical_key,
+        state="blocked_active_response",
+        reason="test_seed_blocked",
+    )
+
+    api._release_blocked_tool_followups_for_response_done(response_id=parent_response_id)
+    assert api._tool_followup_state(canonical_key=tool_canonical_key) == "scheduled_release"
+
+    api.state_manager.state = InteractionState.LISTENING
+    asyncio.run(api._drain_response_create_queue(source_trigger="response_done"))
+    assert ws.sent == []
+
+    api.state_manager.state = InteractionState.IDLE
+    asyncio.run(api._drain_response_create_queue(source_trigger="active_cleared"))
+
+    response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert len(response_create_events) == 1
