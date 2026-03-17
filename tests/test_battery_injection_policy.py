@@ -229,3 +229,52 @@ def test_battery_governance_log_includes_standardized_envelope(monkeypatch) -> N
     assert "event_type=status" in rendered
     assert "severity=warning" in rendered
     assert "transition=enter_warning" in rendered
+
+
+def test_context_only_injection_uses_system_role_and_skips_user_intent_path() -> None:
+    api = _make_api_stub()
+
+    async def _false(*args, **kwargs):
+        return False
+
+    class _Transport:
+        def __init__(self) -> None:
+            self.events = []
+
+        async def send_json(self, _ws, payload):
+            self.events.append(payload)
+
+    transport = _Transport()
+    api._handle_stop_word = _false
+    api._maybe_handle_approval_response = _false
+    api._maybe_handle_research_permission_response = _false
+    api._maybe_handle_research_budget_response = _false
+    api._maybe_apply_late_confirmation_decision = _false
+    api._maybe_handle_preference_recall_intent = _false
+    api._maybe_process_research_intent = _false
+    api.orchestration_state = type("S", (), {"transition": lambda *args, **kwargs: None})()
+    api._track_outgoing_event = lambda *args, **kwargs: None
+    api._get_injection_priority = lambda trigger: 0
+    api._stimuli_coordinator = _StimuliRecorder()
+    api.websocket = _FakeWs()
+    api._get_or_create_transport = lambda: transport
+
+    called = {"record_user_input": 0}
+
+    def _record_user_input(*args, **kwargs):
+        called["record_user_input"] += 1
+
+    api._record_user_input = _record_user_input
+
+    import asyncio
+
+    asyncio.run(api.send_text_message_to_conversation(
+        "Battery voltage: 7.6V",
+        request_response=False,
+        injection_metadata={"source": "battery", "kind": "status", "severity": "warning"},
+    ))
+
+    assert called["record_user_input"] == 0
+    assert transport.events
+    assert transport.events[0]["item"]["role"] == "system"
+

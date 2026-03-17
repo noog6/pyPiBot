@@ -15665,38 +15665,46 @@ class RealtimeAPI:
         safety_override: bool = False,
         injection_metadata: dict[str, Any] | None = None,
     ) -> None:
-        self._record_user_input(text_message, source="text_message")
-        if await self._handle_stop_word(text_message, self.websocket, source="text_message"):
-            return
-        if await self._maybe_handle_approval_response(text_message, self.websocket):
-            return
-        if await self._maybe_handle_research_permission_response(text_message, self.websocket):
-            return
-        if await self._maybe_handle_research_budget_response(text_message, self.websocket):
-            return
-        if await self._maybe_apply_late_confirmation_decision(text_message, self.websocket):
-            return
-        if await self._maybe_handle_preference_recall_intent(
-            text_message,
-            self.websocket,
-            source="text_message",
-        ):
-            return
-        if await self._maybe_process_research_intent(
-            text_message,
-            self.websocket,
-            source="text_message",
-        ):
-            return
+        injection_source = str((injection_metadata or {}).get("source") or "").strip().lower()
+        is_context_only_injection = bool(
+            injection_source in {"battery", "imu", "camera", "ops", "health", "alert"}
+            and not request_response
+        )
+
+        if not is_context_only_injection:
+            self._record_user_input(text_message, source="text_message")
+            if await self._handle_stop_word(text_message, self.websocket, source="text_message"):
+                return
+            if await self._maybe_handle_approval_response(text_message, self.websocket):
+                return
+            if await self._maybe_handle_research_permission_response(text_message, self.websocket):
+                return
+            if await self._maybe_handle_research_budget_response(text_message, self.websocket):
+                return
+            if await self._maybe_apply_late_confirmation_decision(text_message, self.websocket):
+                return
+            if await self._maybe_handle_preference_recall_intent(
+                text_message,
+                self.websocket,
+                source="text_message",
+            ):
+                return
+            if await self._maybe_process_research_intent(
+                text_message,
+                self.websocket,
+                source="text_message",
+            ):
+                return
         self.orchestration_state.transition(
             OrchestrationPhase.SENSE,
             reason="text message",
         )
+        role = "system" if is_context_only_injection else "user"
         text_event = {
             "type": "conversation.item.create",
             "item": {
                 "type": "message",
-                "role": "user",
+                "role": role,
                 "content": [{"type": "input_text", "text": text_message}],
             },
         }
