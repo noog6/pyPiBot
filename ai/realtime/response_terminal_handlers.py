@@ -374,9 +374,6 @@ class ResponseTerminalHandlers:
                 close_reason = "exact_phrase_obligation_open"
             else:
                 close_reason = "exact_phrase_repair_not_scheduled"
-        if close_action == "allow" and selection_reason == "visual_turn_invalid_response_class":
-            close_action = "defer"
-            close_reason = "visual_turn_invalid_response_class"
         if (
             close_action == "allow"
             and active_response_was_provisional
@@ -510,8 +507,6 @@ class ResponseTerminalHandlers:
             )
         logger.info("Received response.done event.")
         api._clear_terminal_response_text(response_id=active_response_id)
-        api._clear_visual_upgraded_pre_audio_tracking(response_id=active_response_id)
-        api._clear_visual_upgraded_pre_audio_tracking(response_id=response_id)
         if str(active_response_origin_before_clear or "").strip().lower() == "prompt":
             startup_terminal_state = "completed"
             startup_terminal_reason = "response_done"
@@ -588,15 +583,6 @@ class ResponseTerminalHandlers:
                 str(active_response_id_before_clear or "none"),
             )
             return
-        if selection_reason == "visual_turn_invalid_response_class":
-            logger.info(
-                "turn_terminal_close_deferred run_id=%s turn_id=%s response_id=%s reason=visual_turn_invalid_response_class",
-                api._current_run_id() or "",
-                turn_id,
-                str(active_response_id_before_clear or "none"),
-            )
-            return
-
         if not transition.allow_response_transition:
             logger.info(
                 "Confirmation state is holding phase progression; skipping REFLECT transition "
@@ -696,7 +682,6 @@ class ResponseTerminalHandlers:
             )
         logger.info("Received response.completed event.")
         api._clear_terminal_response_text(response_id=response_id)
-        api._clear_visual_upgraded_pre_audio_tracking(response_id=response_id)
         if active_response_origin_before_clear == "prompt":
             startup_terminal_state = "completed"
             startup_terminal_reason = "response_done"

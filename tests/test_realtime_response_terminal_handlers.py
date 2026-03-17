@@ -124,25 +124,6 @@ def test_handle_response_done_clears_terminal_response_text_store() -> None:
     assert "resp_1" not in api._terminal_response_text_by_response_id
 
 
-def test_handle_response_done_clears_visual_pre_audio_tracking_store() -> None:
-    api = _make_api()
-    api._visual_upgraded_pre_audio_gate_by_response_id = {"resp_1": "pending"}
-    api._visual_upgraded_pre_audio_buffer_by_response_id = {"resp_1": bytearray(b"abc")}
-    api._maybe_schedule_empty_response_retry = AsyncMock()
-    api._build_confirmation_transition_decision = Mock(
-        return_value=SimpleNamespace(
-            allow_response_transition=False,
-            close_reason="confirmation_hold",
-            emit_reminder=False,
-            recover_mic=False,
-        )
-    )
-
-    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_1"}}))
-
-    assert "resp_1" not in api._visual_upgraded_pre_audio_gate_by_response_id
-    assert "resp_1" not in api._visual_upgraded_pre_audio_buffer_by_response_id
-
 
 def test_handle_response_done_still_runs_confirmation_transition_logic() -> None:
     api = _make_api()
@@ -441,36 +422,6 @@ def test_handle_response_done_defers_terminal_close_when_exact_phrase_still_open
 
 
 
-def test_handle_response_done_defers_terminal_close_when_visual_invalid_obligation_open() -> None:
-    api = _make_api()
-    api._maybe_schedule_empty_response_retry = AsyncMock()
-    api._build_confirmation_transition_decision = Mock(
-        return_value=SimpleNamespace(
-            allow_response_transition=True,
-            close_reason="",
-            emit_reminder=False,
-            recover_mic=False,
-        )
-    )
-    api._response_done_deliverable_decision = Mock(return_value=(False, "visual_turn_invalid_response_class"))
-
-    with patch("ai.realtime.response_terminal_handlers.logger.info") as info_log:
-        asyncio.run(api.handle_response_done({"type": "response.done"}))
-
-    api._drain_response_create_queue.assert_not_awaited()
-    assert api.orchestration_state.transitions == []
-    info_log.assert_any_call(
-        "turn_terminal_close_eval run_id=%s turn_id=%s response_id=%s origin=%s transcript_final_seen=%s obligation_open=%s action=%s reason=%s",
-        "run-test",
-        "turn_1",
-        "resp_1",
-        "assistant_message",
-        "false",
-        "false",
-        "defer",
-        "visual_turn_invalid_response_class",
-    )
-
 
 def test_handle_response_done_defers_terminal_close_for_provisional_server_auto_pending_transcript_final() -> None:
     api = _make_api()
@@ -692,7 +643,6 @@ def test_terminal_substantive_reconcile_excludes_non_deliverable_reasons() -> No
         "provisional_empty_non_deliverable",
         "exact_phrase_obligation_open",
         "tool_followup_precedence",
-        "visual_turn_invalid_response_class",
     ):
         api._reconcile_terminal_substantive_response(
             turn_id="turn_1",

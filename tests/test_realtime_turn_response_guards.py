@@ -1694,7 +1694,7 @@ def test_response_done_decision_rejects_upgraded_response_when_tool_followup_pen
     assert reason == "tool_followup_precedence"
 
 
-def test_visual_turn_rejects_upgraded_response_generic_terminal_selection() -> None:
+def test_visual_snapshot_tag_allows_upgraded_response_without_harness_semantic_policing() -> None:
     api = _make_api()
     turn_id = "turn_2"
     input_event_key = "item_visual"
@@ -1721,11 +1721,11 @@ def test_visual_turn_rejects_upgraded_response_generic_terminal_selection() -> N
         response_id=response_id,
     )
 
-    assert selected is False
-    assert reason == "visual_turn_invalid_response_class"
+    assert selected is True
+    assert reason == "normal"
 
 
-def test_visual_turn_rejects_unrelated_assistant_message_terminal_selection() -> None:
+def test_visual_snapshot_tag_allows_unrelated_assistant_message_without_harness_semantic_policing() -> None:
     api = _make_api()
     turn_id = "turn_2"
     input_event_key = "item_visual"
@@ -1752,11 +1752,11 @@ def test_visual_turn_rejects_unrelated_assistant_message_terminal_selection() ->
         response_id=response_id,
     )
 
-    assert selected is False
-    assert reason == "visual_turn_invalid_response_class"
+    assert selected is True
+    assert reason == "normal"
 
 
-def test_visual_turn_allows_truthful_visual_unavailable_fallback_terminal_selection() -> None:
+def test_visual_snapshot_tag_allows_visual_unavailable_fallback_terminal_selection() -> None:
     api = _make_api()
     turn_id = "turn_2"
     input_event_key = "item_visual"
@@ -1793,7 +1793,7 @@ def test_visual_turn_allows_truthful_visual_unavailable_fallback_terminal_select
     assert reason == "normal"
 
 
-def test_visual_turn_allows_truthful_visual_unavailable_fallback_from_trace_context_recording() -> None:
+def test_visual_snapshot_tag_allows_visual_unavailable_fallback_from_trace_context_recording() -> None:
     api = _make_api()
     turn_id = "turn_2"
     input_event_key = "item_visual"
@@ -1833,7 +1833,7 @@ def test_visual_turn_allows_truthful_visual_unavailable_fallback_from_trace_cont
     assert reason == "normal"
 
 
-def test_visual_turn_rejects_generic_assistant_fallback_even_when_trace_marks_visual_unavailable() -> None:
+def test_visual_snapshot_tag_allows_generic_assistant_fallback_when_trace_marks_visual_unavailable() -> None:
     api = _make_api()
     turn_id = "turn_2"
     input_event_key = "item_visual"
@@ -1869,11 +1869,11 @@ def test_visual_turn_rejects_generic_assistant_fallback_even_when_trace_marks_vi
         response_id=response_id,
     )
 
-    assert selected is False
-    assert reason == "visual_turn_invalid_response_class"
+    assert selected is True
+    assert reason == "normal"
 
 
-def test_non_visual_turn_remains_unaffected_by_visual_guard() -> None:
+def test_non_visual_snapshot_tag_remains_unaffected_by_visual_snapshot_classification() -> None:
     api = _make_api()
     turn_id = "turn_2"
     input_event_key = "item_non_visual"
@@ -1904,7 +1904,7 @@ def test_non_visual_turn_remains_unaffected_by_visual_guard() -> None:
     assert reason == "normal"
 
 
-def test_visual_turn_allows_valid_replacement_when_response_is_grounded() -> None:
+def test_visual_snapshot_tag_allows_valid_replacement_when_response_is_grounded() -> None:
     api = _make_api()
     turn_id = "turn_3"
     input_event_key = "item_visual"
@@ -1935,7 +1935,7 @@ def test_visual_turn_allows_valid_replacement_when_response_is_grounded() -> Non
     assert reason == "normal"
 
 
-def test_visual_turn_tool_output_uses_parent_context_for_terminal_selection() -> None:
+def test_visual_snapshot_tag_tool_output_uses_parent_context_for_terminal_selection() -> None:
     api = _make_api()
     turn_id = "turn_5"
     parent_input_event_key = "item_visual_parent"
@@ -1975,7 +1975,7 @@ def test_visual_turn_tool_output_uses_parent_context_for_terminal_selection() ->
     assert reason == "normal"
 
 
-def test_non_visual_tool_output_remains_unaffected_by_visual_guard() -> None:
+def test_non_visual_tool_output_remains_unaffected_by_visual_snapshot_classification() -> None:
     api = _make_api()
     turn_id = "turn_6"
     input_event_key = "item_non_visual"
@@ -2125,32 +2125,3 @@ def test_non_descriptive_turn_allows_confirmation_style_tool_output_terminal_sel
     assert selected is True
     assert reason == "normal"
 
-
-def test_turn_has_visual_obligation_uses_tool_output_parent_trace_context() -> None:
-    api = _make_api()
-    turn_id = "turn_10"
-    parent_input_event_key = "item_visual_parent_trace"
-    tool_input_event_key = "tool:call_trace"
-    response_id = "resp_tool_trace"
-    api._active_input_event_key_by_turn_id[turn_id] = tool_input_event_key
-    api._utterance_trust_snapshot_by_input_event_key = {
-        parent_input_event_key: {
-            "visual_question": True,
-            "transcript_text": "what do you see",
-        }
-    }
-    api._record_response_trace_context(
-        response_id,
-        turn_id=turn_id,
-        input_event_key=tool_input_event_key,
-        origin="tool_output",
-        parent_turn_id=turn_id,
-        parent_input_event_key=parent_input_event_key,
-    )
-
-    assert api._turn_has_visual_obligation(
-        turn_id=turn_id,
-        input_event_key=tool_input_event_key,
-        origin="tool_output",
-        response_id=response_id,
-    ) is True
