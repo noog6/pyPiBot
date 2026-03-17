@@ -5444,7 +5444,6 @@ class RealtimeAPI:
         normalized_response_id = str(response_id or "").strip()
         if not normalized_response_id:
             return
-        self._clear_visual_upgraded_pre_audio_tracking(response_id=normalized_response_id)
         cancelled_ids = getattr(self, "_cancelled_response_ids", None)
         if not isinstance(cancelled_ids, set):
             cancelled_ids = set()
@@ -6023,22 +6022,10 @@ class RealtimeAPI:
         )
         state["race_logged"] = True
 
-    def _clear_visual_upgraded_pre_audio_tracking(self, *, response_id: str | None) -> None:
-        normalized_response_id = str(response_id or "").strip()
-        if not normalized_response_id:
-            return
-        gate_store = getattr(self, "_visual_upgraded_pre_audio_gate_by_response_id", None)
-        if isinstance(gate_store, dict):
-            gate_store.pop(normalized_response_id, None)
-        buffer_store = getattr(self, "_visual_upgraded_pre_audio_buffer_by_response_id", None)
-        if isinstance(buffer_store, dict):
-            buffer_store.pop(normalized_response_id, None)
-
     def _clear_cancelled_response_tracking(self, response_id: str) -> None:
         normalized_response_id = str(response_id or "").strip()
         if not normalized_response_id:
             return
-        self._clear_visual_upgraded_pre_audio_tracking(response_id=normalized_response_id)
         cancelled_ids = getattr(self, "_cancelled_response_ids", None)
         if isinstance(cancelled_ids, set):
             cancelled_ids.discard(normalized_response_id)
@@ -7452,74 +7439,9 @@ class RealtimeAPI:
                         str(response_id or "").strip() or "none",
                     )
                     return False, "tool_output_descriptive_gesture_only"
-        if self._turn_has_visual_obligation(
-            turn_id=turn_id,
-            input_event_key=input_event_key,
-            origin=normalized_origin,
-            response_id=response_id,
-        ):
-            allowed, invalid_reason, validation_context = self._visual_turn_terminal_candidate_allowed(
-                turn_id=turn_id,
-                input_event_key=input_event_key,
-                origin=normalized_origin,
-                response_id=response_id,
-            )
-            logger.info(
-                "visual_turn_terminal_candidate_eval run_id=%s turn_id=%s origin=%s response_id=%s effective_parent_input_event_key=%s effective_parent_turn_id=%s verdict=%s reason=%s",
-                self._current_run_id() or "",
-                turn_id,
-                normalized_origin or "unknown",
-                str(response_id or "").strip() or "none",
-                validation_context.get("effective_parent_input_event_key", "none"),
-                validation_context.get("effective_parent_turn_id", "none"),
-                "allow" if allowed else "reject",
-                invalid_reason,
-            )
-            if not allowed:
-                logger.info(
-                    "visual_turn_terminal_candidate_rejected run_id=%s turn_id=%s input_event_key=%s response_id=%s origin=%s reason=invalid_response_class",
-                    self._current_run_id() or "",
-                    turn_id,
-                    str(input_event_key or "").strip() or "none",
-                    str(response_id or "").strip() or "none",
-                    normalized_origin or "unknown",
-                )
-                return False, "visual_turn_invalid_response_class"
         return True, "normal"
 
-    def _turn_has_visual_obligation(
-        self,
-        *,
-        turn_id: str,
-        input_event_key: str | None,
-        origin: str = "",
-        response_id: str | None = None,
-    ) -> bool:
-        snapshots = getattr(self, "_utterance_trust_snapshot_by_input_event_key", None)
-        if not isinstance(snapshots, dict):
-            return False
-        parent_context = self._resolve_visual_validation_context(
-            turn_id=turn_id,
-            input_event_key=input_event_key,
-            origin=origin,
-            response_id=response_id,
-        )
-        candidate_keys = [
-            str(parent_context.get("effective_parent_input_event_key") or "").strip(),
-            str(self._active_input_event_key_for_turn(turn_id) or "").strip(),
-            str(input_event_key or "").strip(),
-        ]
-        if candidate_keys[2].endswith(":clarify"):
-            candidate_keys.append(candidate_keys[2][: -len(":clarify")])
-        for key in candidate_keys:
-            if not key:
-                continue
-            snapshot = snapshots.get(key)
-            if isinstance(snapshot, dict) and bool(snapshot.get("visual_question", False)):
-                return True
-        return False
-
-    def _resolve_visual_validation_context(
+    def _resolve_parent_trace_context(
         self,
         *,
         turn_id: str,
@@ -7566,19 +7488,19 @@ class RealtimeAPI:
         origin: str,
         response_id: str | None,
     ) -> tuple[bool, dict[str, str]]:
-        validation_context = self._resolve_visual_validation_context(
+        lineage_context = self._resolve_parent_trace_context(
             turn_id=turn_id,
             input_event_key=input_event_key,
             origin=origin,
             response_id=response_id,
         )
-        transcript_text = str(validation_context.get("transcript_text") or "").strip()
+        transcript_text = str(lineage_context.get("transcript_text") or "").strip()
         if not transcript_text:
-            return False, validation_context
+            return False, lineage_context
         for pattern in _DESCRIPTIVE_TURN_REQUEST_PATTERNS:
             if pattern.search(transcript_text):
-                return True, validation_context
-        return False, validation_context
+                return True, lineage_context
+        return False, lineage_context
 
     def _is_gesture_only_tool_output_text(self, response_text: str) -> bool:
         normalized_text = " ".join(str(response_text or "").strip().split())
@@ -7588,219 +7510,6 @@ class RealtimeAPI:
             if pattern.match(normalized_text):
                 return True
         return False
-
-    def _visual_turn_terminal_candidate_allowed(
-        self,
-        *,
-        turn_id: str,
-        input_event_key: str | None,
-        origin: str,
-        response_id: str | None,
-    ) -> tuple[bool, str, dict[str, str]]:
-        normalized_origin = str(origin or "").strip().lower()
-        trace_context = self._response_trace_by_id().get(str(response_id or "").strip(), {})
-        trigger = str(trace_context.get("trigger") or "").strip().lower()
-        reason = str(trace_context.get("reason") or "").strip().lower()
-        response_text = self._terminal_response_text(response_id)
-        if trigger == "asr_verify_on_risk" and reason == "visual_unavailable":
-            fallback_allowed = self._is_approved_visual_unavailable_fallback_text(response_text)
-            verdict_reason = "approved_visual_unavailable_fallback" if fallback_allowed else "unapproved_visual_unavailable_fallback"
-            return fallback_allowed, verdict_reason, {
-                "effective_parent_turn_id": str(turn_id or "").strip() or "none",
-                "effective_parent_input_event_key": str(input_event_key or "").strip() or "none",
-            }
-        if normalized_origin == "assistant_message":
-            return False, "assistant_message_disallowed", {
-                "effective_parent_turn_id": str(turn_id or "").strip() or "none",
-                "effective_parent_input_event_key": str(input_event_key or "").strip() or "none",
-            }
-        validation_context = self._resolve_visual_validation_context(
-            turn_id=turn_id,
-            input_event_key=input_event_key,
-            origin=normalized_origin,
-            response_id=response_id,
-        )
-        transcript_text = str(validation_context.get("transcript_text") or "")
-        if not transcript_text or not response_text:
-            return False, "missing_transcript_or_response_text", validation_context
-        transcript_anchors = set(extract_topic_anchors(transcript_text))
-        response_anchors = set(extract_topic_anchors(response_text))
-        if not transcript_anchors or not response_anchors:
-            return False, "missing_topic_anchors", validation_context
-        if not bool(transcript_anchors & response_anchors):
-            return False, "anchor_mismatch", validation_context
-        return True, "anchor_overlap", validation_context
-
-    def _normalize_visual_fallback_text(self, text: str) -> str:
-        normalized = " ".join(str(text or "").strip().split()).lower()
-        return normalized.replace("’", "'")
-
-    def _is_approved_visual_unavailable_fallback_text(self, response_text: str) -> bool:
-        normalized_response = self._normalize_visual_fallback_text(response_text)
-        if not normalized_response:
-            return False
-        approved_exact = self._normalize_visual_fallback_text(
-            self._visual_unavailable_clarify_text(self.get_vision_state())
-        )
-        if normalized_response == approved_exact:
-            return True
-        approved_variants = {
-            self._normalize_visual_fallback_text(
-                "The camera is on, but I’m still waiting for a fresh frame to finish processing."
-            ),
-            self._normalize_visual_fallback_text(
-                "The camera is on, but I don’t have a fresh frame yet. Want me to take a new look now?"
-            ),
-            self._normalize_visual_fallback_text(
-                "I can’t see right now. Want me to take a quick look with the camera?"
-            ),
-        }
-        return normalized_response in approved_variants
-
-    def _visual_upgraded_pre_audio_gate_store(self) -> dict[str, str]:
-        store = getattr(self, "_visual_upgraded_pre_audio_gate_by_response_id", None)
-        if not isinstance(store, dict):
-            store = {}
-            self._visual_upgraded_pre_audio_gate_by_response_id = store
-        return store
-
-    def _visual_upgraded_pre_audio_gate_state(self, response_id: str | None) -> str:
-        normalized_response_id = str(response_id or "").strip()
-        if not normalized_response_id:
-            return "allow"
-        return str(self._visual_upgraded_pre_audio_gate_store().get(normalized_response_id) or "pending").strip().lower() or "pending"
-
-    def _set_visual_upgraded_pre_audio_gate_state(self, *, response_id: str | None, state: str) -> None:
-        normalized_response_id = str(response_id or "").strip()
-        if not normalized_response_id:
-            return
-        normalized_state = str(state or "pending").strip().lower() or "pending"
-        self._visual_upgraded_pre_audio_gate_store()[normalized_response_id] = normalized_state
-
-    def _visual_upgraded_pre_audio_buffer_store(self) -> dict[str, bytearray]:
-        store = getattr(self, "_visual_upgraded_pre_audio_buffer_by_response_id", None)
-        if not isinstance(store, dict):
-            store = {}
-            self._visual_upgraded_pre_audio_buffer_by_response_id = store
-        return store
-
-    def _append_visual_upgraded_pre_audio_buffer(self, *, response_id: str, audio_bytes: bytes) -> None:
-        normalized_response_id = str(response_id or "").strip()
-        if not normalized_response_id or not audio_bytes:
-            return
-        store = self._visual_upgraded_pre_audio_buffer_store()
-        chunk = store.get(normalized_response_id)
-        if not isinstance(chunk, bytearray):
-            chunk = bytearray()
-            store[normalized_response_id] = chunk
-        chunk.extend(audio_bytes)
-
-    def _pop_visual_upgraded_pre_audio_buffer(self, *, response_id: str | None) -> bytes:
-        normalized_response_id = str(response_id or "").strip()
-        if not normalized_response_id:
-            return b""
-        store = self._visual_upgraded_pre_audio_buffer_store()
-        chunk = store.pop(normalized_response_id, None)
-        if isinstance(chunk, bytearray):
-            return bytes(chunk)
-        return b""
-
-    def _should_cancel_visual_upgraded_pre_audio(self, *, transcript_prefix: str) -> tuple[bool, str]:
-        normalized = self._normalize_visual_fallback_text(transcript_prefix)
-        if not normalized:
-            return False, "insufficient_prefix"
-        generic_markers = (
-            "let's start with",
-            "quick check",
-            "are you planning",
-            "just testing it out",
-            "help me guide you",
-            "that'll help me guide you",
-            "specific right now",
-            "project",
-        )
-        visual_markers = (
-            "see",
-            "look",
-            "camera",
-            "image",
-            "picture",
-            "holding",
-            "hand",
-            "color",
-            "object",
-        )
-        has_generic = any(marker in normalized for marker in generic_markers)
-        has_visual = any(marker in normalized for marker in visual_markers)
-        if has_generic and not has_visual:
-            return True, "obvious_non_visual_pivot"
-        return False, "prefix_not_obviously_invalid"
-
-    async def _evaluate_visual_upgraded_pre_audio_gate_on_transcript_delta(
-        self,
-        *,
-        response_id: str | None,
-        transcript_delta: str,
-        websocket: Any,
-    ) -> None:
-        normalized_response_id = str(response_id or "").strip()
-        if not normalized_response_id:
-            return
-        if self._visual_upgraded_pre_audio_gate_state(normalized_response_id) != "pending":
-            return
-        active_turn_id = self._current_turn_id_or_unknown()
-        active_input_event_key = str(getattr(self, "_active_response_input_event_key", "") or "").strip()
-        active_origin = str(getattr(self, "_active_response_origin", "") or "").strip().lower()
-        if active_origin != "upgraded_response":
-            self._set_visual_upgraded_pre_audio_gate_state(response_id=normalized_response_id, state="allow")
-            return
-        if not self._turn_has_visual_obligation(
-            turn_id=active_turn_id,
-            input_event_key=active_input_event_key,
-            origin=active_origin,
-            response_id=normalized_response_id,
-        ):
-            self._set_visual_upgraded_pre_audio_gate_state(response_id=normalized_response_id, state="allow")
-            return
-        transcript_prefix = self._assistant_reply_text_for_response(normalized_response_id) or str(transcript_delta or "")
-        should_cancel, reason = self._should_cancel_visual_upgraded_pre_audio(transcript_prefix=transcript_prefix)
-        if should_cancel:
-            self._set_visual_upgraded_pre_audio_gate_state(response_id=normalized_response_id, state="cancel")
-            self._quarantine_cancelled_response_id(
-                response_id=normalized_response_id,
-                turn_id=active_turn_id,
-                input_event_key=active_input_event_key,
-                origin=active_origin,
-                reason=f"visual_turn_pre_audio_{reason}",
-            )
-            self._pop_visual_upgraded_pre_audio_buffer(response_id=normalized_response_id)
-            transport = self._get_or_create_transport()
-            await transport.send_json(websocket, {"type": "response.cancel", "response_id": normalized_response_id})
-            logger.info(
-                "visual_turn_pre_audio_cancel run_id=%s turn_id=%s input_event_key=%s response_id=%s reason=%s",
-                self._current_run_id() or "",
-                active_turn_id,
-                active_input_event_key or "none",
-                normalized_response_id,
-                reason,
-            )
-            return
-        self._set_visual_upgraded_pre_audio_gate_state(response_id=normalized_response_id, state="allow")
-        held_audio = self._pop_visual_upgraded_pre_audio_buffer(response_id=normalized_response_id)
-        if held_audio:
-            logger.debug(
-                "visual_turn_pre_audio_release run_id=%s turn_id=%s input_event_key=%s response_id=%s reason=pre_audio_allow_after_prefix_check bytes=%s",
-                self._current_run_id() or "",
-                active_turn_id,
-                active_input_event_key or "none",
-                normalized_response_id,
-                len(held_audio),
-            )
-            self._deliver_active_response_audio_bytes(
-                response_id=normalized_response_id,
-                audio_data=held_audio,
-            )
-
 
     def _terminal_response_text_store(self) -> dict[str, str]:
         store = getattr(self, "_terminal_response_text_by_response_id", None)
@@ -13599,34 +13308,6 @@ class RealtimeAPI:
         active_input_event_key = str(getattr(self, "_active_response_input_event_key", "") or "").strip()
         active_turn_id = self._current_turn_id_or_unknown()
         active_origin = str(getattr(self, "_active_response_origin", "") or "").strip().lower()
-        if (
-            active_origin == "upgraded_response"
-            and response_id
-            and self._turn_has_visual_obligation(
-                turn_id=active_turn_id,
-                input_event_key=active_input_event_key,
-                origin=active_origin,
-                response_id=response_id,
-            )
-        ):
-            gate_state = self._visual_upgraded_pre_audio_gate_state(response_id)
-            if gate_state == "cancel":
-                return
-            if gate_state == "pending":
-                try:
-                    pending_audio = base64.b64decode(event["delta"])
-                except Exception:
-                    pending_audio = b""
-                if pending_audio:
-                    self._append_visual_upgraded_pre_audio_buffer(response_id=response_id, audio_bytes=pending_audio)
-                logger.debug(
-                    "visual_turn_pre_audio_hold run_id=%s turn_id=%s input_event_key=%s response_id=%s reason=awaiting_transcript_prefix",
-                    self._current_run_id() or "",
-                    active_turn_id,
-                    active_input_event_key or "none",
-                    response_id,
-                )
-                return
         if active_origin == "server_auto" and active_input_event_key:
             verdict = self._get_response_gating_verdict(turn_id=active_turn_id, input_event_key=active_input_event_key)
             if verdict is None or verdict.action == "NOOP":
@@ -13645,10 +13326,6 @@ class RealtimeAPI:
                     await transport.send_json(websocket, cancel_event)
                 return
         audio_data = base64.b64decode(event["delta"])
-        if response_id:
-            held_audio = self._pop_visual_upgraded_pre_audio_buffer(response_id=response_id)
-            if held_audio:
-                audio_data = held_audio + audio_data
         self._deliver_active_response_audio_bytes(response_id=response_id, audio_data=audio_data)
 
     async def _handle_response_done_event(self, event: dict[str, Any], websocket: Any) -> None:
@@ -14239,11 +13916,6 @@ class RealtimeAPI:
             delta = event.get("delta", "")
             self._mark_first_assistant_utterance_observed_if_needed(delta)
             self._append_assistant_reply_text(delta, allow_separator=False, response_id=response_id)
-            await self._evaluate_visual_upgraded_pre_audio_gate_on_transcript_delta(
-                response_id=response_id,
-                transcript_delta=delta,
-                websocket=websocket,
-            )
         elif event_type == "response.output_audio_transcript.done":
             await self.handle_transcribe_response_done()
             self.state_manager.update_state(
