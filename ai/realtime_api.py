@@ -15263,6 +15263,13 @@ class RealtimeAPI:
             log_ws_event("Image", image_item)
             transport = self._get_or_create_transport()
             await transport.send_json(self.websocket, image_item)
+            logger.info(
+                "vision_image_sent_to_realtime run_id=%s bytes=%s image_response_enabled=%s mode=%s",
+                self._current_run_id() or "",
+                len(bytes_buffer.getvalue()),
+                str(self._image_response_enabled).lower(),
+                str(self._image_response_mode or "unknown"),
+            )
             self._last_vision_frame_sent_at_monotonic = time.monotonic()
             if self._image_response_enabled:
                 await self._stimuli_coordinator.enqueue(
