@@ -171,7 +171,7 @@ class CameraController:
                         time.sleep(0.01)
                         continue
 
-                    logger.info("[CAMERA] change detected (mad=%.2f)", score)
+                    logger.info("[CAMERA] image captured due to scene change (mad=%.2f)", score)
 
                     new_image = self.take_main_pil()
                     self._save_image_async(new_image)
