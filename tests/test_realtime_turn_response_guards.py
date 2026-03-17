@@ -1694,6 +1694,58 @@ def test_response_done_decision_rejects_upgraded_response_when_tool_followup_pen
     assert reason == "tool_followup_precedence"
 
 
+def test_response_done_decision_allows_upgraded_response_when_only_status_gesture_followup_pending() -> None:
+    api = _make_api()
+    turn_id = "turn_1"
+    canonical_key = f"{api._current_run_id()}:{turn_id}:tool:call_1"
+    api._tool_followup_state_by_canonical_key = {canonical_key: "created"}
+    api._record_tool_followup_metadata(
+        canonical_key=canonical_key,
+        metadata={
+            "tool_name": "gesture_curious_tilt",
+            "tool_followup_status_only": "true",
+        },
+    )
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id=turn_id,
+        origin="upgraded_response",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id=turn_id, input_event_key="item_1"),
+        transcript_final_seen=True,
+    )
+
+    assert selected is True
+    assert reason == "normal"
+
+
+def test_response_done_decision_keeps_precedence_for_non_status_tool_followup() -> None:
+    api = _make_api()
+    turn_id = "turn_1"
+    canonical_key = f"{api._current_run_id()}:{turn_id}:tool:call_1"
+    api._tool_followup_state_by_canonical_key = {canonical_key: "created"}
+    api._record_tool_followup_metadata(
+        canonical_key=canonical_key,
+        metadata={
+            "tool_name": "perform_research",
+            "tool_followup_status_only": "true",
+        },
+    )
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id=turn_id,
+        origin="upgraded_response",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id=turn_id, input_event_key="item_1"),
+        transcript_final_seen=True,
+    )
+
+    assert selected is False
+    assert reason == "tool_followup_precedence"
+
+
 def test_visual_snapshot_tag_allows_upgraded_response_without_harness_semantic_policing() -> None:
     api = _make_api()
     turn_id = "turn_2"

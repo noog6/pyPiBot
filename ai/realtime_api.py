@@ -7066,6 +7066,7 @@ class RealtimeAPI:
         if tool_result_has_distinct_info:
             metadata["tool_result_has_distinct_info"] = "true"
         canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_input_event_key)
+        self._record_tool_followup_metadata(canonical_key=canonical_key, metadata=metadata)
         return event, canonical_key
 
     def _parent_input_event_key_for_tool_followup(self, *, turn_id: str) -> str:
@@ -7375,9 +7376,44 @@ class RealtimeAPI:
             if turn_prefix not in normalized_canonical_key:
                 continue
             state = str(raw_state or "").strip().lower() or "new"
-            if state in pending_states:
+            if state in pending_states and not self._tool_followup_is_status_only_gesture(
+                canonical_key=normalized_canonical_key,
+            ):
                 return True
         return False
+
+    def _tool_followup_metadata_store(self) -> dict[str, dict[str, str]]:
+        store = getattr(self, "_tool_followup_metadata_by_canonical_key", None)
+        if not isinstance(store, dict):
+            store = {}
+            self._tool_followup_metadata_by_canonical_key = store
+        return store
+
+    def _record_tool_followup_metadata(self, *, canonical_key: str, metadata: dict[str, Any]) -> None:
+        normalized_canonical_key = str(canonical_key or "").strip()
+        if not normalized_canonical_key or not isinstance(metadata, dict):
+            return
+        tool_name = str(metadata.get("tool_name") or "").strip().lower()
+        status_only = str(metadata.get("tool_followup_status_only") or "").strip().lower() in {"true", "1", "yes"}
+        if not tool_name and not status_only:
+            return
+        self._tool_followup_metadata_store()[normalized_canonical_key] = {
+            "tool_name": tool_name,
+            "tool_followup_status_only": "true" if status_only else "false",
+        }
+
+    def _tool_followup_is_status_only_gesture(self, *, canonical_key: str) -> bool:
+        normalized_canonical_key = str(canonical_key or "").strip()
+        if not normalized_canonical_key:
+            return False
+        metadata = self._tool_followup_metadata_store().get(normalized_canonical_key)
+        if not isinstance(metadata, dict):
+            return False
+        status_only = str(metadata.get("tool_followup_status_only") or "").strip().lower() in {"true", "1", "yes"}
+        if not status_only:
+            return False
+        tool_name = str(metadata.get("tool_name") or "").strip().lower()
+        return self._is_low_risk_reversible_gesture_tool(tool_name=tool_name)
 
     def _response_done_deliverable_decision(
         self,
