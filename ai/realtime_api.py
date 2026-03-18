@@ -12759,6 +12759,7 @@ class RealtimeAPI:
                 self._response_in_flight = False
                 self.response_in_progress = False
                 self._clear_active_response_state()
+                self._active_server_auto_input_event_key = None
                 self._response_create_queue_drain_source = "websocket_close"
                 await self._drain_response_create_queue(source_trigger="websocket_close")
                 break

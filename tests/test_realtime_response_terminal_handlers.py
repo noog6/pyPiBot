@@ -154,6 +154,7 @@ def test_handle_response_completed_clears_terminal_response_text_store() -> None
     api = _make_api()
     api._terminal_response_text_by_response_id = {"resp_1": "stale text"}
     api._clear_cancelled_response_tracking = lambda *_args, **_kwargs: None
+    api._maybe_enqueue_reflection = lambda *_args, **_kwargs: None
     api._build_confirmation_transition_decision = Mock(
         return_value=SimpleNamespace(
             allow_response_transition=False,
@@ -854,3 +855,87 @@ def test_clear_assistant_reply_buffers_for_other_response_preserves_active_prefi
     assert api._assistant_reply_text_for_response("resp_stale") == ""
     assert api._assistant_reply_text_for_response("resp_1") == "surviving prefix"
     assert api.assistant_reply == "surviving prefix"
+
+
+def test_handle_response_done_clears_active_ownership_surface_with_legacy_mirror_parity() -> None:
+    api = _make_api()
+    api._active_server_auto_input_event_key = "synthetic_server_auto_7"
+    api._set_active_response_state(
+        response_id="resp_1",
+        origin="server_auto",
+        input_event_key="synthetic_server_auto_7",
+        canonical_key="turn_1::synthetic_server_auto_7",
+        consumes_canonical_slot=False,
+        confirmation_guarded=True,
+        preference_guarded=True,
+    )
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_1"}}))
+
+    assert api._active_response_lifecycle.response_id is None
+    assert api._active_response_lifecycle.origin == "unknown"
+    assert api._active_response_lifecycle.input_event_key is None
+    assert api._active_response_lifecycle.canonical_key is None
+    assert api._active_response_lifecycle.consumes_canonical_slot is True
+    assert api._active_response_lifecycle.confirmation_guarded is False
+    assert api._active_response_lifecycle.preference_guarded is False
+    assert api._active_response_id is None
+    assert api._active_response_origin == "unknown"
+    assert api._active_response_input_event_key is None
+    assert api._active_response_canonical_key is None
+    assert api._active_response_consumes_canonical_slot is True
+    assert api._active_response_confirmation_guarded is False
+    assert api._active_response_preference_guarded is False
+    assert api._active_server_auto_input_event_key is None
+
+
+
+def test_handle_response_completed_clears_same_active_ownership_surface_as_response_done() -> None:
+    api = _make_api()
+    api._active_server_auto_input_event_key = "synthetic_server_auto_7"
+    api._set_active_response_state(
+        response_id="resp_1",
+        origin="server_auto",
+        input_event_key="synthetic_server_auto_7",
+        canonical_key="turn_1::synthetic_server_auto_7",
+        consumes_canonical_slot=False,
+        confirmation_guarded=True,
+        preference_guarded=True,
+    )
+    api._clear_cancelled_response_tracking = lambda *_args, **_kwargs: None
+    api._maybe_enqueue_reflection = lambda *_args, **_kwargs: None
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+
+    asyncio.run(api.handle_response_completed({"type": "response.completed", "response": {"id": "resp_1"}}))
+
+    assert api._active_response_lifecycle.response_id is None
+    assert api._active_response_lifecycle.origin == "unknown"
+    assert api._active_response_lifecycle.input_event_key is None
+    assert api._active_response_lifecycle.canonical_key is None
+    assert api._active_response_lifecycle.consumes_canonical_slot is True
+    assert api._active_response_lifecycle.confirmation_guarded is False
+    assert api._active_response_lifecycle.preference_guarded is False
+    assert api._active_response_id is None
+    assert api._active_response_origin == "unknown"
+    assert api._active_response_input_event_key is None
+    assert api._active_response_canonical_key is None
+    assert api._active_response_consumes_canonical_slot is True
+    assert api._active_response_confirmation_guarded is False
+    assert api._active_response_preference_guarded is False
+    assert api._active_server_auto_input_event_key is None
