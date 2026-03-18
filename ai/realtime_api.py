@@ -4080,17 +4080,68 @@ class RealtimeAPI:
             return required_phrase, "include"
         return "", "none"
 
-    def _turn_contract_exact_phrase_open(self, *, turn_id: str | None = None) -> bool:
+    def _normalize_startup_contract_phrase(self, text: str | None) -> str:
+        normalized_text = str(text or "").strip().lower()
+        normalized_text = re.sub(r"[.!?]+$", "", normalized_text)
+        normalized_text = re.sub(r"\s+", " ", normalized_text)
+        return normalized_text.strip()
+
+    def _turn_contract_satisfied_by_text(self, *, phrase: str, mode: str, spoken_text: str | None) -> bool:
+        normalized_phrase = self._normalize_startup_contract_phrase(phrase)
+        normalized_spoken = self._normalize_startup_contract_phrase(spoken_text)
+        if not normalized_phrase or not normalized_spoken:
+            return False
+        if mode == "exact":
+            return normalized_spoken == normalized_phrase
+        return normalized_phrase in normalized_spoken
+
+    def _turn_contract_exact_phrase_open(
+        self,
+        *,
+        turn_id: str | None = None,
+        response_id: str | None = None,
+        spoken_text: str | None = None,
+    ) -> bool:
         phrase, mode = self._turn_contract_phrase_obligation(turn_id=turn_id)
         if not phrase:
             return False
-        spoken = str(getattr(self, "_assistant_reply_accum", "") or "").strip()
-        if spoken and phrase.lower() in spoken.lower():
+        spoken_candidates = [spoken_text]
+        if response_id:
+            spoken_candidates.extend(
+                [
+                    self._terminal_response_text(response_id),
+                    self._assistant_reply_text_for_response(response_id),
+                ]
+            )
+        spoken_candidates.extend(
+            [
+                str(getattr(self, "assistant_reply", "") or "").strip(),
+                str(getattr(self, "_assistant_reply_accum", "") or "").strip(),
+            ]
+        )
+        spoken = next((str(candidate or "").strip() for candidate in spoken_candidates if str(candidate or "").strip()), "")
+        satisfied = self._turn_contract_satisfied_by_text(
+            phrase=phrase,
+            mode=mode,
+            spoken_text=spoken,
+        )
+        logger.info(
+            "startup_contract_eval run_id=%s turn_id=%s response_id=%s mode=%s satisfied=%s phrase=%r spoken=%r",
+            self._current_run_id() or "",
+            str(turn_id or self._current_turn_id_or_unknown()),
+            str(response_id or "none"),
+            mode,
+            str(satisfied).lower(),
+            phrase,
+            spoken,
+        )
+        if satisfied:
             self._turn_contract_mark_exact_phrase_satisfied(turn_id=turn_id)
             logger.info(
-                "turn_contract_phrase_satisfied run_id=%s turn_id=%s mode=%s",
+                "exact_phrase_repair_suppressed run_id=%s turn_id=%s response_id=%s reason=already_satisfied mode=%s",
                 self._current_run_id() or "",
                 str(turn_id or self._current_turn_id_or_unknown()),
+                str(response_id or "none"),
                 mode,
             )
             return False
@@ -7448,7 +7499,7 @@ class RealtimeAPI:
         # `upgraded_response` is a transcript-final answer replacement, not a tool-result origin.
         if self._turn_has_pending_tool_followup(turn_id=turn_id) and normalized_origin != "tool_output":
             return False, "tool_followup_precedence"
-        if self._turn_contract_exact_phrase_open(turn_id=turn_id):
+        if self._turn_contract_exact_phrase_open(turn_id=turn_id, response_id=response_id):
             return False, "exact_phrase_obligation_open"
         if normalized_origin == "tool_output":
             descriptive_turn, descriptive_context = self._is_descriptive_identification_turn(
