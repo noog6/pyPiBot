@@ -382,6 +382,34 @@ def test_handle_response_done_records_silent_incident_for_non_provisional_empty(
     mark_completed.assert_not_called()
 
 
+def test_handle_response_done_suppresses_exact_phrase_repair_when_startup_contract_already_satisfied() -> None:
+    api = _make_api()
+    api._active_response_origin = "prompt"
+    api._active_response_input_event_key = "synthetic_prompt_1"
+    api._active_response_canonical_key = "turn_1::synthetic_prompt_1"
+    api._active_response_id = "resp_ready"
+    api._terminal_response_text_by_response_id = {"resp_ready": "Ready!"}
+    api._update_turn_contract_from_input("Say Ready!", source="startup_prompt")
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    api._schedule_turn_contract_exact_phrase_repair_response = AsyncMock(return_value=True)
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_ready"}}))
+
+    api._schedule_turn_contract_exact_phrase_repair_response.assert_not_awaited()
+    assert api.orchestration_state.transitions == [
+        (OrchestrationPhase.REFLECT, "response done"),
+        (OrchestrationPhase.IDLE, "response done reflection"),
+    ]
+
+
 def test_handle_response_done_defers_terminal_close_when_exact_phrase_still_open() -> None:
     api = _make_api()
     api._maybe_schedule_empty_response_retry = AsyncMock()

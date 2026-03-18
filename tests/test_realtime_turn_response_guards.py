@@ -347,6 +347,77 @@ def test_turn_contract_required_phrase_not_open_when_already_spoken() -> None:
     api._assistant_reply_accum = "Sentinel Theo online."
 
     assert api._turn_contract_exact_phrase_open(turn_id="turn_1") is False
+
+
+def test_startup_required_phrase_normalization_variants_satisfy_contract() -> None:
+    variants = ["ready", "Ready!", " Ready! ", "Ready."]
+
+    for spoken in variants:
+        api = _make_api()
+        api._update_turn_contract_from_input("Say Ready!", source="startup_prompt")
+        api._terminal_response_text_by_response_id = {"resp_ready": spoken}
+
+        assert api._turn_contract_satisfied_by_text(
+            phrase="Ready",
+            mode="include",
+            spoken_text=spoken,
+        ) is True
+        assert api._turn_contract_exact_phrase_open(turn_id="turn_1", response_id="resp_ready") is False
+
+
+def test_startup_required_phrase_uses_per_response_reply_text_when_terminal_text_missing() -> None:
+    api = _make_api()
+    api._update_turn_contract_from_input("Say Ready!", source="startup_prompt")
+    api._assistant_reply_accum = ""
+    api.assistant_reply = ""
+    api._assistant_reply_by_response_id = {"resp_ready": "Ready!"}
+
+    assert api._turn_contract_exact_phrase_open(turn_id="turn_1", response_id="resp_ready") is False
+
+
+def test_startup_required_phrase_remains_open_for_unsatisfied_transcript() -> None:
+    api = _make_api()
+    api._update_turn_contract_from_input("Say Ready!", source="startup_prompt")
+    api._terminal_response_text_by_response_id = {"resp_hello": "Hello there."}
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id="turn_1",
+        origin="prompt",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id="turn_1", input_event_key="synthetic_prompt_1"),
+        transcript_final_seen=True,
+        input_event_key="synthetic_prompt_1",
+        response_id="resp_hello",
+    )
+
+    assert selected is False
+    assert reason == "exact_phrase_obligation_open"
+
+
+def test_startup_required_phrase_uses_terminal_transcript_after_reply_buffer_clears() -> None:
+    api = _make_api()
+    api._update_turn_contract_from_input("Say Ready!", source="startup_prompt")
+    api._assistant_reply_accum = ""
+    api.assistant_reply = ""
+    api._terminal_response_text_by_response_id = {"resp_ready": "Ready!"}
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id="turn_1",
+        origin="prompt",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id="turn_1", input_event_key="synthetic_prompt_1"),
+        transcript_final_seen=True,
+        input_event_key="synthetic_prompt_1",
+        response_id="resp_ready",
+    )
+
+    assert selected is True
+    assert reason == "normal"
+    assert api._turn_contract_required_phrase(turn_id="turn_1") == ""
+
+
 def test_turn_contract_exact_phrase_not_open_when_already_spoken() -> None:
     api = _make_api()
     api._update_turn_contract_from_input(
