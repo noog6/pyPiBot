@@ -173,6 +173,103 @@ def _make_api_stub() -> RealtimeAPI:
     return api
 
 
+
+
+def test_response_created_syncs_helper_owned_fields_for_assistant_message() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+
+    api._pending_response_create_origins.append(
+        {
+            "origin": "assistant_message",
+            "turn_id": "turn_7",
+            "input_event_key": "item_assistant_7",
+            "consumes_canonical_slot": "true",
+        }
+    )
+
+    asyncio.run(
+        api._handle_response_created_event(
+            {"type": "response.created", "response": {"id": "resp-assistant-7", "metadata": {}}},
+            ws,
+        )
+    )
+
+    expected_canonical_key = api._canonical_utterance_key(turn_id="turn_7", input_event_key="item_assistant_7")
+
+    assert api._active_response_lifecycle.response_id == "resp-assistant-7"
+    assert api._active_response_lifecycle.origin == "assistant_message"
+    assert api._active_response_lifecycle.input_event_key == "item_assistant_7"
+    assert api._active_response_lifecycle.canonical_key == expected_canonical_key
+    assert api._active_response_lifecycle.consumes_canonical_slot is True
+    assert api._active_response_id == "resp-assistant-7"
+    assert api._active_response_origin == "assistant_message"
+    assert api._active_response_input_event_key == "item_assistant_7"
+    assert api._active_response_canonical_key == expected_canonical_key
+    assert api._active_server_auto_input_event_key is None
+
+
+
+def test_response_created_syncs_helper_owned_fields_for_server_auto_guarded_path() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api._current_input_event_key = "synthetic_server_auto_4"
+    api._build_confirmation_transition_decision = lambda **_kwargs: type(
+        "_Transition",
+        (),
+        {
+            "allow_response_transition": True,
+            "emit_reminder": False,
+            "recover_mic": False,
+            "close_reason": "",
+        },
+    )()
+    api._has_active_confirmation_token = lambda: True
+    api._is_awaiting_confirmation_phase = lambda: True
+    api._should_guard_confirmation_response = lambda _origin, _response: True
+    api._mark_confirmation_activity = lambda **_kwargs: None
+    api._schedule_server_auto_audio_deferral = lambda **_kwargs: None
+    api._set_server_auto_pre_audio_hold = lambda **_kwargs: None
+    api._upgrade_likely_for_server_auto_turn = lambda **_kwargs: (False, "none")
+    api._should_delay_server_auto_until_transcript_final = lambda **_kwargs: False
+    api._start_audio_response_if_needed = lambda **_kwargs: None
+
+    api._pending_response_create_origins.append(
+        {
+            "origin": "server_auto",
+            "turn_id": "turn_4",
+            "input_event_key": "synthetic_server_auto_4",
+            "consumes_canonical_slot": "false",
+        }
+    )
+
+    asyncio.run(
+        api._handle_response_created_event(
+            {"type": "response.created", "response": {"id": "resp-server-auto-4", "metadata": {}}},
+            ws,
+        )
+    )
+
+    expected_canonical_key = api._canonical_utterance_key(turn_id="turn_4", input_event_key="synthetic_server_auto_4")
+    expected_lifecycle_key = f"{expected_canonical_key}:non_consuming:resp-server-auto-4"
+
+    assert api._active_response_lifecycle.response_id == "resp-server-auto-4"
+    assert api._active_response_lifecycle.origin == "server_auto"
+    assert api._active_response_lifecycle.input_event_key == "synthetic_server_auto_4"
+    assert api._active_response_lifecycle.canonical_key == expected_lifecycle_key
+    assert api._active_response_lifecycle.consumes_canonical_slot is False
+    assert api._active_response_lifecycle.confirmation_guarded is True
+    assert api._active_response_id == "resp-server-auto-4"
+    assert api._active_response_origin == "server_auto"
+    assert api._active_response_input_event_key == "synthetic_server_auto_4"
+    assert api._active_response_canonical_key == expected_lifecycle_key
+    assert api._active_response_consumes_canonical_slot is False
+    assert api._active_response_confirmation_guarded is True
+    assert api._active_server_auto_input_event_key == "synthetic_server_auto_4"
+
+
 def test_duplicate_assistant_message_create_single_flight_guard(monkeypatch) -> None:
     """Deterministic run-405 repro now guarded to single assistant_message response.create."""
 
@@ -1674,6 +1771,131 @@ def test_tool_followup_suppressed_when_parent_deliverable_is_final(monkeypatch) 
         and "reason=final_deliverable_already_sent" in entry
         for entry in captured_logs
     )
+
+
+
+
+def test_transcript_final_rebind_syncs_active_ownership_and_legacy_mirrors() -> None:
+    api = _make_api_stub()
+    api._active_response_origin = "server_auto"
+    api._response_in_flight = True
+    api._active_response_id = "resp-server-auto-live"
+    api._active_server_auto_input_event_key = "synthetic_server_auto_turn_1_2"
+    api._set_active_response_state(
+        response_id="resp-server-auto-live",
+        origin="server_auto",
+        input_event_key="synthetic_server_auto_turn_1_2",
+        canonical_key=api._canonical_utterance_key(turn_id="turn_1", input_event_key="synthetic_server_auto_turn_1_2"),
+    )
+
+    api._rebind_active_response_correlation_key(
+        turn_id="turn_1",
+        replacement_input_event_key="item_2",
+        cause="transcript_final_rebind",
+    )
+
+    expected_canonical_key = api._canonical_utterance_key(turn_id="turn_1", input_event_key="item_2")
+    assert api._active_response_lifecycle.input_event_key == "item_2"
+    assert api._active_response_lifecycle.canonical_key == expected_canonical_key
+    assert api._active_response_input_event_key == "item_2"
+    assert api._active_response_canonical_key == expected_canonical_key
+    assert api._active_server_auto_input_event_key == "item_2"
+
+
+
+
+
+def test_websocket_close_clears_active_ownership_surface_and_legacy_mirrors(monkeypatch) -> None:
+    api = _make_api_stub()
+    api._transport = type(
+        "_TransportClosed",
+        (),
+        {"recv_json": staticmethod(lambda _websocket: (_ for _ in ()).throw(_ConnectionClosed()))},
+    )()
+    api._response_create_queue_drain_source = None
+    api._drain_response_create_queue = lambda **_kwargs: asyncio.sleep(0)
+    api._note_disconnect = lambda _reason: None
+    api._active_server_auto_input_event_key = "synthetic_server_auto_turn_3_1"
+    api._response_in_flight = True
+    api.response_in_progress = True
+    api._set_active_response_state(
+        response_id="resp-ws-live",
+        origin="server_auto",
+        input_event_key="synthetic_server_auto_turn_3_1",
+        canonical_key=api._canonical_utterance_key(turn_id="turn_3", input_event_key="synthetic_server_auto_turn_3_1"),
+        consumes_canonical_slot=False,
+        confirmation_guarded=True,
+        preference_guarded=True,
+    )
+
+    class _ConnectionClosed(Exception):
+        pass
+
+    monkeypatch.setattr("ai.realtime_api._require_websockets", lambda: object())
+    monkeypatch.setattr(
+        "ai.realtime_api._resolve_websocket_exceptions",
+        lambda _websockets: (_ConnectionClosed, _ConnectionClosed),
+    )
+
+    asyncio.run(api.process_ws_messages(object()))
+
+    assert api._response_in_flight is False
+    assert api.response_in_progress is False
+    assert api._response_create_queue_drain_source == "websocket_close"
+    assert api._active_response_lifecycle.response_id is None
+    assert api._active_response_lifecycle.origin == "unknown"
+    assert api._active_response_lifecycle.input_event_key is None
+    assert api._active_response_lifecycle.canonical_key is None
+    assert api._active_response_lifecycle.consumes_canonical_slot is True
+    assert api._active_response_lifecycle.confirmation_guarded is False
+    assert api._active_response_lifecycle.preference_guarded is False
+    assert api._active_response_id is None
+    assert api._active_response_origin == "unknown"
+    assert api._active_response_input_event_key is None
+    assert api._active_response_canonical_key is None
+    assert api._active_response_consumes_canonical_slot is True
+    assert api._active_response_confirmation_guarded is False
+    assert api._active_response_preference_guarded is False
+    assert api._active_server_auto_input_event_key is None
+
+
+def test_cancelled_response_unblock_clears_active_ownership_and_legacy_mirrors() -> None:
+    api = _make_api_stub()
+    api._active_server_auto_input_event_key = "synthetic_server_auto_turn_2_1"
+    api._response_in_flight = True
+    api.response_in_progress = True
+    api._set_active_response_state(
+        response_id="resp-cancelled-live",
+        origin="server_auto",
+        input_event_key="synthetic_server_auto_turn_2_1",
+        canonical_key=api._canonical_utterance_key(turn_id="turn_2", input_event_key="synthetic_server_auto_turn_2_1"),
+        consumes_canonical_slot=False,
+        confirmation_guarded=True,
+        preference_guarded=True,
+    )
+
+    api._clear_cancelled_response_blocking_state(
+        response_id="resp-cancelled-live",
+        reason="transcript_final_upgrade",
+    )
+
+    assert api._response_in_flight is False
+    assert api.response_in_progress is False
+    assert api._active_response_lifecycle.response_id is None
+    assert api._active_response_lifecycle.origin == "unknown"
+    assert api._active_response_lifecycle.input_event_key is None
+    assert api._active_response_lifecycle.canonical_key is None
+    assert api._active_response_lifecycle.consumes_canonical_slot is True
+    assert api._active_response_lifecycle.confirmation_guarded is False
+    assert api._active_response_lifecycle.preference_guarded is False
+    assert api._active_response_id is None
+    assert api._active_response_origin == "unknown"
+    assert api._active_response_input_event_key is None
+    assert api._active_response_canonical_key is None
+    assert api._active_response_consumes_canonical_slot is True
+    assert api._active_response_confirmation_guarded is False
+    assert api._active_response_preference_guarded is False
+    assert api._active_server_auto_input_event_key is None
 
 
 def test_rebind_active_response_logs_transition_key_rebound_with_cause() -> None:
