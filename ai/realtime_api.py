@@ -7,7 +7,7 @@ import audioop
 import base64
 from collections import deque
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from enum import Enum
 import hashlib
@@ -5924,6 +5924,115 @@ class RealtimeAPI:
             )
         return False
 
+    def _response_runtime_coherence_snapshot(
+        self,
+        *,
+        turn_id: str,
+        canonical_key: str | None = None,
+        response_id: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
+        normalized_response_id = str(response_id or "").strip()
+        active_state = self._active_response_state()
+        active_snapshot = asdict(active_state)
+        active_input_event_key = str(active_state.input_event_key or "").strip()
+        normalized_canonical_key = str(canonical_key or "").strip()
+        if not normalized_canonical_key and active_input_event_key:
+            normalized_canonical_key = self._canonical_utterance_key(
+                turn_id=normalized_turn_id,
+                input_event_key=active_input_event_key,
+            )
+        state = self._canonical_response_state(normalized_canonical_key) if normalized_canonical_key else None
+        canonical_snapshot = asdict(state) if isinstance(state, CanonicalResponseState) else None
+        selection_store = self._terminal_deliverable_selection_store()
+        selection_entry = None
+        if normalized_response_id:
+            raw_selection = selection_store.get(normalized_response_id)
+            if isinstance(raw_selection, dict):
+                selection_entry = dict(raw_selection)
+        pending_server_auto = self._pending_server_auto_response_for_turn(turn_id=normalized_turn_id)
+        pending_server_auto_snapshot = asdict(pending_server_auto) if isinstance(pending_server_auto, PendingServerAutoResponse) else None
+        queue_entries: list[dict[str, Any]] = []
+        queue = getattr(self, "_response_create_queue", deque())
+        if isinstance(queue, deque):
+            for queued in list(queue):
+                if not isinstance(queued, dict):
+                    continue
+                event = queued.get("event") if isinstance(queued.get("event"), dict) else {}
+                metadata = self._extract_response_create_metadata(event)
+                queued_turn_id = str(queued.get("turn_id") or metadata.get("turn_id") or "").strip()
+                queued_canonical_key = self._canonical_utterance_key(
+                    turn_id=queued_turn_id or normalized_turn_id,
+                    input_event_key=str(metadata.get("input_event_key") or "").strip() or None,
+                )
+                if queued_turn_id != normalized_turn_id and queued_canonical_key != normalized_canonical_key:
+                    continue
+                queue_entries.append(
+                    {
+                        "origin": str(queued.get("origin") or "").strip() or "unknown",
+                        "turn_id": queued_turn_id or normalized_turn_id,
+                        "input_event_key": str(metadata.get("input_event_key") or "").strip() or None,
+                        "canonical_key": queued_canonical_key,
+                        "response_id": str(metadata.get("response_id") or "").strip() or None,
+                    }
+                )
+        suppression_turns = getattr(self, "_preference_recall_suppressed_turns", set())
+        suppression_keys = getattr(self, "_preference_recall_suppressed_input_event_keys", set())
+        active_server_auto_key = str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip()
+        expected_active_input_key = str(self._active_input_event_key_for_turn(normalized_turn_id) or "").strip()
+        violations: list[str] = []
+        active_response_id = str(active_snapshot.get("response_id") or "").strip()
+        active_canonical_key = str(active_snapshot.get("canonical_key") or "").strip()
+        if active_response_id and normalized_response_id and active_response_id != normalized_response_id:
+            violations.append("active_response_id_mismatch")
+        if active_canonical_key and normalized_canonical_key and active_canonical_key != normalized_canonical_key:
+            violations.append("active_canonical_key_mismatch")
+        if selection_entry is not None and normalized_canonical_key:
+            selection_canonical_key = str(selection_entry.get("canonical_key") or "").strip()
+            if selection_canonical_key and selection_canonical_key != normalized_canonical_key:
+                violations.append("terminal_selection_canonical_key_mismatch")
+        if pending_server_auto_snapshot is not None and normalized_canonical_key:
+            pending_canonical_key = str(pending_server_auto_snapshot.get("canonical_key") or "").strip()
+            pending_response_id = str(pending_server_auto_snapshot.get("response_id") or "").strip()
+            if (
+                pending_canonical_key
+                and pending_canonical_key != normalized_canonical_key
+                and (
+                    (normalized_response_id and pending_response_id == normalized_response_id)
+                    or active_snapshot.get("origin") == "server_auto"
+                )
+            ):
+                violations.append("pending_server_auto_canonical_key_mismatch")
+        if active_snapshot.get("origin") == "server_auto" and active_server_auto_key:
+            if active_input_event_key and active_input_event_key != active_server_auto_key:
+                violations.append("active_server_auto_key_mismatch")
+        if expected_active_input_key and normalized_canonical_key:
+            expected_canonical_key = self._canonical_utterance_key(
+                turn_id=normalized_turn_id,
+                input_event_key=expected_active_input_key,
+            )
+            if expected_canonical_key != normalized_canonical_key and not active_canonical_key:
+                violations.append("turn_active_key_canonical_mismatch")
+        return {
+            "turn_id": normalized_turn_id,
+            "canonical_key": normalized_canonical_key or None,
+            "response_id": normalized_response_id or None,
+            "active_response": active_snapshot,
+            "canonical_state": canonical_snapshot,
+            "terminal_selection": selection_entry,
+            "pending_queue": queue_entries,
+            "suppression": {
+                "turn_suppressed": normalized_turn_id in suppression_turns,
+                "active_input_event_key_suppressed": bool(
+                    active_server_auto_key and active_server_auto_key in suppression_keys
+                ),
+                "active_input_event_key": active_server_auto_key or None,
+                "expected_turn_input_event_key": expected_active_input_key or None,
+            },
+            "pending_server_auto": pending_server_auto_snapshot,
+            "violations": violations,
+        }
+
     def _log_lifecycle_coherence(
         self,
         *,
@@ -5932,10 +6041,15 @@ class RealtimeAPI:
         response_id: str | None = None,
         canonical_key: str | None = None,
     ) -> None:
-        violations: list[str] = []
-        normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
-        normalized_response_id = str(response_id or "").strip()
-        normalized_canonical_key = str(canonical_key or "").strip()
+        snapshot = self._response_runtime_coherence_snapshot(
+            turn_id=turn_id,
+            canonical_key=canonical_key,
+            response_id=response_id,
+        )
+        violations = list(snapshot.get("violations") or [])
+        normalized_turn_id = str(snapshot.get("turn_id") or "turn-unknown")
+        normalized_response_id = str(snapshot.get("response_id") or "").strip()
+        normalized_canonical_key = str(snapshot.get("canonical_key") or "").strip()
         pending = self._pending_server_auto_response_for_turn(turn_id=normalized_turn_id)
         if stage in {"transcript_final_rebind", "replacement_scheduled", "replacement_created"}:
             active_turn_map = getattr(self, "_active_input_event_key_by_turn_id", {})
@@ -5956,22 +6070,24 @@ class RealtimeAPI:
                 violations.append("cancelled_response_not_terminal_done")
         if violations:
             logger.warning(
-                "lifecycle_coherence_violation run_id=%s stage=%s turn_id=%s response_id=%s canonical_key=%s violations=%s",
+                "lifecycle_coherence_violation run_id=%s stage=%s turn_id=%s response_id=%s canonical_key=%s violations=%s snapshot=%s",
                 self._current_run_id() or "",
                 stage,
                 normalized_turn_id,
                 normalized_response_id or "none",
                 normalized_canonical_key or "none",
                 ",".join(violations),
+                json.dumps(snapshot, sort_keys=True),
             )
             return
         logger.debug(
-            "lifecycle_coherence_ok run_id=%s stage=%s turn_id=%s response_id=%s canonical_key=%s",
+            "lifecycle_coherence_ok run_id=%s stage=%s turn_id=%s response_id=%s canonical_key=%s snapshot=%s",
             self._current_run_id() or "",
             stage,
             normalized_turn_id,
             normalized_response_id or "none",
             normalized_canonical_key or "none",
+            json.dumps(snapshot, sort_keys=True),
         )
 
     def _suppress_cancelled_response_audio(self, response_id: str | None) -> None:
@@ -6199,6 +6315,15 @@ class RealtimeAPI:
                 self._set_active_response_state(input_event_key=normalized_replacement)
             if str(getattr(self, "_active_response_canonical_key", "") or "").strip() == old_canonical_key:
                 self._set_active_response_state(canonical_key=new_canonical_key)
+            pending = self._pending_server_auto_response_for_turn(turn_id=turn_id)
+            active_response_id = str(getattr(self, "_active_response_id", "") or "").strip()
+            if (
+                isinstance(pending, PendingServerAutoResponse)
+                and pending.active
+                and str(getattr(pending, "response_id", "") or "").strip() == active_response_id
+                and str(getattr(pending, "canonical_key", "") or "").strip() == old_canonical_key
+            ):
+                pending.canonical_key = new_canonical_key
             self._active_server_auto_input_event_key = normalized_replacement
 
         lifecycle = self._lifecycle_controller()
@@ -12760,6 +12885,10 @@ class RealtimeAPI:
                 self.response_in_progress = False
                 self._clear_active_response_state()
                 self._active_server_auto_input_event_key = None
+                self._log_lifecycle_coherence(
+                    stage="websocket_close",
+                    turn_id=self._current_turn_id_or_unknown(),
+                )
                 self._response_create_queue_drain_source = "websocket_close"
                 await self._drain_response_create_queue(source_trigger="websocket_close")
                 break
@@ -13051,6 +13180,12 @@ class RealtimeAPI:
             turn_id = utterance_context.turn_id
             resolved_input_event_key = utterance_context.input_event_key
             canonical_key = utterance_context.canonical_key
+        self._log_lifecycle_coherence(
+            stage="response_created",
+            turn_id=turn_id,
+            response_id=self._active_response_id,
+            canonical_key=canonical_key,
+        )
         if str((response_metadata or {}).get("tool_followup", "")).strip().lower() in {"true", "1", "yes"}:
             self._set_tool_followup_state(
                 canonical_key=canonical_key,

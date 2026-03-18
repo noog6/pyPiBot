@@ -63,6 +63,7 @@ def _make_api() -> RealtimeAPI:
 
     api._current_turn_id_or_unknown = lambda: "turn_1"
     api._canonical_utterance_key = lambda turn_id, input_event_key: f"{turn_id}::{input_event_key or 'none'}"
+    api._active_input_event_key_for_turn = lambda _turn_id: "input_evt_1"
     api._response_delivery_state = lambda **_kwargs: "done"
     api._response_obligation_key = lambda **_kwargs: "obl"
     api._cancel_micro_ack = lambda **_kwargs: None
@@ -250,6 +251,50 @@ def test_active_response_lifecycle_clear_keeps_legacy_fields_in_sync() -> None:
     assert api._active_response_consumes_canonical_slot is True
     assert api._active_response_confirmation_guarded is False
     assert api._active_response_preference_guarded is False
+
+
+def test_handle_response_done_coherence_snapshot_stays_consistent_after_cleanup() -> None:
+    api = _make_api()
+    api._apply_terminal_deliverable_selection = RealtimeAPI._apply_terminal_deliverable_selection.__get__(api, RealtimeAPI)
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    api._canonical_response_state_mutate(
+        canonical_key="turn_1::input_evt_1",
+        turn_id="turn_1",
+        input_event_key="input_evt_1",
+        mutator=lambda record: (
+            setattr(record, "created", True),
+            setattr(record, "origin", "assistant_message"),
+            setattr(record, "response_id", "resp_1"),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "final"),
+        ),
+    )
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_1"}}))
+
+    snapshot = api._response_runtime_coherence_snapshot(
+        turn_id="turn_1",
+        canonical_key="turn_1::input_evt_1",
+        response_id="resp_1",
+    )
+
+    assert snapshot["violations"] == []
+    assert snapshot["active_response"]["response_id"] is None
+    assert snapshot["canonical_state"]["done"] is True
+    assert snapshot["terminal_selection"] == {
+        "selected": True,
+        "reason": "normal",
+        "canonical_key": "turn_1::input_evt_1",
+    }
+    assert snapshot["suppression"]["turn_suppressed"] is False
 
 
 def test_handle_response_done_reconciles_terminal_substantive_count() -> None:
