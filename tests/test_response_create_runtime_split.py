@@ -50,7 +50,7 @@ def _make_api_stub() -> RealtimeAPI:
     return api
 
 
-def test_build_response_create_context_captures_expected_facts() -> None:
+def test_prepare_response_create_snapshot_captures_expected_facts_and_mutations() -> None:
     api = _make_api_stub()
     runtime = api._response_create_runtime
     expected_canonical_key = api._canonical_utterance_key(turn_id="turn_ctx", input_event_key="item_ctx")
@@ -73,7 +73,7 @@ def test_build_response_create_context_captures_expected_facts() -> None:
         },
     }
 
-    context = runtime.build_response_create_context(
+    prepared_snapshot = runtime.prepare_response_create_snapshot(
         response_create_event=event,
         origin="assistant_message",
         utterance_context=None,
@@ -81,17 +81,17 @@ def test_build_response_create_context_captures_expected_facts() -> None:
         now=123.0,
     )
 
-    assert context.turn_id == "turn_ctx"
-    assert context.input_event_key == "item_ctx"
-    assert context.canonical_key == expected_canonical_key
-    assert context.effective_memory_note and "Vim" in context.effective_memory_note
-    assert context.had_pending_preference_context is True
-    assert context.created_keys == {expected_canonical_key}
-    assert context.suppression_turns == {"turn_ctx"}
+    assert prepared_snapshot.turn_id == "turn_ctx"
+    assert prepared_snapshot.input_event_key == "item_ctx"
+    assert prepared_snapshot.canonical_key == expected_canonical_key
+    assert prepared_snapshot.effective_memory_note and "Vim" in prepared_snapshot.effective_memory_note
+    assert prepared_snapshot.had_pending_preference_context is True
+    assert prepared_snapshot.created_keys == {expected_canonical_key}
+    assert prepared_snapshot.suppression_turns == {"turn_ctx"}
     assert "Memory-intent response mode" in event["response"]["instructions"]
 
 
-def test_decide_response_create_action_uses_pure_context_for_server_auto_defer() -> None:
+def test_decide_response_create_action_uses_prepared_snapshot_for_server_auto_defer() -> None:
     api = _make_api_stub()
     runtime = api._response_create_runtime
 
@@ -100,14 +100,14 @@ def test_decide_response_create_action_uses_pure_context_for_server_auto_defer()
         "response": {"metadata": {"turn_id": "turn_srv", "input_event_key": "synthetic_server_auto_7"}},
     }
 
-    context = runtime.build_response_create_context(
+    prepared_snapshot = runtime.prepare_response_create_snapshot(
         response_create_event=event,
         origin="server_auto",
         utterance_context=None,
         memory_brief_note=None,
         now=321.0,
     )
-    decision = runtime.decide_response_create_action(context)
+    decision = runtime.decide_response_create_action(prepared_snapshot)
 
     assert decision.action is ResponseCreateDecisionAction.SCHEDULE
     assert decision.reason_code == "awaiting_transcript_final"
