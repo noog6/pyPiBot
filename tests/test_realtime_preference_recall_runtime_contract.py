@@ -567,6 +567,44 @@ def test_preference_recall_miss_context_has_no_memory_claim_language() -> None:
     api.send_assistant_message.assert_not_awaited()
 
 
+def test_preference_recall_followup_flag_does_not_bypass_context_only_contract() -> None:
+    api = _base_api()
+    api._current_input_event_key = "evt_followup_flag"
+    api._preference_recall_followup_enabled = True
+    api._is_preference_recall_intent = Mock(return_value=(True, ["editor"]))
+    api._build_preference_recall_query = Mock(return_value="editor")
+    api._mark_preference_recall_candidate = Mock()
+    api._clear_preference_recall_candidate = Mock()
+    api._run_preference_recall_with_fallbacks = AsyncMock(
+        return_value=(
+            {
+                "memories": [{"content": "User's favorite editor is Vim."}],
+                "memory_cards": [],
+                "memory_cards_text": "Relevant memory:\n- \"User's favorite editor is Vim.\"",
+            },
+            True,
+        )
+    )
+    api._preference_recall_locked_input_event_keys = set()
+    captured_contexts: list[dict[str, object]] = []
+
+    api._set_pending_preference_memory_context = lambda **kwargs: captured_contexts.append(kwargs)
+    api.send_assistant_message = AsyncMock()
+
+    with patch("ai.realtime.preference_recall_runtime.function_map", {"recall_memories": AsyncMock()}):
+        handled = asyncio.run(
+            api._maybe_handle_preference_recall_intent(
+                "remember my editor",
+                object(),
+                source="input_audio_transcription",
+            )
+        )
+
+    assert handled is False
+    assert captured_contexts
+    api.send_assistant_message.assert_not_awaited()
+
+
 def test_deliverable_seen_true_for_tool_output_turn() -> None:
     api = _base_api()
     api._utterance_info_summary = {"deliverable_seen": False}

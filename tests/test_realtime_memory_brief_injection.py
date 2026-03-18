@@ -94,6 +94,46 @@ def test_send_response_create_injects_preference_memory_context_before_response(
     assert "Vim" in ws.events[0]["item"]["content"][0]["text"]
 
 
+def test_send_response_create_consumes_preference_context_only_once_per_canonical_key() -> None:
+    api = _make_api_stub()
+    ws = _Ws()
+    consumed: list[tuple[str, str]] = []
+
+    def _consume(*, turn_id: str, input_event_key: str) -> str | None:
+        consumed.append((turn_id, input_event_key))
+        if len(consumed) == 1:
+            return "Preference recall context for this SAME response: matched stored preference(s). Top recalled value: Vim"
+        return None
+
+    api._consume_pending_preference_memory_context_note = _consume
+
+    event = {
+        "type": "response.create",
+        "response": {"metadata": {"turn_id": "turn_1", "input_event_key": "item_1"}},
+    }
+
+    first_sent = asyncio.run(
+        api._send_response_create(
+            ws,
+            event,
+            origin="assistant_message",
+        )
+    )
+    second_sent = asyncio.run(
+        api._send_response_create(
+            ws,
+            event,
+            origin="assistant_message",
+        )
+    )
+
+    assert first_sent is True
+    assert second_sent is False
+    assert consumed == [("turn_1", "item_1")]
+    assert [item["type"] for item in ws.events].count("conversation.item.create") == 1
+    assert [item["type"] for item in ws.events].count("response.create") == 1
+
+
 
 
 def test_pending_preference_context_resolves_from_response_owner_map() -> None:

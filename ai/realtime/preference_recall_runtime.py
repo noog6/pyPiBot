@@ -442,24 +442,6 @@ async def _maybe_handle_preference_recall_intent(controller, text: str, websocke
                 str(hit).lower(),
                 returned_count,
             )
-            if bool(getattr(controller, "_preference_recall_followup_enabled", False)):
-                response_text = _build_preference_recall_reply(
-                    hit=hit,
-                    memory_cards_text=memory_cards_text,
-                    memories=memories,
-                    cards=cards,
-                )
-                await controller.send_assistant_message(
-                    response_text,
-                    websocket,
-                    response_metadata={
-                        "trigger": "preference_recall",
-                        "turn_id": resolved_turn_id,
-                        "input_event_key": f"pref_recall:{input_event_key or 'unknown'}",
-                        "preference_recall_hit": str(hit).lower(),
-                        "preference_recall_returned_count": str(returned_count),
-                    },
-                )
         finally:
             if input_event_key:
                 locked_input_event_keys.discard(input_event_key)
