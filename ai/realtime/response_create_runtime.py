@@ -6,6 +6,7 @@ import time
 from copy import deepcopy
 from collections import deque
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Protocol
 
 from ai.interaction_lifecycle_policy import ResponseCreateDecision, ResponseCreateDecisionAction
@@ -19,9 +20,21 @@ class ResponseCreateRuntimeAPI(Protocol):
     ...
 
 
+class ResponseCreateOutcomeAction(str, Enum):
+    # Semantics:
+    # - BLOCK: a hard guard/policy/state stop prevents execution for this attempt.
+    # - DROP: the contender intentionally loses because another owner/path/state
+    #   already covers the turn or makes this attempt non-winning.
+    SEND = "SEND"
+    SCHEDULE = "SCHEDULE"
+    BLOCK = "BLOCK"
+    DROP = "DROP"
+
+
 @dataclass(frozen=True)
 class ResponseCreatePreparedSnapshot:
     now: float
+    run_id: str
     origin: str
     normalized_origin: str
     response_create_event: dict[str, Any]
@@ -46,9 +59,16 @@ class ResponseCreatePreparedSnapshot:
     suppression_active: bool
     awaiting_transcript_final: bool
     preference_recall_lock_blocked: bool
-    already_delivered: bool
-    has_safety_override: bool
+    preference_recall_suppression_active: bool
+    preference_recall_lock_active: bool
     response_in_flight: bool
+    active_response_present: bool
+    already_delivered: bool
+    already_created_for_canonical_key: bool
+    same_turn_owner_reason: str | None
+    same_turn_owner_present: bool
+    pending_server_auto_present: bool
+    has_safety_override: bool
     audio_playback_busy: bool
     terminal_state_blocked: bool
     lineage_allowed: bool
@@ -57,8 +77,17 @@ class ResponseCreatePreparedSnapshot:
 
 @dataclass(frozen=True)
 class ResponseCreateExecutionDecision:
-    action: ResponseCreateDecisionAction
+    """Canonical response.create arbitration result.
+
+    `action` is the operator-facing outcome surface:
+    - SEND / SCHEDULE are executable winners.
+    - BLOCK is a guarded refusal/hard stop for this attempt.
+    - DROP is an intentional contender discard because another path/state wins.
+    """
+
+    action: ResponseCreateOutcomeAction
     reason_code: str
+    explanation: str
     selected_candidate_id: str
     queue_reason: str | None = None
     blocked_by_terminal_state: bool = False
@@ -128,6 +157,119 @@ class ResponseCreateRuntime:
         metadata["tool_followup"] = "true"
         metadata["tool_followup_reason"] = "already_created"
         return followup_event
+
+    def _build_execution_decision(
+        self,
+        *,
+        action: ResponseCreateOutcomeAction,
+        reason_code: str,
+        explanation: str,
+        selected_candidate_id: str,
+        queue_reason: str | None = None,
+        blocked_by_terminal_state: bool = False,
+        should_log_arbitration: bool = True,
+    ) -> ResponseCreateExecutionDecision:
+        return ResponseCreateExecutionDecision(
+            action=action,
+            reason_code=reason_code,
+            explanation=explanation,
+            selected_candidate_id=selected_candidate_id,
+            queue_reason=queue_reason,
+            blocked_by_terminal_state=blocked_by_terminal_state,
+            should_log_arbitration=should_log_arbitration,
+        )
+
+    def _normalize_execution_decision(
+        self,
+        *,
+        prepared_snapshot: ResponseCreatePreparedSnapshot,
+        decision: ResponseCreateExecutionDecision,
+    ) -> ResponseCreateExecutionDecision:
+        preferred_reason_code = decision.reason_code
+        preferred_explanation = decision.explanation
+        if preferred_reason_code == "already_done" and prepared_snapshot.already_delivered:
+            preferred_reason_code = "already_delivered"
+            preferred_explanation = "Response.create blocked: already_delivered."
+        if preferred_reason_code == decision.reason_code and preferred_explanation == decision.explanation:
+            return decision
+        return self._build_execution_decision(
+            action=decision.action,
+            reason_code=preferred_reason_code,
+            explanation=preferred_explanation,
+            selected_candidate_id=decision.selected_candidate_id,
+            queue_reason=decision.queue_reason,
+            blocked_by_terminal_state=decision.blocked_by_terminal_state,
+            should_log_arbitration=decision.should_log_arbitration,
+        )
+
+    def _schedule_path_admission_override(
+        self,
+        *,
+        prepared_snapshot: ResponseCreatePreparedSnapshot,
+        decision: ResponseCreateExecutionDecision,
+    ) -> ResponseCreateExecutionDecision:
+        """Apply queue-admission-only guards after core arbitration.
+
+        These are intentionally path-local because they manage queue ownership /
+        side effects (mainly tool-followup suppression), not the core shared
+        response.create arbitration outcome.
+        """
+        if decision.action is not ResponseCreateOutcomeAction.SCHEDULE:
+            return decision
+        api = self.api
+        if not prepared_snapshot.tool_followup:
+            return decision
+        parent_turn_id = str(prepared_snapshot.response_metadata.get("parent_turn_id") or prepared_snapshot.turn_id or "").strip() or prepared_snapshot.turn_id
+        parent_input_event_key = str(prepared_snapshot.response_metadata.get("parent_input_event_key") or "").strip() or None
+        if hasattr(api, "_should_suppress_tool_followup_after_turn_deliverable") and api._should_suppress_tool_followup_after_turn_deliverable(
+            turn_id=parent_turn_id,
+            parent_input_event_key=parent_input_event_key,
+        ):
+            return self._build_execution_decision(
+                action=ResponseCreateOutcomeAction.DROP,
+                reason_code="tool_followup_final_deliverable_already_sent",
+                explanation="Tool followup dropped because the parent turn already has a final deliverable.",
+                selected_candidate_id="tool_followup_final_deliverable",
+            )
+        current_state = self.api._tool_followup_state(canonical_key=prepared_snapshot.canonical_key)
+        if current_state in {"creating", "created", "done", "dropped", "scheduled", "blocked_active_response", "released_on_response_done"}:
+            return self._build_execution_decision(
+                action=ResponseCreateOutcomeAction.DROP,
+                reason_code=f"already_{current_state}",
+                explanation=f"Tool followup dropped because it was already {current_state}.",
+                selected_candidate_id="tool_followup_existing_state",
+            )
+        return decision
+
+    def _log_response_create_outcome(
+        self,
+        *,
+        snapshot: ResponseCreatePreparedSnapshot,
+        decision: ResponseCreateExecutionDecision,
+    ) -> None:
+        logger.info(
+            "response_create_outcome run_id=%s turn_id=%s input_event_key=%s canonical_key=%s origin=%s "
+            "action=%s reason_code=%s explanation=%s awaiting_transcript_final=%s response_in_flight=%s "
+            "already_delivered=%s already_created=%s same_turn_owner_present=%s suppression_active=%s "
+            "terminal_state_blocked=%s pending_server_auto_present=%s tool_followup_state=%s",
+            snapshot.run_id or "",
+            snapshot.turn_id,
+            snapshot.input_event_key or "unknown",
+            snapshot.canonical_key,
+            snapshot.normalized_origin,
+            decision.action.value,
+            decision.reason_code,
+            decision.explanation,
+            snapshot.awaiting_transcript_final,
+            snapshot.response_in_flight,
+            snapshot.already_delivered,
+            snapshot.already_created_for_canonical_key,
+            snapshot.same_turn_owner_present,
+            snapshot.preference_recall_suppression_active,
+            snapshot.terminal_state_blocked,
+            snapshot.pending_server_auto_present,
+            snapshot.tool_followup_state,
+        )
 
     def prepare_response_create_snapshot(
         self,
@@ -241,6 +383,18 @@ class ResponseCreateRuntime:
             normalized_origin=normalized_origin,
             response_metadata=response_metadata,
         )
+        same_turn_owner_reason = None
+        if normalized_origin == "assistant_message":
+            owner_fn = getattr(api, "_assistant_message_same_turn_owner_reason", None)
+            if callable(owner_fn):
+                same_turn_owner_reason = str(
+                    owner_fn(
+                        turn_id=turn_id,
+                        input_event_key=current_input_event_key,
+                        canonical_key=canonical_key,
+                    )
+                    or ""
+                ).strip() or None
         already_delivered = api._is_response_already_delivered(
             turn_id=turn_id,
             input_event_key=current_input_event_key,
@@ -252,8 +406,15 @@ class ResponseCreateRuntime:
             origin=origin,
             response_metadata=response_metadata,
         )
+        pending_server_auto_present = False
+        pending_server_auto_for_turn = getattr(api, "_pending_server_auto_response_for_turn", None)
+        if callable(pending_server_auto_for_turn):
+            pending_server_auto_present = pending_server_auto_for_turn(turn_id=turn_id) is not None
+        response_in_flight = api._is_active_response_blocking()
+        created_for_key = canonical_key in created_keys
         return ResponseCreatePreparedSnapshot(
             now=now,
+            run_id=str(api._current_run_id() or "").strip(),
             origin=origin,
             normalized_origin=normalized_origin,
             response_create_event=response_create_event,
@@ -278,9 +439,16 @@ class ResponseCreateRuntime:
             suppression_active=suppression_active,
             awaiting_transcript_final=awaiting_transcript_final,
             preference_recall_lock_blocked=preference_recall_lock_blocked,
+            preference_recall_suppression_active=suppression_active,
+            preference_recall_lock_active=preference_recall_lock_blocked,
+            response_in_flight=response_in_flight,
+            active_response_present=response_in_flight,
             already_delivered=already_delivered,
+            already_created_for_canonical_key=created_for_key,
+            same_turn_owner_reason=same_turn_owner_reason,
+            same_turn_owner_present=same_turn_owner_reason is not None,
+            pending_server_auto_present=pending_server_auto_present,
             has_safety_override=has_safety_override,
-            response_in_flight=api._is_active_response_blocking(),
             audio_playback_busy=bool(api._audio_playback_busy),
             terminal_state_blocked=terminal_state_blocked,
             lineage_allowed=bool(lineage_allowed),
@@ -291,21 +459,44 @@ class ResponseCreateRuntime:
         self,
         prepared_snapshot: ResponseCreatePreparedSnapshot,
     ) -> ResponseCreateExecutionDecision:
+        """Map one prepared fact snapshot to one canonical action/reason.
+
+        BLOCK is reserved for hard runtime/policy guards. DROP is reserved for
+        non-winning contenders already covered by another owner/path/state.
+        """
         api = self.api
         if not prepared_snapshot.lineage_allowed:
-            return ResponseCreateExecutionDecision(
-                action=ResponseCreateDecisionAction.BLOCK,
-                reason_code=prepared_snapshot.lineage_reason or "lineage_blocked",
-                selected_candidate_id="tool_lineage_guard",
-                should_log_arbitration=False,
+            return self._normalize_execution_decision(
+                prepared_snapshot=prepared_snapshot,
+                decision=self._build_execution_decision(
+                    action=ResponseCreateOutcomeAction.BLOCK,
+                    reason_code=prepared_snapshot.lineage_reason or "lineage_blocked",
+                    explanation="Tool lineage guard blocked response.create.",
+                    selected_candidate_id="tool_lineage_guard",
+                    should_log_arbitration=False,
+                ),
             )
         if prepared_snapshot.terminal_state_blocked:
-            return ResponseCreateExecutionDecision(
-                action=ResponseCreateDecisionAction.BLOCK,
-                reason_code="canonical_terminal_state",
-                selected_candidate_id="canonical_terminal_state",
-                blocked_by_terminal_state=True,
-                should_log_arbitration=False,
+            return self._normalize_execution_decision(
+                prepared_snapshot=prepared_snapshot,
+                decision=self._build_execution_decision(
+                    action=ResponseCreateOutcomeAction.BLOCK,
+                    reason_code="canonical_terminal_state",
+                    explanation="Canonical turn is already terminal.",
+                    selected_candidate_id="canonical_terminal_state",
+                    blocked_by_terminal_state=True,
+                    should_log_arbitration=False,
+                ),
+            )
+        if prepared_snapshot.same_turn_owner_present:
+            return self._normalize_execution_decision(
+                prepared_snapshot=prepared_snapshot,
+                decision=self._build_execution_decision(
+                    action=ResponseCreateOutcomeAction.DROP,
+                    reason_code="same_turn_already_owned",
+                    explanation=f"Assistant message suppressed by same-turn owner: {prepared_snapshot.same_turn_owner_reason}.",
+                    selected_candidate_id="same_turn_owner",
+                ),
             )
         policy_decision: ResponseCreateDecision = api._lifecycle_policy().decide_response_create(
             response_in_flight=prepared_snapshot.response_in_flight,
@@ -319,18 +510,60 @@ class ResponseCreateRuntime:
             single_flight_block_reason=prepared_snapshot.single_flight_block_reason,
             already_delivered=prepared_snapshot.already_delivered,
             preference_recall_lock_blocked=prepared_snapshot.preference_recall_lock_blocked,
-            canonical_key_already_created=prepared_snapshot.canonical_key in prepared_snapshot.created_keys,
+            canonical_key_already_created=prepared_snapshot.already_created_for_canonical_key,
             has_safety_override=prepared_snapshot.has_safety_override,
             suppression_active=prepared_snapshot.suppression_active,
             normalized_origin=prepared_snapshot.normalized_origin,
             awaiting_transcript_final=prepared_snapshot.awaiting_transcript_final,
         )
-        return ResponseCreateExecutionDecision(
-            action=policy_decision.action,
-            reason_code=policy_decision.reason_code,
-            selected_candidate_id=policy_decision.selected_candidate_id,
-            queue_reason=policy_decision.queue_reason,
+        if policy_decision.action is ResponseCreateDecisionAction.SCHEDULE:
+            return self._normalize_execution_decision(
+                prepared_snapshot=prepared_snapshot,
+                decision=self._build_execution_decision(
+                    action=ResponseCreateOutcomeAction.SCHEDULE,
+                    reason_code=policy_decision.reason_code,
+                    explanation=f"Response.create deferred: {policy_decision.reason_code}.",
+                    selected_candidate_id=policy_decision.selected_candidate_id,
+                    queue_reason=policy_decision.queue_reason,
+                ),
+            )
+        if policy_decision.action is ResponseCreateDecisionAction.BLOCK:
+            return self._normalize_execution_decision(
+                prepared_snapshot=prepared_snapshot,
+                decision=self._build_execution_decision(
+                    action=ResponseCreateOutcomeAction.BLOCK,
+                    reason_code=policy_decision.reason_code,
+                    explanation=f"Response.create blocked: {policy_decision.reason_code}.",
+                    selected_candidate_id=policy_decision.selected_candidate_id,
+                ),
+            )
+        return self._normalize_execution_decision(
+            prepared_snapshot=prepared_snapshot,
+            decision=self._build_execution_decision(
+                action=ResponseCreateOutcomeAction.SEND,
+                reason_code=policy_decision.reason_code,
+                explanation="Response.create allowed for immediate send.",
+                selected_candidate_id=policy_decision.selected_candidate_id,
+            ),
         )
+
+    def evaluate_response_create_attempt(
+        self,
+        *,
+        response_create_event: dict[str, Any],
+        origin: str,
+        utterance_context: UtteranceContext | None,
+        memory_brief_note: str | None,
+        now: float | None = None,
+    ) -> tuple[ResponseCreatePreparedSnapshot, ResponseCreateExecutionDecision]:
+        prepared_snapshot = self.prepare_response_create_snapshot(
+            response_create_event=response_create_event,
+            origin=origin,
+            utterance_context=utterance_context,
+            memory_brief_note=memory_brief_note,
+            now=time.monotonic() if now is None else now,
+        )
+        return prepared_snapshot, self.decide_response_create_action(prepared_snapshot)
 
     def schedule_pending_response_create(
         self,
@@ -342,61 +575,45 @@ class ResponseCreateRuntime:
         record_ai_call: bool,
         debug_context: dict[str, Any] | None,
         memory_brief_note: str | None,
+        emit_outcome_log: bool = True,
     ) -> bool:
         api = self.api
-        turn_id = api._resolve_response_create_turn_id(origin=origin, response_create_event=response_create_event)
-        current_input_event_key = api._ensure_response_create_correlation(
+        prepared_snapshot, decision = self.evaluate_response_create_attempt(
             response_create_event=response_create_event,
             origin=origin,
-            turn_id=turn_id,
+            utterance_context=None,
+            memory_brief_note=memory_brief_note,
         )
-        response_metadata = api._extract_response_create_metadata(response_create_event)
-        canonical_origin = api._canonical_response_create_origin(
-            origin=origin,
-            response_metadata=response_metadata,
+        turn_id = prepared_snapshot.turn_id
+        current_input_event_key = prepared_snapshot.input_event_key
+        canonical_key = prepared_snapshot.canonical_key
+        normalized_origin = prepared_snapshot.normalized_origin
+        response_metadata = prepared_snapshot.response_metadata
+        decision = self._schedule_path_admission_override(
+            prepared_snapshot=prepared_snapshot,
+            decision=decision,
         )
-        with api._utterance_context_scope(
-            turn_id=turn_id,
-            input_event_key=current_input_event_key,
-        ) as resolved_context:
-            turn_id = resolved_context.turn_id
-            current_input_event_key = resolved_context.input_event_key
-            canonical_key = resolved_context.canonical_key
-        self._apply_memory_intent_instruction_guardrail(
-            response_create_event=response_create_event,
-            response_metadata=response_metadata,
-        )
-        normalized_origin = canonical_origin
-        lineage_guard = getattr(api, "_evaluate_tool_lineage_guard", None)
-        if callable(lineage_guard):
-            lineage_allowed, _lineage_reason, _lineage_canonical_key, _lineage_parent_state, _lineage_call_id = lineage_guard(
-                origin=normalized_origin,
-                turn_id=turn_id,
-                input_event_key=current_input_event_key,
-                response_metadata=response_metadata,
-            )
-            if not lineage_allowed:
-                return False
-        tool_followup = str(response_metadata.get("tool_followup", "")).strip().lower() in {"true", "1", "yes"}
-        tool_call_id = str(response_metadata.get("tool_call_id") or "").strip()
-        if tool_followup:
-            parent_turn_id = str(response_metadata.get("parent_turn_id") or turn_id or "").strip() or turn_id
-            parent_input_event_key = str(response_metadata.get("parent_input_event_key") or "").strip() or None
-            if hasattr(api, "_should_suppress_tool_followup_after_turn_deliverable") and api._should_suppress_tool_followup_after_turn_deliverable(
-                turn_id=parent_turn_id,
-                parent_input_event_key=parent_input_event_key,
-            ):
-                logger.info(
-                    "tool_followup_create_suppressed canonical_key=%s reason=final_deliverable_already_sent parent_turn_id=%s",
-                    canonical_key,
-                    parent_turn_id,
-                )
+        if emit_outcome_log:
+            self._log_response_create_outcome(snapshot=prepared_snapshot, decision=decision)
+        if decision.action is not ResponseCreateOutcomeAction.SCHEDULE:
+            if decision.action is ResponseCreateOutcomeAction.DROP and prepared_snapshot.tool_followup:
                 api._set_tool_followup_state(
                     canonical_key=canonical_key,
                     state="dropped",
-                    reason="final_deliverable_already_sent",
+                    reason=decision.reason_code,
                 )
-                return False
+            if decision.action is ResponseCreateOutcomeAction.DROP and decision.reason_code == "same_turn_already_owned":
+                api._mark_transcript_response_outcome(
+                    input_event_key=current_input_event_key,
+                    turn_id=turn_id,
+                    outcome="response_not_scheduled",
+                    reason="same_turn_already_owned",
+                    details=f"owner={prepared_snapshot.same_turn_owner_reason} canonical_key={canonical_key} origin={normalized_origin}",
+                )
+            return False
+        tool_followup = str(response_metadata.get("tool_followup", "")).strip().lower() in {"true", "1", "yes"}
+        tool_call_id = str(response_metadata.get("tool_call_id") or "").strip()
+        if tool_followup:
             current_state = api._tool_followup_state(canonical_key=canonical_key)
             if current_state in {"creating", "created", "done", "dropped"}:
                 logger.info(
@@ -405,21 +622,6 @@ class ResponseCreateRuntime:
                     tool_call_id or "unknown",
                     canonical_key,
                 )
-                logger.info(
-                    "tool_followup_create_suppressed canonical_key=%s reason=already_%s prior_state=%s",
-                    canonical_key,
-                    current_state,
-                    current_state,
-                )
-                return False
-            if current_state == "scheduled":
-                logger.info(
-                    "tool_followup_create_suppressed canonical_key=%s reason=already_scheduled prior_state=%s",
-                    canonical_key,
-                    current_state,
-                )
-                return False
-            if current_state in {"blocked_active_response", "released_on_response_done"}:
                 logger.info(
                     "tool_followup_create_suppressed canonical_key=%s reason=already_%s prior_state=%s",
                     canonical_key,
@@ -444,25 +646,6 @@ class ResponseCreateRuntime:
             )
             return False
         suppression_turns = getattr(api, "_preference_recall_suppressed_turns", set())
-        created_keys = getattr(api, "_response_created_canonical_keys", set())
-        if consumes_canonical_slot:
-            single_flight_block_reason = "" if transcript_upgrade_replacement else api._single_flight_block_reason(
-                turn_id=turn_id,
-                input_event_key=current_input_event_key,
-            )
-            if single_flight_block_reason:
-                self._note_response_create_blocked(
-                    canonical_key=canonical_key,
-                    reason=single_flight_block_reason,
-                )
-                api._log_response_create_blocked(
-                    turn_id=turn_id,
-                    origin=normalized_origin,
-                    input_event_key=current_input_event_key,
-                    canonical_key=canonical_key,
-                    block_reason=single_flight_block_reason,
-                )
-                return False
         obligation_present = api._response_obligation_key(
             turn_id=turn_id,
             input_event_key=current_input_event_key,
@@ -485,108 +668,7 @@ class ResponseCreateRuntime:
             obligation_present,
             getattr(api, "_response_done_serial", 0),
         )
-        if api._is_response_already_delivered(turn_id=turn_id, input_event_key=current_input_event_key):
-            api._record_duplicate_create_attempt(
-                turn_id=turn_id,
-                canonical_key=canonical_key,
-                reason="already_delivered",
-            )
-            logger.debug(
-                "duplicate_response_prevented run_id=%s turn_id=%s input_event_key=%s reason=already_delivered origin=%s",
-                api._current_run_id() or "",
-                turn_id,
-                current_input_event_key or "unknown",
-                normalized_origin,
-            )
-            if reason == "audio_playback_busy":
-                logger.debug(
-                    "playback_busy_retry_dropped run_id=%s input_event_key=%s reason=already_delivered",
-                    api._current_run_id() or "",
-                    current_input_event_key or "unknown",
-                )
-            return False
-        if api._is_preference_recall_lock_blocked(
-            turn_id=turn_id,
-            input_event_key=current_input_event_key,
-            normalized_origin=normalized_origin,
-            response_metadata=response_metadata,
-        ):
-            return False
-        if (
-            consumes_canonical_slot
-            and api._canonical_first_audio_started(canonical_key)
-            and not api._response_is_explicit_multipart(response_metadata)
-            and not allow_audio_started_upgrade
-        ):
-            logger.info(
-                "response_schedule_blocked run_id=%s turn_id=%s origin=%s mode=queued reason=canonical_audio_already_started canonical_key=%s",
-                api._current_run_id() or "",
-                turn_id,
-                normalized_origin,
-                canonical_key,
-            )
-            return False
-        if normalized_origin == "assistant_message":
-            owner_reason = ""
-            owner_fn = getattr(api, "_assistant_message_same_turn_owner_reason", None)
-            if callable(owner_fn):
-                owner_reason = str(
-                    owner_fn(
-                        turn_id=turn_id,
-                        input_event_key=current_input_event_key,
-                        canonical_key=canonical_key,
-                    )
-                    or ""
-                ).strip()
-            if owner_reason:
-                api._mark_transcript_response_outcome(
-                    input_event_key=current_input_event_key,
-                    turn_id=turn_id,
-                    outcome="response_not_scheduled",
-                    reason="same_turn_already_owned",
-                    details=f"owner={owner_reason} canonical_key={canonical_key} origin={normalized_origin}",
-                )
-                return False
-
-        if (
-            consumes_canonical_slot
-            and canonical_key in created_keys
-            and not api._response_has_safety_override(response_create_event)
-        ):
-            api._record_duplicate_create_attempt(
-                turn_id=turn_id,
-                canonical_key=canonical_key,
-                reason="canonical_response_already_created",
-            )
-            logger.info(
-                "response_schedule_blocked run_id=%s turn_id=%s origin=%s mode=queued reason=canonical_response_already_created canonical_key=%s",
-                api._current_run_id() or "",
-                turn_id,
-                normalized_origin,
-                canonical_key,
-            )
-            return False
         suppression_active = (turn_id in suppression_turns) and (not str(current_input_event_key or "").strip())
-        if suppression_active and normalized_origin == "server_auto":
-            self._note_response_create_blocked(
-                canonical_key=canonical_key,
-                reason="preference_recall_suppressed",
-            )
-            api._drop_suppressed_scheduled_response_creates(turn_id=turn_id, origin=normalized_origin)
-            api._mark_transcript_response_outcome(
-                input_event_key=current_input_event_key,
-                turn_id=turn_id,
-                outcome="response_not_scheduled",
-                reason="preference_recall_suppressed",
-                details="queued response.create blocked",
-            )
-            logger.info(
-                "response_schedule_blocked run_id=%s turn_id=%s origin=%s mode=queued reason=preference_recall_suppressed",
-                api._current_run_id() or "",
-                turn_id,
-                normalized_origin,
-            )
-            return False
         schedule_logged_turn_ids = getattr(api, "_response_schedule_logged_turn_ids", None)
         if not isinstance(schedule_logged_turn_ids, set):
             schedule_logged_turn_ids = set()
@@ -708,10 +790,10 @@ class ResponseCreateRuntime:
         if str(reason or "").strip().lower() == "active_response":
             schedule_log_method = logger.debug
         schedule_log_method(
-            "response_create_scheduled turn_id=%s origin=%s reason=%s",
+                "response_create_scheduled turn_id=%s origin=%s reason=%s",
             candidate.turn_id,
             candidate.origin,
-            reason,
+            decision.reason_code,
         )
         api._log_response_site_debug(
             site="response_create_scheduled",
@@ -728,7 +810,7 @@ class ResponseCreateRuntime:
             api._current_run_id() or "",
             turn_id,
             normalized_origin,
-            reason,
+            decision.reason_code,
             current_input_event_key or "unknown",
             canonical_key,
             len(getattr(api, "_response_create_queue", deque()) or ()),
@@ -768,12 +850,11 @@ class ResponseCreateRuntime:
                 f"{delta_ms:.1f}" if delta_ms is not None else "n/a",
             )
 
-        prepared_snapshot = self.prepare_response_create_snapshot(
+        prepared_snapshot, decision = self.evaluate_response_create_attempt(
             response_create_event=response_create_event,
             origin=origin,
             utterance_context=utterance_context,
             memory_brief_note=memory_brief_note,
-            now=now,
         )
         turn_id = prepared_snapshot.turn_id
         current_input_event_key = prepared_snapshot.input_event_key
@@ -864,6 +945,15 @@ class ResponseCreateRuntime:
                     state="dropped",
                     reason="final_deliverable_already_sent",
                 )
+                self._log_response_create_outcome(
+                    snapshot=prepared_snapshot,
+                    decision=self._build_execution_decision(
+                        action=ResponseCreateOutcomeAction.DROP,
+                        reason_code="tool_followup_final_deliverable_already_sent",
+                        explanation="Tool followup dropped because the parent turn already has a final deliverable.",
+                        selected_candidate_id="tool_followup_final_deliverable",
+                    ),
+                )
                 return False
             if prepared_snapshot.tool_followup_release and prepared_snapshot.tool_followup_state in {"scheduled", "scheduled_release", "blocked_active_response", "released_on_response_done"}:
                 pass
@@ -881,28 +971,31 @@ class ResponseCreateRuntime:
                     deny_reason,
                     prepared_snapshot.tool_followup_state,
                 )
+                self._log_response_create_outcome(
+                    snapshot=prepared_snapshot,
+                    decision=self._build_execution_decision(
+                        action=ResponseCreateOutcomeAction.DROP,
+                        reason_code=deny_reason,
+                        explanation=f"Tool followup dropped because it was already {prepared_snapshot.tool_followup_state}.",
+                        selected_candidate_id="tool_followup_existing_state",
+                    ),
+                )
                 return False
 
-        if prepared_snapshot.terminal_state_blocked:
-            if prepared_snapshot.tool_followup:
-                api._set_tool_followup_state(
-                    canonical_key=canonical_key,
-                    state="dropped",
-                    reason="canonical_terminal_state",
-                )
-            return False
-        decision = self.decide_response_create_action(prepared_snapshot)
+        self._log_response_create_outcome(snapshot=prepared_snapshot, decision=decision)
         if decision.should_log_arbitration:
-            logger.info(
+            logger.debug(
                 "arbitration_decision surface=response_create action=%s reason_code=%s selected_candidate_id=%s turn_id=%s canonical_key=%s",
-                decision.action.value,
+                decision.action.value.lower(),
                 decision.reason_code,
                 decision.selected_candidate_id,
                 turn_id,
                 canonical_key,
             )
         if prepared_snapshot.tool_followup:
-            arbitration_outcome = "deny" if decision.action is ResponseCreateDecisionAction.BLOCK else "allow"
+            arbitration_outcome = (
+                "deny" if decision.action in {ResponseCreateOutcomeAction.BLOCK, ResponseCreateOutcomeAction.DROP} else "allow"
+            )
             logger.info(
                 "tool_followup_arbitration outcome=%s reason=%s call_id=%s canonical_key=%s",
                 arbitration_outcome,
@@ -911,7 +1004,7 @@ class ResponseCreateRuntime:
                 canonical_key,
             )
 
-        if decision.action is ResponseCreateDecisionAction.SCHEDULE:
+        if decision.action is ResponseCreateOutcomeAction.SCHEDULE:
             return api._schedule_pending_response_create(
                 websocket=websocket,
                 response_create_event=response_create_event,
@@ -920,8 +1013,17 @@ class ResponseCreateRuntime:
                 record_ai_call=record_ai_call,
                 debug_context=debug_context,
                 memory_brief_note=prepared_snapshot.effective_memory_note,
+                emit_outcome_log=False,
             )
-        if decision.action is ResponseCreateDecisionAction.BLOCK:
+        if decision.action is ResponseCreateOutcomeAction.DROP:
+            if prepared_snapshot.tool_followup:
+                api._set_tool_followup_state(
+                    canonical_key=canonical_key,
+                    state="dropped",
+                    reason=decision.reason_code,
+                )
+            return False
+        if decision.action is ResponseCreateOutcomeAction.BLOCK:
             if decision.reason_code == "already_delivered":
                 api._record_duplicate_create_attempt(
                     turn_id=turn_id,
