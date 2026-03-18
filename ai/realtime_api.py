@@ -1181,6 +1181,10 @@ class RealtimeAPI:
         self._asr_verify_on_risk_enabled = bool(verify_cfg.get("enabled", True))
         self._asr_verify_min_confidence = float(verify_cfg.get("min_confidence", 0.65))
         self._asr_verify_short_utterance_ms = int(verify_cfg.get("short_utterance_ms", 450))
+        self._asr_verify_visual_recent_window_ms = int(verify_cfg.get("visual_recent_window_ms", 5000))
+        self._asr_verify_visual_recent_window_catalog_only_ms = int(
+            verify_cfg.get("visual_recent_window_catalog_only_ms", 12000)
+        )
         self._asr_verify_max_clarify_per_turn = max(1, int(verify_cfg.get("max_clarify_per_turn", 1)))
         self._asr_clarify_count_by_turn: dict[str, int] = {}
         self._asr_clarify_asked_input_event_keys: set[str] = set()
@@ -9112,6 +9116,12 @@ class RealtimeAPI:
             "camera_active": camera_active,
         }
 
+    def _verify_visual_freshness_window_ms(self) -> int:
+        mode = str(getattr(self, "_image_response_mode", "") or "").strip().lower()
+        if mode == "catalog_only":
+            return max(1000, int(getattr(self, "_asr_verify_visual_recent_window_catalog_only_ms", 12000)))
+        return max(1000, int(getattr(self, "_asr_verify_visual_recent_window_ms", 5000)))
+
     def _visual_unavailable_clarify_text(self, vision_state: dict[str, Any]) -> str:
         queued_frames = int(vision_state.get("queued_frame_count") or 0)
         if queued_frames > 0:
@@ -9136,9 +9146,10 @@ class RealtimeAPI:
         if self._asr_clarify_count_by_turn.get(turn_id, 0) >= self._asr_verify_max_clarify_per_turn:
             return False
         vision_state = self.get_vision_state()
+        freshness_window_ms = self._verify_visual_freshness_window_ms()
         fresh_frame_available = bool(
             isinstance(vision_state.get("last_frame_age_ms"), int)
-            and int(vision_state["last_frame_age_ms"]) <= 5000
+            and int(vision_state["last_frame_age_ms"]) <= freshness_window_ms
         )
         normalized_transcript = " ".join((transcript or "").lower().split())
         known_domain = self._is_memory_intent(transcript) or any(
@@ -9164,6 +9175,20 @@ class RealtimeAPI:
             known_domain=known_domain,
             camera_available=bool(vision_state.get("available", False) or vision_state.get("can_capture", False)),
             camera_recent=fresh_frame_available,
+        )
+        logger.info(
+            "visual_availability_eval run_id=%s turn_id=%s input_event_key=%s recent_image_seen=%s "
+            "last_image_age_ms=%s image_mode=%s image_response_enabled=%s freshness_window_ms=%s decision=%s reason=%s",
+            snapshot.get("run_id", ""),
+            turn_id,
+            input_event_key,
+            str(fresh_frame_available).lower(),
+            vision_state.get("last_frame_age_ms"),
+            str(getattr(self, "_image_response_mode", "unknown") or "unknown"),
+            str(bool(getattr(self, "_image_response_enabled", True))).lower(),
+            freshness_window_ms,
+            "CLARIFY" if should_confirm else "ANSWER",
+            reason if should_confirm else "verify_clear",
         )
         if not should_confirm:
             self._set_response_gating_verdict(
