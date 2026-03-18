@@ -45,3 +45,14 @@ class PendingResponseCreate:
     queued_reminder_key: str | None = None
     enqueued_done_serial: int = 0
     enqueue_seq: int = 0
+
+
+@dataclass
+class ActiveResponseLifecycle:
+    response_id: str | None = None
+    origin: str = "unknown"
+    input_event_key: str | None = None
+    canonical_key: str | None = None
+    consumes_canonical_slot: bool = True
+    confirmation_guarded: bool = False
+    preference_guarded: bool = False
