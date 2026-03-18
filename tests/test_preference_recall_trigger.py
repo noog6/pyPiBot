@@ -6,7 +6,13 @@ import asyncio
 import base64
 import json
 from collections import deque
+import sys
 from types import SimpleNamespace
+import types
+from unittest.mock import AsyncMock
+
+if "audioop" not in sys.modules:
+    sys.modules["audioop"] = types.ModuleType("audioop")
 
 import ai.tools as ai_tools
 import ai.realtime_api as realtime_api
@@ -120,10 +126,10 @@ def _make_memory_manager(store: MemoryStore) -> MemoryManager:
     manager._recall_trace_level = "info"
     return manager
 
-def test_preference_question_calls_recall_before_response(monkeypatch) -> None:
+def test_preference_question_calls_recall_before_attaching_context(monkeypatch) -> None:
     api = _make_api_stub()
     call_order: list[str] = []
-    sent_messages: list[str] = []
+    captured_contexts: list[dict[str, object]] = []
 
     async def _fake_recall(**_kwargs):
         call_order.append("recall")
@@ -136,12 +142,9 @@ def test_preference_question_calls_recall_before_response(monkeypatch) -> None:
             "memory_cards_text": "Relevant memory:\n- \"User's favorite editor is Vim.\"",
         }
 
-    async def _fake_send(message: str, _ws, **_kwargs) -> None:
-        call_order.append("respond")
-        sent_messages.append(message)
-
     monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "recall_memories", _fake_recall)
-    monkeypatch.setattr(api, "send_assistant_message", _fake_send)
+    monkeypatch.setattr(api, "send_assistant_message", AsyncMock())
+    api._set_pending_preference_memory_context = lambda **kwargs: captured_contexts.append(kwargs)
 
     handled = asyncio.run(
         api._maybe_handle_preference_recall_intent(
@@ -151,15 +154,16 @@ def test_preference_question_calls_recall_before_response(monkeypatch) -> None:
         )
     )
 
-    assert handled is True
-    assert call_order == ["recall", "respond"]
-    assert "Vim" in sent_messages[0]
-    assert "Relevant memory:" in sent_messages[0]
+    assert handled is False
+    assert call_order == ["recall"]
+    assert captured_contexts
+    assert "Vim" in str(captured_contexts[0]["memory_context"]["prompt_note"])
+    api.send_assistant_message.assert_not_awaited()
 
 
-def test_preference_recall_response_sanitizes_memory_id_phrasing(monkeypatch) -> None:
+def test_preference_recall_context_sanitizes_memory_id_phrasing(monkeypatch) -> None:
     api = _make_api_stub()
-    sent_messages: list[str] = []
+    captured_contexts: list[dict[str, object]] = []
 
     async def _fake_recall(**_kwargs):
         return {
@@ -174,11 +178,9 @@ def test_preference_recall_response_sanitizes_memory_id_phrasing(monkeypatch) ->
             "memory_cards": [{"confidence": "Medium"}],
         }
 
-    async def _fake_send(message: str, _ws, **_kwargs) -> None:
-        sent_messages.append(message)
-
     monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "recall_memories", _fake_recall)
-    monkeypatch.setattr(api, "send_assistant_message", _fake_send)
+    monkeypatch.setattr(api, "send_assistant_message", AsyncMock())
+    api._set_pending_preference_memory_context = lambda **kwargs: captured_contexts.append(kwargs)
 
     handled = asyncio.run(
         api._maybe_handle_preference_recall_intent(
@@ -188,12 +190,13 @@ def test_preference_recall_response_sanitizes_memory_id_phrasing(monkeypatch) ->
         )
     )
 
-    assert handled is True
-    assert sent_messages
-    assert "Relevant memory:" in sent_messages[0]
-    assert "memory #" not in sent_messages[0].lower()
-    assert "memory id" not in sent_messages[0].lower()
-    assert "id:" not in sent_messages[0].lower()
+    assert handled is False
+    assert captured_contexts
+    prompt_note = str(captured_contexts[0]["memory_context"]["prompt_note"]).lower()
+    assert "memory #" not in prompt_note
+    assert "memory id" not in prompt_note
+    assert "id:" not in prompt_note
+    api.send_assistant_message.assert_not_awaited()
 
 
 def test_memory_recall_normalizer_compresses_repeated_reassurance_suffix() -> None:
