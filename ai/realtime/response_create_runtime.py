@@ -316,6 +316,9 @@ class ResponseCreateRuntime:
         api._bind_active_input_event_key_for_turn(
             turn_id=turn_id,
             input_event_key=current_input_event_key,
+            allow_tool_rebind=(
+                str(response_metadata.get("tool_followup_release", "")).strip().lower() in {"true", "1", "yes"}
+            ),
             cause="prepare_response_create",
             origin=canonical_origin,
         )

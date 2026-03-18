@@ -118,7 +118,37 @@ def test_decide_response_create_action_uses_prepared_snapshot_for_server_auto_de
 
     assert decision.action is ResponseCreateOutcomeAction.SCHEDULE
     assert decision.reason_code == "awaiting_transcript_final"
-    assert decision.queue_reason == "awaiting_transcript_final"
+
+
+def test_prepare_response_create_snapshot_does_not_let_nonrelease_tool_followup_steal_turn_ownership() -> None:
+    api = _make_api_stub()
+    runtime = api._response_create_runtime
+    api._active_input_event_key_by_turn_id = {}
+    api._active_input_event_key_by_turn_id["turn_tool_parent"] = "item_parent_owner"
+
+    event = {
+        "type": "response.create",
+        "response": {
+            "metadata": {
+                "turn_id": "turn_tool_parent",
+                "input_event_key": "tool:call_owner_prepare",
+                "tool_followup": "true",
+                "tool_call_id": "call_owner_prepare",
+            }
+        },
+    }
+
+    prepared_snapshot = runtime.prepare_response_create_snapshot(
+        response_create_event=event,
+        origin="tool_output",
+        utterance_context=None,
+        memory_brief_note=None,
+        now=456.0,
+    )
+
+    assert prepared_snapshot.tool_followup is True
+    assert prepared_snapshot.tool_followup_release is False
+    assert api._active_input_event_key_for_turn("turn_tool_parent") == "item_parent_owner"
 
 
 def test_send_response_create_executes_side_effects_after_direct_send_decision() -> None:

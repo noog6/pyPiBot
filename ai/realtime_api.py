@@ -3214,6 +3214,10 @@ class RealtimeAPI:
             self._bind_active_input_event_key_for_turn(
                 turn_id=metadata_turn_id,
                 input_event_key=metadata_input_event_key,
+                allow_tool_rebind=(
+                    isinstance(metadata, dict)
+                    and str(metadata.get("tool_followup_release", "")).strip().lower() in {"true", "1", "yes"}
+                ),
                 cause="queue_response_origin",
                 origin=normalized_origin,
             )
@@ -4900,6 +4904,7 @@ class RealtimeAPI:
         *,
         turn_id: str,
         input_event_key: str | None,
+        allow_tool_rebind: bool = False,
         cause: str = "unspecified",
         response_id: str | None = None,
         origin: str | None = None,
@@ -4912,9 +4917,10 @@ class RealtimeAPI:
         old_active_key = str(active_by_turn.get(normalized_turn_id) or "").strip()
         requested_key = str(input_event_key or "").strip()
         should_block_tool_rebind = (
-            bool(old_active_key)
-            and not old_active_key.startswith("tool:")
+            not allow_tool_rebind
             and requested_key.startswith("tool:")
+            and bool(old_active_key)
+            and not old_active_key.startswith("tool:")
         )
         resolved_key = old_active_key if should_block_tool_rebind else requested_key
         self._lifecycle_state_coordinator().bind_active_input_event_key_for_turn(
@@ -8179,6 +8185,7 @@ class RealtimeAPI:
                 state="scheduled_release",
                 reason=f"response_done response_id={normalized_response_id}",
             )
+            self._mark_pending_server_auto_response_replaced(turn_id=turn_id)
             logger.info(
                 "response_create_scheduled turn_id=%s origin=%s reason=release_after_response_done",
                 turn_id,
@@ -13194,6 +13201,29 @@ class RealtimeAPI:
             turn_id = utterance_context.turn_id
             resolved_input_event_key = utterance_context.input_event_key
             canonical_key = utterance_context.canonical_key
+        allow_tool_followup_rebind = (
+            str((response_metadata or {}).get("tool_followup_release", "")).strip().lower() in {"true", "1", "yes"}
+        )
+        self._set_active_response_state(input_event_key=str(resolved_input_event_key or "").strip() or None)
+        self._bind_active_input_event_key_for_turn(
+            turn_id=turn_id,
+            input_event_key=self._active_response_input_event_key,
+            allow_tool_rebind=allow_tool_followup_rebind,
+            cause="response_created_prebind",
+            response_id=self._active_response_id,
+            origin=origin,
+        )
+        self._set_active_response_state(canonical_key=canonical_key)
+        if allow_tool_followup_rebind:
+            logger.info(
+                "tool_followup_release_handoff run_id=%s turn_id=%s canonical_key=%s prior_parent_key=%s new_active_key=%s response_id=%s",
+                self._current_run_id() or "",
+                turn_id,
+                canonical_key,
+                str((response_metadata or {}).get("parent_input_event_key") or "").strip() or "none",
+                self._active_input_event_key_for_turn(turn_id) or "none",
+                str(self._active_response_id or "").strip() or "none",
+            )
         self._log_lifecycle_coherence(
             stage="response_created",
             turn_id=turn_id,
@@ -13323,15 +13353,15 @@ class RealtimeAPI:
                 upgrade_chain_id=upgrade_chain_id,
             )
             self._mark_response_provisional(response_id=self._active_response_id)
-        self._set_active_response_state(input_event_key=str(resolved_input_event_key or "").strip() or None)
+        self._set_active_response_state(canonical_key=lifecycle_canonical_key)
         self._bind_active_input_event_key_for_turn(
             turn_id=turn_id,
             input_event_key=self._active_response_input_event_key,
+            allow_tool_rebind=allow_tool_followup_rebind,
             cause="response_created",
             response_id=self._active_response_id,
             origin=origin,
         )
-        self._set_active_response_state(canonical_key=lifecycle_canonical_key)
         if str(origin or "").strip().lower() == "prompt":
             self._emit_startup_prompt_bound(
                 turn_id=turn_id,
