@@ -205,6 +205,11 @@ asr:
     enabled: true
     min_confidence: 0.65
     short_utterance_ms: 450
+    # General visual recency window for verify-on-risk visual question availability.
+    visual_recent_window_ms: 5000
+    # catalog_only still streams frames without response-triggering image injection,
+    # so allow a wider recency window before marking visuals unavailable.
+    visual_recent_window_catalog_only_ms: 12000
     max_clarify_per_turn: 1
 
 # Startup dependency behavior
