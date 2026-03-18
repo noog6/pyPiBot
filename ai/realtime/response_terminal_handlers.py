@@ -65,7 +65,7 @@ class ResponseTerminalHandlers:
                             api.websocket,
                             reason="transcribe_response_done_legacy",
                         )
-            api._active_response_confirmation_guarded = False
+            api._set_active_response_state(confirmation_guarded=False)
             api.response_in_progress = False
             api._recover_confirmation_guard_microphone("transcribe_response_done")
             api._maybe_enqueue_reflection("response transcript done")
@@ -444,12 +444,7 @@ class ResponseTerminalHandlers:
         if active_input_event_key:
             api._preference_recall_suppressed_input_event_keys.discard(active_input_event_key)
         was_confirmation_guarded = api._active_response_confirmation_guarded
-        api._active_response_id = None
-        api._active_response_confirmation_guarded = False
-        api._active_response_preference_guarded = False
-        api._active_response_origin = "unknown"
-        api._active_response_input_event_key = None
-        api._active_response_canonical_key = None
+        api._clear_active_response_state()
         api._active_server_auto_input_event_key = None
         obligations_after_cleanup = getattr(api, "_response_obligations", {})
         obligation_count_after_clear = len(obligations_after_cleanup) if isinstance(obligations_after_cleanup, dict) else 0
@@ -678,10 +673,7 @@ class ResponseTerminalHandlers:
         active_input_event_key = str(getattr(api, "_active_server_auto_input_event_key", "") or "").strip()
         if active_input_event_key:
             api._preference_recall_suppressed_input_event_keys.discard(active_input_event_key)
-        api._active_response_id = None
-        api._active_response_confirmation_guarded = False
-        api._active_response_preference_guarded = False
-        api._active_response_origin = "unknown"
+        api._clear_active_response_state()
         api._active_server_auto_input_event_key = None
         current_state = getattr(api.state_manager, "state", InteractionState.IDLE)
         if current_state != InteractionState.LISTENING:

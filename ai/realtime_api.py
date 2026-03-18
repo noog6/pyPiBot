@@ -77,7 +77,12 @@ from ai.opportunistic_arbitration import (
 from ai.realtime.runtime_tasks import RuntimeTaskRegistry
 from ai.realtime.shutdown import ShutdownCoordinator
 from ai.realtime.transport import RealtimeTransport
-from ai.realtime.types import CanonicalResponseState, PendingResponseCreate, UtteranceContext
+from ai.realtime.types import (
+    ActiveResponseLifecycle,
+    CanonicalResponseState,
+    PendingResponseCreate,
+    UtteranceContext,
+)
 from ai.realtime import preference_recall_runtime
 from ai.attention_continuity import AttentionContinuity, AttentionSnapshot
 from ai.embodiment_policy import (
@@ -1023,6 +1028,7 @@ class RealtimeAPI:
         )
         self._last_response_create_ts: float | None = None
         self._response_done_serial = 0
+        self._active_response_lifecycle = ActiveResponseLifecycle()
         self._active_response_id: str | None = None
         self._active_response_confirmation_guarded = False
         self._active_response_preference_guarded = False
@@ -1077,6 +1083,7 @@ class RealtimeAPI:
         self._tool_followup_state_by_canonical_key: dict[str, str] = {}
         self._active_response_input_event_key: str | None = None
         self._active_response_canonical_key: str | None = None
+        self._sync_active_response_legacy_fields()
         self._startup_prompt_audit: dict[str, Any] = {
             "dispatched": False,
             "bound": False,
@@ -3222,7 +3229,7 @@ class RealtimeAPI:
         return str(metadata.get("micro_ack", "")).strip().lower() != "true"
 
     def _consume_response_origin(self, event: dict[str, Any] | None = None) -> str:
-        self._active_response_consumes_canonical_slot = True
+        self._set_active_response_state(consumes_canonical_slot=True)
         self._last_consumed_response_origin_context = {}
         if self._pending_response_create_origins:
             response = event.get("response") if isinstance(event, dict) else None
@@ -3250,24 +3257,26 @@ class RealtimeAPI:
                     None,
                 )
                 if preferred_index is None:
-                    self._active_response_consumes_canonical_slot = self._response_consumes_canonical_slot(metadata)
+                    self._set_active_response_state(consumes_canonical_slot=self._response_consumes_canonical_slot(metadata))
                     return "server_auto"
             pending = self._pending_response_create_origins[preferred_index]
             del self._pending_response_create_origins[preferred_index]
             if not isinstance(pending, dict):
-                self._active_response_consumes_canonical_slot = True
+                self._set_active_response_state(consumes_canonical_slot=True)
                 return str(pending or "unknown")
             self._last_consumed_response_origin_context = {
                 "turn_id": str(pending.get("turn_id") or "").strip(),
                 "input_event_key": str(pending.get("input_event_key") or "").strip(),
             }
-            self._active_response_consumes_canonical_slot = (
-                str(pending.get("consumes_canonical_slot", "")).strip().lower() == "true"
+            self._set_active_response_state(
+                consumes_canonical_slot=(
+                    str(pending.get("consumes_canonical_slot", "")).strip().lower() == "true"
+                )
             )
             return str(pending.get("origin") or "unknown")
         response = event.get("response") if isinstance(event, dict) else None
         metadata = response.get("metadata") if isinstance(response, dict) else None
-        self._active_response_consumes_canonical_slot = self._response_consumes_canonical_slot(metadata)
+        self._set_active_response_state(consumes_canonical_slot=self._response_consumes_canonical_slot(metadata))
         return "server_auto"
 
     def inject_event(self, event: Event) -> None:
@@ -6150,13 +6159,8 @@ class RealtimeAPI:
             return
         self._response_in_flight = False
         self.response_in_progress = False
-        self._active_response_id = None
-        self._active_response_origin = "unknown"
-        self._active_response_input_event_key = None
-        self._active_response_canonical_key = None
+        self._clear_active_response_state()
         self._active_server_auto_input_event_key = None
-        self._active_response_confirmation_guarded = False
-        self._active_response_preference_guarded = False
         logger.info(
             "cancelled_response_unblocked_scheduler run_id=%s response_id=%s reason=%s",
             self._current_run_id() or "",
@@ -6192,9 +6196,9 @@ class RealtimeAPI:
 
         def _update_local_active_response_pointers() -> None:
             if str(getattr(self, "_active_response_input_event_key", "") or "").strip() == active_key:
-                self._active_response_input_event_key = normalized_replacement
+                self._set_active_response_state(input_event_key=normalized_replacement)
             if str(getattr(self, "_active_response_canonical_key", "") or "").strip() == old_canonical_key:
-                self._active_response_canonical_key = new_canonical_key
+                self._set_active_response_state(canonical_key=new_canonical_key)
             self._active_server_auto_input_event_key = normalized_replacement
 
         lifecycle = self._lifecycle_controller()
@@ -6327,6 +6331,67 @@ class RealtimeAPI:
             state_store = {}
             self._canonical_response_state_by_key = state_store
         return state_store
+
+    def _active_response_state(self) -> ActiveResponseLifecycle:
+        state = getattr(self, "_active_response_lifecycle", None)
+        if not isinstance(state, ActiveResponseLifecycle):
+            state = ActiveResponseLifecycle(
+                response_id=getattr(self, "_active_response_id", None),
+                origin=str(getattr(self, "_active_response_origin", "unknown") or "unknown"),
+                input_event_key=getattr(self, "_active_response_input_event_key", None),
+                canonical_key=getattr(self, "_active_response_canonical_key", None),
+                consumes_canonical_slot=bool(getattr(self, "_active_response_consumes_canonical_slot", True)),
+                confirmation_guarded=bool(getattr(self, "_active_response_confirmation_guarded", False)),
+                preference_guarded=bool(getattr(self, "_active_response_preference_guarded", False)),
+            )
+            self._active_response_lifecycle = state
+        self._sync_active_response_legacy_fields()
+        return state
+
+    def _sync_active_response_legacy_fields(self) -> None:
+        state = getattr(self, "_active_response_lifecycle", None)
+        if not isinstance(state, ActiveResponseLifecycle):
+            return
+        self._active_response_id = state.response_id
+        self._active_response_origin = str(state.origin or "unknown") or "unknown"
+        self._active_response_input_event_key = state.input_event_key
+        self._active_response_canonical_key = state.canonical_key
+        self._active_response_consumes_canonical_slot = bool(state.consumes_canonical_slot)
+        self._active_response_confirmation_guarded = bool(state.confirmation_guarded)
+        self._active_response_preference_guarded = bool(state.preference_guarded)
+
+    def _set_active_response_state(
+        self,
+        *,
+        response_id: str | None | object = ...,
+        origin: str | object = ...,
+        input_event_key: str | None | object = ...,
+        canonical_key: str | None | object = ...,
+        consumes_canonical_slot: bool | object = ...,
+        confirmation_guarded: bool | object = ...,
+        preference_guarded: bool | object = ...,
+    ) -> ActiveResponseLifecycle:
+        state = self._active_response_state()
+        if response_id is not ...:
+            state.response_id = str(response_id).strip() if response_id is not None else None
+        if origin is not ...:
+            state.origin = str(origin or "unknown").strip() or "unknown"
+        if input_event_key is not ...:
+            state.input_event_key = str(input_event_key).strip() if input_event_key is not None else None
+        if canonical_key is not ...:
+            state.canonical_key = str(canonical_key).strip() if canonical_key is not None else None
+        if consumes_canonical_slot is not ...:
+            state.consumes_canonical_slot = bool(consumes_canonical_slot)
+        if confirmation_guarded is not ...:
+            state.confirmation_guarded = bool(confirmation_guarded)
+        if preference_guarded is not ...:
+            state.preference_guarded = bool(preference_guarded)
+        self._sync_active_response_legacy_fields()
+        return state
+
+    def _clear_active_response_state(self) -> None:
+        self._active_response_lifecycle = ActiveResponseLifecycle()
+        self._sync_active_response_legacy_fields()
 
     def _canonical_response_state(self, canonical_key: str) -> CanonicalResponseState | None:
         normalized = str(canonical_key or "").strip()
@@ -12693,13 +12758,13 @@ class RealtimeAPI:
                 self._note_disconnect("websocket connection closed")
                 self._response_in_flight = False
                 self.response_in_progress = False
-                self._active_response_id = None
+                self._clear_active_response_state()
                 self._response_create_queue_drain_source = "websocket_close"
                 await self._drain_response_create_queue(source_trigger="websocket_close")
                 break
 
     async def _recover_from_event_handler_error(self, event_type: str, websocket: Any) -> None:
-        self._active_response_confirmation_guarded = False
+        self._set_active_response_state(confirmation_guarded=False)
         self._awaiting_confirmation_completion = False
 
         token = getattr(self, "_pending_confirmation_token", None)
@@ -12832,13 +12897,15 @@ class RealtimeAPI:
         pending_turn_id = str(pending_origin_context.get("turn_id") or "").strip()
         pending_input_event_key = str(pending_origin_context.get("input_event_key") or "").strip()
         response_id = response.get("id")
-        self._active_response_id = str(response_id) if response_id else None
+        self._set_active_response_state(
+            response_id=str(response_id) if response_id else None,
+            origin=str(origin),
+            input_event_key=None,
+            canonical_key=None,
+        )
         self._set_response_status(response_id=self._active_response_id, status="active")
-        self._active_response_origin = str(origin)
-        self._active_response_input_event_key = None
-        self._active_response_canonical_key = None
         pending_confirmation_active = self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase()
-        self._active_response_preference_guarded = False
+        self._set_active_response_state(preference_guarded=False)
         turn_id = metadata_turn_id or pending_turn_id or self._current_turn_id_or_unknown()
         self._cancel_micro_ack(turn_id=turn_id, reason="response_created")
         if origin == "server_auto":
@@ -13106,7 +13173,7 @@ class RealtimeAPI:
                 upgrade_chain_id=upgrade_chain_id,
             )
             self._mark_response_provisional(response_id=self._active_response_id)
-        self._active_response_input_event_key = str(resolved_input_event_key or "").strip() or None
+        self._set_active_response_state(input_event_key=str(resolved_input_event_key or "").strip() or None)
         self._bind_active_input_event_key_for_turn(
             turn_id=turn_id,
             input_event_key=self._active_response_input_event_key,
@@ -13114,7 +13181,7 @@ class RealtimeAPI:
             response_id=self._active_response_id,
             origin=origin,
         )
-        self._active_response_canonical_key = lifecycle_canonical_key
+        self._set_active_response_state(canonical_key=lifecycle_canonical_key)
         if str(origin or "").strip().lower() == "prompt":
             self._emit_startup_prompt_bound(
                 turn_id=turn_id,
@@ -13178,7 +13245,7 @@ class RealtimeAPI:
         obligation_input_event_key = active_input_event_key if origin == "server_auto" else current_input_event_key
         if arbitration_outcome is ServerAutoArbitrationOutcome.CANCEL_PRE_AUDIO:
             replacement_reason = arbitration_reason_code
-            self._active_response_preference_guarded = True
+            self._set_active_response_state(preference_guarded=True)
             if consumes_canonical_slot:
                 self._canonical_response_state_mutate(
                     canonical_key=canonical_key,
@@ -13232,7 +13299,7 @@ class RealtimeAPI:
             transport = self._get_or_create_transport()
             await transport.send_json(websocket, cancel_event)
         elif arbitration_outcome is ServerAutoArbitrationOutcome.DEFER:
-            self._active_response_preference_guarded = True
+            self._set_active_response_state(preference_guarded=True)
             logger.info(
                 "server_auto_guard_pre_audio_defer response_id=%s canonical_key=%s",
                 self._active_response_id or "unknown",
@@ -13270,9 +13337,11 @@ class RealtimeAPI:
                 )
         if pending_confirmation_active:
             log_info(f"response.created consumed by confirmation flow; origin={origin}")
-            self._active_response_confirmation_guarded = self._should_guard_confirmation_response(
-                origin,
-                response,
+            self._set_active_response_state(
+                confirmation_guarded=self._should_guard_confirmation_response(
+                    origin,
+                    response,
+                )
             )
             if self._active_response_confirmation_guarded:
                 self._mark_confirmation_activity(reason="guarded_response_created")
@@ -13282,7 +13351,7 @@ class RealtimeAPI:
                     self._active_response_id or "unknown",
                 )
         else:
-            self._active_response_confirmation_guarded = False
+            self._set_active_response_state(confirmation_guarded=False)
             self.orchestration_state.transition(
                 OrchestrationPhase.PLAN,
                 reason="response created",

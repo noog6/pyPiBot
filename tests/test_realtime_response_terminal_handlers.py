@@ -219,6 +219,38 @@ def test_handle_response_done_applies_terminal_selection_to_canonical_state() ->
     )
 
 
+def test_active_response_lifecycle_clear_keeps_legacy_fields_in_sync() -> None:
+    api = _make_api()
+
+    api._set_active_response_state(
+        response_id="resp_new",
+        origin="server_auto",
+        input_event_key="synthetic_server_auto_7",
+        canonical_key="turn_1::synthetic_server_auto_7",
+        consumes_canonical_slot=False,
+        confirmation_guarded=True,
+        preference_guarded=True,
+    )
+
+    assert api._active_response_id == "resp_new"
+    assert api._active_response_origin == "server_auto"
+    assert api._active_response_input_event_key == "synthetic_server_auto_7"
+    assert api._active_response_canonical_key == "turn_1::synthetic_server_auto_7"
+    assert api._active_response_consumes_canonical_slot is False
+    assert api._active_response_confirmation_guarded is True
+    assert api._active_response_preference_guarded is True
+
+    api._clear_active_response_state()
+
+    assert api._active_response_id is None
+    assert api._active_response_origin == "unknown"
+    assert api._active_response_input_event_key is None
+    assert api._active_response_canonical_key is None
+    assert api._active_response_consumes_canonical_slot is True
+    assert api._active_response_confirmation_guarded is False
+    assert api._active_response_preference_guarded is False
+
+
 def test_handle_response_done_reconciles_terminal_substantive_count() -> None:
     api = _make_api()
     api._maybe_schedule_empty_response_retry = AsyncMock()
