@@ -679,7 +679,7 @@ def test_terminal_substantive_reconcile_exact_phrase_repair_path_totals_one() ->
     assert state.substantive_count == 1
 
 
-def test_handle_transcribe_response_done_logs_from_per_response_buffer_prefix() -> None:
+def test_handle_transcribe_response_done_uses_event_response_id_for_full_per_response_buffer() -> None:
     api = _make_api()
     api._maybe_schedule_empty_response_retry = AsyncMock()
     api._build_confirmation_transition_decision = Mock(
@@ -699,10 +699,84 @@ def test_handle_transcribe_response_done_logs_from_per_response_buffer_prefix() 
     api._assistant_reply_accum = "different levels."
 
     with patch("ai.realtime.response_terminal_handlers.log_info") as info_log:
-        asyncio.run(api.handle_transcribe_response_done())
+        asyncio.run(
+            api.handle_transcribe_response_done(
+                {"type": "response.output_audio_transcript.done", "response_id": "resp_1"}
+            )
+        )
 
     rendered = " ".join(str(arg) for arg in info_log.call_args.args)
     assert "I can see rows of games stacked at different levels." in rendered
+
+
+def test_handle_transcribe_response_done_for_stale_response_id_does_not_finalize_or_clear_active_buffer() -> None:
+    api = _make_api()
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    api._active_response_id = "resp_new"
+    api.response_in_progress = True
+    api._assistant_reply_by_response_id = {
+        "resp_old": "stale prefix",
+        "resp_new": "full upgraded response",
+    }
+    api._assistant_reply_response_id = "resp_new"
+    api.assistant_reply = "full upgraded response"
+    api._assistant_reply_accum = "full upgraded response"
+    api._terminal_response_text_by_response_id = {}
+    api._maybe_enqueue_reflection = Mock()
+
+    with patch("ai.realtime.response_terminal_handlers.log_info") as info_log:
+        asyncio.run(
+            api.handle_transcribe_response_done(
+                {"type": "response.output_audio_transcript.done", "response_id": "resp_old"}
+            )
+        )
+
+    assert api._assistant_reply_text_for_response("resp_new") == "full upgraded response"
+    assert api.assistant_reply == "full upgraded response"
+    assert api._assistant_reply_accum == "full upgraded response"
+    assert api._assistant_reply_response_id == "resp_new"
+    assert api._terminal_response_text_by_response_id == {}
+    assert api.response_in_progress is True
+    info_log.assert_not_called()
+
+
+def test_output_audio_transcript_done_event_router_passes_full_event_and_finalizes_matching_buffer() -> None:
+    api = _make_api()
+    api._should_process_response_event_ingress = lambda *_args, **_kwargs: True
+    api._set_response_status = lambda **_kwargs: None
+    api._is_active_response_guarded = lambda: False
+    api._audio_playback_busy = False
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._mark_first_assistant_utterance_observed_if_needed = lambda *_args, **_kwargs: None
+    api._assistant_reply_by_response_id = {
+        "resp_1": "I can see the whole shelf.",
+        "resp_old": "old suffix",
+    }
+    api._assistant_reply_response_id = "resp_old"
+    api.assistant_reply = "old suffix"
+    api._assistant_reply_accum = "old suffix"
+    api._terminal_response_text_by_response_id = {}
+    api._maybe_enqueue_reflection = Mock()
+
+    asyncio.run(
+        api._handle_event_legacy(
+            {"type": "response.output_audio_transcript.done", "response_id": "resp_1"},
+            websocket=None,
+        )
+    )
+
+    assert api._terminal_response_text_by_response_id["resp_1"] == "I can see the whole shelf."
+    assert api._assistant_reply_text_for_response("resp_1") == ""
+    assert api._assistant_reply_response_id == "resp_old"
+    assert api.state_manager.state == InteractionState.IDLE
 
 
 def test_clear_assistant_reply_buffers_for_other_response_preserves_active_prefix() -> None:

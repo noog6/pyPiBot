@@ -39,7 +39,7 @@ class ResponseTerminalHandlers:
     def __init__(self, api: RealtimeAPI) -> None:
         self._api = api
 
-    async def handle_transcribe_response_done(self) -> None:
+    async def handle_transcribe_response_done(self, event: dict[str, Any] | None = None) -> None:
         api = self._api
         if (
             api._active_response_confirmation_guarded
@@ -74,7 +74,17 @@ class ResponseTerminalHandlers:
             logger.info("Finished handle_transcribe_response_done()")
             return
 
-        response_id = str(getattr(api, "_assistant_reply_response_id", "") or "").strip()
+        event_response_id = api._response_id_from_event(event)
+        response_id = event_response_id or str(getattr(api, "_assistant_reply_response_id", "") or "").strip()
+        active_response_id = str(getattr(api, "_active_response_id", "") or "").strip()
+        if event_response_id and active_response_id and event_response_id != active_response_id:
+            logger.debug(
+                "transcript_done_ignored reason=inactive_response response_id=%s active_response_id=%s",
+                event_response_id,
+                active_response_id,
+            )
+            return
+
         reply_text = api._assistant_reply_text_for_response(response_id) if response_id else str(api.assistant_reply or "")
 
         if reply_text:
