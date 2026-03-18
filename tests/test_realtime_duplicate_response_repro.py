@@ -160,6 +160,7 @@ def _make_api_stub() -> RealtimeAPI:
     api._log_user_transcript = lambda *_args, **_kwargs: None
     api._record_user_input = lambda *_args, **_kwargs: None
     api._track_outgoing_event = RealtimeAPI._track_outgoing_event.__get__(api, RealtimeAPI)
+    api._active_input_event_key_for_turn = lambda turn_id: api._active_input_event_key_by_turn_id.get(turn_id, "")
     api._input_audio_events = type(
         "_InputAudioEvents",
         (),
@@ -1805,6 +1806,58 @@ def test_transcript_final_rebind_syncs_active_ownership_and_legacy_mirrors() -> 
 
 
 
+def test_transcript_final_rebind_coherence_snapshot_stays_consistent() -> None:
+    api = _make_api_stub()
+    old_key = "synthetic_server_auto_turn_1_2"
+    new_key = "item_2"
+    old_canonical_key = api._canonical_utterance_key(turn_id="turn_1", input_event_key=old_key)
+    new_canonical_key = api._canonical_utterance_key(turn_id="turn_1", input_event_key=new_key)
+    api._active_response_origin = "server_auto"
+    api._response_in_flight = True
+    api._active_response_id = "resp-server-auto-live"
+    api._active_server_auto_input_event_key = old_key
+    api._active_input_event_key_by_turn_id["turn_1"] = new_key
+    api._canonical_response_state_mutate(
+        canonical_key=old_canonical_key,
+        turn_id="turn_1",
+        input_event_key=old_key,
+        mutator=lambda record: (
+            setattr(record, "created", True),
+            setattr(record, "origin", "server_auto"),
+            setattr(record, "response_id", "resp-server-auto-live"),
+        ),
+    )
+    api._record_pending_server_auto_response(
+        turn_id="turn_1",
+        response_id="resp-server-auto-live",
+        canonical_key=old_canonical_key,
+    )
+    api._set_active_response_state(
+        response_id="resp-server-auto-live",
+        origin="server_auto",
+        input_event_key=old_key,
+        canonical_key=old_canonical_key,
+    )
+
+    api._rebind_active_response_correlation_key(
+        turn_id="turn_1",
+        replacement_input_event_key=new_key,
+        cause="transcript_final_rebind",
+    )
+
+    snapshot = api._response_runtime_coherence_snapshot(
+        turn_id="turn_1",
+        canonical_key=new_canonical_key,
+        response_id="resp-server-auto-live",
+    )
+
+    assert snapshot["violations"] == []
+    assert snapshot["active_response"]["input_event_key"] == new_key
+    assert snapshot["active_response"]["canonical_key"] == new_canonical_key
+    assert snapshot["canonical_state"]["response_id"] == "resp-server-auto-live"
+    assert snapshot["canonical_state"]["input_event_key"] == new_key
+
+
 def test_websocket_close_clears_active_ownership_surface_and_legacy_mirrors(monkeypatch) -> None:
     api = _make_api_stub()
     api._transport = type(
@@ -1839,6 +1892,15 @@ def test_websocket_close_clears_active_ownership_surface_and_legacy_mirrors(monk
 
     asyncio.run(api.process_ws_messages(object()))
 
+    snapshot = api._response_runtime_coherence_snapshot(
+        turn_id="turn_3",
+        canonical_key=api._canonical_utterance_key(turn_id="turn_3", input_event_key="synthetic_server_auto_turn_3_1"),
+        response_id="resp-ws-live",
+    )
+
+    assert snapshot["violations"] == []
+    assert snapshot["active_response"]["response_id"] is None
+    assert snapshot["suppression"]["active_input_event_key"] is None
     assert api._response_in_flight is False
     assert api.response_in_progress is False
     assert api._response_create_queue_drain_source == "websocket_close"

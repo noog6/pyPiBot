@@ -475,6 +475,12 @@ class ResponseTerminalHandlers:
             active_canonical_key=active_canonical_key,
             payload_summary=f"delivery_state_before_done={delivery_state_before_done}",
         )
+        api._log_lifecycle_coherence(
+            stage="response_done",
+            turn_id=turn_id,
+            response_id=resolved_response_id or active_response_id,
+            canonical_key=resolved_canonical_key,
+        )
         logger.debug(
             "[RESPTRACE] response_done_cleanup_after run_id=%s removed_suppressed_turn=%s "
             "removed_suppressed_input_event_key=%s suppressed_turns_count=%s suppressed_keys_count=%s "
