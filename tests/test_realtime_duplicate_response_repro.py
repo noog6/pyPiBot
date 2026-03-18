@@ -1221,7 +1221,16 @@ def test_tool_followup_blocked_by_active_response_released_on_response_done(monk
     api._active_response_origin = "assistant_message"
     api._current_response_turn_id = "turn_tool_release"
     api._active_response_input_event_key = "item_active_release"
+    api._active_response_canonical_key = api._canonical_utterance_key(
+        turn_id="turn_tool_release",
+        input_event_key="item_active_release",
+    )
     api._active_input_event_key_by_turn_id["turn_tool_release"] = "item_active_release"
+    api._record_pending_server_auto_response(
+        turn_id="turn_tool_release",
+        response_id="resp-active-release",
+        canonical_key=api._active_response_canonical_key,
+    )
     api._build_confirmation_transition_decision = lambda **_kwargs: type(
         "_Transition",
         (),
@@ -1241,6 +1250,7 @@ def test_tool_followup_blocked_by_active_response_released_on_response_done(monk
 
     captured_logs: list[str] = []
     original_info = logger.info
+    original_warning = logger.warning
 
     def _capture_info(message: str, *args, **kwargs):
         rendered = str(message)
@@ -1249,8 +1259,16 @@ def test_tool_followup_blocked_by_active_response_released_on_response_done(monk
         captured_logs.append(rendered)
         return original_info(message, *args, **kwargs)
 
+    def _capture_warning(message: str, *args, **kwargs):
+        rendered = str(message)
+        if args:
+            rendered = rendered % args
+        captured_logs.append(rendered)
+        return original_warning(message, *args, **kwargs)
+
     monkeypatch.setattr(logger, "info", _capture_info)
     monkeypatch.setattr(logger, "debug", _capture_info)
+    monkeypatch.setattr(logger, "warning", _capture_warning)
 
     async def _run() -> None:
         await api._send_response_create(ws, response_create_event, origin="tool_output")
@@ -1258,17 +1276,60 @@ def test_tool_followup_blocked_by_active_response_released_on_response_done(monk
         assert api._tool_followup_state(canonical_key=canonical_key) == "blocked_active_response"
 
         await api.handle_response_done({"type": "response.done", "response_id": "resp-active-release"})
+        pending = api._pending_server_auto_response_for_turn(turn_id="turn_tool_release")
+        assert pending is not None
+        assert pending.active is False
+
+        await api._handle_response_created_event(
+            {
+                "type": "response.created",
+                "response": {
+                    "id": "resp-tool-release",
+                    "metadata": {
+                        "turn_id": "turn_tool_release",
+                        "input_event_key": "tool:call_release_1",
+                        "tool_followup": "true",
+                        "tool_followup_release": "true",
+                        "tool_call_id": "call_release_1",
+                        "parent_turn_id": "turn_tool_release",
+                        "parent_input_event_key": "item_active_release",
+                    },
+                },
+            },
+            ws,
+        )
+        await api.handle_response_done({"type": "response.done", "response": {"id": "resp-tool-release"}})
 
     asyncio.run(_run())
 
     response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
     assert len(response_create_events) == 1
-    assert api._tool_followup_state(canonical_key=canonical_key) in {"creating", "created", "released_on_response_done"}
+    assert api._tool_followup_state(canonical_key=canonical_key) == "done"
+    selection_parent = api._terminal_deliverable_selection_store().get("resp-active-release")
+    selection_tool = api._terminal_deliverable_selection_store().get("resp-tool-release")
+    assert selection_parent == {
+        "canonical_key": api._canonical_utterance_key(turn_id="turn_tool_release", input_event_key="item_active_release"),
+        "selected": False,
+        "reason": "tool_followup_precedence",
+    }
+    assert selection_tool == {
+        "canonical_key": canonical_key,
+        "selected": True,
+        "reason": "normal",
+    }
+    assert api._active_input_event_key_for_turn("turn_tool_release") == "tool:call_release_1"
+    assert not getattr(api, "_response_create_queue", deque())
     assert any(
         "tool_followup_state" in entry
         and f"canonical_key={canonical_key}" in entry
         and "state=scheduled_release" in entry
         and "reason=response_done response_id=resp-active-release" in entry
+        for entry in captured_logs
+    )
+    assert any("tool_followup_release_handoff" in entry and f"canonical_key={canonical_key}" in entry for entry in captured_logs)
+    assert not any(
+        "lifecycle_coherence_violation" in entry and "turn_active_key_canonical_mismatch" in entry
+        and "response_id=resp-tool-release" in entry
         for entry in captured_logs
     )
     assert not any(
