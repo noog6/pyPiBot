@@ -13978,7 +13978,7 @@ class RealtimeAPI:
             self._mark_first_assistant_utterance_observed_if_needed(delta)
             self._append_assistant_reply_text(delta, allow_separator=False, response_id=response_id)
         elif event_type == "response.output_audio_transcript.done":
-            await self.handle_transcribe_response_done()
+            await self.handle_transcribe_response_done(event)
             self.state_manager.update_state(
                 InteractionState.IDLE,
                 "audio transcript done",
@@ -15432,8 +15432,8 @@ class RealtimeAPI:
         transport = self._get_or_create_transport()
         await transport.send_json(websocket, error_item)
 
-    async def handle_transcribe_response_done(self) -> None:
-        await self._response_terminal_handlers_module().handle_transcribe_response_done()
+    async def handle_transcribe_response_done(self, event: dict[str, Any] | None = None) -> None:
+        await self._response_terminal_handlers_module().handle_transcribe_response_done(event)
 
     async def handle_audio_response_done(self) -> None:
         await self._response_terminal_handlers_module().handle_audio_response_done()
