@@ -10573,8 +10573,13 @@ class RealtimeAPI:
         record_ai_call: bool,
         debug_context: dict[str, Any] | None,
         memory_brief_note: str | None,
+        emit_outcome_log: bool = True,
     ) -> bool:
-        return self._response_create_runtime.schedule_pending_response_create(
+        runtime = getattr(self, "_response_create_runtime", None)
+        if runtime is None:
+            runtime = ResponseCreateRuntime(self)
+            self._response_create_runtime = runtime
+        return runtime.schedule_pending_response_create(
             websocket=websocket,
             response_create_event=response_create_event,
             origin=origin,
@@ -10582,6 +10587,7 @@ class RealtimeAPI:
             record_ai_call=record_ai_call,
             debug_context=debug_context,
             memory_brief_note=memory_brief_note,
+            emit_outcome_log=emit_outcome_log,
         )
 
     async def _send_response_create(
@@ -10595,7 +10601,11 @@ class RealtimeAPI:
         debug_context: dict[str, Any] | None = None,
         memory_brief_note: str | None = None,
     ) -> bool:
-        return await self._response_create_runtime.send_response_create(
+        runtime = getattr(self, "_response_create_runtime", None)
+        if runtime is None:
+            runtime = ResponseCreateRuntime(self)
+            self._response_create_runtime = runtime
+        return await runtime.send_response_create(
             websocket,
             response_create_event,
             origin=origin,
@@ -10606,7 +10616,11 @@ class RealtimeAPI:
         )
 
     async def _drain_response_create_queue(self, source_trigger: str | None = None) -> None:
-        await self._response_create_runtime.drain_response_create_queue(source_trigger=source_trigger)
+        runtime = getattr(self, "_response_create_runtime", None)
+        if runtime is None:
+            runtime = ResponseCreateRuntime(self)
+            self._response_create_runtime = runtime
+        await runtime.drain_response_create_queue(source_trigger=source_trigger)
 
 
     def _extract_confirmation_reminder_dedupe_key(
