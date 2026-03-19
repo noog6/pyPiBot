@@ -278,3 +278,34 @@ def test_context_only_injection_uses_system_role_and_skips_user_intent_path() ->
     assert transport.events
     assert transport.events[0]["item"]["role"] == "system"
 
+
+def test_phatic_thanks_does_not_emit_battery_advisory() -> None:
+    api = _make_api_stub()
+    api._record_user_input("Thanks.", source="text_message")
+
+    enter_warning = Event(
+        source="battery",
+        kind="status",
+        metadata={"severity": "warning", "event_type": "status", "transition": "enter_warning"},
+    )
+
+    decision = api._battery_response_decision(enter_warning, fallback=False)
+
+    assert decision.decision == "suppress"
+    assert decision.reason_code == "phatic_acknowledgement_turn"
+
+
+def test_explicit_battery_question_still_answers_normally() -> None:
+    api = _make_api_stub()
+    api._record_user_input("What percentage is your battery currently at?", source="text_message")
+
+    info_event = Event(
+        source="battery",
+        kind="status",
+        metadata={"severity": "info", "event_type": "status", "transition": "steady_info"},
+    )
+
+    decision = api._battery_response_decision(info_event, fallback=False)
+
+    assert decision.decision == "allow"
+    assert decision.reason_code == "query_context_active"

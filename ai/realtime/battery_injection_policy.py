@@ -7,6 +7,7 @@ from typing import Any
 
 from ai.event_bus import Event
 from ai.governance_spine import GovernanceDecision
+from ai.realtime.asr_trust import is_phatic_acknowledgement_text
 from core.logging import logger
 
 BATTERY_PRIORITY_ALLOW_CRITICAL = 20
@@ -70,6 +71,19 @@ class BatteryInjectionPolicy:
         # suppress = hard policy block; allow = eligible for response creation.
         # GovernanceDecision.priority remains seam-local observability metadata
         # unless/until an explicit cross-system arbiter consumes it.
+        last_user_input = str(getattr(self._api, "_last_user_input_text", "") or "")
+        if (
+            is_phatic_acknowledgement_text(last_user_input)
+            and not self.is_query_context_active()
+            and not self.is_safety_override(event)
+        ):
+            return GovernanceDecision(
+                decision="suppress",
+                reason_code="phatic_acknowledgement_turn",
+                subsystem="battery",
+                priority=BATTERY_PRIORITY_SUPPRESS_TOPIC,
+                metadata={"fallback": fallback, "event_type": event_type, "severity": severity, "transition": transition},
+            )
         if "battery" in getattr(self._api, "_suppressed_topics", set()) and not self.is_safety_override(event):
             logger.info("battery_response_suppressed reason=topic_suppression")
             return GovernanceDecision(

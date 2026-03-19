@@ -14,6 +14,20 @@ _STOPWORDS = {
 
 _VISUAL_TERMS = {"pants", "shirt", "hat", "wearing", "wear", "color", "see"}
 _GREETING_TERMS = {"hi", "hello", "hey", "yo", "sup", "howdy"}
+_PHATIC_ACKNOWLEDGEMENTS = {
+    "thanks",
+    "thank you",
+    "ok",
+    "okay",
+    "got it",
+    "gotcha",
+    "cool",
+    "nice",
+    "sounds good",
+    "all good",
+    "perfect",
+    "alright",
+}
 _CLEAR_MOTION_TERMS = {"look", "center", "left", "right", "up", "down", "back"}
 _COMPOUND_MOTION_TERMS = {"move", "turn", "look", "return", "go"}
 _DIRECTION_TERMS = {"center", "left", "right", "up", "down", "back", "front", "forward"}
@@ -40,6 +54,15 @@ def _contains_rare_terms(text: str) -> bool:
 
 def _likely_proper_noun(text: str) -> bool:
     return any(re.match(r"^[A-Z][a-z]+$", token) for token in re.findall(r"\b\w+\b", text or ""))
+
+
+def _normalize_acknowledgement_text(text: str) -> str:
+    return " ".join(re.findall(r"[a-zA-Z0-9']+", (text or "").lower()))
+
+
+def is_phatic_acknowledgement_text(text: str) -> bool:
+    normalized = _normalize_acknowledgement_text(text)
+    return normalized in _PHATIC_ACKNOWLEDGEMENTS
 
 
 @dataclass(slots=True)
@@ -121,6 +144,8 @@ def should_clarify(
         and bool(token_set & _DIRECTION_TERMS)
     )
 
+    if is_phatic_acknowledgement_text(transcript_text):
+        return False, "phatic_acknowledgement"
     if snapshot.asr_confidence is not None and snapshot.asr_confidence < min_confidence:
         return True, "low_conf"
     if snapshot.short_utterance and snapshot.very_short_text:
