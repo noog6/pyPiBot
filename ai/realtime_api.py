@@ -2487,6 +2487,7 @@ class RealtimeAPI:
             self._schedule_tool_followup_after_micro_ack_discard(context=context)
             return
         speak = self._should_speak_micro_ack(context.channel)
+        utterance_context = self._micro_ack_utterance_context(context)
 
         async def _emit() -> None:
             await self.send_assistant_message(
@@ -2505,9 +2506,24 @@ class RealtimeAPI:
                     "micro_ack_action": context.action or "",
                     "micro_ack_tool_call_id": context.tool_call_id or "",
                 },
+                utterance_context=utterance_context,
             )
 
         self.loop.create_task(_emit())
+
+    def _micro_ack_utterance_context(self, context: MicroAckContext) -> UtteranceContext:
+        turn_id = str(getattr(context, "turn_id", "") or "").strip() or self._current_turn_id_or_unknown()
+        input_event_key = ""
+        action = str(getattr(context, "action", "") or "").strip()
+        canonical_prefix = f"{self._current_run_id() or 'run-unknown'}:{turn_id}:"
+        if action.startswith(canonical_prefix):
+            input_event_key = action[len(canonical_prefix) :].strip()
+        if not input_event_key and turn_id:
+            input_event_key = str(self._active_input_event_key_for_turn(turn_id) or "").strip()
+        return self._build_utterance_context(
+            turn_id=turn_id,
+            input_event_key=input_event_key or None,
+        )
 
     def _micro_ack_phrase_is_non_substantive(self, phrase: str) -> bool:
         normalized_phrase = str(phrase or "").strip()
