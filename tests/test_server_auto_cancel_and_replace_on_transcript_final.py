@@ -1167,6 +1167,7 @@ def test_cancel_and_replace_reconciles_provisional_ownership_before_coherence_ch
         created_at_ms=1,
         active=True,
         upgrade_chain_id="run-464:turn_51:synthetic_server_auto_51",
+        pre_rebind_canonical_key="run-464:turn_51:synthetic_server_auto_51",
     )
     api._terminal_deliverable_selection_store()["resp-server-auto-51"] = {
         "selected": False,
@@ -1201,6 +1202,104 @@ def test_cancel_and_replace_reconciles_provisional_ownership_before_coherence_ch
     assert pending is not None
     assert pending.canonical_key == "run-464:turn_51:item_51"
     assert api._terminal_deliverable_selection_store()["resp-server-auto-51"]["canonical_key"] == "run-464:turn_51:item_51"
+
+
+def test_cancel_and_replace_does_not_fallback_after_transcript_final_rebind(monkeypatch) -> None:
+    api = _build_api_stub()
+    transport = _Transport()
+    captured: list[str] = []
+
+    pending = PendingServerAutoResponse(
+        turn_id="turn_52",
+        response_id="resp-server-auto-52",
+        canonical_key="run-464:turn_52:synthetic_server_auto_52",
+        created_at_ms=1,
+        active=True,
+        upgrade_chain_id="run-464:turn_52:synthetic_server_auto_52",
+        pre_rebind_canonical_key="run-464:turn_52:synthetic_server_auto_52",
+    )
+    api._pending_server_auto_response_by_turn_id["turn_52"] = pending
+    api._terminal_deliverable_selection_store()["resp-server-auto-52"] = {
+        "selected": False,
+        "reason": "provisional_server_auto_awaiting_transcript_final",
+        "canonical_key": "run-464:turn_52:synthetic_server_auto_52",
+    }
+    api._peek_pending_preference_memory_context_payload = lambda **_kwargs: None
+    api._get_or_create_transport = lambda: transport
+    api._response_delivery_state = lambda **_kwargs: "pending"
+
+    async def _fake_send_response_create(_websocket, _event, **_kwargs):
+        return True
+
+    api._send_response_create = _fake_send_response_create
+    api._rebind_provisional_server_auto_turn_ownership(
+        turn_id="turn_52",
+        response_id="resp-server-auto-52",
+        replacement_input_event_key="item_52",
+    )
+    monkeypatch.setattr(
+        "ai.realtime_api.logger.info",
+        lambda msg, *args: captured.append(msg % args if args else msg),
+    )
+
+    replaced = asyncio.run(
+        api._cancel_and_replace_pending_server_auto_on_transcript_final(
+            websocket=object(),
+            turn_id="turn_52",
+            input_event_key="item_52",
+            origin_label="upgraded_response",
+        )
+    )
+
+    assert replaced is True
+    assert not any(
+        "upgrade_flow_fallback outcome=keep_server_auto reason=same_canonical_key" in line for line in captured
+    )
+    assert any("replacement_response_scheduled" in line for line in captured)
+
+
+def test_cancel_and_replace_skips_duplicate_when_real_replacement_already_exists(monkeypatch) -> None:
+    api = _build_api_stub()
+    captured: list[str] = []
+    api._pending_server_auto_response_by_turn_id["turn_53"] = PendingServerAutoResponse(
+        turn_id="turn_53",
+        response_id="resp-server-auto-53",
+        canonical_key="run-464:turn_53:item_53",
+        created_at_ms=1,
+        active=True,
+        upgrade_chain_id="run-464:turn_53:synthetic_server_auto_53",
+        pre_rebind_canonical_key="run-464:turn_53:item_53",
+    )
+    api._active_response_id = "resp-replacement-53"
+    api._active_response_canonical_key = "run-464:turn_53:item_53"
+    api._response_delivery_state = lambda **_kwargs: "created"
+    api._get_or_create_transport = lambda: _Transport()
+    api._peek_pending_preference_memory_context_payload = lambda **_kwargs: None
+
+    async def _unexpected_send_response_create(_websocket, _event, **_kwargs):
+        raise AssertionError("replacement create should not be sent")
+
+    api._send_response_create = _unexpected_send_response_create
+    monkeypatch.setattr(
+        "ai.realtime_api.logger.info",
+        lambda msg, *args: captured.append(msg % args if args else msg),
+    )
+
+    replaced = asyncio.run(
+        api._cancel_and_replace_pending_server_auto_on_transcript_final(
+            websocket=object(),
+            turn_id="turn_53",
+            input_event_key="item_53",
+            origin_label="upgraded_response",
+        )
+    )
+
+    assert replaced is False
+    assert any(
+        "upgrade_flow_fallback outcome=keep_server_auto reason=same_canonical_key replacement_exists=true "
+        "lineage_key=run-464:turn_53:item_53 replacement_key=run-464:turn_53:item_53" in line
+        for line in captured
+    )
 
 
 def test_distinct_info_tool_followup_not_suppressed_after_canonical_ownership() -> None:
