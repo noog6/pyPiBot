@@ -5870,6 +5870,13 @@ class RealtimeAPI:
             return
         pending = self._pending_server_auto_response_for_turn(turn_id=normalized_turn_id)
         if isinstance(pending, PendingServerAutoResponse):
+            previous_canonical_key = str(getattr(pending, "canonical_key", "") or "").strip()
+            if (
+                previous_canonical_key
+                and previous_canonical_key != replacement_canonical_key
+                and not str(getattr(pending, "pre_rebind_canonical_key", "") or "").strip()
+            ):
+                pending.pre_rebind_canonical_key = previous_canonical_key
             pending.canonical_key = replacement_canonical_key
         if normalized_response_id:
             selection_store = self._terminal_deliverable_selection_store()
@@ -14302,8 +14309,9 @@ class RealtimeAPI:
             response_id=old_response_id or None,
             replacement_input_event_key=input_event_key,
         )
-        if old_pending_canonical_key:
-            self._lifecycle_controller().on_replaced(old_pending_canonical_key, replacement_canonical_key)
+        replaced_lineage_key = old_pending_lineage_key or old_pending_canonical_key
+        if replaced_lineage_key:
+            self._lifecycle_controller().on_replaced(replaced_lineage_key, replacement_canonical_key)
             self._log_lifecycle_event(
                 turn_id=turn_id,
                 input_event_key=input_event_key,

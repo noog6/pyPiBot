@@ -1152,6 +1152,66 @@ def test_transcript_final_handoff_rebinds_pending_and_terminal_selection_canonic
     )
     assert "pending_server_auto_canonical_key_mismatch" not in snapshot["violations"]
     assert "terminal_selection_canonical_key_mismatch" not in snapshot["violations"]
+    assert pending.pre_rebind_canonical_key == old_canonical_key
+
+
+def test_transcript_final_upgrade_after_provisional_done_uses_pre_rebind_lineage_without_poisoning_replacement() -> None:
+    api = _build_api_stub()
+    old_canonical_key = "run-464:turn_52:synthetic_server_auto_52"
+    new_input_event_key = "item_52"
+    new_canonical_key = "run-464:turn_52:item_52"
+    replacement_calls: list[dict[str, object]] = []
+
+    api._pending_server_auto_response_by_turn_id["turn_52"] = PendingServerAutoResponse(
+        turn_id="turn_52",
+        response_id="resp-server-auto-52",
+        canonical_key=old_canonical_key,
+        created_at_ms=1,
+        active=False,
+    )
+    api._peek_pending_preference_memory_context_payload = lambda **_kwargs: None
+    api._get_or_create_transport = lambda: _Transport()
+    api._lifecycle_controller().on_response_done(old_canonical_key)
+
+    api._rebind_provisional_server_auto_turn_ownership(
+        turn_id="turn_52",
+        response_id="resp-server-auto-52",
+        replacement_input_event_key=new_input_event_key,
+    )
+
+    pending = api._pending_server_auto_response_for_turn(turn_id="turn_52")
+    assert pending is not None
+    assert pending.canonical_key == new_canonical_key
+    assert pending.pre_rebind_canonical_key == old_canonical_key
+
+    async def _fake_send_response_create(_websocket, event, **kwargs):
+        replacement_calls.append({"event": event, **kwargs})
+        return True
+
+    api._send_response_create = _fake_send_response_create
+
+    replaced = asyncio.run(
+        api._cancel_and_replace_pending_server_auto_on_transcript_final(
+            websocket=object(),
+            turn_id="turn_52",
+            input_event_key=new_input_event_key,
+            origin_label="upgraded_response",
+        )
+    )
+
+    assert replaced is True
+    assert len(replacement_calls) == 1
+    assert api._lifecycle_controller().state_for(old_canonical_key).value == "replaced"
+    assert api._lifecycle_controller().state_for(new_canonical_key).value == "new"
+    assert (
+        api._drop_response_create_for_terminal_state(
+            turn_id="turn_52",
+            input_event_key=new_input_event_key,
+            origin="upgraded_response",
+            response_metadata={"transcript_upgrade_replacement": "true"},
+        )
+        is False
+    )
 
 
 def test_cancel_and_replace_reconciles_provisional_ownership_before_coherence_check(monkeypatch) -> None:
