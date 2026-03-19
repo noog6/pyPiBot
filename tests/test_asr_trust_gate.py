@@ -104,3 +104,46 @@ def test_compound_motion_visual_request_does_not_force_visual_unavailable_when_c
 
     assert clarify is False
     assert reason == "compound_motion_visual_defer"
+
+
+def test_phatic_thanks_does_not_route_to_clarify() -> None:
+    snapshot = build_utterance_trust_snapshot(
+        run_id="run-700",
+        turn_id="turn-ack",
+        input_event_key="evt-thanks",
+        transcript_text="Thanks.",
+        utterance_duration_ms=180,
+        asr_meta={},
+        short_utterance_ms=450,
+    )
+
+    clarify, reason = should_clarify(
+        transcript_text=snapshot.transcript_text,
+        snapshot=snapshot,
+        min_confidence=0.65,
+    )
+
+    assert clarify is False
+    assert reason == "phatic_acknowledgement"
+
+
+def test_extended_phatic_acknowledgements_do_not_route_to_clarify() -> None:
+    for transcript_text in ("Gotcha.", "sounds good", "all good", "perfect", "alright"):
+        snapshot = build_utterance_trust_snapshot(
+            run_id="run-701",
+            turn_id="turn-ack-extended",
+            input_event_key=f"evt-{transcript_text}",
+            transcript_text=transcript_text,
+            utterance_duration_ms=1800,
+            asr_meta={},
+            short_utterance_ms=450,
+        )
+
+        clarify, reason = should_clarify(
+            transcript_text=snapshot.transcript_text,
+            snapshot=snapshot,
+            min_confidence=0.65,
+        )
+
+        assert clarify is False
+        assert reason == "phatic_acknowledgement"

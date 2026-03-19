@@ -378,3 +378,24 @@ def test_short_utterance_bounded_clarify_instruction_is_unchanged() -> None:
         "'Sorry, I only caught a tiny bit. Could you repeat that?'. "
         "Do not add scene, IMU, memory, or environment commentary."
     )
+
+
+def test_ambiguous_short_utterance_still_can_clarify() -> None:
+    snapshot = build_utterance_trust_snapshot(
+        run_id="run-701",
+        turn_id="turn-ambiguous",
+        input_event_key="item-ambiguous",
+        transcript_text="Sure?",
+        utterance_duration_ms=1500,
+        asr_meta={},
+        short_utterance_ms=450,
+    )
+
+    clarify, reason = should_clarify(
+        transcript_text=snapshot.transcript_text,
+        snapshot=snapshot,
+        min_confidence=0.65,
+    )
+
+    assert clarify is True
+    assert reason == "low_semantic_confidence"
