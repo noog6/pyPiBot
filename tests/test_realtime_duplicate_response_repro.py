@@ -2922,7 +2922,7 @@ def test_tool_followup_release_not_suppressed_when_parent_only_has_unclassified_
     assert should_drop is False
     assert reason == "parent_not_deliverable"
 
-def test_tool_followup_create_seam_uses_terminal_selection_as_parent_coverage_source() -> None:
+def test_tool_followup_create_seam_requires_terminal_text_before_terminal_selection_counts_as_parent_coverage() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
     ws = _RecordingWs()
@@ -2982,8 +2982,18 @@ def test_tool_followup_create_seam_uses_terminal_selection_as_parent_coverage_so
 
     asyncio.run(api._drain_response_create_queue(source_trigger="playback_complete"))
 
-    assert len([event for event in ws.sent if event.get("type") == "response.create"]) == 0
-    assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
+    assert len([event for event in ws.sent if event.get("type") == "response.create"]) == 1
+    assert api._tool_followup_state(canonical_key=canonical_key) == "creating"
+
+    api._record_terminal_response_text(response_id=parent_response_id, text="It looks like a phone.")
+
+    should_drop, _entry, reason = api._should_suppress_queued_tool_followup_release(
+        response_metadata=metadata,
+        blocked_by_response_id=parent_response_id,
+    )
+
+    assert should_drop is True
+    assert reason == "parent_covered_tool_result"
 
 
 def test_tool_followup_pruned_when_parent_has_substantive_audio_output() -> None:
@@ -4349,6 +4359,22 @@ def test_upgraded_response_still_suppresses_redundant_tool_followup_after_pendin
         blocked_by_response_id=parent_response_id,
     )
 
+    assert should_drop is False
+    assert reason == "parent_not_deliverable"
+    assert entry is not None
+    parent_covered, coverage_source, _observed, _klass, _selected, _sel_reason = api._parent_response_coverage_state(
+        parent_state=entry[1],
+    )
+    assert parent_covered is False
+    assert coverage_source == "none"
+
+    api._record_terminal_response_text(response_id=parent_response_id, text="It looks like a phone.")
+
+    should_drop, entry, reason = api._should_suppress_queued_tool_followup_release(
+        response_metadata=metadata,
+        blocked_by_response_id=parent_response_id,
+    )
+
     assert should_drop is True
     assert reason == "parent_covered_tool_result"
     assert entry is not None
@@ -4441,10 +4467,10 @@ def test_provisional_server_auto_parent_progression_holds_then_suppresses_follow
         selection_reason="normal",
     )
 
-    # 6) once terminal-selected as normal, followup is suppressed even without substantive parent output
+    # 6) terminal selection alone does not suppress followup without substantive parent text
     api._release_blocked_tool_followups_for_response_done(response_id=parent_response_id)
-    assert api._tool_followup_state(canonical_key=tool_canonical_key) == "dropped"
-    assert followup_metadata.get("tool_followup_release") != "true"
+    assert api._tool_followup_state(canonical_key=tool_canonical_key) == "scheduled_release"
+    assert followup_metadata.get("tool_followup_release") == "true"
 
 
 def test_response_done_suppression_prunes_blocked_tool_followup_lineage_artifacts() -> None:
@@ -4826,6 +4852,39 @@ def test_emitted_micro_ack_freezes_parent_utterance_context_before_tool_followup
     assert sent_metadata.get("input_event_key") == parent_input_event_key
     assert sent_metadata.get("input_event_key") != tool_input_event_key
     assert api._tool_followup_state(canonical_key=tool_canonical_key) == "dropped"
+
+
+def test_terminal_substantive_reconcile_requires_terminal_text_evidence() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_terminal_text_required"
+    canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key="item_terminal_text_required")
+    response_id = "resp-terminal-text-required"
+
+    api._reconcile_terminal_substantive_response(
+        turn_id=turn_id,
+        canonical_key=canonical_key,
+        response_id=response_id,
+        selected=True,
+        selection_reason="normal",
+    )
+
+    state = api._conversation_efficiency_state(turn_id=turn_id)
+    assert state.substantive_count == 0
+
+    api._record_terminal_response_text(response_id=response_id, text="I can see a small object in your hand.")
+    api._reconcile_terminal_substantive_response(
+        turn_id=turn_id,
+        canonical_key=canonical_key,
+        response_id=response_id,
+        selected=True,
+        selection_reason="normal",
+    )
+
+    state = api._conversation_efficiency_state(turn_id=turn_id)
+    assert state.substantive_count == 1
+    assert state.substantive_count_by_canonical == {canonical_key: 1}
 
 
 def test_tool_followup_release_after_response_done_drains_for_nonsubstantive_parent() -> None:
