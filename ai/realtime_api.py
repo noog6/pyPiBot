@@ -2651,6 +2651,13 @@ class RealtimeAPI:
                     )
                 )
 
+    def _selected_response_has_substantive_evidence(
+        self,
+        *,
+        response_id: str | None,
+    ) -> bool:
+        return bool(self._terminal_response_text(response_id))
+
     def _reconcile_terminal_substantive_response(
         self,
         *,
@@ -2662,8 +2669,19 @@ class RealtimeAPI:
     ) -> None:
         normalized_reason = str(selection_reason or "").strip().lower()
         # Reconcile only terminal user-deliverable substantive output
-        # (selected + normal), not all response activity.
+        # (selected + normal) once the selected response has actual terminal text.
         if not selected or normalized_reason != "normal":
+            return
+        if not self._selected_response_has_substantive_evidence(response_id=response_id):
+            logger.info(
+                "terminal_substantive_reconcile_skipped run_id=%s turn_id=%s canonical_key=%s response_id=%s selected=%s reason=%s evidence=missing_terminal_text",
+                self._current_run_id() or "",
+                str(turn_id or "").strip() or "turn-unknown",
+                str(canonical_key or "").strip() or "canonical-unknown",
+                str(response_id or "").strip() or "none",
+                str(bool(selected)).lower(),
+                normalized_reason,
+            )
             return
 
         normalized_canonical_key = str(canonical_key or "").strip() or "canonical-unknown"
@@ -8197,7 +8215,8 @@ class RealtimeAPI:
                 terminal_reason = str(selection_entry.get("reason") or "unknown").strip().lower() or "unknown"
         covered = canonical_covered
         source = "canonical" if canonical_covered else "none"
-        if not covered and terminal_selected and terminal_reason == "normal":
+        terminal_text_present = self._selected_response_has_substantive_evidence(response_id=normalized_response_id)
+        if not covered and terminal_selected and terminal_reason == "normal" and terminal_text_present:
             covered = True
             source = "terminal_selection"
         return covered, source, deliverable_observed, deliverable_class, terminal_selected, terminal_reason

@@ -60,6 +60,7 @@ def _make_api() -> RealtimeAPI:
     api._preference_recall_suppressed_input_event_keys = set()
     api._pending_image_stimulus = None
     api._pending_image_flush_after_playback = False
+    api._audio_playback_busy = False
 
     api._current_turn_id_or_unknown = lambda: "turn_1"
     api._canonical_utterance_key = lambda turn_id, input_event_key: f"{turn_id}::{input_event_key or 'none'}"
