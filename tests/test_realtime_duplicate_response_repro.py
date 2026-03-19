@@ -10,6 +10,7 @@ if "audioop" not in sys.modules:
     sys.modules["audioop"] = types.ModuleType("audioop")
 
 from ai.governance import ActionPacket
+from ai.micro_ack_manager import MicroAckCategory, MicroAckContext
 from ai.realtime.response_create_runtime import ResponseCreateRuntime
 from ai.realtime.types import PendingResponseCreate
 from ai.realtime.response_terminal_handlers import ResponseTerminalHandlers
@@ -4662,6 +4663,74 @@ def test_response_done_suppression_rebinds_followon_micro_ack_to_parent_turn_key
     sent_metadata = ((response_events[0].get("response") or {}).get("metadata") or {})
     assert sent_metadata.get("input_event_key") == parent_input_event_key
     assert sent_metadata.get("input_event_key") != tool_input_event_key
+
+
+def test_emitted_micro_ack_freezes_parent_utterance_context_before_tool_followup_rebind() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api.loop = asyncio.new_event_loop()
+
+    turn_id = "turn_micro_ack_context_freeze"
+    parent_input_event_key = "item_parent_micro_ack_context_freeze"
+    tool_input_event_key = "tool:call_micro_ack_context_freeze"
+    parent_canonical_key = api._canonical_utterance_key(
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+    )
+    tool_canonical_key = api._canonical_utterance_key(
+        turn_id=turn_id,
+        input_event_key=tool_input_event_key,
+    )
+    api._current_response_turn_id = turn_id
+    api._current_input_event_key = parent_input_event_key
+    api._active_input_event_key_by_turn_id[turn_id] = parent_input_event_key
+
+    class _MutatingTransport:
+        async def send_json(self, websocket: _RecordingWs, payload: dict[str, object]) -> None:
+            await websocket.send(json.dumps(payload))
+            if payload.get("type") == "conversation.item.create":
+                api._current_input_event_key = tool_input_event_key
+                api._active_input_event_key_by_turn_id[turn_id] = tool_input_event_key
+                api._set_tool_followup_state(
+                    canonical_key=tool_canonical_key,
+                    state="dropped",
+                    reason="test_rebind_after_emit",
+                )
+
+    api._get_or_create_transport = lambda: _MutatingTransport()
+
+    async def _run() -> None:
+        api._emit_micro_ack(
+            MicroAckContext(
+                category=MicroAckCategory.LATENCY_MASK,
+                channel="voice",
+                run_id=api._current_run_id(),
+                session_id=None,
+                turn_id=turn_id,
+                intent=None,
+                action=parent_canonical_key,
+                tool_call_id=None,
+            ),
+            "latency_mask_hmm",
+            "Hmm.",
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    try:
+        api.loop.run_until_complete(_run())
+    finally:
+        api.loop.close()
+
+    response_events = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert len(response_events) == 1
+    sent_metadata = ((response_events[0].get("response") or {}).get("metadata") or {})
+    assert sent_metadata.get("micro_ack") == "true"
+    assert sent_metadata.get("input_event_key") == parent_input_event_key
+    assert sent_metadata.get("input_event_key") != tool_input_event_key
+    assert api._tool_followup_state(canonical_key=tool_canonical_key) == "dropped"
 
 
 def test_tool_followup_release_after_response_done_drains_for_nonsubstantive_parent() -> None:
