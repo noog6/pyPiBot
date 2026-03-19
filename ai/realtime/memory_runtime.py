@@ -66,7 +66,7 @@ class PerceptionMemoryVerdict:
     memory_intent_subtype: str = "none"
     preference_recall_requested: bool = False
     preference_recall_context: dict[str, Any] | None = None
-    mixed_intent_tool_request: dict[str, Any] | None = None
+    companion_gesture_tool_request: dict[str, Any] | None = None
     runtime_request: dict[str, Any] | None = None
 
     @classmethod

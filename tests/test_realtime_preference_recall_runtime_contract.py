@@ -140,13 +140,13 @@ def test_preference_recall_analysis_keeps_runtime_side_effect_sets_untouched(mon
     api._set_pending_preference_memory_context.assert_not_called()
 
 
-def test_apply_perception_memory_verdict_owns_context_attach_and_mixed_intent_runtime_effects() -> None:
+def test_apply_perception_memory_verdict_owns_context_attach_and_companion_gesture_runtime_effects() -> None:
     api = _base_api()
     api._current_input_event_key = "evt_apply"
     api._preference_recall_locked_input_event_keys = set()
     captured_contexts: list[dict[str, object]] = []
     api._set_pending_preference_memory_context = lambda **kwargs: captured_contexts.append(kwargs)
-    api._submit_mixed_intent_tool_request = AsyncMock(
+    api._submit_companion_gesture_tool_request = AsyncMock(
         return_value={"outcome": "allow", "reason": "within_bounds", "executed": True}
     )
 
@@ -160,10 +160,10 @@ def test_apply_perception_memory_verdict_owns_context_attach_and_mixed_intent_ru
             "returned_count": 1,
             "prompt_note": "Use Vim.",
         },
-        mixed_intent_tool_request={
+        companion_gesture_tool_request={
             "tool_name": "gesture_look_center",
             "tool_args": {},
-            "source": "preference_recall_mixed_intent",
+            "source": "preference_recall_companion_gesture",
             "turn_id": "turn_1",
             "query": "which editor do i prefer and look back",
         },
@@ -180,7 +180,7 @@ def test_apply_perception_memory_verdict_owns_context_attach_and_mixed_intent_ru
     assert handled is False
     assert captured_contexts
     assert captured_contexts[0]["memory_context"]["prompt_note"] == "Use Vim."
-    api._submit_mixed_intent_tool_request.assert_awaited_once()
+    api._submit_companion_gesture_tool_request.assert_awaited_once()
     assert "evt_apply" not in api._preference_recall_locked_input_event_keys
 
 
@@ -895,7 +895,7 @@ def test_topic_recall_bridge_no_hit_for_non_preference_topic(monkeypatch) -> Non
     assert handled is False
     api._set_pending_preference_memory_context.assert_not_called()
 
-def test_preference_recall_mixed_intent_routes_to_governed_tool_path(monkeypatch) -> None:
+def test_preference_recall_companion_gesture_routes_to_governed_tool_path(monkeypatch) -> None:
     api = _base_api()
     api._is_preference_recall_intent = RealtimeAPI._is_preference_recall_intent.__get__(api, RealtimeAPI)
     api._build_preference_recall_query = RealtimeAPI._build_preference_recall_query.__get__(api, RealtimeAPI)
@@ -915,7 +915,7 @@ def test_preference_recall_mixed_intent_routes_to_governed_tool_path(monkeypatch
             "favorite editor",
         )
     )
-    api._submit_mixed_intent_tool_request = AsyncMock(
+    api._submit_companion_gesture_tool_request = AsyncMock(
         return_value={"outcome": "allow", "reason": "within_bounds", "executed": True}
     )
 
@@ -938,11 +938,11 @@ def test_preference_recall_mixed_intent_routes_to_governed_tool_path(monkeypatch
 
     assert result is False
     assert gesture_calls == []
-    api._submit_mixed_intent_tool_request.assert_awaited_once()
+    api._submit_companion_gesture_tool_request.assert_awaited_once()
     assert api._run_preference_recall_with_fallbacks.await_count == 1
 
 
-def test_preference_recall_mixed_intent_governed_request_does_not_break_recall_flow() -> None:
+def test_preference_recall_companion_gesture_governed_request_does_not_break_recall_flow() -> None:
     api = _base_api()
     api._is_preference_recall_intent = RealtimeAPI._is_preference_recall_intent.__get__(api, RealtimeAPI)
     api._build_preference_recall_query = RealtimeAPI._build_preference_recall_query.__get__(api, RealtimeAPI)
@@ -959,7 +959,7 @@ def test_preference_recall_mixed_intent_governed_request_does_not_break_recall_f
         return ({"memories": [{"content": "Your favorite editor is Vim."}], "memory_cards": [], "memory_cards_text": "", "returned_count": 1}, "editor")
 
     api._run_preference_recall_with_fallbacks = AsyncMock(side_effect=_fake_recall)
-    api._submit_mixed_intent_tool_request = AsyncMock(
+    api._submit_companion_gesture_tool_request = AsyncMock(
         return_value={"outcome": "suppress", "reason": "risk_threshold_exceeded", "executed": False}
     )
 
@@ -974,4 +974,154 @@ def test_preference_recall_mixed_intent_governed_request_does_not_break_recall_f
 
     assert result is False
     assert recall_calls == ["recall"]
-    api._submit_mixed_intent_tool_request.assert_awaited_once()
+    api._submit_companion_gesture_tool_request.assert_awaited_once()
+
+
+def test_preference_recall_analysis_sets_companion_gesture_for_look_around(monkeypatch) -> None:
+    api = _base_api()
+    api._is_preference_recall_intent = RealtimeAPI._is_preference_recall_intent.__get__(api, RealtimeAPI)
+    api._classify_memory_intent = RealtimeAPI._classify_memory_intent.__get__(api, RealtimeAPI)
+    api._build_preference_recall_query = RealtimeAPI._build_preference_recall_query.__get__(api, RealtimeAPI)
+    api._mark_preference_recall_candidate = RealtimeAPI._mark_preference_recall_candidate.__get__(api, RealtimeAPI)
+    api._clear_preference_recall_candidate = RealtimeAPI._clear_preference_recall_candidate.__get__(api, RealtimeAPI)
+    api._run_preference_recall_with_fallbacks = AsyncMock(
+        return_value=(
+            {
+                "memories": [{"content": "Your favorite editor is Vim."}],
+                "memory_cards": [],
+                "memory_cards_text": 'Relevant memory:\n- "Your favorite editor is Vim."',
+                "returned_count": 1,
+            },
+            "favorite editor",
+        )
+    )
+
+    async def _fake_recall(**_kwargs):
+        return {"memories": [], "memory_cards": [], "memory_cards_text": "", "returned_count": 0}
+
+    monkeypatch.setitem(ai_tools.function_map, "recall_memories", _fake_recall)
+
+    verdict = asyncio.run(
+        RealtimeAPI._analyze_preference_recall_intent(
+            api,
+            "Look around and tell me my favorite editor.",
+            source="input_audio_transcription",
+        )
+    )
+
+    assert verdict.preference_recall_requested is True
+    assert verdict.companion_gesture_tool_request == {
+        "tool_name": "gesture_look_around",
+        "tool_args": {},
+        "source": "preference_recall_companion_gesture",
+        "turn_id": "turn_1",
+        "query": "look around and tell me my favorite editor.",
+    }
+
+
+def test_preference_recall_analysis_does_not_set_companion_gesture_for_go_back_to_center(monkeypatch) -> None:
+    api = _base_api()
+    api._is_preference_recall_intent = RealtimeAPI._is_preference_recall_intent.__get__(api, RealtimeAPI)
+    api._classify_memory_intent = RealtimeAPI._classify_memory_intent.__get__(api, RealtimeAPI)
+    api._build_preference_recall_query = RealtimeAPI._build_preference_recall_query.__get__(api, RealtimeAPI)
+    api._mark_preference_recall_candidate = RealtimeAPI._mark_preference_recall_candidate.__get__(api, RealtimeAPI)
+    api._clear_preference_recall_candidate = RealtimeAPI._clear_preference_recall_candidate.__get__(api, RealtimeAPI)
+    api._run_preference_recall_with_fallbacks = AsyncMock(
+        return_value=(
+            {
+                "memories": [{"content": "Your preferred editor is Vim."}],
+                "memory_cards": [],
+                "memory_cards_text": 'Relevant memory:\n- "Your preferred editor is Vim."',
+                "returned_count": 1,
+            },
+            "preferred editor",
+        )
+    )
+
+    async def _fake_recall(**_kwargs):
+        return {"memories": [], "memory_cards": [], "memory_cards_text": "", "returned_count": 0}
+
+    monkeypatch.setitem(ai_tools.function_map, "recall_memories", _fake_recall)
+
+    verdict = asyncio.run(
+        RealtimeAPI._analyze_preference_recall_intent(
+            api,
+            "Go back to center and tell me my preferred editor.",
+            source="input_audio_transcription",
+        )
+    )
+
+    assert verdict.preference_recall_requested is True
+    assert verdict.companion_gesture_tool_request is None
+
+
+def test_preference_recall_analysis_multi_request_without_companion_gesture_stays_unset(monkeypatch) -> None:
+    api = _base_api()
+    api._is_preference_recall_intent = RealtimeAPI._is_preference_recall_intent.__get__(api, RealtimeAPI)
+    api._classify_memory_intent = RealtimeAPI._classify_memory_intent.__get__(api, RealtimeAPI)
+    api._build_preference_recall_query = RealtimeAPI._build_preference_recall_query.__get__(api, RealtimeAPI)
+    api._mark_preference_recall_candidate = RealtimeAPI._mark_preference_recall_candidate.__get__(api, RealtimeAPI)
+    api._clear_preference_recall_candidate = RealtimeAPI._clear_preference_recall_candidate.__get__(api, RealtimeAPI)
+    api._run_preference_recall_with_fallbacks = AsyncMock(
+        return_value=(
+            {
+                "memories": [{"content": "Your favorite editor is Vim."}],
+                "memory_cards": [],
+                "memory_cards_text": 'Relevant memory:\n- "Your favorite editor is Vim."',
+                "returned_count": 1,
+            },
+            "favorite editor",
+        )
+    )
+
+    async def _fake_recall(**_kwargs):
+        return {"memories": [], "memory_cards": [], "memory_cards_text": "", "returned_count": 0}
+
+    monkeypatch.setitem(ai_tools.function_map, "recall_memories", _fake_recall)
+
+    verdict = asyncio.run(
+        RealtimeAPI._analyze_preference_recall_intent(
+            api,
+            "Tell me my favorite editor and what am I holding?",
+            source="input_audio_transcription",
+        )
+    )
+
+    assert verdict.preference_recall_requested is True
+    assert verdict.companion_gesture_tool_request is None
+
+
+def test_preference_recall_analysis_single_request_keeps_companion_gesture_unset(monkeypatch) -> None:
+    api = _base_api()
+    api._is_preference_recall_intent = RealtimeAPI._is_preference_recall_intent.__get__(api, RealtimeAPI)
+    api._classify_memory_intent = RealtimeAPI._classify_memory_intent.__get__(api, RealtimeAPI)
+    api._build_preference_recall_query = RealtimeAPI._build_preference_recall_query.__get__(api, RealtimeAPI)
+    api._mark_preference_recall_candidate = RealtimeAPI._mark_preference_recall_candidate.__get__(api, RealtimeAPI)
+    api._clear_preference_recall_candidate = RealtimeAPI._clear_preference_recall_candidate.__get__(api, RealtimeAPI)
+    api._run_preference_recall_with_fallbacks = AsyncMock(
+        return_value=(
+            {
+                "memories": [{"content": "Your favorite editor is Vim."}],
+                "memory_cards": [],
+                "memory_cards_text": 'Relevant memory:\n- "Your favorite editor is Vim."',
+                "returned_count": 1,
+            },
+            "favorite editor",
+        )
+    )
+
+    async def _fake_recall(**_kwargs):
+        return {"memories": [], "memory_cards": [], "memory_cards_text": "", "returned_count": 0}
+
+    monkeypatch.setitem(ai_tools.function_map, "recall_memories", _fake_recall)
+
+    verdict = asyncio.run(
+        RealtimeAPI._analyze_preference_recall_intent(
+            api,
+            "Tell me my favorite editor.",
+            source="input_audio_transcription",
+        )
+    )
+
+    assert verdict.preference_recall_requested is True
+    assert verdict.companion_gesture_tool_request is None

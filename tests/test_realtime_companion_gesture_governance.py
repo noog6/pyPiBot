@@ -60,16 +60,16 @@ def _setup_api() -> RealtimeAPI:
     return api
 
 
-def test_mixed_intent_tool_request_allow_executes() -> None:
+def test_companion_gesture_tool_request_allow_executes() -> None:
     api = _setup_api()
 
     result = asyncio.run(
-        RealtimeAPI._submit_mixed_intent_tool_request(
+        RealtimeAPI._submit_companion_gesture_tool_request(
             api,
             tool_name="gesture_look_around",
             tool_args={},
             websocket=object(),
-            source="preference_recall_mixed_intent",
+            source="preference_recall_companion_gesture",
             turn_id="turn_1",
             query="look around",
         )
@@ -84,17 +84,17 @@ def test_mixed_intent_tool_request_allow_executes() -> None:
     assert "turn=turn_1" in api._governance.build_action_packet.call_args.kwargs["reason"]
 
 
-def test_mixed_intent_tool_request_defer_does_not_execute() -> None:
+def test_companion_gesture_tool_request_defer_does_not_execute() -> None:
     api = _setup_api()
     api._normalize_confirmation_decision = Mock(return_value=_decision(status="deferred", reason="autonomy window closed"))
 
     result = asyncio.run(
-        RealtimeAPI._submit_mixed_intent_tool_request(
+        RealtimeAPI._submit_companion_gesture_tool_request(
             api,
             tool_name="gesture_look_around",
             tool_args={},
             websocket=object(),
-            source="preference_recall_mixed_intent",
+            source="preference_recall_companion_gesture",
             turn_id="turn_1",
             query="look around",
         )
@@ -106,17 +106,17 @@ def test_mixed_intent_tool_request_defer_does_not_execute() -> None:
     assert api._record_intent_state.call_args.args[2] == "deferred"
 
 
-def test_mixed_intent_tool_request_suppress_does_not_execute() -> None:
+def test_companion_gesture_tool_request_suppress_does_not_execute() -> None:
     api = _setup_api()
     api._normalize_confirmation_decision = Mock(return_value=_decision(status="denied", reason="risk threshold exceeded"))
 
     result = asyncio.run(
-        RealtimeAPI._submit_mixed_intent_tool_request(
+        RealtimeAPI._submit_companion_gesture_tool_request(
             api,
             tool_name="gesture_look_around",
             tool_args={},
             websocket=object(),
-            source="preference_recall_mixed_intent",
+            source="preference_recall_companion_gesture",
             turn_id="turn_1",
             query="look around",
         )
@@ -128,7 +128,7 @@ def test_mixed_intent_tool_request_suppress_does_not_execute() -> None:
     assert api._record_intent_state.call_args.args[2] == "denied"
 
 
-def test_mixed_intent_tool_request_confirmation_uses_governed_confirmation_path() -> None:
+def test_companion_gesture_tool_request_confirmation_uses_governed_confirmation_path() -> None:
     api = _setup_api()
     api._normalize_confirmation_decision = Mock(
         return_value=_decision(
@@ -140,12 +140,12 @@ def test_mixed_intent_tool_request_confirmation_uses_governed_confirmation_path(
     )
 
     result = asyncio.run(
-        RealtimeAPI._submit_mixed_intent_tool_request(
+        RealtimeAPI._submit_companion_gesture_tool_request(
             api,
             tool_name="gesture_look_around",
             tool_args={},
             websocket=object(),
-            source="preference_recall_mixed_intent",
+            source="preference_recall_companion_gesture",
             turn_id="turn_1",
             query="look around",
         )
@@ -156,22 +156,22 @@ def test_mixed_intent_tool_request_confirmation_uses_governed_confirmation_path(
     api._request_tool_confirmation.assert_awaited_once()
     assert isinstance(api._pending_action, PendingAction)
     token_metadata = api._create_confirmation_token.call_args.kwargs["metadata"]
-    assert token_metadata["mixed_intent"] is True
+    assert token_metadata["companion_gesture_request"] is True
     assert token_metadata["turn_id"] == "turn_1"
     api._execute_action.assert_not_awaited()
 
 
-def test_mixed_intent_tool_request_blocked_execution_defer_records_deferred_state() -> None:
+def test_companion_gesture_tool_request_blocked_execution_defer_records_deferred_state() -> None:
     api = _setup_api()
     api._evaluate_intent_guard = Mock(return_value=(True, "deferred", "deferred"))
 
     result = asyncio.run(
-        RealtimeAPI._submit_mixed_intent_tool_request(
+        RealtimeAPI._submit_companion_gesture_tool_request(
             api,
             tool_name="gesture_look_around",
             tool_args={},
             websocket=object(),
-            source="preference_recall_mixed_intent",
+            source="preference_recall_companion_gesture",
             turn_id="turn_1",
             query="look around",
         )
@@ -188,30 +188,30 @@ def test_normalize_realtime_call_id_direct_behavior() -> None:
     short_call_id = "call_short_123"
     assert RealtimeAPI._normalize_realtime_call_id(short_call_id) == short_call_id
 
-    oversized_call_id = "mixed_intent_a535dd5098194e50ac1f3de90318b5cc"
+    oversized_call_id = "compgest_a535dd5098194e50ac1f3de90318b5cc"
     normalized_once = RealtimeAPI._normalize_realtime_call_id(oversized_call_id)
     normalized_twice = RealtimeAPI._normalize_realtime_call_id(oversized_call_id)
 
     assert len(normalized_once) <= 32
     assert normalized_once == normalized_twice
-    assert normalized_once.startswith("mixedin_")
+    assert normalized_once.startswith("compges_")
 
 
-def test_mixed_intent_tool_request_generated_call_id_is_realtime_safe() -> None:
+def test_companion_gesture_tool_request_generated_call_id_is_realtime_safe() -> None:
     api = _setup_api()
 
     result = asyncio.run(
-        RealtimeAPI._submit_mixed_intent_tool_request(
+        RealtimeAPI._submit_companion_gesture_tool_request(
             api,
             tool_name="gesture_look_around",
             tool_args={},
             websocket=object(),
-            source="preference_recall_mixed_intent",
+            source="preference_recall_companion_gesture",
             turn_id="turn_1",
             query="look around",
         )
     )
 
     call_id = str(result.get("call_id") or "")
-    assert call_id.startswith("mixint_")
+    assert call_id.startswith("compgest_")
     assert len(call_id) <= 32

@@ -234,25 +234,25 @@ async def _analyze_preference_recall_intent(controller, text: str, *, source: st
         controller._mark_preference_recall_candidate(text, source=source)
 
         normalized_text = str(text or "").strip().lower()
-        mixed_intent_gesture_tool = ""
+        companion_gesture_tool = ""
         if "look around" in normalized_text:
-            mixed_intent_gesture_tool = "gesture_look_around"
+            companion_gesture_tool = "gesture_look_around"
         elif "look back" in normalized_text or "look center" in normalized_text or "return to neutral" in normalized_text:
-            mixed_intent_gesture_tool = "gesture_look_center"
-        if mixed_intent_gesture_tool:
+            companion_gesture_tool = "gesture_look_center"
+        if companion_gesture_tool:
             logger.info(
-                "mixed_intent_detected run_id=%s turn_id=%s source=%s tool=%s",
+                "preference_recall_companion_gesture_detected run_id=%s turn_id=%s source=%s tool=%s",
                 controller._current_run_id() or "",
                 resolved_turn_id,
                 source,
-                mixed_intent_gesture_tool,
+                companion_gesture_tool,
             )
             logger.info(
-                "mixed_intent_tool_request_created run_id=%s turn_id=%s source=%s tool=%s",
+                "companion_gesture_tool_request_created run_id=%s turn_id=%s source=%s tool=%s",
                 controller._current_run_id() or "",
                 resolved_turn_id,
                 source,
-                mixed_intent_gesture_tool,
+                companion_gesture_tool,
             )
 
         query = controller._build_preference_recall_query(text.lower(), keywords=keywords)
@@ -394,28 +394,28 @@ async def _analyze_preference_recall_intent(controller, text: str, *, source: st
             memory_intent_subtype=memory_intent_subtype,
             preference_recall_requested=True,
             preference_recall_context=memory_context,
-            mixed_intent_tool_request=(
+            companion_gesture_tool_request=(
                 {
-                    "tool_name": mixed_intent_gesture_tool,
+                    "tool_name": companion_gesture_tool,
                     "tool_args": {},
-                    "source": "preference_recall_mixed_intent",
+                    "source": "preference_recall_companion_gesture",
                     "turn_id": resolved_turn_id,
                     "query": normalized_text,
                 }
-                if mixed_intent_gesture_tool
+                if companion_gesture_tool
                 else None
             ),
             runtime_request=None,
         )
         logger.info(
-            "perception_memory_verdict run_id=%s turn_id=%s source=%s memory_intent=%s memory_intent_subtype=%s preference_recall_requested=%s mixed_intent=%s runtime_request=%s",
+            "perception_memory_verdict run_id=%s turn_id=%s source=%s memory_intent=%s memory_intent_subtype=%s preference_recall_requested=%s companion_gesture_requested=%s runtime_request=%s",
             controller._current_run_id() or "",
             resolved_turn_id,
             source,
             str(bool(verdict.memory_intent)).lower(),
             verdict.memory_intent_subtype,
             str(bool(verdict.preference_recall_requested)).lower(),
-            str(bool(verdict.mixed_intent_tool_request)).lower(),
+            str(bool(verdict.companion_gesture_tool_request)).lower(),
             "present" if isinstance(verdict.runtime_request, dict) and verdict.runtime_request else "none",
         )
         return verdict
