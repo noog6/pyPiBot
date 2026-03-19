@@ -7964,16 +7964,20 @@ class RealtimeAPI:
             reason,
         )
 
-    def _drop_dead_tool_followup_creates_after_terminal_selection(
+    def _prune_dead_tool_followup_creates(
         self,
         *,
         turn_id: str,
         selected_response_id: str | None,
-    ) -> None:
+        reason: str,
+        log_label: str,
+    ) -> tuple[int, int]:
         normalized_turn_id = str(turn_id or "").strip()
         if not normalized_turn_id:
-            return
+            return 0, 0
         normalized_response_id = str(selected_response_id or "").strip()
+        normalized_reason = str(reason or "").strip() or "parent_covered_tool_result"
+        normalized_log_label = str(log_label or "").strip() or "tool_followup_prune"
 
         def _should_drop_tool_followup(event: dict[str, Any], *, fallback_turn_id: str) -> tuple[bool, str, str, str]:
             metadata = self._extract_response_create_metadata(event)
@@ -8008,14 +8012,14 @@ class RealtimeAPI:
                     self._set_tool_followup_state(
                         canonical_key=canonical_key,
                         state="dropped",
-                        reason="parent_covered_tool_result terminal_deliverable_selected",
+                        reason=normalized_reason,
                     )
                     self._invalidate_dropped_tool_followup_lineage(
                         turn_id=normalized_turn_id,
                         canonical_key=canonical_key,
                         input_event_key=input_event_key,
                         tool_call_id=tool_call_id,
-                        reason="parent_covered_tool_result terminal_deliverable_selected",
+                        reason=normalized_reason,
                     )
                 self._pending_response_create = None
                 dropped_pending = 1
@@ -8039,14 +8043,14 @@ class RealtimeAPI:
                     self._set_tool_followup_state(
                         canonical_key=canonical_key,
                         state="dropped",
-                        reason="parent_covered_tool_result terminal_deliverable_selected",
+                        reason=normalized_reason,
                     )
                     self._invalidate_dropped_tool_followup_lineage(
                         turn_id=normalized_turn_id,
                         canonical_key=canonical_key,
                         input_event_key=input_event_key,
                         tool_call_id=tool_call_id,
-                        reason="parent_covered_tool_result terminal_deliverable_selected",
+                        reason=normalized_reason,
                     )
                 dropped_queue += 1
             self._response_create_queue = retained
@@ -8054,13 +8058,28 @@ class RealtimeAPI:
         if dropped_pending or dropped_queue:
             self._sync_pending_response_create_queue()
             logger.info(
-                "terminal_deliverable_tool_followup_prune run_id=%s turn_id=%s response_id=%s dropped_pending=%s dropped_queue=%s",
+                "%s run_id=%s turn_id=%s response_id=%s dropped_pending=%s dropped_queue=%s",
+                normalized_log_label,
                 self._current_run_id() or "",
                 normalized_turn_id,
                 normalized_response_id or "none",
                 dropped_pending,
                 dropped_queue,
             )
+        return dropped_pending, dropped_queue
+
+    def _drop_dead_tool_followup_creates_after_terminal_selection(
+        self,
+        *,
+        turn_id: str,
+        selected_response_id: str | None,
+    ) -> None:
+        self._prune_dead_tool_followup_creates(
+            turn_id=turn_id,
+            selected_response_id=selected_response_id,
+            reason="parent_covered_tool_result terminal_deliverable_selected",
+            log_label="terminal_deliverable_tool_followup_prune",
+        )
 
     def _parent_response_coverage_state(
         self,
@@ -8240,10 +8259,11 @@ class RealtimeAPI:
                 else "none",
             )
             if should_drop:
-                self._set_tool_followup_state(
-                    canonical_key=canonical_key,
-                    state="dropped",
+                self._prune_dead_tool_followup_creates(
+                    turn_id=turn_id,
+                    selected_response_id=normalized_response_id,
                     reason=f"parent_covered_tool_result response_id={normalized_response_id}",
+                    log_label="response_done_tool_followup_prune",
                 )
                 logger.info(
                     "tool_followup_release_suppressed turn_id=%s origin=%s reason=parent_covered_tool_result response_id=%s",
