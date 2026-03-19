@@ -331,6 +331,7 @@ class PendingServerAutoResponse:
     cancelled_for_upgrade: bool = False
     pre_audio_hold: bool = False
     upgrade_chain_id: str = ""
+    pre_rebind_canonical_key: str = ""
 
 
 @dataclass
@@ -5143,6 +5144,7 @@ class RealtimeAPI:
                 active=True,
                 pre_audio_hold=False,
                 upgrade_chain_id=str(upgrade_chain_id or "").strip(),
+                pre_rebind_canonical_key=str(canonical_key or "").strip(),
             )
             by_response_id[normalized_response_id] = pending
         else:
@@ -5152,6 +5154,7 @@ class RealtimeAPI:
             pending.cancelled_for_upgrade = False
             pending.pre_audio_hold = False
             pending.upgrade_chain_id = str(upgrade_chain_id or pending.upgrade_chain_id or "").strip()
+            pending.pre_rebind_canonical_key = str(canonical_key or pending.pre_rebind_canonical_key or "").strip()
         response_id_by_turn_id[normalized_turn_id] = normalized_response_id
         legacy_by_turn_id[normalized_turn_id] = pending
 
@@ -5816,6 +5819,39 @@ class RealtimeAPI:
                 rebound_selection = dict(selection_entry)
                 rebound_selection["canonical_key"] = replacement_canonical_key
                 selection_store[normalized_response_id] = rebound_selection
+
+    def _replacement_response_already_exists(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str,
+        ignore_response_id: str | None = None,
+    ) -> bool:
+        normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
+        normalized_input_event_key = str(input_event_key or "").strip()
+        normalized_ignore_response_id = str(ignore_response_id or "").strip()
+        replacement_canonical_key = self._canonical_utterance_key(
+            turn_id=normalized_turn_id,
+            input_event_key=normalized_input_event_key,
+        )
+        if not replacement_canonical_key:
+            return False
+        active_canonical_key = str(getattr(self, "_active_response_canonical_key", "") or "").strip()
+        active_response_id = str(getattr(self, "_active_response_id", "") or "").strip()
+        if (
+            active_canonical_key
+            and active_canonical_key == replacement_canonical_key
+            and active_response_id != normalized_ignore_response_id
+        ):
+            return True
+        response_delivery_state = getattr(self, "_response_delivery_state", None)
+        if callable(response_delivery_state):
+            delivery_state = str(
+                response_delivery_state(turn_id=normalized_turn_id, input_event_key=normalized_input_event_key) or ""
+            ).strip()
+            if delivery_state in {"created", "delivered", "done"}:
+                return True
+        return False
 
     def _should_defer_provisional_server_auto_tool_call(self) -> bool:
         active_origin = str(getattr(self, "_active_response_origin", "") or "").strip().lower()
@@ -14059,15 +14095,23 @@ class RealtimeAPI:
         if pending is None:
             return False
         replacement_canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
-        if str(pending.canonical_key or "").strip() == replacement_canonical_key:
+        old_pending_canonical_key = str(pending.canonical_key or "").strip()
+        old_pending_lineage_key = str(getattr(pending, "pre_rebind_canonical_key", "") or old_pending_canonical_key).strip()
+        replacement_already_exists = self._replacement_response_already_exists(
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            ignore_response_id=old_response_id or None,
+        )
+        if old_pending_lineage_key == replacement_canonical_key and replacement_already_exists:
             logger.info(
-                "upgrade_flow_fallback outcome=keep_server_auto reason=same_canonical_key run_id=%s turn_id=%s canonical_key=%s",
+                "upgrade_flow_fallback outcome=keep_server_auto reason=same_canonical_key replacement_exists=%s lineage_key=%s replacement_key=%s run_id=%s turn_id=%s",
+                str(replacement_already_exists).lower(),
+                old_pending_lineage_key or "none",
+                replacement_canonical_key or "none",
                 self._current_run_id() or "",
                 turn_id,
-                replacement_canonical_key,
             )
             return False
-        old_pending_canonical_key = str(pending.canonical_key or "").strip()
         self._rebind_provisional_server_auto_turn_ownership(
             turn_id=turn_id,
             response_id=old_response_id or None,
