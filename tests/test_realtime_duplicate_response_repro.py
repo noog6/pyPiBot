@@ -3948,6 +3948,63 @@ def test_tool_followup_queue_does_not_rebind_turn_active_key_to_tool_key() -> No
     assert api._active_input_event_key_for_turn("turn_1") == "item_parent"
 
 
+def test_catalog_only_descriptive_tool_followup_adds_uncertainty_guardrail_instruction() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    api._image_response_mode = "catalog_only"
+    api._image_response_enabled = False
+    api._active_input_event_key_by_turn_id["turn_1"] = "item_visual_parent"
+    api._utterance_trust_snapshot_by_input_event_key = {
+        "item_visual_parent": {
+            "transcript_text": "Can you tell me what I'm holding in my hand?",
+        }
+    }
+
+    event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_visual_guardrail",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+
+    payload = event.get("response") or {}
+    metadata = payload.get("metadata") or {}
+    instructions = str(((event.get("response") or {}).get("instructions")) or "")
+
+    assert metadata.get("tool_followup_status_only") is None
+    assert "Descriptive visual follow-up" in instructions
+    assert "complete the parent visual identification request" in instructions
+    assert "it looks like" in instructions
+    assert "Do not guess purpose, accessories, hidden parts" in instructions
+
+
+def test_respond_mode_descriptive_tool_followup_uses_grounded_instruction_without_catalog_hedge() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    api._image_response_mode = "respond"
+    api._image_response_enabled = True
+    api._active_input_event_key_by_turn_id["turn_1"] = "item_visual_parent"
+    api._utterance_trust_snapshot_by_input_event_key = {
+        "item_visual_parent": {
+            "transcript_text": "Can you tell me what I'm holding in my hand?",
+        }
+    }
+
+    event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_visual_respond_mode",
+        response_create_event={"type": "response.create"},
+        tool_name="analyze_image",
+    )
+
+    payload = event.get("response") or {}
+    metadata = payload.get("metadata") or {}
+    instructions = str(payload.get("instructions") or "")
+
+    assert metadata.get("tool_followup_status_only") is None
+    assert "Descriptive visual follow-up" in instructions
+    assert "Ground the answer in directly visible evidence" in instructions
+    assert "it looks like" not in instructions
+
+
 def test_tool_followup_response_created_does_not_rebind_parent_active_key_to_tool_key() -> None:
     api = _make_api_stub()
     _wire_runtime(api)

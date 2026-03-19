@@ -7415,6 +7415,40 @@ class RealtimeAPI:
             "gesture_attention_snap",
         }
 
+    def _descriptive_visual_tool_followup_instruction(
+        self,
+        *,
+        turn_id: str,
+        parent_input_event_key: str | None,
+    ) -> str | None:
+        normalized_parent_key = str(parent_input_event_key or "").strip()
+        if not normalized_parent_key:
+            return None
+        descriptive_turn, _ = self._is_descriptive_identification_turn(
+            turn_id=turn_id,
+            input_event_key=normalized_parent_key,
+            origin="tool_output",
+            response_id=None,
+        )
+        if not descriptive_turn:
+            return None
+        image_mode = str(getattr(self, "_image_response_mode", "") or "").strip().lower()
+        image_response_enabled = bool(getattr(self, "_image_response_enabled", True))
+        instruction = (
+            "Descriptive visual follow-up: complete the parent visual identification request in one concise answer. "
+            "Ground the answer in directly visible evidence from the latest image context. "
+        )
+        if image_mode == "catalog_only" or not image_response_enabled:
+            instruction += (
+                "If the object identity is not unmistakable, use cautious wording such as 'it looks like' or "
+                "'might be' and name the visible color/shape cues instead of overstating certainty. "
+            )
+        instruction += (
+            "Do not guess purpose, accessories, hidden parts, or other properties unless they are clearly visible. "
+            "Do not add speculative embellishments beyond the image evidence."
+        )
+        return instruction
+
     def _build_tool_followup_response_create_event(
         self,
         *,
@@ -7446,13 +7480,24 @@ class RealtimeAPI:
         normalized_tool_name = str(tool_name or "").strip().lower()
         if normalized_tool_name:
             metadata["tool_name"] = normalized_tool_name
-        if self._is_low_risk_reversible_gesture_tool(tool_name=normalized_tool_name):
+        descriptive_visual_instruction = self._descriptive_visual_tool_followup_instruction(
+            turn_id=turn_id,
+            parent_input_event_key=parent_input_event_key,
+        )
+        if self._is_low_risk_reversible_gesture_tool(tool_name=normalized_tool_name) and not descriptive_visual_instruction:
             metadata["tool_followup_suppress_if_parent_covered"] = "true"
             metadata["tool_followup_status_only"] = "true"
             response_payload["instructions"] = (
                 "Gesture follow-up only: acknowledge gesture completion in one short sentence. "
                 "Do not restate or re-answer semantic memory/preferences content already covered by the parent response. "
                 "Do not narrate environment/vision context in gesture-only followups."
+            )
+        if descriptive_visual_instruction:
+            existing_instructions = str(response_payload.get("instructions") or "").strip()
+            response_payload["instructions"] = (
+                f"{existing_instructions} {descriptive_visual_instruction}".strip()
+                if existing_instructions
+                else descriptive_visual_instruction
             )
         if tool_result_has_distinct_info:
             metadata["tool_result_has_distinct_info"] = "true"
