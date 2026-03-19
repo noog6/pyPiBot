@@ -5788,6 +5788,35 @@ class RealtimeAPI:
             response_id=pending.response_id,
         )
 
+    def _rebind_provisional_server_auto_turn_ownership(
+        self,
+        *,
+        turn_id: str,
+        response_id: str | None,
+        replacement_input_event_key: str,
+    ) -> None:
+        normalized_turn_id = str(turn_id or "").strip()
+        normalized_response_id = str(response_id or "").strip()
+        normalized_input_event_key = str(replacement_input_event_key or "").strip()
+        if not normalized_turn_id or not normalized_input_event_key:
+            return
+        replacement_canonical_key = self._canonical_utterance_key(
+            turn_id=normalized_turn_id,
+            input_event_key=normalized_input_event_key,
+        )
+        if not replacement_canonical_key:
+            return
+        pending = self._pending_server_auto_response_for_turn(turn_id=normalized_turn_id)
+        if isinstance(pending, PendingServerAutoResponse):
+            pending.canonical_key = replacement_canonical_key
+        if normalized_response_id:
+            selection_store = self._terminal_deliverable_selection_store()
+            selection_entry = selection_store.get(normalized_response_id)
+            if isinstance(selection_entry, dict):
+                rebound_selection = dict(selection_entry)
+                rebound_selection["canonical_key"] = replacement_canonical_key
+                selection_store[normalized_response_id] = rebound_selection
+
     def _should_defer_provisional_server_auto_tool_call(self) -> bool:
         active_origin = str(getattr(self, "_active_response_origin", "") or "").strip().lower()
         if active_origin != "server_auto":
@@ -14039,6 +14068,11 @@ class RealtimeAPI:
             )
             return False
         old_pending_canonical_key = str(pending.canonical_key or "").strip()
+        self._rebind_provisional_server_auto_turn_ownership(
+            turn_id=turn_id,
+            response_id=old_response_id or None,
+            replacement_input_event_key=input_event_key,
+        )
         if old_pending_canonical_key:
             self._lifecycle_controller().on_replaced(old_pending_canonical_key, replacement_canonical_key)
             self._log_lifecycle_event(
@@ -14181,6 +14215,11 @@ class RealtimeAPI:
             str(pending_server_auto_active).lower(),
             pending_server_auto_key or "none",
             transcript_canonical_key,
+        )
+        self._rebind_provisional_server_auto_turn_ownership(
+            turn_id=resolved_turn_id,
+            response_id=str(getattr(pending_server_auto, "response_id", "") or "").strip() or None,
+            replacement_input_event_key=input_event_key,
         )
         self._clear_stale_pending_server_auto_for_turn(
             turn_id=resolved_turn_id,
