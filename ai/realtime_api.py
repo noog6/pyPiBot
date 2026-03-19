@@ -14140,7 +14140,7 @@ class RealtimeAPI:
             )
             self._suppress_cancelled_response_audio(old_response_id)
             self._mark_canonical_cancelled_for_upgrade(
-                canonical_key=pending.canonical_key,
+                canonical_key=old_pending_lineage_key or old_pending_canonical_key,
                 turn_id=turn_id,
                 response_id=old_response_id,
             )
