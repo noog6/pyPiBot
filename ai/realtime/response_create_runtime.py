@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Protocol
 
+from ai.decision_arbitration_adapter import build_response_create_observation
 from ai.interaction_lifecycle_policy import ResponseCreateDecision, ResponseCreateDecisionAction
 from ai.realtime.types import PendingResponseCreate
 from core.logging import logger, log_ws_event
@@ -458,13 +459,16 @@ class ResponseCreateRuntime:
             lineage_reason=lineage_reason,
         )
 
-    def decide_response_create_action(
+    def _decide_response_create_action_with_lifecycle(
         self,
         prepared_snapshot: ResponseCreatePreparedSnapshot,
-    ) -> ResponseCreateExecutionDecision:
-        """Map one prepared fact snapshot to one canonical action/reason.
+    ) -> tuple[ResponseCreateExecutionDecision, ResponseCreateDecision | None]:
+        """Private observation seam helper for response.create decisions.
 
-        BLOCK is reserved for hard runtime/policy guards. DROP is reserved for
+        This returns the same authoritative execution decision used by the
+        runtime plus the underlying lifecycle-policy decision when one exists
+        so the observational adapter can mirror, not steer, the seam. BLOCK is
+        reserved for hard runtime/policy guards. DROP is reserved for
         non-winning contenders already covered by another owner/path/state.
         """
         api = self.api
@@ -478,7 +482,7 @@ class ResponseCreateRuntime:
                     selected_candidate_id="tool_lineage_guard",
                     should_log_arbitration=False,
                 ),
-            )
+            ), None
         if prepared_snapshot.terminal_state_blocked:
             return self._normalize_execution_decision(
                 prepared_snapshot=prepared_snapshot,
@@ -490,7 +494,7 @@ class ResponseCreateRuntime:
                     blocked_by_terminal_state=True,
                     should_log_arbitration=False,
                 ),
-            )
+            ), None
         if prepared_snapshot.same_turn_owner_present:
             return self._normalize_execution_decision(
                 prepared_snapshot=prepared_snapshot,
@@ -500,15 +504,16 @@ class ResponseCreateRuntime:
                     explanation=f"Assistant message suppressed by same-turn owner: {prepared_snapshot.same_turn_owner_reason}.",
                     selected_candidate_id="same_turn_owner",
                 ),
-            )
+            ), None
+        canonical_audio_started = (
+            api._canonical_first_audio_started(prepared_snapshot.canonical_key)
+            and not prepared_snapshot.allow_audio_started_upgrade
+        )
         policy_decision: ResponseCreateDecision = api._lifecycle_policy().decide_response_create(
             response_in_flight=prepared_snapshot.response_in_flight,
             audio_playback_busy=prepared_snapshot.audio_playback_busy,
             consumes_canonical_slot=prepared_snapshot.consumes_canonical_slot,
-            canonical_audio_started=(
-                api._canonical_first_audio_started(prepared_snapshot.canonical_key)
-                and not prepared_snapshot.allow_audio_started_upgrade
-            ),
+            canonical_audio_started=canonical_audio_started,
             explicit_multipart=prepared_snapshot.explicit_multipart,
             single_flight_block_reason=prepared_snapshot.single_flight_block_reason,
             already_delivered=prepared_snapshot.already_delivered,
@@ -529,7 +534,7 @@ class ResponseCreateRuntime:
                     selected_candidate_id=policy_decision.selected_candidate_id,
                     queue_reason=policy_decision.queue_reason,
                 ),
-            )
+            ), policy_decision
         if policy_decision.action is ResponseCreateDecisionAction.BLOCK:
             return self._normalize_execution_decision(
                 prepared_snapshot=prepared_snapshot,
@@ -539,7 +544,7 @@ class ResponseCreateRuntime:
                     explanation=f"Response.create blocked: {policy_decision.reason_code}.",
                     selected_candidate_id=policy_decision.selected_candidate_id,
                 ),
-            )
+            ), policy_decision
         return self._normalize_execution_decision(
             prepared_snapshot=prepared_snapshot,
             decision=self._build_execution_decision(
@@ -548,7 +553,14 @@ class ResponseCreateRuntime:
                 explanation="Response.create allowed for immediate send.",
                 selected_candidate_id=policy_decision.selected_candidate_id,
             ),
-        )
+        ), policy_decision
+
+    def decide_response_create_action(
+        self,
+        prepared_snapshot: ResponseCreatePreparedSnapshot,
+    ) -> ResponseCreateExecutionDecision:
+        decision, _lifecycle_decision = self._decide_response_create_action_with_lifecycle(prepared_snapshot)
+        return decision
 
     def evaluate_response_create_attempt(
         self,
@@ -566,7 +578,22 @@ class ResponseCreateRuntime:
             memory_brief_note=memory_brief_note,
             now=time.monotonic() if now is None else now,
         )
-        return prepared_snapshot, self.decide_response_create_action(prepared_snapshot)
+        decision, lifecycle_decision = self._decide_response_create_action_with_lifecycle(prepared_snapshot)
+        canonical_audio_started: bool | None = None
+        if lifecycle_decision is not None:
+            canonical_audio_started = bool(
+                self.api._canonical_first_audio_started(prepared_snapshot.canonical_key)
+                and not prepared_snapshot.allow_audio_started_upgrade
+            )
+        observation = build_response_create_observation(
+            snapshot=prepared_snapshot,
+            execution_decision=decision,
+            lifecycle_decision=lifecycle_decision,
+            same_turn_owner_reason=prepared_snapshot.same_turn_owner_reason,
+            canonical_audio_started=canonical_audio_started,
+        )
+        logger.debug("decision_adapter_observation payload=%s", observation.to_log_payload())
+        return prepared_snapshot, decision
 
     def schedule_pending_response_create(
         self,
