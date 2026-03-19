@@ -2718,6 +2718,47 @@ class RealtimeAPI:
             normalized_reason,
         )
 
+    def _reconcile_semantic_substantive_owner(
+        self,
+        *,
+        turn_id: str,
+        execution_canonical_key: str,
+        semantic_owner_canonical_key: str,
+        response_id: str | None,
+    ) -> None:
+        normalized_execution_key = str(execution_canonical_key or "").strip()
+        normalized_owner_key = str(semantic_owner_canonical_key or "").strip()
+        if not normalized_execution_key or not normalized_owner_key or normalized_execution_key == normalized_owner_key:
+            return
+        state = self._conversation_efficiency_state(turn_id=turn_id)
+        counts = state.substantive_count_by_canonical or {}
+        execution_count = int(counts.get(normalized_execution_key, 0))
+        if execution_count <= 0:
+            return
+        owner_existing_count = int(counts.get(normalized_owner_key, 0))
+        counts.pop(normalized_execution_key, None)
+        if owner_existing_count <= 0:
+            counts[normalized_owner_key] = execution_count
+        state.substantive_count_by_canonical = counts
+        if owner_existing_count > 0:
+            state.substantive_count = max(0, int(state.substantive_count) - execution_count)
+        alerted_keys = state.duplicate_alerted_canonical_keys or set()
+        if normalized_execution_key in alerted_keys:
+            alerted_keys.discard(normalized_execution_key)
+        if owner_existing_count <= 1 and normalized_owner_key in alerted_keys:
+            alerted_keys.discard(normalized_owner_key)
+        state.duplicate_alerted_canonical_keys = alerted_keys
+        logger.info(
+            "semantic_substantive_owner_reconciled run_id=%s turn_id=%s response_id=%s execution_canonical_key=%s semantic_owner_canonical_key=%s moved_count=%s owner_existing_count=%s",
+            self._current_run_id() or "",
+            str(turn_id or "").strip() or "turn-unknown",
+            str(response_id or "").strip() or "none",
+            normalized_execution_key,
+            normalized_owner_key,
+            execution_count,
+            owner_existing_count,
+        )
+
     def _recent_silent_turn_lifecycle_markers(self, *, canonical_key: str) -> str:
         normalized_canonical_key = str(canonical_key or "").strip()
         if not normalized_canonical_key:
@@ -7866,6 +7907,60 @@ class RealtimeAPI:
             "transcript_text": transcript_text,
         }
 
+    def _resolve_semantic_answer_owner_for_response(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str | None,
+        origin: str,
+        response_id: str | None,
+        done_canonical_key: str,
+        selected: bool,
+        selection_reason: str,
+    ) -> str:
+        execution_canonical_key = str(done_canonical_key or "").strip()
+        normalized_origin = str(origin or "").strip().lower()
+        normalized_reason = str(selection_reason or "").strip().lower()
+        if not execution_canonical_key:
+            return ""
+        if not selected or normalized_reason != "normal" or normalized_origin != "tool_output":
+            return execution_canonical_key
+
+        lineage_context = self._resolve_parent_trace_context(
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            origin=origin,
+            response_id=response_id,
+        )
+        parent_turn_id = str(lineage_context.get("effective_parent_turn_id") or "").strip()
+        parent_input_event_key = str(lineage_context.get("effective_parent_input_event_key") or "").strip()
+        if not parent_turn_id or not parent_input_event_key or parent_input_event_key.startswith("tool:"):
+            return execution_canonical_key
+
+        semantic_owner_canonical_key = self._canonical_utterance_key(
+            turn_id=parent_turn_id,
+            input_event_key=parent_input_event_key,
+        )
+        if not semantic_owner_canonical_key:
+            return execution_canonical_key
+        if semantic_owner_canonical_key == execution_canonical_key:
+            return execution_canonical_key
+
+        semantic_owner_state = self._canonical_response_state(semantic_owner_canonical_key)
+        if not isinstance(semantic_owner_state, CanonicalResponseState):
+            return execution_canonical_key
+
+        logger.info(
+            "semantic_answer_owner_resolved run_id=%s turn_id=%s response_id=%s execution_canonical_key=%s semantic_owner_canonical_key=%s origin=%s",
+            self._current_run_id() or "",
+            str(turn_id or "").strip() or "turn-unknown",
+            str(response_id or "").strip() or "none",
+            execution_canonical_key,
+            semantic_owner_canonical_key,
+            normalized_origin,
+        )
+        return semantic_owner_canonical_key
+
     def _is_descriptive_identification_turn(
         self,
         *,
@@ -7934,6 +8029,7 @@ class RealtimeAPI:
         self,
         *,
         canonical_key: str,
+        semantic_owner_canonical_key: str | None = None,
         response_id: str,
         turn_id: str,
         input_event_key: str | None,
@@ -7942,12 +8038,16 @@ class RealtimeAPI:
     ) -> None:
         normalized_response_id = str(response_id or "").strip()
         normalized_canonical_key = str(canonical_key or "").strip()
+        normalized_semantic_owner_key = str(semantic_owner_canonical_key or "").strip() or normalized_canonical_key
         if normalized_response_id:
-            self._terminal_deliverable_selection_store()[normalized_response_id] = {
+            selection_entry = {
                 "selected": bool(selected),
                 "reason": str(selection_reason or "unknown").strip().lower() or "unknown",
                 "canonical_key": normalized_canonical_key,
             }
+            if normalized_semantic_owner_key and normalized_semantic_owner_key != normalized_canonical_key:
+                selection_entry["semantic_owner_canonical_key"] = normalized_semantic_owner_key
+            self._terminal_deliverable_selection_store()[normalized_response_id] = selection_entry
 
         if not normalized_canonical_key:
             return
@@ -7982,11 +8082,32 @@ class RealtimeAPI:
             input_event_key=input_event_key,
             mutator=_mutator,
         )
+        semantic_owner_evidence_present = self._selected_response_has_substantive_evidence(
+            response_id=normalized_response_id
+        )
+        if (
+            selected
+            and semantic_owner_evidence_present
+            and normalized_semantic_owner_key
+            and normalized_semantic_owner_key != normalized_canonical_key
+        ):
+            semantic_owner_state = self._canonical_response_state(normalized_semantic_owner_key)
+            self._canonical_response_state_mutate(
+                canonical_key=normalized_semantic_owner_key,
+                turn_id=str(getattr(semantic_owner_state, "turn_id", "") or ""),
+                input_event_key=str(getattr(semantic_owner_state, "input_event_key", "") or "") or None,
+                mutator=lambda record: (
+                    setattr(record, "created", True),
+                    setattr(record, "deliverable_observed", True),
+                    setattr(record, "deliverable_class", "final"),
+                ),
+            )
         logger.info(
-            "terminal_deliverable_selection_applied run_id=%s turn_id=%s canonical_key=%s response_id=%s selected=%s reason=%s",
+            "terminal_deliverable_selection_applied run_id=%s turn_id=%s canonical_key=%s semantic_owner_canonical_key=%s response_id=%s selected=%s reason=%s",
             self._current_run_id() or "",
             turn_id,
             normalized_canonical_key,
+            normalized_semantic_owner_key or "none",
             normalized_response_id or "none",
             str(bool(selected)).lower(),
             normalized_reason or "unknown",

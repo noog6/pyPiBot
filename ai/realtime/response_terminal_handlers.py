@@ -339,17 +339,33 @@ class ResponseTerminalHandlers:
                 )
 
         resolved_response_id = str(active_response_id_before_clear or "")
+        semantic_owner_canonical_key = api._resolve_semantic_answer_owner_for_response(
+            turn_id=turn_id,
+            input_event_key=done_input_event_key,
+            origin=str(active_response_origin_before_clear or ""),
+            response_id=resolved_response_id,
+            done_canonical_key=done_canonical_key,
+            selected=selected,
+            selection_reason=selection_reason,
+        )
         api._apply_terminal_deliverable_selection(
             canonical_key=done_canonical_key,
+            semantic_owner_canonical_key=semantic_owner_canonical_key,
             response_id=resolved_response_id,
             turn_id=turn_id,
             input_event_key=done_input_event_key,
             selected=selected,
             selection_reason=selection_reason,
         )
+        api._reconcile_semantic_substantive_owner(
+            turn_id=turn_id,
+            execution_canonical_key=done_canonical_key,
+            semantic_owner_canonical_key=semantic_owner_canonical_key,
+            response_id=resolved_response_id,
+        )
         api._reconcile_terminal_substantive_response(
             turn_id=turn_id,
-            canonical_key=done_canonical_key,
+            canonical_key=semantic_owner_canonical_key,
             response_id=resolved_response_id,
             selected=selected,
             selection_reason=selection_reason,
@@ -569,7 +585,7 @@ class ResponseTerminalHandlers:
         if not exact_phrase_close_deferred:
             api._log_turn_conversation_efficiency(
                 turn_id=turn_id,
-                canonical_key=resolved_canonical_key,
+                canonical_key=semantic_owner_canonical_key or resolved_canonical_key,
                 close_reason="response_done",
             )
         transition = api._build_confirmation_transition_decision(
