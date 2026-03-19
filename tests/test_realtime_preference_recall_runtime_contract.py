@@ -13,6 +13,7 @@ os.environ.setdefault("OPENAI_API_KEY", "test-key")
 
 import ai.tools as ai_tools
 from ai.realtime_api import RealtimeAPI
+from ai.realtime.memory_runtime import PerceptionMemoryVerdict
 from services.memory_manager import MemoryManager, MemoryScope
 from storage.memories import MemoryStore
 
@@ -81,6 +82,106 @@ def test_preference_recall_intent_delegates_to_runtime() -> None:
         result = asyncio.run(api._maybe_handle_preference_recall_intent("text", websocket, source="test"))
     mocked.assert_awaited_once_with(api, "text", websocket, source="test")
     assert result is True
+
+
+def test_preference_recall_analysis_delegates_to_runtime() -> None:
+    api = _base_api()
+    verdict = PerceptionMemoryVerdict(
+        memory_intent=True,
+        memory_intent_subtype="preference_recall",
+        preference_recall_requested=True,
+    )
+    with patch(
+        "ai.realtime_api.preference_recall_runtime._analyze_preference_recall_intent",
+        new=AsyncMock(return_value=verdict),
+    ) as mocked:
+        result = asyncio.run(api._analyze_preference_recall_intent("text", source="test"))
+    mocked.assert_awaited_once_with(api, "text", source="test")
+    assert result == verdict
+
+
+def test_preference_recall_analysis_keeps_runtime_side_effect_sets_untouched(monkeypatch) -> None:
+    api = _base_api()
+    api._current_input_event_key = "evt_runtime_owner"
+    api._is_preference_recall_intent = Mock(return_value=(True, ["editor"]))
+    api._classify_memory_intent = Mock(return_value="preference_recall")
+    api._build_preference_recall_query = Mock(return_value="editor")
+    api._mark_preference_recall_candidate = Mock()
+    api._clear_preference_recall_candidate = Mock()
+    api._run_preference_recall_with_fallbacks = AsyncMock(
+        return_value=(
+            {
+                "memories": [{"content": "User's favorite editor is Vim."}],
+                "memory_cards": [],
+                "memory_cards_text": "Relevant memory:\n- \"User's favorite editor is Vim.\"",
+            },
+            True,
+        )
+    )
+    api._preference_recall_locked_input_event_keys = set()
+    api._preference_recall_suppressed_turns = set()
+    api._preference_recall_suppressed_input_event_keys = set()
+    api._set_pending_preference_memory_context = Mock()
+
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "recall_memories", AsyncMock())
+
+    verdict = asyncio.run(
+        api._analyze_preference_recall_intent(
+            "Which editor do I prefer?",
+            source="input_audio_transcription",
+        )
+    )
+
+    assert verdict.preference_recall_requested is True
+    assert verdict.preference_recall_context is not None
+    assert api._preference_recall_locked_input_event_keys == set()
+    assert api._preference_recall_suppressed_turns == set()
+    assert api._preference_recall_suppressed_input_event_keys == set()
+    api._set_pending_preference_memory_context.assert_not_called()
+
+
+def test_apply_perception_memory_verdict_owns_context_attach_and_mixed_intent_runtime_effects() -> None:
+    api = _base_api()
+    api._current_input_event_key = "evt_apply"
+    api._preference_recall_locked_input_event_keys = set()
+    captured_contexts: list[dict[str, object]] = []
+    api._set_pending_preference_memory_context = lambda **kwargs: captured_contexts.append(kwargs)
+    api._submit_mixed_intent_tool_request = AsyncMock(
+        return_value={"outcome": "allow", "reason": "within_bounds", "executed": True}
+    )
+
+    verdict = PerceptionMemoryVerdict(
+        memory_intent=True,
+        memory_intent_subtype="preference_recall",
+        preference_recall_requested=True,
+        preference_recall_context={
+            "source": "preference_recall",
+            "hit": True,
+            "returned_count": 1,
+            "prompt_note": "Use Vim.",
+        },
+        mixed_intent_tool_request={
+            "tool_name": "gesture_look_center",
+            "tool_args": {},
+            "source": "preference_recall_mixed_intent",
+            "turn_id": "turn_1",
+            "query": "which editor do i prefer and look back",
+        },
+    )
+
+    handled = asyncio.run(
+        api._apply_perception_memory_verdict(
+            verdict,
+            websocket=object(),
+            source="input_audio_transcription",
+        )
+    )
+
+    assert handled is False
+    assert captured_contexts
+    assert captured_contexts[0]["memory_context"]["prompt_note"] == "Use Vim."
+    api._submit_mixed_intent_tool_request.assert_awaited_once()
+    assert "evt_apply" not in api._preference_recall_locked_input_event_keys
 
 
 def test_preference_recall_filters_irrelevant_low_score() -> None:

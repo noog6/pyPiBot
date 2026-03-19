@@ -62,7 +62,7 @@ from ai.realtime.injection_bus import InjectionBus
 from ai.realtime.injections import InjectionCoordinator
 from ai.realtime.input_audio_events import InputAudioEventHandlers
 from ai.realtime.lifecycle_state import LifecycleStateCoordinator
-from ai.realtime.memory_runtime import MemoryRuntime
+from ai.realtime.memory_runtime import MemoryRuntime, PerceptionMemoryVerdict
 from ai.realtime.research_runtime import ResearchRuntime
 from ai.realtime.response_create_runtime import ResponseCreateRuntime
 from ai.realtime.response_lifecycle import ResponseLifecycleTracker
@@ -8610,6 +8610,127 @@ class RealtimeAPI:
             source=source,
         )
 
+    async def _analyze_preference_recall_intent(
+        self,
+        user_text: str,
+        *,
+        source: str,
+    ) -> PerceptionMemoryVerdict:
+        return await preference_recall_runtime._analyze_preference_recall_intent(
+            self,
+            user_text,
+            source=source,
+        )
+
+    async def _apply_perception_memory_verdict(
+        self,
+        verdict: PerceptionMemoryVerdict | None,
+        *,
+        websocket: Any,
+        source: str,
+    ) -> bool:
+        resolved_verdict = verdict if isinstance(verdict, PerceptionMemoryVerdict) else PerceptionMemoryVerdict.empty()
+        runtime_request = (
+            resolved_verdict.runtime_request
+            if isinstance(resolved_verdict.runtime_request, dict)
+            else {}
+        )
+        input_event_key = str(getattr(self, "_current_input_event_key", "") or "").strip()
+        turn_id = self._current_turn_id_or_unknown()
+        logger.info(
+            "perception_memory_runtime_apply run_id=%s turn_id=%s input_event_key=%s source=%s preference_recall_requested=%s suppress_server_auto=%s cancel_active_server_auto=%s mixed_intent=%s",
+            self._current_run_id() or "",
+            turn_id,
+            input_event_key or "unknown",
+            source,
+            str(bool(resolved_verdict.preference_recall_requested)).lower(),
+            str(bool(runtime_request.get("suppress_server_auto"))).lower(),
+            str(bool(runtime_request.get("cancel_active_server_auto"))).lower(),
+            str(bool(resolved_verdict.mixed_intent_tool_request)).lower(),
+        )
+
+        if resolved_verdict.preference_recall_requested:
+            locked_input_event_keys = getattr(self, "_preference_recall_locked_input_event_keys", None)
+            if not isinstance(locked_input_event_keys, set):
+                locked_input_event_keys = set()
+                self._preference_recall_locked_input_event_keys = locked_input_event_keys
+            if input_event_key:
+                locked_input_event_keys.add(input_event_key)
+            try:
+                memory_context = (
+                    resolved_verdict.preference_recall_context
+                    if isinstance(resolved_verdict.preference_recall_context, dict)
+                    else None
+                )
+                if memory_context is not None and hasattr(self, "_set_pending_preference_memory_context"):
+                    self._set_pending_preference_memory_context(
+                        turn_id=turn_id,
+                        input_event_key=input_event_key,
+                        memory_context=memory_context,
+                    )
+                    logger.info(
+                        "pref_recall_context_attached run_id=%s turn_id=%s input_event_key=%s hit=%s returned_count=%s",
+                        self._current_run_id() or "",
+                        turn_id,
+                        input_event_key or "unknown",
+                        str(bool(memory_context.get("hit"))).lower(),
+                        memory_context.get("returned_count", 0),
+                    )
+            finally:
+                if input_event_key:
+                    locked_input_event_keys.discard(input_event_key)
+
+        mixed_intent_request = (
+            resolved_verdict.mixed_intent_tool_request
+            if isinstance(resolved_verdict.mixed_intent_tool_request, dict)
+            else None
+        )
+        if mixed_intent_request is not None:
+            request_fn = getattr(self, "_submit_mixed_intent_tool_request", None)
+            if callable(request_fn):
+                try:
+                    request_result = await request_fn(
+                        tool_name=str(mixed_intent_request.get("tool_name") or ""),
+                        tool_args=dict(mixed_intent_request.get("tool_args") or {}),
+                        websocket=websocket,
+                        source=str(mixed_intent_request.get("source") or "perception_memory"),
+                        turn_id=str(mixed_intent_request.get("turn_id") or turn_id),
+                        query=str(mixed_intent_request.get("query") or ""),
+                    )
+                except Exception:
+                    logger.warning(
+                        "mixed_intent_tool_execution_result run_id=%s turn_id=%s source=%s tool=%s outcome=error",
+                        self._current_run_id() or "",
+                        turn_id,
+                        source,
+                        str(mixed_intent_request.get("tool_name") or ""),
+                        exc_info=True,
+                    )
+                else:
+                    if isinstance(request_result, dict):
+                        outcome = str(request_result.get("outcome") or "unknown")
+                        reason = normalize_governance_reason(str(request_result.get("reason") or ""))
+                        logger.info(
+                            "mixed_intent_governance_decision run_id=%s turn_id=%s source=%s tool=%s outcome=%s reason=%s",
+                            self._current_run_id() or "",
+                            turn_id,
+                            source,
+                            str(mixed_intent_request.get("tool_name") or ""),
+                            outcome,
+                            reason,
+                        )
+                        logger.info(
+                            "mixed_intent_tool_execution_result run_id=%s turn_id=%s source=%s tool=%s outcome=%s executed=%s",
+                            self._current_run_id() or "",
+                            turn_id,
+                            source,
+                            str(mixed_intent_request.get("tool_name") or ""),
+                            outcome,
+                            str(bool(request_result.get("executed"))).lower(),
+                        )
+
+        return False
+
     def _is_active_response_guarded(self) -> bool:
         return bool(
             getattr(self, "_active_response_confirmation_guarded", False)
@@ -14123,9 +14244,13 @@ class RealtimeAPI:
                 return
             if await self._maybe_apply_late_confirmation_decision(transcript, websocket):
                 return
-            if await self._maybe_handle_preference_recall_intent(
+            perception_memory_verdict = await self._analyze_preference_recall_intent(
                 transcript,
-                websocket,
+                source="input_audio_transcription",
+            )
+            if await self._apply_perception_memory_verdict(
+                perception_memory_verdict,
+                websocket=websocket,
                 source="input_audio_transcription",
             ):
                 return
@@ -16008,9 +16133,13 @@ class RealtimeAPI:
                 return
             if await self._maybe_apply_late_confirmation_decision(text_message, self.websocket):
                 return
-            if await self._maybe_handle_preference_recall_intent(
+            perception_memory_verdict = await self._analyze_preference_recall_intent(
                 text_message,
-                self.websocket,
+                source="text_message",
+            )
+            if await self._apply_perception_memory_verdict(
+                perception_memory_verdict,
+                websocket=self.websocket,
                 source="text_message",
             ):
                 return
