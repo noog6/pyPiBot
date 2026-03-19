@@ -117,7 +117,8 @@ def _make_api_stub() -> RealtimeAPI:
         {
             "is_receiving": False,
             "is_recording": False,
-            "start_receiving": lambda self: None,
+            "start_receiving": lambda self: setattr(self, "is_receiving", True),
+            "stop_receiving": lambda self: setattr(self, "is_receiving", False),
             "start_recording": lambda self: setattr(self, "is_recording", True),
         },
     )()
@@ -3163,6 +3164,110 @@ def test_terminal_deliverable_selection_eagerly_drops_queued_tool_followup() -> 
     assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
 
 
+def test_terminal_deliverable_selection_prune_invalidates_stale_tool_followup_lineage() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_terminal_invalidate"
+    parent_input_event_key = "item_parent_terminal_invalidate"
+    parent_response_id = "resp-parent-terminal-invalidate"
+    parent_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    api._active_input_event_key_by_turn_id[turn_id] = parent_input_event_key
+    api._current_response_turn_id = turn_id
+
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "server_auto"),
+            setattr(record, "response_id", parent_response_id),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "final"),
+            setattr(record, "done", True),
+        ),
+    )
+
+    response_create_event, canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_terminal_invalidate",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+    metadata = ((response_create_event.get("response") or {}).get("metadata") or {})
+    metadata["turn_id"] = turn_id
+    metadata["parent_turn_id"] = turn_id
+    metadata["parent_input_event_key"] = parent_input_event_key
+    metadata["blocked_by_response_id"] = parent_response_id
+    tool_input_event_key = str(metadata.get("input_event_key") or "")
+    api._current_input_event_key = tool_input_event_key
+    api._pending_response_create = PendingResponseCreate(
+        websocket=_RecordingWs(),
+        event=response_create_event,
+        origin="tool_output",
+        turn_id=turn_id,
+        created_at=0.0,
+        reason="active_response",
+        record_ai_call=False,
+        debug_context=None,
+        memory_brief_note=None,
+        queued_reminder_key=None,
+        enqueued_done_serial=0,
+        enqueue_seq=1,
+    )
+    api._pending_response_create_origins.append(
+        {
+            "origin": "micro_ack",
+            "micro_ack": "true",
+            "consumes_canonical_slot": "false",
+            "turn_id": turn_id,
+            "input_event_key": tool_input_event_key,
+        }
+    )
+    api._pending_response_create_origins.append(
+        {
+            "origin": "assistant_message",
+            "micro_ack": "false",
+            "consumes_canonical_slot": "true",
+            "turn_id": turn_id,
+            "input_event_key": parent_input_event_key,
+        }
+    )
+    api._pending_micro_ack_by_turn_channel = {(turn_id, "voice"): object()}
+
+    cancelled: list[tuple[str, str]] = []
+
+    class _AckManager:
+        def cancel_matching(self, *, turn_id: str, reason: str, matcher):
+            cancelled.append((turn_id, reason))
+
+    api._micro_ack_manager = _AckManager()
+
+    api._apply_terminal_deliverable_selection(
+        canonical_key=parent_key,
+        response_id=parent_response_id,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        selected=True,
+        selection_reason="normal",
+    )
+
+    assert api._pending_response_create is None
+    assert len(api._response_create_queue) == 0
+    assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
+    assert api._current_input_event_key == parent_input_event_key
+    assert list(api._pending_response_create_origins) == [
+        {
+            "origin": "assistant_message",
+            "micro_ack": "false",
+            "consumes_canonical_slot": "true",
+            "turn_id": turn_id,
+            "input_event_key": parent_input_event_key,
+        }
+    ]
+    assert api._pending_micro_ack_by_turn_channel == {}
+    assert cancelled == [(turn_id, "tool_followup_pruned:parent_covered_tool_result terminal_deliverable_selected")]
+
+
 def test_terminal_deliverable_selection_does_not_drop_legitimate_distinct_info_tool_followup() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
@@ -3516,6 +3621,160 @@ def test_dropped_tool_followup_lineage_blocks_micro_ack_non_consuming_create(mon
         and f"canonical_key={canonical_key}" in entry
         for entry in captured_logs
     )
+
+
+def test_pruned_tool_followup_rebinds_followon_micro_ack_to_parent_turn_key() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+
+    turn_id = "turn_pruned_followon_ack"
+    parent_input_event_key = "item_parent_pruned_followon_ack"
+    parent_response_id = "resp-parent-pruned-followon-ack"
+    parent_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    api._active_input_event_key_by_turn_id[turn_id] = parent_input_event_key
+    api._current_response_turn_id = turn_id
+
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "server_auto"),
+            setattr(record, "response_id", parent_response_id),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "final"),
+            setattr(record, "done", True),
+        ),
+    )
+
+    response_create_event, canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_pruned_followon_ack",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+    metadata = ((response_create_event.get("response") or {}).get("metadata") or {})
+    metadata["turn_id"] = turn_id
+    metadata["parent_turn_id"] = turn_id
+    metadata["parent_input_event_key"] = parent_input_event_key
+    metadata["blocked_by_response_id"] = parent_response_id
+    tool_input_event_key = str(metadata.get("input_event_key") or "")
+    api._current_input_event_key = tool_input_event_key
+    api._pending_response_create = PendingResponseCreate(
+        websocket=ws,
+        event=response_create_event,
+        origin="tool_output",
+        turn_id=turn_id,
+        created_at=0.0,
+        reason="active_response",
+        record_ai_call=False,
+        debug_context=None,
+        memory_brief_note=None,
+        queued_reminder_key=None,
+        enqueued_done_serial=0,
+        enqueue_seq=1,
+    )
+
+    api._apply_terminal_deliverable_selection(
+        canonical_key=parent_key,
+        response_id=parent_response_id,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        selected=True,
+        selection_reason="normal",
+    )
+
+    followon_micro_ack = {
+        "type": "response.create",
+        "response": {
+            "metadata": {
+                "micro_ack": "true",
+                "consumes_canonical_slot": "false",
+                "micro_ack_turn_id": turn_id,
+            }
+        },
+    }
+
+    sent = asyncio.run(api._send_response_create(ws, followon_micro_ack, origin="assistant_message"))
+
+    assert sent is True
+    assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
+    response_events = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert len(response_events) == 1
+    sent_metadata = ((response_events[0].get("response") or {}).get("metadata") or {})
+    assert sent_metadata.get("input_event_key") == parent_input_event_key
+    assert sent_metadata.get("input_event_key") != tool_input_event_key
+
+
+
+def test_on_playback_complete_restarts_mic_after_tool_followup_prune_path() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_playback_prune"
+    parent_input_event_key = "item_parent_playback_prune"
+    parent_response_id = "resp-parent-playback-prune"
+    parent_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    api._active_input_event_key_by_turn_id[turn_id] = parent_input_event_key
+    api._current_response_turn_id = turn_id
+
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "server_auto"),
+            setattr(record, "response_id", parent_response_id),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "final"),
+            setattr(record, "done", True),
+        ),
+    )
+
+    response_create_event, canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_playback_prune",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+    metadata = ((response_create_event.get("response") or {}).get("metadata") or {})
+    metadata["turn_id"] = turn_id
+    metadata["parent_turn_id"] = turn_id
+    metadata["parent_input_event_key"] = parent_input_event_key
+    metadata["blocked_by_response_id"] = parent_response_id
+    api._current_input_event_key = str(metadata.get("input_event_key") or "")
+    api._pending_response_create = PendingResponseCreate(
+        websocket=_RecordingWs(),
+        event=response_create_event,
+        origin="tool_output",
+        turn_id=turn_id,
+        created_at=0.0,
+        reason="active_response",
+        record_ai_call=False,
+        debug_context=None,
+        memory_brief_note=None,
+        queued_reminder_key=None,
+        enqueued_done_serial=0,
+        enqueue_seq=1,
+    )
+
+    api._apply_terminal_deliverable_selection(
+        canonical_key=parent_key,
+        response_id=parent_response_id,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        selected=True,
+        selection_reason="normal",
+    )
+    api._audio_playback_busy = True
+    api.exit_event = type("_ExitEvent", (), {"is_set": lambda self: False})()
+
+    api._on_playback_complete()
+
+    assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
+    assert api._current_input_event_key == parent_input_event_key
+    assert api._audio_playback_busy is False
+    assert api.mic.is_recording is True
 
 
 def test_unrelated_micro_ack_for_user_turn_still_allowed() -> None:

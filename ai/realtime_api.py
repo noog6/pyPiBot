@@ -7898,6 +7898,72 @@ class RealtimeAPI:
                 selected_response_id=normalized_response_id,
             )
 
+    def _invalidate_dropped_tool_followup_lineage(
+        self,
+        *,
+        turn_id: str,
+        canonical_key: str,
+        input_event_key: str,
+        tool_call_id: str | None,
+        reason: str,
+    ) -> None:
+        normalized_turn_id = str(turn_id or "").strip()
+        normalized_canonical_key = str(canonical_key or "").strip()
+        normalized_input_event_key = str(input_event_key or "").strip()
+        normalized_tool_call_id = str(tool_call_id or "").strip()
+        if not normalized_turn_id or not normalized_canonical_key or not normalized_input_event_key:
+            return
+
+        manager = getattr(self, "_micro_ack_manager", None)
+        if manager is not None and hasattr(manager, "cancel_matching"):
+            manager.cancel_matching(
+                turn_id=normalized_turn_id,
+                reason=f"tool_followup_pruned:{reason}",
+                matcher=lambda context: (
+                    str(getattr(context, "action", "") or "").strip() == normalized_canonical_key
+                    or (
+                        normalized_tool_call_id
+                        and str(getattr(context, "tool_call_id", "") or "").strip() == normalized_tool_call_id
+                    )
+                ),
+            )
+
+        self._clear_pending_micro_ack_marker(
+            turn_id=normalized_turn_id,
+            reason=f"tool_followup_pruned:{reason}",
+        )
+
+        pending_origins = getattr(self, "_pending_response_create_origins", None)
+        if isinstance(pending_origins, deque) and pending_origins:
+            retained_origins: deque[dict[str, str]] = deque(maxlen=pending_origins.maxlen)
+            for pending_origin in pending_origins:
+                if not isinstance(pending_origin, dict):
+                    retained_origins.append(pending_origin)
+                    continue
+                pending_turn_id = str(pending_origin.get("turn_id") or "").strip()
+                pending_input_event_key = str(pending_origin.get("input_event_key") or "").strip()
+                if pending_turn_id == normalized_turn_id and pending_input_event_key == normalized_input_event_key:
+                    continue
+                retained_origins.append(pending_origin)
+            self._pending_response_create_origins = retained_origins
+
+        if str(getattr(self, "_current_response_turn_id", "") or "").strip() == normalized_turn_id:
+            current_input_event_key = str(getattr(self, "_current_input_event_key", "") or "").strip()
+            if current_input_event_key == normalized_input_event_key:
+                rebound_input_event_key = str(self._active_input_event_key_for_turn(normalized_turn_id) or "").strip()
+                if rebound_input_event_key and rebound_input_event_key != normalized_input_event_key:
+                    self._current_input_event_key = rebound_input_event_key
+
+        logger.info(
+            "tool_followup_lineage_invalidated run_id=%s turn_id=%s canonical_key=%s input_event_key=%s tool_call_id=%s reason=%s",
+            self._current_run_id() or "",
+            normalized_turn_id,
+            normalized_canonical_key,
+            normalized_input_event_key,
+            normalized_tool_call_id or "none",
+            reason,
+        )
+
     def _drop_dead_tool_followup_creates_after_terminal_selection(
         self,
         *,
@@ -7909,13 +7975,13 @@ class RealtimeAPI:
             return
         normalized_response_id = str(selected_response_id or "").strip()
 
-        def _should_drop_tool_followup(event: dict[str, Any], *, fallback_turn_id: str) -> tuple[bool, str]:
+        def _should_drop_tool_followup(event: dict[str, Any], *, fallback_turn_id: str) -> tuple[bool, str, str, str]:
             metadata = self._extract_response_create_metadata(event)
             if str(metadata.get("tool_followup", "")).strip().lower() not in {"true", "1", "yes"}:
-                return False, ""
+                return False, "", "", ""
             event_turn_id = str(metadata.get("turn_id") or fallback_turn_id or "").strip()
             if event_turn_id != normalized_turn_id:
-                return False, ""
+                return False, "", "", ""
             input_event_key = str(metadata.get("input_event_key") or "").strip()
             canonical_key = self._canonical_utterance_key(
                 turn_id=event_turn_id,
@@ -7923,17 +7989,17 @@ class RealtimeAPI:
             )
             blocked_by_response_id = str(metadata.get("blocked_by_response_id") or "").strip()
             if normalized_response_id and blocked_by_response_id and blocked_by_response_id != normalized_response_id:
-                return False, canonical_key
+                return False, canonical_key, input_event_key, str(metadata.get("tool_call_id") or "").strip()
             should_drop, _parent_entry, _reason = self._should_suppress_queued_tool_followup_release(
                 response_metadata=metadata,
                 blocked_by_response_id=normalized_response_id or blocked_by_response_id or None,
             )
-            return should_drop, canonical_key
+            return should_drop, canonical_key, input_event_key, str(metadata.get("tool_call_id") or "").strip()
 
         dropped_pending = 0
         pending = getattr(self, "_pending_response_create", None)
         if pending is not None and isinstance(getattr(pending, "event", None), dict):
-            should_drop, canonical_key = _should_drop_tool_followup(
+            should_drop, canonical_key, input_event_key, tool_call_id = _should_drop_tool_followup(
                 pending.event,
                 fallback_turn_id=str(getattr(pending, "turn_id", "") or normalized_turn_id),
             )
@@ -7942,6 +8008,13 @@ class RealtimeAPI:
                     self._set_tool_followup_state(
                         canonical_key=canonical_key,
                         state="dropped",
+                        reason="parent_covered_tool_result terminal_deliverable_selected",
+                    )
+                    self._invalidate_dropped_tool_followup_lineage(
+                        turn_id=normalized_turn_id,
+                        canonical_key=canonical_key,
+                        input_event_key=input_event_key,
+                        tool_call_id=tool_call_id,
                         reason="parent_covered_tool_result terminal_deliverable_selected",
                     )
                 self._pending_response_create = None
@@ -7955,7 +8028,7 @@ class RealtimeAPI:
                 if not isinstance(queued, dict) or not isinstance(queued.get("event"), dict):
                     retained.append(queued)
                     continue
-                should_drop, canonical_key = _should_drop_tool_followup(
+                should_drop, canonical_key, input_event_key, tool_call_id = _should_drop_tool_followup(
                     queued["event"],
                     fallback_turn_id=str(queued.get("turn_id") or normalized_turn_id),
                 )
@@ -7966,6 +8039,13 @@ class RealtimeAPI:
                     self._set_tool_followup_state(
                         canonical_key=canonical_key,
                         state="dropped",
+                        reason="parent_covered_tool_result terminal_deliverable_selected",
+                    )
+                    self._invalidate_dropped_tool_followup_lineage(
+                        turn_id=normalized_turn_id,
+                        canonical_key=canonical_key,
+                        input_event_key=input_event_key,
+                        tool_call_id=tool_call_id,
                         reason="parent_covered_tool_result terminal_deliverable_selected",
                     )
                 dropped_queue += 1
