@@ -1427,6 +1427,10 @@ def test_tool_followup_blocked_by_active_response_released_on_response_done(monk
     }
     assert selection_tool == {
         "canonical_key": canonical_key,
+        "semantic_owner_canonical_key": api._canonical_utterance_key(
+            turn_id="turn_tool_release",
+            input_event_key="item_active_release",
+        ),
         "selected": True,
         "reason": "normal",
     }
@@ -1445,12 +1449,458 @@ def test_tool_followup_blocked_by_active_response_released_on_response_done(monk
         and "response_id=resp-tool-release" in entry
         for entry in captured_logs
     )
-    assert not any(
-        "tool_followup_create_suppressed" in entry
-        and f"canonical_key={canonical_key}" in entry
-        and "reason=final_deliverable_already_sent" in entry
+
+
+def test_tool_output_semantic_answer_ownership_reconciles_to_parent_canonical_key(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_response_turn_id = "turn_semantic_owner"
+    api._active_input_event_key_by_turn_id["turn_semantic_owner"] = "item_parent_semantic"
+    api._active_server_auto_input_event_key = "item_parent_semantic"
+    api._active_response_origin = "server_auto"
+    api._active_response_id = "resp-parent-semantic"
+    api._active_response_input_event_key = "item_parent_semantic"
+    api._active_response_canonical_key = api._canonical_utterance_key(
+        turn_id="turn_semantic_owner",
+        input_event_key="item_parent_semantic",
+    )
+    api._response_in_flight = True
+    api.response_in_progress = True
+    parent_canonical_key = api._canonical_utterance_key(
+        turn_id="turn_semantic_owner",
+        input_event_key="item_parent_semantic",
+    )
+    api._canonical_response_state_mutate(
+        canonical_key=parent_canonical_key,
+        turn_id="turn_semantic_owner",
+        input_event_key="item_parent_semantic",
+        mutator=lambda record: (
+            setattr(record, "created", True),
+            setattr(record, "done", False),
+            setattr(record, "origin", "server_auto"),
+            setattr(record, "response_id", "resp-parent-semantic"),
+        ),
+    )
+    api._record_response_trace_context(
+        "resp-parent-semantic",
+        turn_id="turn_semantic_owner",
+        input_event_key="item_parent_semantic",
+        canonical_key=parent_canonical_key,
+        origin="server_auto",
+    )
+    response_create_event, child_canonical_key = api._build_tool_followup_response_create_event(call_id="call_semantic_owner")
+    api._record_pending_server_auto_response(
+        turn_id="turn_semantic_owner",
+        response_id="resp-parent-semantic",
+        canonical_key=parent_canonical_key,
+    )
+
+    captured_logs: list[str] = []
+    original_info = logger.info
+
+    def _capture_info(message: str, *args, **kwargs):
+        rendered = str(message)
+        if args:
+            rendered = rendered % args
+        captured_logs.append(rendered)
+        return original_info(message, *args, **kwargs)
+
+    monkeypatch.setattr(logger, "info", _capture_info)
+    monkeypatch.setattr(logger, "debug", _capture_info)
+
+    async def _run() -> None:
+        await api._send_response_create(ws, response_create_event, origin="tool_output")
+        assert api._tool_followup_state(canonical_key=child_canonical_key) == "blocked_active_response"
+
+        await api.handle_response_done({"type": "response.done", "response": {"id": "resp-parent-semantic"}})
+
+        await api._handle_response_created_event(
+            {
+                "type": "response.created",
+                "response": {
+                    "id": "resp-child-semantic",
+                    "metadata": {
+                        "turn_id": "turn_semantic_owner",
+                        "input_event_key": "tool:call_semantic_owner",
+                        "tool_followup": "true",
+                        "tool_followup_release": "true",
+                        "tool_call_id": "call_semantic_owner",
+                        "parent_turn_id": "turn_semantic_owner",
+                        "parent_input_event_key": "item_parent_semantic",
+                    },
+                },
+            },
+            ws,
+        )
+        api._record_terminal_response_text(
+            response_id="resp-child-semantic",
+            text="All set back to center. You're holding a white mug.",
+        )
+        await api.handle_response_done({"type": "response.done", "response": {"id": "resp-child-semantic"}})
+
+    asyncio.run(_run())
+
+    efficiency = api._conversation_efficiency_state(turn_id="turn_semantic_owner")
+    assert efficiency.substantive_count == 1
+    assert efficiency.substantive_count_by_canonical == {parent_canonical_key: 1}
+    parent_state = api._canonical_response_state(parent_canonical_key)
+    child_state = api._canonical_response_state(child_canonical_key)
+    assert parent_state is not None
+    assert child_state is not None
+    assert parent_state.deliverable_observed is True
+    assert parent_state.deliverable_class == "final"
+    assert parent_state.turn_id == "turn_semantic_owner"
+    assert parent_state.input_event_key == "item_parent_semantic"
+    assert child_state.done is True
+    assert child_state.turn_id == "turn_semantic_owner"
+    assert child_state.input_event_key == "tool:call_semantic_owner"
+    assert child_state.response_id == "resp-child-semantic"
+    assert api._tool_followup_state(canonical_key=child_canonical_key) == "done"
+    selection_tool = api._terminal_deliverable_selection_store().get("resp-child-semantic")
+    assert selection_tool == {
+        "canonical_key": child_canonical_key,
+        "semantic_owner_canonical_key": parent_canonical_key,
+        "selected": True,
+        "reason": "normal",
+    }
+    assert any(
+        "semantic_substantive_owner_reconciled" in entry
+        and f"execution_canonical_key={child_canonical_key}" in entry
+        and f"semantic_owner_canonical_key={parent_canonical_key}" in entry
+        and "response_id=resp-child-semantic" in entry
         for entry in captured_logs
     )
+    assert any(
+        "conversation_efficiency" in entry
+        and f"canonical_key={parent_canonical_key}" in entry
+        and "turn_id=turn_semantic_owner" in entry
+        for entry in captured_logs
+    )
+
+
+def test_parent_without_terminal_text_still_releases_child_followup_after_response_done() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+
+    turn_id = "turn_parent_release_fix"
+    parent_input_event_key = "item_parent_release_fix"
+    parent_response_id = "resp_parent_release_fix"
+    parent_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    api._current_response_turn_id = turn_id
+    api._active_input_event_key_by_turn_id[turn_id] = parent_input_event_key
+    api._active_response_origin = "server_auto"
+    api._active_response_id = parent_response_id
+    api._active_response_input_event_key = parent_input_event_key
+    api._active_response_canonical_key = parent_canonical_key
+    api._response_in_flight = True
+    api.response_in_progress = True
+    api._canonical_response_state_mutate(
+        canonical_key=parent_canonical_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "created", True),
+            setattr(record, "origin", "server_auto"),
+            setattr(record, "response_id", parent_response_id),
+        ),
+    )
+    api._record_response_trace_context(
+        parent_response_id,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        canonical_key=parent_canonical_key,
+        origin="server_auto",
+    )
+    response_create_event, child_canonical_key = api._build_tool_followup_response_create_event(call_id="call_parent_release_fix")
+
+    async def _run() -> None:
+        await api._send_response_create(ws, response_create_event, origin="tool_output")
+        assert api._tool_followup_state(canonical_key=child_canonical_key) == "blocked_active_response"
+        await api.handle_response_done({"type": "response.done", "response": {"id": parent_response_id}})
+
+    asyncio.run(_run())
+
+    assert api._tool_followup_state(canonical_key=child_canonical_key) in {"creating", "created", "released_on_response_done"}
+    assert len([event for event in ws.sent if event.get("type") == "response.create"]) == 1
+
+
+def test_same_turn_suppression_still_holds_after_semantic_reconcile() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    turn_id = "turn_owner_after_semantic"
+    parent_input_event_key = "item_owner_after_semantic"
+    parent_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    child_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key="tool:call_owner_after_semantic")
+    api._current_response_turn_id = turn_id
+    api._active_input_event_key_by_turn_id[turn_id] = parent_input_event_key
+    api._response_in_flight = True
+    api.response_in_progress = True
+    api._canonical_response_state_mutate(
+        canonical_key=parent_canonical_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: setattr(record, "created", True),
+    )
+    api._record_terminal_response_text(
+        response_id="resp-owner-after-semantic",
+        text="The answer is ready.",
+    )
+
+    api._apply_terminal_deliverable_selection(
+        canonical_key=child_canonical_key,
+        semantic_owner_canonical_key=parent_canonical_key,
+        response_id="resp-owner-after-semantic",
+        turn_id=turn_id,
+        input_event_key="tool:call_owner_after_semantic",
+        selected=True,
+        selection_reason="normal",
+    )
+
+    owner_reason = api._assistant_message_same_turn_owner_reason(
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        canonical_key=parent_canonical_key,
+    )
+
+    assert owner_reason == "terminal_deliverable_owned"
+
+
+def test_semantic_substantive_owner_reconcile_is_idempotent_for_repeated_child_done() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_semantic_idempotent"
+    execution_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key="tool:call_semantic_idempotent")
+    owner_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key="item_semantic_idempotent")
+    api._record_substantive_response(turn_id=turn_id, canonical_key=execution_key)
+    api._record_terminal_response_text(response_id="resp-semantic-idempotent", text="Here's the answer.")
+
+    api._reconcile_semantic_substantive_owner(
+        turn_id=turn_id,
+        execution_canonical_key=execution_key,
+        semantic_owner_canonical_key=owner_key,
+        response_id="resp-semantic-idempotent",
+    )
+    api._reconcile_terminal_substantive_response(
+        turn_id=turn_id,
+        canonical_key=owner_key,
+        response_id="resp-semantic-idempotent",
+        selected=True,
+        selection_reason="normal",
+    )
+
+    api._reconcile_semantic_substantive_owner(
+        turn_id=turn_id,
+        execution_canonical_key=execution_key,
+        semantic_owner_canonical_key=owner_key,
+        response_id="resp-semantic-idempotent",
+    )
+    api._reconcile_terminal_substantive_response(
+        turn_id=turn_id,
+        canonical_key=owner_key,
+        response_id="resp-semantic-idempotent",
+        selected=True,
+        selection_reason="normal",
+    )
+
+    efficiency = api._conversation_efficiency_state(turn_id=turn_id)
+    assert efficiency.substantive_count == 1
+    assert efficiency.substantive_count_by_canonical == {owner_key: 1}
+
+
+def test_missing_parent_lineage_falls_back_to_execution_canonical_key() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    execution_key = api._canonical_utterance_key(turn_id="turn_semantic_fallback", input_event_key="tool:call_fallback")
+    api._record_response_trace_context(
+        "resp-semantic-fallback",
+        turn_id="turn_semantic_fallback",
+        input_event_key="tool:call_fallback",
+        canonical_key=execution_key,
+        origin="tool_output",
+    )
+
+    semantic_key = api._resolve_semantic_answer_owner_for_response(
+        turn_id="turn_semantic_fallback",
+        input_event_key="tool:call_fallback",
+        origin="tool_output",
+        response_id="resp-semantic-fallback",
+        done_canonical_key=execution_key,
+        selected=True,
+        selection_reason="normal",
+    )
+
+    assert semantic_key == execution_key
+
+
+def test_tool_derived_parent_lineage_does_not_create_bogus_semantic_owner() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    execution_key = api._canonical_utterance_key(turn_id="turn_semantic_nested", input_event_key="tool:call_nested")
+    api._record_response_trace_context(
+        "resp-semantic-nested",
+        turn_id="turn_semantic_nested",
+        input_event_key="tool:call_nested",
+        canonical_key=execution_key,
+        origin="tool_output",
+        parent_turn_id="turn_semantic_nested",
+        parent_input_event_key="tool:call_parent_nested",
+    )
+
+    semantic_key = api._resolve_semantic_answer_owner_for_response(
+        turn_id="turn_semantic_nested",
+        input_event_key="tool:call_nested",
+        origin="tool_output",
+        response_id="resp-semantic-nested",
+        done_canonical_key=execution_key,
+        selected=True,
+        selection_reason="normal",
+    )
+
+    assert semantic_key == execution_key
+
+
+def test_parent_semantic_promotion_requires_terminal_text_evidence() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_semantic_promotion_gate"
+    parent_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key="item_semantic_parent")
+    child_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key="tool:call_semantic_parent")
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id=turn_id,
+        input_event_key="item_semantic_parent",
+        mutator=lambda record: (
+            setattr(record, "created", True),
+            setattr(record, "done", True),
+            setattr(record, "origin", "server_auto"),
+        ),
+    )
+
+    api._apply_terminal_deliverable_selection(
+        canonical_key=child_key,
+        semantic_owner_canonical_key=parent_key,
+        response_id="resp-semantic-parent",
+        turn_id=turn_id,
+        input_event_key="tool:call_semantic_parent",
+        selected=True,
+        selection_reason="normal",
+    )
+
+    parent_state = api._canonical_response_state(parent_key)
+    assert parent_state is not None
+    assert parent_state.deliverable_class != "final"
+    assert parent_state.deliverable_observed is False
+    assert parent_state.input_event_key == "item_semantic_parent"
+
+
+def test_parent_semantic_promotion_preserves_parent_input_lineage() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_semantic_lineage"
+    parent_input_event_key = "item_semantic_lineage_parent"
+    child_input_event_key = "tool:call_semantic_lineage_child"
+    parent_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    child_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=child_input_event_key)
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "created", True),
+            setattr(record, "response_id", "resp-parent-lineage"),
+            setattr(record, "origin", "server_auto"),
+        ),
+    )
+    api._record_terminal_response_text(
+        response_id="resp-child-lineage",
+        text="You are holding a mug.",
+    )
+
+    api._apply_terminal_deliverable_selection(
+        canonical_key=child_key,
+        semantic_owner_canonical_key=parent_key,
+        response_id="resp-child-lineage",
+        turn_id=turn_id,
+        input_event_key=child_input_event_key,
+        selected=True,
+        selection_reason="normal",
+    )
+
+    parent_state = api._canonical_response_state(parent_key)
+    child_state = api._canonical_response_state(child_key)
+
+    assert parent_state is not None
+    assert child_state is not None
+    assert parent_state.input_event_key == parent_input_event_key
+    assert parent_state.turn_id == turn_id
+    assert parent_state.response_id == "resp-parent-lineage"
+    assert parent_state.deliverable_observed is True
+    assert parent_state.deliverable_class == "final"
+    assert child_state.input_event_key == child_input_event_key
+    assert child_state.response_id == "resp-child-lineage"
+
+
+def test_semantic_substantive_owner_reconcile_moves_create_time_count_to_parent_once() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_semantic_move_once"
+    execution_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key="tool:call_semantic_move_once")
+    owner_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key="item_semantic_move_once")
+    api._record_substantive_response(turn_id=turn_id, canonical_key=execution_key)
+    api._record_terminal_response_text(response_id="resp-semantic-move-once", text="Here is the result.")
+
+    api._reconcile_semantic_substantive_owner(
+        turn_id=turn_id,
+        execution_canonical_key=execution_key,
+        semantic_owner_canonical_key=owner_key,
+        response_id="resp-semantic-move-once",
+    )
+    api._reconcile_terminal_substantive_response(
+        turn_id=turn_id,
+        canonical_key=owner_key,
+        response_id="resp-semantic-move-once",
+        selected=True,
+        selection_reason="normal",
+    )
+
+    efficiency = api._conversation_efficiency_state(turn_id=turn_id)
+    assert efficiency.substantive_count == 1
+    assert efficiency.substantive_count_by_canonical == {owner_key: 1}
+    assert execution_key not in efficiency.duplicate_alerted_canonical_keys
+
+
+def test_semantic_substantive_owner_reconcile_dedupes_when_owner_already_counted() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_semantic_owner_already_counted"
+    execution_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key="tool:call_semantic_owner_existing")
+    owner_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key="item_semantic_owner_existing")
+    api._record_substantive_response(turn_id=turn_id, canonical_key=owner_key)
+    api._record_substantive_response(turn_id=turn_id, canonical_key=execution_key)
+
+    api._reconcile_semantic_substantive_owner(
+        turn_id=turn_id,
+        execution_canonical_key=execution_key,
+        semantic_owner_canonical_key=owner_key,
+        response_id="resp-semantic-owner-existing",
+    )
+
+    efficiency = api._conversation_efficiency_state(turn_id=turn_id)
+    assert efficiency.substantive_count == 1
+    assert efficiency.substantive_count_by_canonical == {owner_key: 1}
 
 
 def test_tool_followup_second_arbitration_denied_for_same_canonical_key(monkeypatch) -> None:
@@ -3091,7 +3541,7 @@ def test_tool_followup_blocked_by_active_parent_is_released_and_drained_after_pa
     api._set_tool_followup_state(canonical_key=canonical_key, state="blocked_active_response", reason="test_seed")
 
     api._release_blocked_tool_followups_for_response_done(response_id=parent_response_id)
-    assert api._tool_followup_state(canonical_key=tool_canonical_key) == "scheduled_release"
+    assert api._tool_followup_state(canonical_key=canonical_key) == "scheduled_release"
 
     asyncio.run(api._drain_response_create_queue(source_trigger="response_done"))
     assert len([event for event in ws.sent if event.get("type") == "response.create"]) == 1

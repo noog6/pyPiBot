@@ -214,6 +214,7 @@ def test_handle_response_done_applies_terminal_selection_to_canonical_state() ->
 
     apply_selection.assert_called_once_with(
         canonical_key="turn_1::input_evt_1",
+        semantic_owner_canonical_key="turn_1::input_evt_1",
         response_id="resp_1",
         turn_id="turn_1",
         input_event_key="input_evt_1",
@@ -720,6 +721,8 @@ def test_terminal_substantive_reconcile_skips_when_create_time_already_counted()
 def test_terminal_substantive_reconcile_repairs_missed_create_time_once() -> None:
     api = _make_api()
     api._reconcile_terminal_substantive_response = RealtimeAPI._reconcile_terminal_substantive_response.__get__(api, RealtimeAPI)
+    api._record_terminal_response_text(response_id="resp_1", text="Here's the answer.")
+    api._record_terminal_response_text(response_id="resp_2", text="Here's the answer again.")
 
     api._reconcile_terminal_substantive_response(
         turn_id="turn_1",
@@ -766,6 +769,7 @@ def test_terminal_substantive_reconcile_excludes_non_deliverable_reasons() -> No
 def test_terminal_substantive_reconcile_exact_phrase_repair_path_totals_one() -> None:
     api = _make_api()
     api._reconcile_terminal_substantive_response = RealtimeAPI._reconcile_terminal_substantive_response.__get__(api, RealtimeAPI)
+    api._record_terminal_response_text(response_id="resp_repair", text="Exact phrase repair completed.")
 
     api._reconcile_terminal_substantive_response(
         turn_id="turn_1",
