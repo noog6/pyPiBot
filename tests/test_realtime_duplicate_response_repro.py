@@ -4220,7 +4220,7 @@ def test_tool_result_send_normalizes_oversized_call_id(monkeypatch) -> None:
     api._add_no_tools_follow_up_instruction = _fake_add_no_tools
     monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "perform_research", _fake_research)
 
-    oversized_call_id = "mixed_intent_a535dd5098194e50ac1f3de90318b5cc"
+    oversized_call_id = "compgest_a535dd5098194e50ac1f3de90318b5cc"
     asyncio.run(api.execute_function_call("perform_research", oversized_call_id, {"query": "logs"}, ws))
 
     function_outputs = [event for event in ws.sent if event.get("item", {}).get("type") == "function_call_output"]

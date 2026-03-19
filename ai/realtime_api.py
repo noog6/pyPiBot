@@ -8796,7 +8796,7 @@ class RealtimeAPI:
         input_event_key = str(getattr(self, "_current_input_event_key", "") or "").strip()
         turn_id = self._current_turn_id_or_unknown()
         logger.info(
-            "perception_memory_runtime_apply run_id=%s turn_id=%s input_event_key=%s source=%s preference_recall_requested=%s suppress_server_auto=%s cancel_active_server_auto=%s mixed_intent=%s",
+            "perception_memory_runtime_apply run_id=%s turn_id=%s input_event_key=%s source=%s preference_recall_requested=%s suppress_server_auto=%s cancel_active_server_auto=%s companion_gesture_requested=%s",
             self._current_run_id() or "",
             turn_id,
             input_event_key or "unknown",
@@ -8804,7 +8804,7 @@ class RealtimeAPI:
             str(bool(resolved_verdict.preference_recall_requested)).lower(),
             str(bool(runtime_request.get("suppress_server_auto"))).lower(),
             str(bool(runtime_request.get("cancel_active_server_auto"))).lower(),
-            str(bool(resolved_verdict.mixed_intent_tool_request)).lower(),
+            str(bool(resolved_verdict.companion_gesture_tool_request)).lower(),
         )
 
         if resolved_verdict.preference_recall_requested:
@@ -8838,30 +8838,30 @@ class RealtimeAPI:
                 if input_event_key:
                     locked_input_event_keys.discard(input_event_key)
 
-        mixed_intent_request = (
-            resolved_verdict.mixed_intent_tool_request
-            if isinstance(resolved_verdict.mixed_intent_tool_request, dict)
+        companion_gesture_request = (
+            resolved_verdict.companion_gesture_tool_request
+            if isinstance(resolved_verdict.companion_gesture_tool_request, dict)
             else None
         )
-        if mixed_intent_request is not None:
-            request_fn = getattr(self, "_submit_mixed_intent_tool_request", None)
+        if companion_gesture_request is not None:
+            request_fn = getattr(self, "_submit_companion_gesture_tool_request", None)
             if callable(request_fn):
                 try:
                     request_result = await request_fn(
-                        tool_name=str(mixed_intent_request.get("tool_name") or ""),
-                        tool_args=dict(mixed_intent_request.get("tool_args") or {}),
+                        tool_name=str(companion_gesture_request.get("tool_name") or ""),
+                        tool_args=dict(companion_gesture_request.get("tool_args") or {}),
                         websocket=websocket,
-                        source=str(mixed_intent_request.get("source") or "perception_memory"),
-                        turn_id=str(mixed_intent_request.get("turn_id") or turn_id),
-                        query=str(mixed_intent_request.get("query") or ""),
+                        source=str(companion_gesture_request.get("source") or "perception_memory"),
+                        turn_id=str(companion_gesture_request.get("turn_id") or turn_id),
+                        query=str(companion_gesture_request.get("query") or ""),
                     )
                 except Exception:
                     logger.warning(
-                        "mixed_intent_tool_execution_result run_id=%s turn_id=%s source=%s tool=%s outcome=error",
+                        "companion_gesture_tool_execution_result run_id=%s turn_id=%s source=%s tool=%s outcome=error",
                         self._current_run_id() or "",
                         turn_id,
                         source,
-                        str(mixed_intent_request.get("tool_name") or ""),
+                        str(companion_gesture_request.get("tool_name") or ""),
                         exc_info=True,
                     )
                 else:
@@ -8869,20 +8869,20 @@ class RealtimeAPI:
                         outcome = str(request_result.get("outcome") or "unknown")
                         reason = normalize_governance_reason(str(request_result.get("reason") or ""))
                         logger.info(
-                            "mixed_intent_governance_decision run_id=%s turn_id=%s source=%s tool=%s outcome=%s reason=%s",
+                            "companion_gesture_governance_decision run_id=%s turn_id=%s source=%s tool=%s outcome=%s reason=%s",
                             self._current_run_id() or "",
                             turn_id,
                             source,
-                            str(mixed_intent_request.get("tool_name") or ""),
+                            str(companion_gesture_request.get("tool_name") or ""),
                             outcome,
                             reason,
                         )
                         logger.info(
-                            "mixed_intent_tool_execution_result run_id=%s turn_id=%s source=%s tool=%s outcome=%s executed=%s",
+                            "companion_gesture_tool_execution_result run_id=%s turn_id=%s source=%s tool=%s outcome=%s executed=%s",
                             self._current_run_id() or "",
                             turn_id,
                             source,
-                            str(mixed_intent_request.get("tool_name") or ""),
+                            str(companion_gesture_request.get("tool_name") or ""),
                             outcome,
                             str(bool(request_result.get("executed"))).lower(),
                         )
@@ -15301,7 +15301,7 @@ class RealtimeAPI:
                 final_execution_decision,
             )
 
-    async def _submit_mixed_intent_tool_request(
+    async def _submit_companion_gesture_tool_request(
         self,
         *,
         tool_name: str,
@@ -15311,12 +15311,12 @@ class RealtimeAPI:
         turn_id: str,
         query: str,
     ) -> dict[str, Any]:
-        call_id = f"mixint_{uuid.uuid4().hex[:24]}"
+        call_id = f"compgest_{uuid.uuid4().hex[:23]}"
         action = self._governance.build_action_packet(
             tool_name,
             call_id,
             tool_args,
-            reason=f"mixed_intent {source} turn={turn_id}",
+            reason=f"companion_gesture {source} turn={turn_id}",
         )
         staging = self._stage_action(action)
         if not staging.get("valid", True):
@@ -15403,7 +15403,7 @@ class RealtimeAPI:
                     "action_summary": confirmation_decision.action_summary,
                     "source": source,
                     "turn_id": turn_id,
-                    "mixed_intent": True,
+                    "companion_gesture_request": True,
                 },
             )
             self._pending_action = pending_action
