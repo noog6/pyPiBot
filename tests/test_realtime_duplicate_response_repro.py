@@ -4583,6 +4583,101 @@ def test_response_done_suppression_prunes_blocked_tool_followup_lineage_artifact
     assert cancelled == [(turn_id, f"tool_followup_pruned:parent_covered_tool_result response_id={parent_response_id}")]
 
 
+def test_terminal_selection_prunes_mirrored_tool_followup_once(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_terminal_prune_mirror"
+    parent_input_event_key = "item_parent_terminal_prune_mirror"
+    parent_response_id = "resp_parent_terminal_prune_mirror"
+    parent_canonical_key = api._canonical_utterance_key(
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+    )
+    api._active_input_event_key_by_turn_id[turn_id] = parent_input_event_key
+    api._current_response_turn_id = turn_id
+
+    api._canonical_response_state_mutate(
+        canonical_key=parent_canonical_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "server_auto"),
+            setattr(record, "response_id", parent_response_id),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "final"),
+            setattr(record, "done", True),
+        ),
+    )
+
+    response_create_event, canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_terminal_prune_mirror",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+    metadata = ((response_create_event.get("response") or {}).get("metadata") or {})
+    metadata["turn_id"] = turn_id
+    metadata["parent_turn_id"] = turn_id
+    metadata["parent_input_event_key"] = parent_input_event_key
+    metadata["blocked_by_response_id"] = parent_response_id
+    tool_input_event_key = str(metadata.get("input_event_key") or "")
+
+    api._pending_response_create = PendingResponseCreate(
+        websocket=_RecordingWs(),
+        event=response_create_event,
+        origin="tool_output",
+        turn_id=turn_id,
+        created_at=0.0,
+        reason="active_response",
+        record_ai_call=False,
+        debug_context=None,
+        memory_brief_note=None,
+        queued_reminder_key=None,
+        enqueued_done_serial=0,
+        enqueue_seq=1,
+    )
+    api._sync_pending_response_create_queue()
+    api._set_tool_followup_state(
+        canonical_key=canonical_key,
+        state="blocked_active_response",
+        reason="test_seed_blocked",
+    )
+
+    captured_logs: list[str] = []
+    original_info = logger.info
+
+    def _capture_info(message: str, *args, **kwargs):
+        rendered = str(message)
+        if args:
+            rendered = rendered % args
+        captured_logs.append(rendered)
+        return original_info(message, *args, **kwargs)
+
+    monkeypatch.setattr(logger, "info", _capture_info)
+
+    api._apply_terminal_deliverable_selection(
+        canonical_key=parent_canonical_key,
+        response_id=parent_response_id,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        selected=True,
+        selection_reason="normal",
+    )
+
+    assert api._pending_response_create is None
+    assert list(api._response_create_queue) == []
+    assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
+    assert sum("tool_followup_parent_resolution" in entry for entry in captured_logs) == 1
+    assert sum("tool_followup_lineage_invalidated" in entry for entry in captured_logs) == 1
+    assert any(
+        "terminal_deliverable_tool_followup_prune" in entry
+        and "dropped_pending=1" in entry
+        and "dropped_queue=1" in entry
+        for entry in captured_logs
+    )
+    assert all(tool_input_event_key in entry for entry in captured_logs if "tool_followup_lineage_invalidated" in entry)
+
+
 def test_response_done_suppression_rebinds_followon_micro_ack_to_parent_turn_key() -> None:
     api = _make_api_stub()
     _wire_runtime(api)

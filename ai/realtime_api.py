@@ -7994,6 +7994,7 @@ class RealtimeAPI:
         normalized_response_id = str(selected_response_id or "").strip()
         normalized_reason = str(reason or "").strip() or "parent_covered_tool_result"
         normalized_log_label = str(log_label or "").strip() or "tool_followup_prune"
+        pruned_canonical_keys: set[str] = set()
 
         def _should_drop_tool_followup(event: dict[str, Any], *, fallback_turn_id: str) -> tuple[bool, str, str, str]:
             metadata = self._extract_response_create_metadata(event)
@@ -8037,6 +8038,7 @@ class RealtimeAPI:
                         tool_call_id=tool_call_id,
                         reason=normalized_reason,
                     )
+                    pruned_canonical_keys.add(canonical_key)
                 self._pending_response_create = None
                 dropped_pending = 1
 
@@ -8048,9 +8050,19 @@ class RealtimeAPI:
                 if not isinstance(queued, dict) or not isinstance(queued.get("event"), dict):
                     retained.append(queued)
                     continue
+                queued_metadata = self._extract_response_create_metadata(queued["event"])
+                queued_turn_id = str(queued.get("turn_id") or normalized_turn_id).strip()
+                queued_input_event_key = str(queued_metadata.get("input_event_key") or "").strip()
+                queued_canonical_key = self._canonical_utterance_key(
+                    turn_id=queued_turn_id,
+                    input_event_key=queued_input_event_key,
+                )
+                if queued_canonical_key and queued_canonical_key in pruned_canonical_keys:
+                    dropped_queue += 1
+                    continue
                 should_drop, canonical_key, input_event_key, tool_call_id = _should_drop_tool_followup(
                     queued["event"],
-                    fallback_turn_id=str(queued.get("turn_id") or normalized_turn_id),
+                    fallback_turn_id=queued_turn_id,
                 )
                 if not should_drop:
                     retained.append(queued)
@@ -8068,6 +8080,7 @@ class RealtimeAPI:
                         tool_call_id=tool_call_id,
                         reason=normalized_reason,
                     )
+                    pruned_canonical_keys.add(canonical_key)
                 dropped_queue += 1
             self._response_create_queue = retained
 
