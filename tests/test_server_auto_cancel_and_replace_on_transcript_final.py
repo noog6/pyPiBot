@@ -3,12 +3,16 @@ from __future__ import annotations
 import base64
 import asyncio
 from collections import deque
+from contextlib import nullcontext
 import sys
 import types
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 if "audioop" not in sys.modules:
     sys.modules["audioop"] = types.ModuleType("audioop")
 
+from ai.realtime.memory_runtime import PerceptionMemoryVerdict
 from ai.realtime_api import PendingServerAutoResponse, RealtimeAPI
 
 
@@ -140,6 +144,86 @@ def test_cancel_and_replace_server_auto_on_transcript_final_tags_memory_intent_s
     assert replacement_calls
     metadata = replacement_calls[0]["event"]["response"]["metadata"]
     assert metadata["memory_intent_subtype"] == "general_memory"
+
+
+def test_transcript_final_upgrade_preserved_when_perception_memory_verdict_is_noop() -> None:
+    api = _build_api_stub()
+    api._extract_transcript = lambda event: str(event.get("transcript") or "")
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._log_user_transcript = lambda *_args, **_kwargs: None
+    api._attention_on_transcript_finalized = lambda: None
+    api._resolve_input_event_key = lambda event: str(event.get("item_id") or "item_abc")
+    api._current_turn_id_or_unknown = lambda: "turn_2"
+    api._utterance_context_scope = lambda **kwargs: nullcontext(
+        SimpleNamespace(
+            turn_id=str(kwargs.get("turn_id") or "turn_2"),
+            input_event_key=str(kwargs.get("input_event_key") or "item_abc"),
+        )
+    )
+    api._active_input_event_key_by_turn_id = {}
+    api._rebind_active_response_correlation_key = lambda **_kwargs: None
+    api._clear_stale_pending_server_auto_for_turn = lambda **_kwargs: None
+    api._invalidate_provisional_tool_followups_for_turn = lambda **_kwargs: None
+    api._response_trace_by_id = lambda: {}
+    api._classify_memory_intent = lambda _text: "general_memory"
+    api._set_response_obligation = lambda **_kwargs: None
+    api._summary_response_created_seen_for_canonical = lambda **_kwargs: True
+    api._response_delivery_state = lambda **_kwargs: "pending"
+    api._pending_server_auto_input_event_keys = deque(maxlen=64)
+    api._active_server_auto_input_event_key = None
+    api._active_response_origin = "unknown"
+    api._start_transcript_response_watchdog = lambda **_kwargs: None
+    api._turn_diagnostic_timestamps = {}
+    api._signal_server_auto_transcript_final = lambda **_kwargs: None
+    api._latest_partial_transcript_by_turn_id = {}
+    api._has_active_confirmation_token = lambda: False
+    api._is_awaiting_confirmation_phase = lambda: False
+    api._active_utterance = None
+    api._log_utterance_trust_snapshot = lambda **_kwargs: {"word_count": 6}
+    api._evaluate_curiosity_from_trust_snapshot = lambda **_kwargs: None
+    api._maybe_verify_on_risk_clarify = AsyncMock(return_value=False)
+    api._set_response_gating_verdict = lambda **_kwargs: None
+    api._maybe_schedule_micro_ack = lambda **_kwargs: None
+    api._record_user_input = lambda *_args, **_kwargs: None
+    api._maybe_handle_approval_response = AsyncMock(return_value=False)
+    api._handle_stop_word = AsyncMock(return_value=False)
+    api._maybe_handle_research_permission_response = AsyncMock(return_value=False)
+    api._maybe_handle_research_budget_response = AsyncMock(return_value=False)
+    api._maybe_apply_late_confirmation_decision = AsyncMock(return_value=False)
+    api._maybe_process_research_intent = AsyncMock(return_value=False)
+    api._peek_pending_preference_memory_context_payload = lambda **_kwargs: None
+    api.should_cancel_and_replace = lambda **_kwargs: True
+    api._pending_server_auto_response_by_turn_id["turn_2"] = PendingServerAutoResponse(
+        turn_id="turn_2",
+        response_id="resp-server-auto",
+        canonical_key="run-464:turn_2:synthetic_server_auto_1",
+        created_at_ms=1,
+        active=True,
+    )
+    api._analyze_preference_recall_intent = AsyncMock(
+        return_value=PerceptionMemoryVerdict.empty(memory_intent_subtype="general_memory")
+    )
+    api._apply_perception_memory_verdict = AsyncMock(return_value=False)
+    api._cancel_and_replace_pending_server_auto_on_transcript_final = AsyncMock(return_value=True)
+
+    asyncio.run(
+        api._handle_input_audio_transcription_completed_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "item_abc",
+                "transcript": "Tell me what you remember about Vim",
+            },
+            object(),
+        )
+    )
+
+    api._analyze_preference_recall_intent.assert_awaited_once()
+    api._apply_perception_memory_verdict.assert_awaited_once()
+    api._cancel_and_replace_pending_server_auto_on_transcript_final.assert_awaited_once()
+    assert (
+        api._cancel_and_replace_pending_server_auto_on_transcript_final.await_args.kwargs["memory_intent_subtype"]
+        == "general_memory"
+    )
 
 
 def test_transcript_upgrade_memory_intent_adds_observation_exclusion_guardrail() -> None:

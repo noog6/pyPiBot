@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import time
 import re
-from typing import Protocol
+from typing import Any, Protocol
 
 from core.logging import logger
 from services.memory_manager import render_realtime_memory_brief_item, render_startup_memory_digest_item
@@ -56,6 +56,26 @@ class MemoryRuntimeAPI(Protocol):
     _pending_turn_memory_brief: object | None
     _memory_retrieval_last_error_log_at: float
     _memory_retrieval_suppressed_errors: int
+
+
+@dataclass(frozen=True)
+class PerceptionMemoryVerdict:
+    """Structured perception/memory result with runtime effects applied later."""
+
+    memory_intent: bool = False
+    memory_intent_subtype: str = "none"
+    preference_recall_requested: bool = False
+    preference_recall_context: dict[str, Any] | None = None
+    mixed_intent_tool_request: dict[str, Any] | None = None
+    runtime_request: dict[str, Any] | None = None
+
+    @classmethod
+    def empty(cls, *, memory_intent_subtype: str = "none") -> "PerceptionMemoryVerdict":
+        normalized_subtype = str(memory_intent_subtype or "none").strip() or "none"
+        return cls(
+            memory_intent=normalized_subtype != "none",
+            memory_intent_subtype=normalized_subtype,
+        )
 
 
 @dataclass

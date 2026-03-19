@@ -7,7 +7,7 @@ import time
 from typing import Any
 
 from core.logging import logger, log_ws_event
-from ai.governance import normalize_governance_reason
+from ai.realtime.memory_runtime import PerceptionMemoryVerdict
 from ai.tools import function_map
 
 
@@ -218,12 +218,11 @@ def _emit_preference_recall_skip_trace_if_needed(controller, *, turn_id: str | N
         )
         controller._clear_preference_recall_candidate()
 
-async def _maybe_handle_preference_recall_intent(controller, text: str, websocket: Any, *, source: str) -> bool:
-        _ = websocket
+async def _analyze_preference_recall_intent(controller, text: str, *, source: str) -> PerceptionMemoryVerdict:
         matched, keywords = controller._is_preference_recall_intent(text)
         memory_intent_subtype = controller._classify_memory_intent(text)
         if not matched and memory_intent_subtype != "topic_recall":
-            return False
+            return PerceptionMemoryVerdict.empty(memory_intent_subtype=memory_intent_subtype)
 
         resolved_turn_id = controller._current_turn_id_or_unknown()
         turn_timestamps_store = getattr(controller, "_turn_diagnostic_timestamps", None)
@@ -248,55 +247,13 @@ async def _maybe_handle_preference_recall_intent(controller, text: str, websocke
                 source,
                 mixed_intent_gesture_tool,
             )
-            request_fn = getattr(controller, "_submit_mixed_intent_tool_request", None)
-            if callable(request_fn):
-                logger.info(
-                    "mixed_intent_tool_request_created run_id=%s turn_id=%s source=%s tool=%s",
-                    controller._current_run_id() or "",
-                    resolved_turn_id,
-                    source,
-                    mixed_intent_gesture_tool,
-                )
-                request_result: dict[str, Any] | None = None
-                try:
-                    request_result = await request_fn(
-                        tool_name=mixed_intent_gesture_tool,
-                        tool_args={},
-                        websocket=websocket,
-                        source="preference_recall_mixed_intent",
-                        turn_id=resolved_turn_id,
-                        query=normalized_text,
-                    )
-                except Exception:
-                    logger.warning(
-                        "mixed_intent_tool_execution_result run_id=%s turn_id=%s source=%s tool=%s outcome=error",
-                        controller._current_run_id() or "",
-                        resolved_turn_id,
-                        source,
-                        mixed_intent_gesture_tool,
-                        exc_info=True,
-                    )
-                if isinstance(request_result, dict):
-                    outcome = str(request_result.get("outcome") or "unknown")
-                    reason = normalize_governance_reason(str(request_result.get("reason") or ""))
-                    logger.info(
-                        "mixed_intent_governance_decision run_id=%s turn_id=%s source=%s tool=%s outcome=%s reason=%s",
-                        controller._current_run_id() or "",
-                        resolved_turn_id,
-                        source,
-                        mixed_intent_gesture_tool,
-                        outcome,
-                        reason,
-                    )
-                    logger.info(
-                        "mixed_intent_tool_execution_result run_id=%s turn_id=%s source=%s tool=%s outcome=%s executed=%s",
-                        controller._current_run_id() or "",
-                        resolved_turn_id,
-                        source,
-                        mixed_intent_gesture_tool,
-                        outcome,
-                        str(bool(request_result.get("executed"))).lower(),
-                    )
+            logger.info(
+                "mixed_intent_tool_request_created run_id=%s turn_id=%s source=%s tool=%s",
+                controller._current_run_id() or "",
+                resolved_turn_id,
+                source,
+                mixed_intent_gesture_tool,
+            )
 
         query = controller._build_preference_recall_query(text.lower(), keywords=keywords)
         topic_bridge_query = ""
@@ -330,7 +287,7 @@ async def _maybe_handle_preference_recall_intent(controller, text: str, websocke
                 if isinstance(controller._pending_preference_recall_trace, dict):
                     controller._pending_preference_recall_trace["reason"] = "policy_skip"
                 logger.warning("Preference recall intent matched but recall_memories tool unavailable.")
-                return False
+                return PerceptionMemoryVerdict.empty(memory_intent_subtype=memory_intent_subtype)
             recall_invoked = True
             tool_call_records = getattr(controller, "_tool_call_records", None)
             if isinstance(tool_call_records, list):
@@ -400,7 +357,7 @@ async def _maybe_handle_preference_recall_intent(controller, text: str, websocke
             )
             if not bridge_hit:
                 controller._clear_preference_recall_candidate()
-                return False
+                return PerceptionMemoryVerdict.empty(memory_intent_subtype=memory_intent_subtype)
             result_payload["source"] = "topic_recall_preference_bridge"
 
         input_event_key = str(getattr(controller, "_current_input_event_key", "") or "").strip()
@@ -413,38 +370,13 @@ async def _maybe_handle_preference_recall_intent(controller, text: str, websocke
             returned_count,
         )
 
-        locked_input_event_keys = getattr(controller, "_preference_recall_locked_input_event_keys", None)
-        if not isinstance(locked_input_event_keys, set):
-            locked_input_event_keys = set()
-            controller._preference_recall_locked_input_event_keys = locked_input_event_keys
-        if input_event_key:
-            locked_input_event_keys.add(input_event_key)
-
-        try:
-            memory_context = _build_preference_memory_context(
-                hit=hit,
-                returned_count=returned_count,
-                memory_cards_text=memory_cards_text,
-                memories=memories,
-                cards=cards,
-            )
-            if hasattr(controller, "_set_pending_preference_memory_context"):
-                controller._set_pending_preference_memory_context(
-                    turn_id=resolved_turn_id,
-                    input_event_key=input_event_key,
-                    memory_context=memory_context,
-                )
-            logger.info(
-                "pref_recall_context_attached run_id=%s turn_id=%s input_event_key=%s hit=%s returned_count=%s",
-                controller._current_run_id() or "",
-                resolved_turn_id,
-                input_event_key or "unknown",
-                str(hit).lower(),
-                returned_count,
-            )
-        finally:
-            if input_event_key:
-                locked_input_event_keys.discard(input_event_key)
+        memory_context = _build_preference_memory_context(
+            hit=hit,
+            returned_count=returned_count,
+            memory_cards_text=memory_cards_text,
+            memories=memories,
+            cards=cards,
+        )
 
         turn_timestamps["preference_recall_end"] = time.monotonic()
         controller._clear_preference_recall_candidate()
@@ -457,7 +389,49 @@ async def _maybe_handle_preference_recall_intent(controller, text: str, websocke
             str(hit).lower(),
             str(recall_invoked).lower(),
         )
-        return False
+        verdict = PerceptionMemoryVerdict(
+            memory_intent=memory_intent_subtype != "none",
+            memory_intent_subtype=memory_intent_subtype,
+            preference_recall_requested=True,
+            preference_recall_context=memory_context,
+            mixed_intent_tool_request=(
+                {
+                    "tool_name": mixed_intent_gesture_tool,
+                    "tool_args": {},
+                    "source": "preference_recall_mixed_intent",
+                    "turn_id": resolved_turn_id,
+                    "query": normalized_text,
+                }
+                if mixed_intent_gesture_tool
+                else None
+            ),
+            runtime_request=None,
+        )
+        logger.info(
+            "perception_memory_verdict run_id=%s turn_id=%s source=%s memory_intent=%s memory_intent_subtype=%s preference_recall_requested=%s mixed_intent=%s runtime_request=%s",
+            controller._current_run_id() or "",
+            resolved_turn_id,
+            source,
+            str(bool(verdict.memory_intent)).lower(),
+            verdict.memory_intent_subtype,
+            str(bool(verdict.preference_recall_requested)).lower(),
+            str(bool(verdict.mixed_intent_tool_request)).lower(),
+            "present" if isinstance(verdict.runtime_request, dict) and verdict.runtime_request else "none",
+        )
+        return verdict
+
+
+async def _maybe_handle_preference_recall_intent(controller, text: str, websocket: Any, *, source: str) -> bool:
+        verdict = await _analyze_preference_recall_intent(
+            controller,
+            text,
+            source=source,
+        )
+        return await controller._apply_perception_memory_verdict(
+            verdict,
+            websocket=websocket,
+            source=source,
+        )
 
 def _find_stop_word(controller, text: str) -> str | None:
         if not text or not controller._stop_words:
