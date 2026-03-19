@@ -12,6 +12,7 @@ if "audioop" not in sys.modules:
 from ai.governance import ActionPacket
 from ai.realtime.response_create_runtime import ResponseCreateRuntime
 from ai.realtime.types import PendingResponseCreate
+from ai.realtime.response_terminal_handlers import ResponseTerminalHandlers
 from ai.realtime_api import InteractionState, RealtimeAPI
 from ai.interaction_lifecycle_controller import InteractionLifecycleState
 from core.logging import logger
@@ -117,9 +118,18 @@ def _make_api_stub() -> RealtimeAPI:
         {
             "is_receiving": False,
             "is_recording": False,
+            "start_recording_calls": 0,
+            "stop_recording_calls": 0,
             "start_receiving": lambda self: setattr(self, "is_receiving", True),
             "stop_receiving": lambda self: setattr(self, "is_receiving", False),
-            "start_recording": lambda self: setattr(self, "is_recording", True),
+            "start_recording": lambda self: (
+                setattr(self, "is_recording", True),
+                setattr(self, "start_recording_calls", getattr(self, "start_recording_calls", 0) + 1),
+            ),
+            "stop_recording": lambda self: (
+                setattr(self, "is_recording", False),
+                setattr(self, "stop_recording_calls", getattr(self, "stop_recording_calls", 0) + 1),
+            ),
         },
     )()
     api.websocket = None
@@ -174,6 +184,107 @@ def _make_api_stub() -> RealtimeAPI:
     )()
     return api
 
+
+def _prime_response_done_api(
+    api: RealtimeAPI,
+    *,
+    turn_id: str,
+    input_event_key: str,
+    response_id: str,
+    origin: str = "server_auto",
+    audio_started: bool = False,
+) -> str:
+    canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+    api._current_response_turn_id = turn_id
+    api._current_turn_id_or_unknown = lambda: turn_id
+    api._active_input_event_key_by_turn_id[turn_id] = input_event_key
+    api._active_response_id = response_id
+    api._active_response_origin = origin
+    api._active_response_input_event_key = input_event_key
+    api._active_response_canonical_key = canonical_key
+    api._active_response_consumes_canonical_slot = True
+    api._response_trace_context_by_id = {
+        response_id: {
+            "turn_id": turn_id,
+            "input_event_key": input_event_key,
+            "canonical_key": canonical_key,
+            "origin": origin,
+        }
+    }
+    api._stale_response_context = lambda _response_id: {}
+    api._response_delivery_state = lambda **_kwargs: "created"
+    api._response_obligation_key = lambda **_kwargs: f"{turn_id}:{input_event_key}"
+    api._lifecycle_controller = lambda: type(
+        "_Lifecycle",
+        (),
+        {
+            "on_response_done": lambda *_args, **_kwargs: None,
+            "audio_started": lambda *_args, **_kwargs: False,
+        },
+    )()
+    api._log_lifecycle_event = lambda **_kwargs: None
+    api._debug_dump_canonical_key_timeline = lambda **_kwargs: None
+    api._set_response_delivery_state = lambda **_kwargs: None
+    api._tool_followup_state = lambda **_kwargs: "idle"
+    api._set_tool_followup_state = lambda **_kwargs: None
+    api._reconcile_terminal_substantive_response = lambda **_kwargs: None
+    api._release_blocked_tool_followups_for_response_done = lambda **_kwargs: None
+    api._log_cancelled_deliverable_once = lambda *_args, **_kwargs: None
+    api._record_response_trace_context = lambda *_args, **_kwargs: None
+    api._emit_response_lifecycle_trace = lambda **_kwargs: None
+    api._log_lifecycle_coherence = lambda **_kwargs: None
+    api._clear_terminal_response_text = lambda **_kwargs: None
+    api._emit_startup_prompt_terminal = lambda **_kwargs: None
+    api._emit_utterance_info_summary = lambda **_kwargs: None
+    api._prune_curiosity_surface_candidates = lambda **_kwargs: None
+    api._is_empty_response_done = lambda **_kwargs: False
+    api._record_silent_turn_incident = lambda **_kwargs: None
+    api._maybe_schedule_empty_response_retry = lambda **_kwargs: asyncio.sleep(0)
+    api._emit_preference_recall_skip_trace_if_needed = lambda **_kwargs: None
+    api._log_turn_conversation_efficiency = lambda **_kwargs: None
+    api._cancel_micro_ack = lambda **_kwargs: None
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._response_trace_by_id = lambda: api._response_trace_context_by_id
+    api._build_confirmation_transition_decision = lambda **_kwargs: type(
+        "_Transition",
+        (),
+        {
+            "allow_response_transition": True,
+            "emit_reminder": False,
+            "recover_mic": False,
+            "close_reason": "",
+        },
+    )()
+    api._confirmation_hold_components = lambda: (False, False, None, False)
+    api._mark_confirmation_activity = lambda **_kwargs: None
+    api._should_send_response_done_fallback_reminder = lambda: False
+    api._is_guarded_server_auto_reminder_allowed = lambda **_kwargs: False
+    api._maybe_emit_confirmation_reminder = lambda *_args, **_kwargs: asyncio.sleep(0)
+    api._recover_confirmation_guard_microphone = lambda *_args, **_kwargs: None
+    api._clear_cancelled_response_tracking = lambda *_args, **_kwargs: None
+    api._response_terminal_handlers = ResponseTerminalHandlers(api)
+    api.exit_event = type("_ExitEvent", (), {"is_set": lambda self: False})()
+    state = api.state_manager
+    state.transitions = []
+    state.update_state = lambda new_state, reason: (
+        state.transitions.append((new_state, reason)),
+        setattr(state, "state", new_state),
+    )
+    orch = api.orchestration_state
+    orch.transitions = []
+    orch.transition = lambda phase, reason: orch.transitions.append((phase, reason))
+    api._canonical_response_state_mutate(
+        canonical_key=canonical_key,
+        turn_id=turn_id,
+        input_event_key=input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", origin),
+            setattr(record, "response_id", response_id),
+            setattr(record, "created", True),
+            setattr(record, "audio_started", audio_started),
+        ),
+    )
+    return canonical_key
 
 
 
@@ -3705,6 +3816,143 @@ def test_pruned_tool_followup_rebinds_followon_micro_ack_to_parent_turn_key() ->
     sent_metadata = ((response_events[0].get("response") or {}).get("metadata") or {})
     assert sent_metadata.get("input_event_key") == parent_input_event_key
     assert sent_metadata.get("input_event_key") != tool_input_event_key
+
+
+
+def test_response_done_restarts_mic_for_silent_terminal_completion() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    turn_id = "turn_silent_done"
+    input_event_key = "item_silent_done"
+    response_id = "resp-silent-done"
+    canonical_key = _prime_response_done_api(
+        api,
+        turn_id=turn_id,
+        input_event_key=input_event_key,
+        response_id=response_id,
+        origin="server_auto",
+        audio_started=False,
+    )
+
+    asyncio.run(
+        api.handle_response_done(
+            {"type": "response.done", "response": {"id": response_id}}
+        )
+    )
+
+    assert api._canonical_first_audio_started(canonical_key) is False
+    assert api.mic.is_recording is True
+    assert api.mic.start_recording_calls == 1
+
+
+
+def test_response_done_does_not_double_restart_spoken_turns() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    turn_id = "turn_spoken_done"
+    input_event_key = "item_spoken_done"
+    response_id = "resp-spoken-done"
+    canonical_key = _prime_response_done_api(
+        api,
+        turn_id=turn_id,
+        input_event_key=input_event_key,
+        response_id=response_id,
+        origin="server_auto",
+        audio_started=True,
+    )
+    api._audio_playback_busy = True
+    api._speaking_started = True
+    api.exit_event = type("_ExitEvent", (), {"is_set": lambda self: False})()
+
+    asyncio.run(
+        api.handle_response_done(
+            {"type": "response.done", "response": {"id": response_id}}
+        )
+    )
+
+    assert api._canonical_first_audio_started(canonical_key) is True
+    assert api.mic.start_recording_calls == 0
+    assert api.mic.is_recording is False
+
+    api._on_playback_complete()
+
+    assert api.mic.start_recording_calls == 1
+    assert api.mic.is_recording is True
+
+
+
+def test_response_done_restarts_mic_when_tool_followup_is_pruned_without_playback() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_response_done_pruned_recovery"
+    parent_input_event_key = "item_parent_response_done_pruned_recovery"
+    parent_response_id = "resp-parent-response-done-pruned-recovery"
+    parent_key = _prime_response_done_api(
+        api,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        response_id=parent_response_id,
+        origin="server_auto",
+        audio_started=False,
+    )
+
+    api._tool_followup_state = RealtimeAPI._tool_followup_state.__get__(api, RealtimeAPI)
+    api._set_tool_followup_state = RealtimeAPI._set_tool_followup_state.__get__(api, RealtimeAPI)
+    api._release_blocked_tool_followups_for_response_done = (
+        RealtimeAPI._release_blocked_tool_followups_for_response_done.__get__(api, RealtimeAPI)
+    )
+
+    response_create_event, canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_response_done_pruned_recovery",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_right",
+    )
+    metadata = ((response_create_event.get("response") or {}).get("metadata") or {})
+    metadata["turn_id"] = turn_id
+    metadata["parent_turn_id"] = turn_id
+    metadata["parent_input_event_key"] = parent_input_event_key
+    metadata["blocked_by_response_id"] = parent_response_id
+    api._current_input_event_key = str(metadata.get("input_event_key") or "")
+    api._pending_response_create = PendingResponseCreate(
+        websocket=_RecordingWs(),
+        event=response_create_event,
+        origin="tool_output",
+        turn_id=turn_id,
+        created_at=0.0,
+        reason="active_response",
+        record_ai_call=False,
+        debug_context=None,
+        memory_brief_note=None,
+        queued_reminder_key=None,
+        enqueued_done_serial=0,
+        enqueue_seq=1,
+    )
+
+    api._set_tool_followup_state(
+        canonical_key=canonical_key,
+        state="blocked_active_response",
+        reason="test_seed",
+    )
+    api._apply_terminal_deliverable_selection(
+        canonical_key=parent_key,
+        response_id=parent_response_id,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        selected=True,
+        selection_reason="normal",
+    )
+
+    asyncio.run(
+        api.handle_response_done(
+            {"type": "response.done", "response": {"id": parent_response_id}}
+        )
+    )
+
+    assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
+    assert api._current_input_event_key == parent_input_event_key
+    assert api.mic.start_recording_calls == 1
+    assert api.mic.is_recording is True
 
 
 

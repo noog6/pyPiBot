@@ -11639,6 +11639,48 @@ class RealtimeAPI:
         )
         mic.start_recording()
 
+    def _maybe_recover_mic_after_response_done(
+        self,
+        *,
+        turn_id: str,
+        response_id: str | None,
+        canonical_key: str,
+        origin: str,
+        trigger: str,
+    ) -> bool:
+        exit_event = getattr(self, "exit_event", None)
+        if exit_event is not None and exit_event.is_set():
+            logger.info(
+                "response_done_mic_recovery_skipped run_id=%s turn_id=%s response_id=%s reason=shutdown_requested",
+                self._current_run_id() or "",
+                turn_id,
+                str(response_id or "none"),
+            )
+            return False
+        if self._audio_playback_busy:
+            return False
+        mic = getattr(self, "mic", None)
+        if mic is None or getattr(mic, "is_recording", False):
+            return False
+        if self._canonical_first_audio_started(canonical_key):
+            return False
+        if bool(getattr(self, "_speaking_started", False)):
+            return False
+        current_state = getattr(getattr(self, "state_manager", None), "state", InteractionState.IDLE)
+        if current_state == InteractionState.SPEAKING:
+            return False
+        logger.info(
+            "response_done_mic_recovery run_id=%s turn_id=%s response_id=%s canonical_key=%s origin=%s trigger=%s",
+            self._current_run_id() or "",
+            turn_id,
+            str(response_id or "none"),
+            canonical_key,
+            str(origin or "unknown"),
+            trigger,
+        )
+        mic.start_recording()
+        return True
+
     async def _add_no_tools_follow_up_instruction(self, websocket: Any) -> None:
         instruction_event = {
             "type": "conversation.item.create",

@@ -620,6 +620,13 @@ class ResponseTerminalHandlers:
                 OrchestrationPhase.IDLE,
                 reason="response done reflection",
             )
+        api._maybe_recover_mic_after_response_done(
+            turn_id=turn_id,
+            response_id=active_response_id_before_clear,
+            canonical_key=resolved_canonical_key,
+            origin=str(active_response_origin_before_clear or "unknown"),
+            trigger="response_done_terminal",
+        )
         if was_confirmation_guarded:
             if token_active:
                 api._mark_confirmation_activity(reason="guarded_response_done")
