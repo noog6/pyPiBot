@@ -1116,6 +1116,93 @@ def test_cancel_and_replace_allows_post_done_lineage_when_active_response_cleare
     assert not any("pending_server_auto_mutation_rejected" in line for line in captured)
 
 
+def test_transcript_final_handoff_rebinds_pending_and_terminal_selection_canonical_key() -> None:
+    api = _build_api_stub()
+    old_canonical_key = "run-464:turn_50:synthetic_server_auto_50"
+    new_input_event_key = "item_50"
+    new_canonical_key = "run-464:turn_50:item_50"
+    api._pending_server_auto_response_by_turn_id["turn_50"] = PendingServerAutoResponse(
+        turn_id="turn_50",
+        response_id="resp-server-auto-50",
+        canonical_key=old_canonical_key,
+        created_at_ms=1,
+        active=False,
+    )
+    api._terminal_deliverable_selection_store()["resp-server-auto-50"] = {
+        "selected": False,
+        "reason": "provisional_server_auto_awaiting_transcript_final",
+        "canonical_key": old_canonical_key,
+    }
+
+    api._rebind_provisional_server_auto_turn_ownership(
+        turn_id="turn_50",
+        response_id="resp-server-auto-50",
+        replacement_input_event_key=new_input_event_key,
+    )
+
+    pending = api._pending_server_auto_response_for_turn(turn_id="turn_50")
+    assert pending is not None
+    assert pending.canonical_key == new_canonical_key
+    assert api._terminal_deliverable_selection_store()["resp-server-auto-50"]["canonical_key"] == new_canonical_key
+
+    snapshot = api._response_runtime_coherence_snapshot(
+        turn_id="turn_50",
+        canonical_key=new_canonical_key,
+        response_id="resp-server-auto-50",
+    )
+    assert "pending_server_auto_canonical_key_mismatch" not in snapshot["violations"]
+    assert "terminal_selection_canonical_key_mismatch" not in snapshot["violations"]
+
+
+def test_cancel_and_replace_reconciles_provisional_ownership_before_coherence_check(monkeypatch) -> None:
+    api = _build_api_stub()
+    transport = _Transport()
+    warning_logs: list[str] = []
+    api._active_response_id = "resp-server-auto-51"
+
+    api._pending_server_auto_response_by_turn_id["turn_51"] = PendingServerAutoResponse(
+        turn_id="turn_51",
+        response_id="resp-server-auto-51",
+        canonical_key="run-464:turn_51:synthetic_server_auto_51",
+        created_at_ms=1,
+        active=True,
+        upgrade_chain_id="run-464:turn_51:synthetic_server_auto_51",
+    )
+    api._terminal_deliverable_selection_store()["resp-server-auto-51"] = {
+        "selected": False,
+        "reason": "provisional_server_auto_awaiting_transcript_final",
+        "canonical_key": "run-464:turn_51:synthetic_server_auto_51",
+    }
+    api._peek_pending_preference_memory_context_payload = lambda **_kwargs: None
+    api._get_or_create_transport = lambda: transport
+
+    async def _fake_send_response_create(_websocket, _event, **_kwargs):
+        return True
+
+    api._send_response_create = _fake_send_response_create
+    monkeypatch.setattr(
+        "ai.realtime_api.logger.warning",
+        lambda msg, *args: warning_logs.append(msg % args if args else msg),
+    )
+
+    replaced = asyncio.run(
+        api._cancel_and_replace_pending_server_auto_on_transcript_final(
+            websocket=object(),
+            turn_id="turn_51",
+            input_event_key="item_51",
+            origin_label="upgraded_response",
+        )
+    )
+
+    assert replaced is True
+    assert not any("terminal_selection_canonical_key_mismatch" in entry for entry in warning_logs)
+    assert not any("pending_server_auto_canonical_key_mismatch" in entry for entry in warning_logs)
+    pending = api._pending_server_auto_response_for_turn(turn_id="turn_51")
+    assert pending is not None
+    assert pending.canonical_key == "run-464:turn_51:item_51"
+    assert api._terminal_deliverable_selection_store()["resp-server-auto-51"]["canonical_key"] == "run-464:turn_51:item_51"
+
+
 def test_distinct_info_tool_followup_not_suppressed_after_canonical_ownership() -> None:
     api = _build_api_stub()
     should_drop, _parent_entry, reason = api._should_suppress_queued_tool_followup_release(
