@@ -546,7 +546,11 @@ def main(argv: list[str] | None = None) -> int:
                     env_var="THEO_CAMERA_DEBUG",
                     logger=logger,
                 ):
-                    camera_instance.stop_vision_loop()
+                    close_camera = getattr(camera_instance, "close", None)
+                    if callable(close_camera):
+                        close_camera()
+                    else:
+                        camera_instance.stop_vision_loop()
 
             shutdown_summary["camera_controller"] = _run_stop_with_status(
                 _stop_camera,

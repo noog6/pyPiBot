@@ -6,6 +6,7 @@ import asyncio
 import threading
 import time
 import traceback
+import sys
 from typing import Any
 import concurrent.futures
 from collections import deque
@@ -45,6 +46,13 @@ def _safe_connection_closed_ok() -> type[BaseException] | None:
     if exceptions_module is not None:
         return getattr(exceptions_module, "ConnectionClosedOK", None)
     return getattr(websockets, "ConnectionClosedOK", None)
+
+
+def _is_interpreter_shutdown_import_error(exc: BaseException) -> bool:
+    if not isinstance(exc, ImportError):
+        return False
+    message = str(exc)
+    return "sys.meta_path is None" in message and "Python is likely shutting down" in message
 
 
 class CameraController:
@@ -124,6 +132,41 @@ class CameraController:
             logger.info("[CAMERA] Control loop stopped at index: %s", self.vision_loop_index)
             self.vision_loop_index = 0
             self._shutdown_image_saver()
+
+    def close(self) -> None:
+        self.stop_vision_loop()
+        picam2 = getattr(self, "picam2", None)
+        if picam2 is None:
+            CameraController._instance = None
+            return
+        try:
+            stop_method = getattr(picam2, "stop", None)
+            if callable(stop_method):
+                stop_method()
+        except Exception as exc:
+            logger.exception("[CAMERA] Failed stopping camera during shutdown: %s", exc)
+        try:
+            close_method = getattr(picam2, "close", None)
+            if callable(close_method):
+                close_method()
+        except Exception as exc:
+            logger.exception("[CAMERA] Failed closing camera during shutdown: %s", exc)
+        finally:
+            self.picam2 = None
+            CameraController._instance = None
+
+    def __del__(self) -> None:
+        picam2 = getattr(self, "picam2", None)
+        if picam2 is None:
+            return
+        if sys.meta_path is None:
+            try:
+                close_method = getattr(picam2, "close", None)
+                if callable(close_method):
+                    close_method()
+            except Exception as exc:
+                if _is_interpreter_shutdown_import_error(exc):
+                    return
 
     def take_image(self) -> Any:
         frame = self.picam2.capture_array("main")

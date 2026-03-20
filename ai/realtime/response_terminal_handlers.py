@@ -143,6 +143,18 @@ class ResponseTerminalHandlers:
 
     async def handle_audio_response_done(self) -> None:
         api = self._api
+        response_id = str(getattr(api, "_active_response_id", "") or "").strip()
+        trace_context = api._response_trace_by_id().get(response_id, {}) if response_id else {}
+        if str(trace_context.get("tool_followup") or "").strip().lower() in {"true", "1", "yes"}:
+            api._mark_tool_followup_timing(
+                turn_id=str(trace_context.get("turn_id") or api._current_turn_id_or_unknown()).strip() or "turn-unknown",
+                marker="followup_output_audio_done",
+                call_id=str(trace_context.get("tool_call_id") or "").strip() or None,
+                canonical_key=str(trace_context.get("canonical_key") or "").strip() or None,
+                response_id=response_id or None,
+                is_tool_followup=True,
+                released=str(trace_context.get("tool_followup_release") or "").strip().lower() in {"true", "1", "yes"},
+            )
         if api.response_start_time is not None:
             response_end_time = time.perf_counter()
             response_duration = response_end_time - api.response_start_time
@@ -211,6 +223,19 @@ class ResponseTerminalHandlers:
         response_id = api._response_id_from_event(event)
         trace_context = api._response_trace_by_id().get(response_id, {}) if response_id else {}
         stale_context = api._stale_response_context(response_id) if response_id else {}
+        if str(trace_context.get("tool_followup") or "").strip().lower() in {"true", "1", "yes"}:
+            api._mark_tool_followup_timing(
+                turn_id=str(trace_context.get("turn_id") or api._current_turn_id_or_unknown()).strip() or "turn-unknown",
+                marker="followup_response_done",
+                call_id=str(trace_context.get("tool_call_id") or "").strip() or None,
+                canonical_key=str(trace_context.get("canonical_key") or "").strip() or None,
+                response_id=response_id or None,
+                is_tool_followup=True,
+                released=str(trace_context.get("tool_followup_release") or "").strip().lower() in {"true", "1", "yes"},
+            )
+            api._maybe_emit_tool_followup_timing_summary(
+                turn_id=str(trace_context.get("turn_id") or api._current_turn_id_or_unknown()).strip() or "turn-unknown",
+            )
         active_turn_id = api._current_turn_id_or_unknown()
         turn_id = str(
             trace_context.get("turn_id")

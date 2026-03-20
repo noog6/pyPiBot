@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import threading
 from collections import deque
 
@@ -86,3 +87,40 @@ def test_can_send_realtime_supports_bool_readiness_callable() -> None:
 
     assert not not_ready_camera._can_send_realtime()
     assert ready_camera._can_send_realtime()
+
+
+def test_camera_close_stops_and_dereferences_picamera(monkeypatch) -> None:
+    stop_calls: list[str] = []
+
+    class _Picam:
+        def stop(self) -> None:
+            stop_calls.append("stop")
+
+        def close(self) -> None:
+            stop_calls.append("close")
+
+    camera = CameraController.__new__(CameraController)
+    camera.picam2 = _Picam()
+    camera.stop_vision_loop = lambda: stop_calls.append("stop_vision_loop")
+    CameraController._instance = camera
+
+    camera.close()
+
+    assert stop_calls == ["stop_vision_loop", "stop", "close"]
+    assert camera.picam2 is None
+    assert CameraController._instance is None
+
+
+def test_camera_del_suppresses_late_shutdown_close_noise(monkeypatch) -> None:
+    class _Picam:
+        def close(self) -> None:
+            raise ImportError("sys.meta_path is None, Python is likely shutting down")
+
+    camera = CameraController.__new__(CameraController)
+    camera.picam2 = _Picam()
+    original_meta_path = sys.meta_path
+    monkeypatch.setattr(sys, "meta_path", None)
+    try:
+        camera.__del__()
+    finally:
+        monkeypatch.setattr(sys, "meta_path", original_meta_path)

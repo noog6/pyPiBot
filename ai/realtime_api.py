@@ -986,6 +986,7 @@ class RealtimeAPI:
         self._preference_recall_handled_logged_turn_ids: set[str] = set()
         self._response_schedule_logged_turn_ids: set[str] = set()
         self._turn_diagnostic_timestamps: dict[str, dict[str, float]] = {}
+        self._tool_followup_timing_by_turn_id: dict[str, dict[str, Any]] = {}
 
         research_cfg = config.get("research") or {}
         self._research_enabled = bool(research_cfg.get("enabled", False))
@@ -1350,6 +1351,138 @@ class RealtimeAPI:
             if normalized_value:
                 current[key] = normalized_value
         return current
+
+    def _tool_followup_timing_state(self, *, turn_id: str, create: bool = False) -> dict[str, Any] | None:
+        normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
+        store = getattr(self, "_tool_followup_timing_by_turn_id", None)
+        if not isinstance(store, dict):
+            if not create:
+                return None
+            store = {}
+            self._tool_followup_timing_by_turn_id = store
+        state = store.get(normalized_turn_id)
+        if isinstance(state, dict):
+            return state
+        if not create:
+            return None
+        state = {
+            "run_id": "",
+            "turn_id": normalized_turn_id,
+            "tool_call_id": "",
+            "canonical_key": "",
+            "response_id": "",
+            "markers": {},
+            "is_tool_followup": False,
+            "released": False,
+            "summary_emitted": False,
+        }
+        store[normalized_turn_id] = state
+        return state
+
+    def _mark_tool_followup_timing(
+        self,
+        *,
+        turn_id: str,
+        marker: str,
+        when: float | None = None,
+        call_id: str | None = None,
+        canonical_key: str | None = None,
+        response_id: str | None = None,
+        is_tool_followup: bool | None = None,
+        released: bool | None = None,
+    ) -> None:
+        state = self._tool_followup_timing_state(turn_id=turn_id, create=True)
+        if state is None:
+            return
+        state["run_id"] = str(self._current_run_id() or state.get("run_id") or "").strip()
+        state["turn_id"] = str(turn_id or state.get("turn_id") or "").strip() or "turn-unknown"
+        if call_id:
+            state["tool_call_id"] = str(call_id).strip()
+        if canonical_key:
+            state["canonical_key"] = str(canonical_key).strip()
+        if response_id:
+            state["response_id"] = str(response_id).strip()
+        if is_tool_followup is not None:
+            state["is_tool_followup"] = bool(is_tool_followup)
+        if released is not None:
+            state["released"] = bool(released)
+        markers = state.setdefault("markers", {})
+        if marker not in markers:
+            markers[marker] = float(time.monotonic() if when is None else when)
+
+    @staticmethod
+    def _tool_followup_timing_delta_ms(start_ts: Any, end_ts: Any) -> str:
+        if not isinstance(start_ts, (int, float)) or not isinstance(end_ts, (int, float)):
+            return "na"
+        return str(max(0, int((float(end_ts) - float(start_ts)) * 1000)))
+
+    def _maybe_emit_tool_followup_timing_summary(self, *, turn_id: str) -> None:
+        state = self._tool_followup_timing_state(turn_id=turn_id, create=False)
+        if not isinstance(state, dict) or bool(state.get("summary_emitted", False)):
+            return
+        if not bool(state.get("is_tool_followup", False)):
+            return
+        markers = state.get("markers") if isinstance(state.get("markers"), dict) else {}
+        if not isinstance(markers, dict):
+            return
+        if "followup_response_done" not in markers:
+            return
+        if "tool_followup_release" not in markers and not bool(state.get("released", False)):
+            return
+        summary_fields = {
+            "speech_to_transcript_final_ms": self._tool_followup_timing_delta_ms(
+                markers.get("speech_stopped"),
+                markers.get("transcript_final_received"),
+            ),
+            "transcript_final_to_tool_call_ms": self._tool_followup_timing_delta_ms(
+                markers.get("transcript_final_received"),
+                markers.get("first_tool_call_received"),
+            ),
+            "tool_call_to_tool_result_ms": self._tool_followup_timing_delta_ms(
+                markers.get("first_tool_call_received"),
+                markers.get("tool_result_received"),
+            ),
+            "tool_result_to_followup_release_ms": self._tool_followup_timing_delta_ms(
+                markers.get("tool_result_received"),
+                markers.get("tool_followup_release"),
+            ),
+            "followup_release_to_response_created_ms": self._tool_followup_timing_delta_ms(
+                markers.get("tool_followup_release"),
+                markers.get("followup_response_created"),
+            ),
+            "response_created_to_first_audio_ms": self._tool_followup_timing_delta_ms(
+                markers.get("followup_response_created"),
+                markers.get("first_output_audio_delta_for_followup"),
+            ),
+            "first_audio_to_audio_done_ms": self._tool_followup_timing_delta_ms(
+                markers.get("first_output_audio_delta_for_followup"),
+                markers.get("followup_output_audio_done"),
+            ),
+            "total_turn_elapsed_ms": self._tool_followup_timing_delta_ms(
+                markers.get("speech_stopped"),
+                markers.get("followup_response_done"),
+            ),
+        }
+        logger.info(
+            "tool_followup_turn_timing_summary run_id=%s turn_id=%s tool_call_id=%s canonical_key=%s "
+            "speech_to_transcript_final_ms=%s transcript_final_to_tool_call_ms=%s "
+            "tool_call_to_tool_result_ms=%s tool_result_to_followup_release_ms=%s "
+            "followup_release_to_response_created_ms=%s response_created_to_first_audio_ms=%s "
+            "first_audio_to_audio_done_ms=%s total_turn_elapsed_ms=%s",
+            str(state.get("run_id") or self._current_run_id() or "").strip(),
+            str(state.get("turn_id") or turn_id or "").strip() or "turn-unknown",
+            str(state.get("tool_call_id") or "").strip() or "unknown",
+            str(state.get("canonical_key") or "").strip() or "unknown",
+            summary_fields["speech_to_transcript_final_ms"],
+            summary_fields["transcript_final_to_tool_call_ms"],
+            summary_fields["tool_call_to_tool_result_ms"],
+            summary_fields["tool_result_to_followup_release_ms"],
+            summary_fields["followup_release_to_response_created_ms"],
+            summary_fields["response_created_to_first_audio_ms"],
+            summary_fields["first_audio_to_audio_done_ms"],
+            summary_fields["total_turn_elapsed_ms"],
+        )
+        state["summary_emitted"] = True
 
     def _response_item_id_map(self) -> dict[str, str]:
         mapping = getattr(self, "_response_id_by_output_item_id", None)
@@ -8782,6 +8915,14 @@ class RealtimeAPI:
                 )
                 continue
             response_metadata["tool_followup_release"] = "true"
+            self._mark_tool_followup_timing(
+                turn_id=turn_id,
+                marker="tool_followup_release",
+                call_id=str(response_metadata.get("tool_call_id") or "").strip() or None,
+                canonical_key=canonical_key,
+                is_tool_followup=True,
+                released=True,
+            )
             parent_coverage_state = "unknown"
             blocked_by_parent_final_coverage = None
             parent_canonical_key = parent_entry[0] if parent_entry else None
@@ -14171,6 +14312,9 @@ class RealtimeAPI:
             response_metadata=response_metadata,
         )
         if self._active_response_id:
+            metadata_tool_followup = str((response_metadata or {}).get("tool_followup") or "").strip().lower()
+            metadata_tool_followup_release = str((response_metadata or {}).get("tool_followup_release") or "").strip().lower()
+            metadata_tool_call_id = str((response_metadata or {}).get("tool_call_id") or "").strip()
             metadata_trigger = str((response_metadata or {}).get("trigger") or "").strip().lower()
             metadata_reason = str((response_metadata or {}).get("reason") or "").strip().lower()
             self._record_response_trace_context(
@@ -14184,7 +14328,20 @@ class RealtimeAPI:
                 reason=metadata_reason,
                 parent_turn_id=str((response_metadata or {}).get("parent_turn_id") or ""),
                 parent_input_event_key=str((response_metadata or {}).get("parent_input_event_key") or ""),
+                tool_followup=metadata_tool_followup,
+                tool_followup_release=metadata_tool_followup_release,
+                tool_call_id=metadata_tool_call_id,
             )
+            if metadata_tool_followup in {"true", "1", "yes"}:
+                self._mark_tool_followup_timing(
+                    turn_id=turn_id,
+                    marker="followup_response_created",
+                    call_id=metadata_tool_call_id or None,
+                    canonical_key=canonical_key,
+                    response_id=str(self._active_response_id or "").strip() or None,
+                    is_tool_followup=True,
+                    released=metadata_tool_followup_release in {"true", "1", "yes"},
+                )
         self._emit_response_lifecycle_trace(
             event_type="response.created",
             response_id=str(self._active_response_id or ""),
@@ -14457,6 +14614,17 @@ class RealtimeAPI:
         response_id = self._response_id_from_event(event)
         if not self._should_process_response_event_ingress(event, source="audio_delta"):
             return
+        trace_context = self._response_trace_by_id().get(response_id, {}) if response_id else {}
+        if str(trace_context.get("tool_followup") or "").strip().lower() in {"true", "1", "yes"}:
+            self._mark_tool_followup_timing(
+                turn_id=str(trace_context.get("turn_id") or self._current_turn_id_or_unknown()).strip() or "turn-unknown",
+                marker="first_output_audio_delta_for_followup",
+                call_id=str(trace_context.get("tool_call_id") or "").strip() or None,
+                canonical_key=str(trace_context.get("canonical_key") or "").strip() or None,
+                response_id=response_id or None,
+                is_tool_followup=True,
+                released=str(trace_context.get("tool_followup_release") or "").strip().lower() in {"true", "1", "yes"},
+            )
         if self._is_active_response_guarded():
             return
         active_input_event_key = str(getattr(self, "_active_response_input_event_key", "") or "").strip()
@@ -14779,6 +14947,11 @@ class RealtimeAPI:
             self._turn_diagnostic_timestamps = turn_timestamps_store
         turn_timestamps = turn_timestamps_store.setdefault(resolved_turn_id, {})
         turn_timestamps["transcript_final"] = time.monotonic()
+        self._mark_tool_followup_timing(
+            turn_id=resolved_turn_id,
+            marker="transcript_final_received",
+            when=turn_timestamps["transcript_final"],
+        )
         self._signal_server_auto_transcript_final(turn_id=resolved_turn_id)
         partial_store = getattr(self, "_latest_partial_transcript_by_turn_id", None)
         if isinstance(partial_store, dict):
@@ -15291,6 +15464,11 @@ class RealtimeAPI:
                 function_name,
                 call_id,
                 args_parsed,
+            )
+            self._mark_tool_followup_timing(
+                turn_id=self._current_turn_id_or_unknown(),
+                marker="first_tool_call_received",
+                call_id=str(call_id or "").strip() or None,
             )
             if self._should_defer_provisional_server_auto_tool_call():
                 logger.info(
@@ -15963,6 +16141,11 @@ class RealtimeAPI:
                     self._current_turn_id_or_unknown(),
                     call_id,
                 )
+                self._mark_tool_followup_timing(
+                    turn_id=self._current_turn_id_or_unknown(),
+                    marker="tool_result_received",
+                    call_id=call_id,
+                )
             except Exception as exc:
                 error_message = f"Error executing function '{function_name}': {exc}"
                 log_error(error_message)
@@ -16059,6 +16242,13 @@ class RealtimeAPI:
             "tool_followup_response_scheduled call_id=%s canonical_key=%s",
             call_id,
             tool_followup_canonical_key,
+        )
+        self._mark_tool_followup_timing(
+            turn_id=self._current_turn_id_or_unknown(),
+            marker="tool_followup_response_scheduled",
+            call_id=call_id,
+            canonical_key=tool_followup_canonical_key,
+            is_tool_followup=True,
         )
         await self._send_response_create(
             websocket,
@@ -16285,6 +16475,13 @@ class RealtimeAPI:
             action.id,
             tool_followup_canonical_key,
         )
+        self._mark_tool_followup_timing(
+            turn_id=self._current_turn_id_or_unknown(),
+            marker="tool_followup_response_scheduled",
+            call_id=action.id,
+            canonical_key=tool_followup_canonical_key,
+            is_tool_followup=True,
+        )
         await self._send_response_create(websocket, response_create_event, origin="tool_output")
         self._presented_actions.add(action.id)
 
@@ -16332,6 +16529,13 @@ class RealtimeAPI:
             "tool_followup_response_scheduled call_id=%s canonical_key=%s",
             action.id,
             tool_followup_canonical_key,
+        )
+        self._mark_tool_followup_timing(
+            turn_id=self._current_turn_id_or_unknown(),
+            marker="tool_followup_response_scheduled",
+            call_id=action.id,
+            canonical_key=tool_followup_canonical_key,
+            is_tool_followup=True,
         )
         await self._send_response_create(websocket, response_create_event, origin="tool_output")
         self.function_call = None
@@ -16586,6 +16790,11 @@ class RealtimeAPI:
         logger.info("Speech ended, processing...")
         self.response_start_time = time.perf_counter()
         self._response_start_monotonic = time.monotonic()
+        self._mark_tool_followup_timing(
+            turn_id=self._current_turn_id_or_unknown(),
+            marker="speech_stopped",
+            when=self._response_start_monotonic,
+        )
 
     async def send_initial_prompts(self, websocket: Any) -> None:
         logger.info("Sending %s prompts: %s", len(self.prompts), self.prompts)
