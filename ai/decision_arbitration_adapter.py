@@ -310,6 +310,36 @@ class TurnArbitrationTraceLogPayload(TypedDict):
     trace_partial: bool
 
 
+TurnReviewBucket: TypeAlias = Literal[
+    "coherent",
+    "partial_expected",
+    "suspicious",
+    "needs_review",
+]
+
+
+class TurnArbitrationReviewLogPayload(TypedDict):
+    run_id: str
+    turn_id: str
+    review_bucket: TurnReviewBucket
+    review_priority: str
+    overall_verdict: str
+    overall_summary: str
+    response_create_summary: str
+    terminal_summary: str
+    semantic_owner_summary: str
+    tool_followup_summary: str
+    top_reasons: tuple[str, ...]
+    notable_mismatches: tuple[str, ...]
+    explainability_gaps: tuple[str, ...]
+    suspicious_signals: tuple[str, ...]
+    warning_codes: tuple[str, ...]
+    diagnostic_codes: tuple[str, ...]
+    trace_complete: bool
+    trace_partial: bool
+    observational_only: bool
+
+
 @dataclass(frozen=True)
 class TurnArbitrationTrace:
     run_id: str
@@ -325,6 +355,7 @@ class TurnArbitrationTrace:
     trace_complete: bool = False
     trace_partial: bool = True
     diagnostics: TurnArbitrationDiagnostics | None = None
+    review_summary: TurnArbitrationReviewSummary | None = None
 
     @property
     def semantic_owner_diverged(self) -> bool | None:
@@ -396,6 +427,52 @@ class TurnArbitrationTrace:
             "authority_seams_seen": self.authority_seams_seen,
             "trace_complete": self.trace_complete,
             "trace_partial": self.trace_partial,
+        }
+
+
+@dataclass(frozen=True)
+class TurnArbitrationReviewSummary:
+    run_id: str
+    turn_id: str
+    review_bucket: TurnReviewBucket
+    review_priority: Literal["low", "medium", "high"]
+    overall_verdict: str
+    overall_summary: str
+    response_create_summary: str
+    terminal_summary: str
+    semantic_owner_summary: str
+    tool_followup_summary: str
+    top_reasons: tuple[str, ...]
+    notable_mismatches: tuple[str, ...]
+    explainability_gaps: tuple[str, ...]
+    suspicious_signals: tuple[str, ...]
+    warning_codes: tuple[str, ...]
+    diagnostic_codes: tuple[str, ...]
+    trace_complete: bool
+    trace_partial: bool
+    observational_only: bool = True
+
+    def to_log_payload(self) -> TurnArbitrationReviewLogPayload:
+        return {
+            "run_id": self.run_id,
+            "turn_id": self.turn_id,
+            "review_bucket": self.review_bucket,
+            "review_priority": self.review_priority,
+            "overall_verdict": self.overall_verdict,
+            "overall_summary": self.overall_summary,
+            "response_create_summary": self.response_create_summary,
+            "terminal_summary": self.terminal_summary,
+            "semantic_owner_summary": self.semantic_owner_summary,
+            "tool_followup_summary": self.tool_followup_summary,
+            "top_reasons": self.top_reasons,
+            "notable_mismatches": self.notable_mismatches,
+            "explainability_gaps": self.explainability_gaps,
+            "suspicious_signals": self.suspicious_signals,
+            "warning_codes": self.warning_codes,
+            "diagnostic_codes": self.diagnostic_codes,
+            "trace_complete": self.trace_complete,
+            "trace_partial": self.trace_partial,
+            "observational_only": self.observational_only,
         }
 
 
@@ -772,7 +849,7 @@ def merge_arbitration_observations_for_turn(
     merged_semantic_owner = semantic_owner_observation or (
         existing_trace.semantic_owner_observation if existing_trace is not None else None
     )
-    existing_tool_followups = existing_trace.tool_followup_observations if existing_trace is not None else ()
+    existing_tool_followups = getattr(existing_trace, "tool_followup_observations", ()) if existing_trace is not None else ()
     merged_tool_followups = existing_tool_followups + ((tool_followup_observation,) if tool_followup_observation is not None else ())
     observations = tuple(
         observation
@@ -839,7 +916,22 @@ def merge_arbitration_observations_for_turn(
         trace_complete=trace_complete,
         trace_partial=not trace_complete,
     )
-    return TurnArbitrationTrace(**{**trace.__dict__, "diagnostics": build_turn_arbitration_diagnostics(trace)})
+    diagnostics = build_turn_arbitration_diagnostics(trace)
+    review_summary = build_turn_review_summary(
+        TurnArbitrationTrace(
+            **{
+                **trace.__dict__,
+                "diagnostics": diagnostics,
+            }
+        )
+    )
+    return TurnArbitrationTrace(
+        **{
+            **trace.__dict__,
+            "diagnostics": diagnostics,
+            "review_summary": review_summary,
+        }
+    )
 
 
 def build_turn_arbitration_diagnostics(trace: TurnArbitrationTrace) -> TurnArbitrationDiagnostics:
@@ -956,6 +1048,198 @@ def summarize_turn_arbitration_diagnostics(diagnostics: TurnArbitrationDiagnosti
 
 def summarize_turn_arbitration_trace(trace: TurnArbitrationTrace) -> TurnArbitrationTraceLogPayload:
     return trace.to_log_payload()
+
+
+def _review_bucket_for_trace(trace: TurnArbitrationTrace) -> TurnReviewBucket:
+    diagnostics = trace.diagnostics
+    if diagnostics is None:
+        return "needs_review"
+    if "explainability_gap_final_without_owner" in diagnostics.diagnostic_codes:
+        return "needs_review"
+    if trace.trace_partial and diagnostics.suspicious_mismatch_count == 0:
+        return "partial_expected"
+    if diagnostics.suspicious_mismatch_count > 0:
+        return "suspicious"
+    if any(code.startswith("explainability_gap_") for code in diagnostics.diagnostic_codes):
+        return "needs_review"
+    return "coherent"
+
+
+def _review_priority_for_bucket(bucket: TurnReviewBucket) -> Literal["low", "medium", "high"]:
+    if bucket == "coherent":
+        return "low"
+    if bucket == "partial_expected":
+        return "medium"
+    return "high"
+
+
+def _response_create_summary(trace: TurnArbitrationTrace) -> str:
+    decision = trace.response_create_observation.decision if trace.response_create_observation else None
+    if decision is None:
+        return "response.create seam missing"
+    if decision.decision_disposition == "allow_now":
+        return f"response.create allowed ({decision.selected_candidate_id})"
+    if decision.decision_disposition == "defer":
+        return f"response.create deferred ({decision.native_reason_code or decision.selected_candidate_id})"
+    if decision.decision_disposition == "block":
+        return f"response.create blocked ({decision.native_reason_code or decision.selected_candidate_id})"
+    if decision.decision_disposition == "drop":
+        return f"response.create dropped ({decision.native_reason_code or decision.selected_candidate_id})"
+    return f"response.create observed ({decision.selected_candidate_id})"
+
+
+def _terminal_summary(trace: TurnArbitrationTrace) -> str:
+    decision = trace.terminal_selection_observation.decision if trace.terminal_selection_observation else None
+    if decision is None:
+        return "terminal seam missing"
+    if decision.selected_candidate_id == "terminal_selected":
+        return "terminal deliverable selected"
+    return f"terminal not selected ({decision.native_reason_code or decision.selected_candidate_id})"
+
+
+def _semantic_owner_summary(trace: TurnArbitrationTrace) -> str:
+    decision = trace.semantic_owner_observation.decision if trace.semantic_owner_observation else None
+    if decision is None:
+        return "semantic owner seam missing"
+    if trace.semantic_owner_diverged:
+        return "semantic owner diverged to parent"
+    if decision.selected_candidate_id == "semantic_owner_execution":
+        return "semantic owner stayed on execution canonical"
+    return f"semantic owner observed ({decision.selected_candidate_id})"
+
+
+def _tool_followup_summary(trace: TurnArbitrationTrace) -> str:
+    if not trace.tool_followup_observations:
+        return "no tool followup observations"
+    latest = trace.tool_followup_observations[-1].decision
+    return (
+        f"tool followup {latest.followup_outcome_posture} "
+        f"(parent={latest.parent_coverage_state}, distinctness={latest.followup_distinctness})"
+    )
+
+
+def _collect_explainability_gaps(trace: TurnArbitrationTrace) -> tuple[str, ...]:
+    diagnostics = trace.diagnostics
+    if diagnostics is None:
+        return ("diagnostics_unavailable",)
+    gaps: list[str] = []
+    if "expected_terminal_selection_missing" in diagnostics.diagnostic_codes:
+        gaps.append("terminal selection seam missing after response.create observation")
+    if "expected_semantic_owner_missing" in diagnostics.diagnostic_codes:
+        gaps.append("semantic owner seam missing after terminal observation")
+    if "explainability_gap_final_without_owner" in diagnostics.diagnostic_codes:
+        gaps.append("final terminal selected without semantic owner explanation")
+    if "explainability_gap_runtime_resolved_without_terminal" in diagnostics.diagnostic_codes:
+        gaps.append("runtime resolved response.create without terminal explanation")
+    return tuple(gaps)
+
+
+def _collect_notable_mismatches(trace: TurnArbitrationTrace) -> tuple[str, ...]:
+    diagnostics = trace.diagnostics
+    if diagnostics is None:
+        return ()
+    mismatches: list[str] = []
+    if "semantic_owner_diverged" in diagnostics.diagnostic_codes:
+        mismatches.append("semantic owner diverged from execution canonical")
+    if "response_create_blocked_but_terminal_final" in diagnostics.diagnostic_codes:
+        mismatches.append("blocked response.create still ended with final terminal")
+    if "response_create_dropped_but_terminal_selected" in diagnostics.diagnostic_codes:
+        mismatches.append("dropped response.create still ended with terminal selection")
+    if "tool_followup_terminal_selection_disagreement" in diagnostics.diagnostic_codes:
+        mismatches.append("tool followup released despite terminal-coverage disagreement")
+    return tuple(mismatches)
+
+
+def _collect_suspicious_signals(trace: TurnArbitrationTrace) -> tuple[str, ...]:
+    diagnostics = trace.diagnostics
+    if diagnostics is None:
+        return ("diagnostics_unavailable",)
+    suspicious: list[str] = []
+    if "tool_followup_suppressed_with_unknown_parent_coverage" in diagnostics.diagnostic_codes:
+        suspicious.append("tool followup suppressed while parent coverage stayed unknown")
+    if "tool_followup_released_despite_parent_final_coverage" in diagnostics.diagnostic_codes:
+        suspicious.append("tool followup released despite parent final coverage")
+    if "terminal_selected_without_semantic_owner" in diagnostics.diagnostic_codes:
+        suspicious.append("terminal selected without semantic owner correlation")
+    if "conservative_mapping_present" in diagnostics.diagnostic_codes:
+        suspicious.append("conservative normalization warning present")
+    return tuple(suspicious)
+
+
+def _top_reasons(trace: TurnArbitrationTrace) -> tuple[str, ...]:
+    reasons: list[str] = []
+    for decision in (
+        trace.response_create_observation.decision if trace.response_create_observation else None,
+        trace.terminal_selection_observation.decision if trace.terminal_selection_observation else None,
+        trace.semantic_owner_observation.decision if trace.semantic_owner_observation else None,
+        trace.tool_followup_observations[-1].decision if trace.tool_followup_observations else None,
+    ):
+        if decision is None:
+            continue
+        reason = str(decision.native_reason_code or decision.selected_candidate_id).strip()
+        if reason and reason not in reasons:
+            reasons.append(reason)
+    return tuple(reasons[:4])
+
+
+def build_turn_review_summary(trace: TurnArbitrationTrace) -> TurnArbitrationReviewSummary:
+    bucket = _review_bucket_for_trace(trace)
+    explainability_gaps = _collect_explainability_gaps(trace)
+    notable_mismatches = _collect_notable_mismatches(trace)
+    suspicious_signals = _collect_suspicious_signals(trace)
+    response_summary = _response_create_summary(trace)
+    terminal_summary = _terminal_summary(trace)
+    semantic_summary = _semantic_owner_summary(trace)
+    tool_summary = _tool_followup_summary(trace)
+    overall_verdict_map: dict[TurnReviewBucket, str] = {
+        "coherent": "coherent turn trace",
+        "partial_expected": "partial observational trace",
+        "suspicious": "suspicious arbitration trace",
+        "needs_review": "review required",
+    }
+    overall_summary_parts = [
+        response_summary,
+        terminal_summary,
+        semantic_summary,
+        tool_summary,
+    ]
+    if suspicious_signals:
+        overall_summary_parts.append(f"suspicious signals: {suspicious_signals[0]}")
+    elif explainability_gaps:
+        overall_summary_parts.append(f"explainability gap: {explainability_gaps[0]}")
+    else:
+        overall_summary_parts.append("no suspicious signals")
+    diagnostics = trace.diagnostics
+    return TurnArbitrationReviewSummary(
+        run_id=trace.run_id,
+        turn_id=trace.turn_id,
+        review_bucket=bucket,
+        review_priority=_review_priority_for_bucket(bucket),
+        overall_verdict=overall_verdict_map[bucket],
+        overall_summary="; ".join(overall_summary_parts),
+        response_create_summary=response_summary,
+        terminal_summary=terminal_summary,
+        semantic_owner_summary=semantic_summary,
+        tool_followup_summary=tool_summary,
+        top_reasons=_top_reasons(trace),
+        notable_mismatches=notable_mismatches,
+        explainability_gaps=explainability_gaps,
+        suspicious_signals=suspicious_signals,
+        warning_codes=trace.warning_codes,
+        diagnostic_codes=diagnostics.diagnostic_codes if diagnostics is not None else ("diagnostics_unavailable",),
+        trace_complete=trace.trace_complete,
+        trace_partial=trace.trace_partial,
+    )
+
+
+def summarize_turn_arbitration_for_review(trace: TurnArbitrationTrace) -> TurnArbitrationReviewLogPayload:
+    return build_turn_review_summary(trace).to_log_payload()
+
+
+def get_latest_turn_review_summary(trace: TurnArbitrationTrace | None) -> TurnArbitrationReviewSummary | None:
+    if trace is None:
+        return None
+    return build_turn_review_summary(trace)
 
 
 def _owner_scope_for_candidate(

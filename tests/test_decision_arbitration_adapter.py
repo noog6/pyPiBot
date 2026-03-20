@@ -4,6 +4,7 @@ from dataclasses import replace
 import os
 import sys
 import types
+from types import SimpleNamespace
 
 if "audioop" not in sys.modules:
     sys.modules["audioop"] = types.ModuleType("audioop")
@@ -14,8 +15,11 @@ from ai.decision_arbitration_adapter import (
     build_response_create_observation,
     build_semantic_owner_observation,
     build_terminal_selection_observation,
+    build_turn_review_summary,
     build_turn_arbitration_diagnostics,
+    get_latest_turn_review_summary,
     merge_arbitration_observations_for_turn,
+    summarize_turn_arbitration_for_review,
     summarize_turn_arbitration_trace,
 )
 from ai.interaction_lifecycle_policy import ResponseCreateDecision, ResponseCreateDecisionAction
@@ -882,3 +886,252 @@ def test_turn_arbitration_diagnostics_flags_weak_tool_followup_suppression_expla
 
     assert diagnostics is not None
     assert "tool_followup_suppressed_with_unknown_parent_coverage" in diagnostics.diagnostic_codes
+
+
+def test_turn_review_summary_reports_coherent_complete_turn() -> None:
+    api = _make_api_stub()
+    runtime = api._response_create_runtime
+    event = {"type": "response.create", "response": {"metadata": {"turn_id": "turn_review_ok", "input_event_key": "item_review_ok"}}}
+    snapshot = runtime.prepare_response_create_snapshot(
+        response_create_event=event,
+        origin="assistant_message",
+        utterance_context=None,
+        memory_brief_note=None,
+        now=1.0,
+    )
+    decision, lifecycle_decision = runtime._decide_response_create_action_with_lifecycle(snapshot)
+    trace = merge_arbitration_observations_for_turn(
+        response_create_observation=build_response_create_observation(
+            snapshot=snapshot,
+            execution_decision=decision,
+            lifecycle_decision=lifecycle_decision,
+            same_turn_owner_reason=snapshot.same_turn_owner_reason,
+            canonical_audio_started=False,
+        ),
+        terminal_selection_observation=build_terminal_selection_observation(
+            run_id=snapshot.run_id,
+            turn_id=snapshot.turn_id,
+            input_event_key=snapshot.input_event_key,
+            canonical_key=snapshot.canonical_key,
+            origin=snapshot.normalized_origin,
+            selected=True,
+            selection_reason="normal",
+            transcript_final_seen=True,
+            active_response_was_provisional=False,
+        ),
+        semantic_owner_observation=build_semantic_owner_observation(
+            run_id=snapshot.run_id,
+            turn_id=snapshot.turn_id,
+            input_event_key=snapshot.input_event_key,
+            execution_canonical_key=snapshot.canonical_key,
+            semantic_owner_canonical_key=snapshot.canonical_key,
+            origin=snapshot.normalized_origin,
+            selected=True,
+            selection_reason="normal",
+        ),
+        semantic_owner_canonical_key=snapshot.canonical_key,
+    )
+
+    summary = build_turn_review_summary(trace)
+    payload = summarize_turn_arbitration_for_review(trace)
+
+    assert summary.review_bucket == "coherent"
+    assert summary.review_priority == "low"
+    assert summary.overall_verdict == "coherent turn trace"
+    assert summary.explainability_gaps == ()
+    assert "terminal deliverable selected" in summary.overall_summary
+    assert payload["review_bucket"] == "coherent"
+
+
+def test_turn_review_summary_reports_partial_trace_gap() -> None:
+    api = _make_api_stub()
+    runtime = api._response_create_runtime
+    event = {"type": "response.create", "response": {"metadata": {"turn_id": "turn_review_partial", "input_event_key": "item_review_partial"}}}
+    snapshot = runtime.prepare_response_create_snapshot(
+        response_create_event=event,
+        origin="assistant_message",
+        utterance_context=None,
+        memory_brief_note=None,
+        now=1.0,
+    )
+    trace = merge_arbitration_observations_for_turn(
+        response_create_observation=build_response_create_observation(
+            snapshot=snapshot,
+            execution_decision=runtime.decide_response_create_action(snapshot),
+            lifecycle_decision=None,
+            same_turn_owner_reason=None,
+            canonical_audio_started=None,
+        )
+    )
+
+    summary = build_turn_review_summary(trace)
+
+    assert summary.review_bucket == "partial_expected"
+    assert summary.review_priority == "medium"
+    assert "terminal selection seam missing after response.create observation" in summary.explainability_gaps
+    assert summary.response_create_summary.startswith("response.create allowed")
+
+
+def test_turn_review_summary_reports_suspicious_divergence_case() -> None:
+    trace = merge_arbitration_observations_for_turn(
+        terminal_selection_observation=build_terminal_selection_observation(
+            run_id="run-review-diverge",
+            turn_id="turn-review-diverge",
+            input_event_key="tool:call_diverge",
+            canonical_key="turn-review-diverge::tool:call_diverge",
+            origin="tool_output",
+            selected=True,
+            selection_reason="normal",
+            transcript_final_seen=False,
+            active_response_was_provisional=False,
+        ),
+        semantic_owner_observation=build_semantic_owner_observation(
+            run_id="run-review-diverge",
+            turn_id="turn-review-diverge",
+            input_event_key="tool:call_diverge",
+            execution_canonical_key="turn-review-diverge::tool:call_diverge",
+            semantic_owner_canonical_key="turn-review-diverge::item_parent",
+            origin="tool_output",
+            selected=True,
+            selection_reason="normal",
+            parent_turn_id="turn-review-diverge",
+            parent_input_event_key="item_parent",
+        ),
+        semantic_owner_canonical_key="turn-review-diverge::item_parent",
+    )
+
+    summary = build_turn_review_summary(trace)
+
+    assert summary.review_bucket == "suspicious"
+    assert summary.review_priority == "high"
+    assert "semantic owner diverged from execution canonical" in summary.notable_mismatches
+
+
+def test_turn_review_summary_reports_explainability_gap_case() -> None:
+    trace = merge_arbitration_observations_for_turn(
+        terminal_selection_observation=build_terminal_selection_observation(
+            run_id="run-review-gap",
+            turn_id="turn-review-gap",
+            input_event_key="item-gap",
+            canonical_key="turn-review-gap::item-gap",
+            origin="assistant_message",
+            selected=True,
+            selection_reason="normal",
+            transcript_final_seen=True,
+            active_response_was_provisional=False,
+        ),
+    )
+
+    summary = build_turn_review_summary(trace)
+
+    assert summary.review_bucket == "needs_review"
+    assert summary.review_priority == "high"
+    assert "final terminal selected without semantic owner explanation" in summary.explainability_gaps
+
+
+def test_turn_review_summary_reports_tool_followup_heavy_case() -> None:
+    trace = merge_arbitration_observations_for_turn(
+        tool_followup_observation=build_tool_followup_observation(
+            run_id="run-review-followup",
+            turn_id="turn-review-followup",
+            input_event_key="tool:call_unknown",
+            canonical_key="turn-review-followup::tool:call_unknown",
+            origin="tool_output",
+            parent_coverage_state="unknown",
+            followup_outcome_posture="suppressed",
+            native_reason_code="parent_unresolved",
+            native_outcome_action="DROP",
+            followup_distinctness="unknown",
+        ),
+    )
+
+    summary = get_latest_turn_review_summary(trace)
+
+    assert summary is not None
+    assert summary.review_bucket == "suspicious"
+    assert summary.tool_followup_summary == "tool followup suppressed (parent=unknown, distinctness=unknown)"
+    assert "tool followup suppressed while parent coverage stayed unknown" in summary.suspicious_signals
+
+
+def test_turn_review_helpers_are_observational_only_and_preserve_trace() -> None:
+    api = _make_api_stub()
+    runtime = api._response_create_runtime
+    event = {"type": "response.create", "response": {"metadata": {"turn_id": "turn_review_parity", "input_event_key": "item_review_parity"}}}
+    snapshot = runtime.prepare_response_create_snapshot(
+        response_create_event=event,
+        origin="assistant_message",
+        utterance_context=None,
+        memory_brief_note=None,
+        now=1.0,
+    )
+    direct_decision = runtime.decide_response_create_action(snapshot)
+    trace = merge_arbitration_observations_for_turn(
+        response_create_observation=build_response_create_observation(
+            snapshot=snapshot,
+            execution_decision=direct_decision,
+            lifecycle_decision=None,
+            same_turn_owner_reason=None,
+            canonical_audio_started=None,
+        )
+    )
+
+    before = trace.to_log_payload()
+    summary = build_turn_review_summary(trace)
+    after = trace.to_log_payload()
+
+    assert before == after
+    assert summary.observational_only is True
+    assert direct_decision.action is ResponseCreateOutcomeAction.SEND
+
+
+def test_merge_arbitration_observations_for_turn_hardens_older_trace_without_tool_followups() -> None:
+    older_trace = SimpleNamespace(
+        run_id="run-legacy",
+        turn_id="turn-legacy",
+        execution_canonical_key="turn-legacy::item-legacy",
+        semantic_owner_canonical_key=None,
+        response_create_observation=None,
+        terminal_selection_observation=None,
+        semantic_owner_observation=None,
+    )
+
+    merged = merge_arbitration_observations_for_turn(
+        existing_trace=older_trace,
+        tool_followup_observation=build_tool_followup_observation(
+            run_id="run-legacy",
+            turn_id="turn-legacy",
+            input_event_key="tool:call_legacy",
+            canonical_key="turn-legacy::tool:call_legacy",
+            origin="tool_output",
+            parent_coverage_state="unknown",
+            followup_outcome_posture="suppressed",
+            native_reason_code="parent_unresolved",
+            native_outcome_action="DROP",
+            followup_distinctness="unknown",
+        ),
+    )
+
+    assert len(merged.tool_followup_observations) == 1
+    assert merged.review_summary is not None
+    assert merged.review_summary.review_bucket == "suspicious"
+
+
+def test_merge_arbitration_observations_for_turn_attaches_review_summary() -> None:
+    trace = merge_arbitration_observations_for_turn(
+        tool_followup_observation=build_tool_followup_observation(
+            run_id="run-attached-review",
+            turn_id="turn-attached-review",
+            input_event_key="tool:call_attached",
+            canonical_key="turn-attached-review::tool:call_attached",
+            origin="tool_output",
+            parent_coverage_state="coverage_pending",
+            followup_outcome_posture="pending",
+            native_reason_code="parent_deliverable_pending",
+            native_outcome_action="HOLD",
+            followup_distinctness="not_applicable",
+        ),
+    )
+
+    assert trace.review_summary is not None
+    assert trace.review_summary.review_priority == "medium"
+    assert trace.review_summary.review_bucket == "partial_expected"
