@@ -5,6 +5,7 @@ import os
 import sys
 import types
 from types import SimpleNamespace
+from unittest.mock import patch
 
 if "audioop" not in sys.modules:
     sys.modules["audioop"] = types.ModuleType("audioop")
@@ -971,6 +972,9 @@ def test_turn_review_summary_reports_partial_trace_gap() -> None:
     assert summary.review_priority == "medium"
     assert "terminal selection seam missing after response.create observation" in summary.explainability_gaps
     assert summary.response_create_summary.startswith("response.create allowed")
+    assert "no suspicious signals" not in summary.overall_summary
+    assert "expected gaps remain: terminal selection seam missing after response.create observation" in summary.overall_summary
+    assert "explainability gap:" not in summary.overall_summary
 
 
 def test_turn_review_summary_reports_suspicious_divergence_case() -> None:
@@ -1006,6 +1010,9 @@ def test_turn_review_summary_reports_suspicious_divergence_case() -> None:
     assert summary.review_bucket == "suspicious"
     assert summary.review_priority == "high"
     assert "semantic owner diverged from execution canonical" in summary.notable_mismatches
+    assert "no suspicious signals" not in summary.overall_summary
+    assert "suspicious signals require review" in summary.overall_summary
+    assert "suspicious signals:" not in summary.overall_summary
 
 
 def test_turn_review_summary_reports_explainability_gap_case() -> None:
@@ -1028,6 +1035,34 @@ def test_turn_review_summary_reports_explainability_gap_case() -> None:
     assert summary.review_bucket == "needs_review"
     assert summary.review_priority == "high"
     assert "final terminal selected without semantic owner explanation" in summary.explainability_gaps
+    assert "no suspicious signals" not in summary.overall_summary
+    assert "suspicious signals: terminal selected without semantic owner correlation" in summary.overall_summary
+    assert "review needed:" not in summary.overall_summary
+    assert "explainability gap:" not in summary.overall_summary
+
+
+def test_turn_review_summary_reports_needs_review_gap_without_doubled_tail() -> None:
+    trace = merge_arbitration_observations_for_turn(
+        terminal_selection_observation=build_terminal_selection_observation(
+            run_id="run-review-gap-only",
+            turn_id="turn-review-gap-only",
+            input_event_key="item-gap-only",
+            canonical_key="turn-review-gap-only::item-gap-only",
+            origin="assistant_message",
+            selected=True,
+            selection_reason="normal",
+            transcript_final_seen=True,
+            active_response_was_provisional=False,
+        ),
+    )
+
+    with patch("ai.decision_arbitration_adapter._collect_suspicious_signals", return_value=()):
+        summary = build_turn_review_summary(trace)
+
+    assert summary.review_bucket == "needs_review"
+    assert f"review needed: {summary.explainability_gaps[0]}" in summary.overall_summary
+    assert "suspicious signals:" not in summary.overall_summary
+    assert "explainability gap:" not in summary.overall_summary
 
 
 def test_turn_review_summary_reports_tool_followup_heavy_case() -> None:

@@ -1206,9 +1206,20 @@ def build_turn_review_summary(trace: TurnArbitrationTrace) -> TurnArbitrationRev
     if suspicious_signals:
         overall_summary_parts.append(f"suspicious signals: {suspicious_signals[0]}")
     elif explainability_gaps:
-        overall_summary_parts.append(f"explainability gap: {explainability_gaps[0]}")
-    else:
+        if bucket == "partial_expected":
+            overall_summary_parts.append(f"expected gaps remain: {explainability_gaps[0]}")
+        elif bucket == "needs_review":
+            overall_summary_parts.append(f"review needed: {explainability_gaps[0]}")
+        else:
+            overall_summary_parts.append(f"explainability gap: {explainability_gaps[0]}")
+    elif bucket == "coherent":
         overall_summary_parts.append("no suspicious signals")
+    elif bucket == "partial_expected":
+        overall_summary_parts.append("expected gaps remain")
+    elif bucket == "needs_review":
+        overall_summary_parts.append("review needed")
+    else:
+        overall_summary_parts.append("suspicious signals require review")
     diagnostics = trace.diagnostics
     return TurnArbitrationReviewSummary(
         run_id=trace.run_id,
@@ -1255,6 +1266,25 @@ def should_emit_turn_review_summary_info(trace: TurnArbitrationTrace) -> bool:
     if trace.trace_complete:
         return True
     return review_summary.review_bucket in {"suspicious", "needs_review"}
+
+
+def turn_review_summary_info_fingerprint(
+    trace: TurnArbitrationTrace,
+    review_summary: TurnArbitrationReviewSummary | None = None,
+) -> tuple[str, ...] | None:
+    summary = review_summary or get_latest_turn_review_summary(trace)
+    if summary is None:
+        return None
+    return (
+        summary.review_bucket,
+        summary.overall_verdict,
+        summary.overall_summary,
+        summary.response_create_summary,
+        summary.terminal_summary,
+        summary.semantic_owner_summary,
+        summary.tool_followup_summary,
+        str(summary.trace_complete).lower(),
+    )
 
 
 def _owner_scope_for_candidate(
