@@ -2925,6 +2925,16 @@ def test_tool_followup_release_suppressed_when_upgraded_parent_already_covered_a
     assert [event for event in ws.sent if event.get("type") == "response.create"] == []
     assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
     assert any("tool_followup_release_suppressed" in entry for entry in captured_logs)
+    trace = api._turn_arbitration_trace_by_key[("run-405-repro", "turn_mix_1")]
+    latest_tool_followup = trace.tool_followup_observations[-1].decision
+    assert latest_tool_followup.followup_outcome_posture in {"suppressed", "pruned"}
+    assert latest_tool_followup.parent_coverage_state == "covered_canonical"
+    assert any(
+        observation.decision.followup_distinctness == "redundant"
+        for observation in trace.tool_followup_observations
+    )
+    assert latest_tool_followup.followup_distinctness == "stale"
+    assert latest_tool_followup.native_reason_code.startswith("parent_covered_tool_result")
 
 
 def test_tool_followup_release_preserved_for_distinct_tool_result_information(monkeypatch) -> None:
@@ -2988,6 +2998,12 @@ def test_tool_followup_release_preserved_for_distinct_tool_result_information(mo
     assert len([event for event in ws.sent if event.get("type") == "response.create"]) == 1
     assert api._tool_followup_state(canonical_key=canonical_key) in {"creating", "created"}
     assert not any("tool_followup_release_suppressed" in entry for entry in captured_logs)
+    trace = api._turn_arbitration_trace_by_key[("run-405-repro", "turn_mix_2")]
+    latest_tool_followup = trace.tool_followup_observations[-1].decision
+    assert latest_tool_followup.followup_outcome_posture == "released"
+    assert latest_tool_followup.parent_coverage_state == "not_applicable"
+    assert latest_tool_followup.followup_distinctness == "distinct"
+    assert latest_tool_followup.native_reason_code == "not_suppressible"
 
 def test_tool_followup_release_suppressed_for_assistant_parent_covering_gesture_action() -> None:
     api = _make_api_stub()

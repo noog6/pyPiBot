@@ -10,6 +10,7 @@ if "audioop" not in sys.modules:
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
 
 from ai.decision_arbitration_adapter import (
+    build_tool_followup_observation,
     build_response_create_observation,
     build_semantic_owner_observation,
     build_terminal_selection_observation,
@@ -388,6 +389,99 @@ def test_semantic_owner_observation_maps_parent_divergence() -> None:
     assert observation.decision.parent_coverage_state == "covered_canonical"
 
 
+def test_tool_followup_observation_maps_parent_uncovered_release() -> None:
+    observation = build_tool_followup_observation(
+        run_id="run-followup",
+        turn_id="turn_followup",
+        input_event_key="tool:call_release",
+        canonical_key="turn_followup::tool:call_release",
+        origin="tool_output",
+        parent_coverage_state="uncovered",
+        followup_outcome_posture="released",
+        native_reason_code="parent_not_deliverable",
+        native_outcome_action="RELEASE",
+        followup_distinctness="distinct",
+    )
+
+    assert observation.decision.selected_candidate_id == "tool_followup_uncovered"
+    assert observation.decision.parent_coverage_state == "uncovered"
+    assert observation.decision.followup_outcome_posture == "released"
+    assert observation.decision.followup_distinctness == "distinct"
+
+
+def test_tool_followup_observation_maps_parent_covered_terminal_suppression() -> None:
+    observation = build_tool_followup_observation(
+        run_id="run-followup",
+        turn_id="turn_followup",
+        input_event_key="tool:call_suppress",
+        canonical_key="turn_followup::tool:call_suppress",
+        origin="tool_output",
+        parent_coverage_state="covered_terminal_selection",
+        followup_outcome_posture="suppressed",
+        native_reason_code="parent_covered_tool_result",
+        native_outcome_action="DROP",
+        followup_distinctness="redundant",
+        parent_canonical_key="turn_followup::item_parent",
+        blocked_by_parent_final_coverage=True,
+    )
+
+    assert observation.decision.selected_candidate_id == "tool_followup_parent_covered"
+    assert observation.decision.parent_coverage_state == "covered_terminal_selection"
+    assert observation.decision.blocked_by_parent_final_coverage is True
+    assert observation.decision.followup_distinctness == "redundant"
+
+
+def test_tool_followup_observation_maps_pending_and_pruned_states() -> None:
+    pending_observation = build_tool_followup_observation(
+        run_id="run-followup",
+        turn_id="turn_followup",
+        input_event_key="tool:call_pending",
+        canonical_key="turn_followup::tool:call_pending",
+        origin="tool_output",
+        parent_coverage_state="coverage_pending",
+        followup_outcome_posture="pending",
+        native_reason_code="parent_deliverable_pending",
+        native_outcome_action="HOLD",
+        followup_distinctness="not_applicable",
+    )
+    pruned_observation = build_tool_followup_observation(
+        run_id="run-followup",
+        turn_id="turn_followup",
+        input_event_key="tool:call_pruned",
+        canonical_key="turn_followup::tool:call_pruned",
+        origin="tool_output",
+        parent_coverage_state="covered_canonical",
+        followup_outcome_posture="pruned",
+        native_reason_code="parent_covered_tool_result terminal_deliverable_selected",
+        native_outcome_action="PRUNE",
+        followup_distinctness="stale",
+    )
+
+    assert pending_observation.decision.selected_candidate_id == "tool_followup_parent_pending"
+    assert pending_observation.decision.followup_outcome_posture == "pending"
+    assert pending_observation.decision.followup_distinctness == "not_applicable"
+    assert pruned_observation.decision.selected_candidate_id == "tool_followup_pruned"
+    assert pruned_observation.decision.followup_outcome_posture == "pruned"
+    assert pruned_observation.decision.followup_distinctness == "stale"
+
+
+def test_tool_followup_observation_maps_weak_evidence_to_unknown_distinctness() -> None:
+    observation = build_tool_followup_observation(
+        run_id="run-followup",
+        turn_id="turn_followup",
+        input_event_key="tool:call_unknown",
+        canonical_key="turn_followup::tool:call_unknown",
+        origin="tool_output",
+        parent_coverage_state="unknown",
+        followup_outcome_posture="suppressed",
+        native_reason_code="parent_unresolved",
+        native_outcome_action="DROP",
+        followup_distinctness="unknown",
+    )
+
+    assert observation.decision.followup_distinctness == "unknown"
+
+
 def test_turn_arbitration_trace_is_complete_for_direct_send_terminal_and_same_owner() -> None:
     api = _make_api_stub()
     runtime = api._response_create_runtime
@@ -479,6 +573,30 @@ def test_turn_arbitration_trace_handles_parent_semantic_owner_divergence() -> No
     assert trace.trace_complete is False
     assert trace.trace_partial is True
     assert trace.semantic_owner_diverged is True
+
+
+def test_turn_arbitration_trace_includes_latest_tool_followup_observation() -> None:
+    trace = merge_arbitration_observations_for_turn(
+        tool_followup_observation=build_tool_followup_observation(
+            run_id="run-followup",
+            turn_id="turn_followup",
+            input_event_key="tool:call_release",
+            canonical_key="turn_followup::tool:call_release",
+            origin="tool_output",
+            parent_coverage_state="uncovered",
+            followup_outcome_posture="released",
+            native_reason_code="parent_not_deliverable",
+            native_outcome_action="RELEASE",
+            followup_distinctness="distinct",
+        ),
+    )
+
+    summary = summarize_turn_arbitration_trace(trace)
+
+    assert len(trace.tool_followup_observations) == 1
+    assert summary["latest_tool_followup_outcome_posture"] == "released"
+    assert summary["latest_tool_followup_parent_coverage_state"] == "uncovered"
+    assert summary["latest_tool_followup_distinctness"] == "distinct"
 
 
 def test_turn_arbitration_trace_is_partial_with_only_response_create_observation() -> None:
@@ -742,3 +860,25 @@ def test_turn_arbitration_diagnostics_detects_vocabulary_aliasing() -> None:
     assert diagnostics is not None
     assert diagnostics.vocabulary_alias_seen is True
     assert "vocabulary_alias_detected" in diagnostics.diagnostic_codes
+
+
+def test_turn_arbitration_diagnostics_flags_weak_tool_followup_suppression_explanation() -> None:
+    trace = merge_arbitration_observations_for_turn(
+        tool_followup_observation=build_tool_followup_observation(
+            run_id="run-followup",
+            turn_id="turn_followup",
+            input_event_key="tool:call_unknown",
+            canonical_key="turn_followup::tool:call_unknown",
+            origin="tool_output",
+            parent_coverage_state="unknown",
+            followup_outcome_posture="suppressed",
+            native_reason_code="parent_unresolved",
+            native_outcome_action="DROP",
+            followup_distinctness="unknown",
+        ),
+    )
+
+    diagnostics = trace.diagnostics
+
+    assert diagnostics is not None
+    assert "tool_followup_suppressed_with_unknown_parent_coverage" in diagnostics.diagnostic_codes

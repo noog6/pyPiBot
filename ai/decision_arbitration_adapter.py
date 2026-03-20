@@ -70,6 +70,21 @@ NormalizedParentCoverageState: TypeAlias = Literal[
     "covered_terminal_selection",
     "coverage_pending",
 ]
+NormalizedToolFollowupOutcomePosture: TypeAlias = Literal[
+    "released",
+    "suppressed",
+    "pruned",
+    "stale",
+    "pending",
+    "observe_only",
+]
+NormalizedToolFollowupDistinctness: TypeAlias = Literal[
+    "not_applicable",
+    "distinct",
+    "redundant",
+    "stale",
+    "unknown",
+]
 NormalizedCandidateId: TypeAlias = Literal[
     "same_turn_owner",
     "tool_lineage_guard",
@@ -94,6 +109,12 @@ NormalizedCandidateId: TypeAlias = Literal[
     "tool_output_descriptive_gesture_only",
     "semantic_owner_execution",
     "semantic_owner_parent",
+    "tool_followup_uncovered",
+    "tool_followup_parent_covered",
+    "tool_followup_parent_pending",
+    "tool_followup_parent_unknown",
+    "tool_followup_pruned",
+    "tool_followup_stale",
 ]
 
 
@@ -113,6 +134,12 @@ class NormalizedObservationLogPayload(TypedDict):
     confirmation_hold_state: NormalizedConfirmationHoldState
     transcript_final_state: NormalizedTranscriptFinalState
     parent_coverage_state: NormalizedParentCoverageState
+    followup_outcome_posture: NormalizedToolFollowupOutcomePosture | None
+    followup_distinctness: NormalizedToolFollowupDistinctness | None
+    child_canonical_key: str | None
+    parent_canonical_key: str | None
+    parent_semantic_owner_key: str | None
+    blocked_by_parent_final_coverage: bool | None
     authority_retained_by: str
     candidate_count: int
     observational_only: bool
@@ -132,6 +159,12 @@ class NormalizedDecisionCandidate:
     transcript_final_state: NormalizedTranscriptFinalState
     parent_coverage_state: NormalizedParentCoverageState
     authority_seam: str
+    followup_outcome_posture: NormalizedToolFollowupOutcomePosture | None = None
+    followup_distinctness: NormalizedToolFollowupDistinctness | None = None
+    child_canonical_key: str | None = None
+    parent_canonical_key: str | None = None
+    parent_semantic_owner_key: str | None = None
+    blocked_by_parent_final_coverage: bool | None = None
     normalization_warnings: tuple[str, ...] = ()
 
 
@@ -148,6 +181,12 @@ class NormalizedDecisionArtifact:
     parent_coverage_state: NormalizedParentCoverageState
     authority_retained_by: str
     observational_only: bool
+    followup_outcome_posture: NormalizedToolFollowupOutcomePosture | None = None
+    followup_distinctness: NormalizedToolFollowupDistinctness | None = None
+    child_canonical_key: str | None = None
+    parent_canonical_key: str | None = None
+    parent_semantic_owner_key: str | None = None
+    blocked_by_parent_final_coverage: bool | None = None
     normalization_warnings: tuple[str, ...] = ()
 
 
@@ -187,6 +226,12 @@ class NormalizedArbitrationObservation:
             "confirmation_hold_state": self.decision.confirmation_hold_state,
             "transcript_final_state": self.decision.transcript_final_state,
             "parent_coverage_state": self.decision.parent_coverage_state,
+            "followup_outcome_posture": self.decision.followup_outcome_posture,
+            "followup_distinctness": self.decision.followup_distinctness,
+            "child_canonical_key": self.decision.child_canonical_key,
+            "parent_canonical_key": self.decision.parent_canonical_key,
+            "parent_semantic_owner_key": self.decision.parent_semantic_owner_key,
+            "blocked_by_parent_final_coverage": self.decision.blocked_by_parent_final_coverage,
             "authority_retained_by": self.decision.authority_retained_by,
             "candidate_count": len(self.candidates),
             "observational_only": self.context.observational_only,
@@ -252,6 +297,11 @@ class TurnArbitrationTraceLogPayload(TypedDict):
     semantic_owner_canonical_key: str | None
     semantic_owner_reason_code: str | None
     semantic_owner_diverged: bool | None
+    latest_tool_followup_selected_candidate_id: str | None
+    latest_tool_followup_reason_code: str | None
+    latest_tool_followup_parent_coverage_state: str | None
+    latest_tool_followup_outcome_posture: str | None
+    latest_tool_followup_distinctness: str | None
     transcript_final_state: str | None
     normalized_warning_count: int
     warning_codes: tuple[str, ...]
@@ -269,6 +319,7 @@ class TurnArbitrationTrace:
     response_create_observation: NormalizedArbitrationObservation | None = None
     terminal_selection_observation: NormalizedArbitrationObservation | None = None
     semantic_owner_observation: NormalizedArbitrationObservation | None = None
+    tool_followup_observations: tuple[NormalizedArbitrationObservation, ...] = ()
     warning_codes: tuple[str, ...] = ()
     authority_seams_seen: tuple[str, ...] = ()
     trace_complete: bool = False
@@ -293,6 +344,7 @@ class TurnArbitrationTrace:
         response_create = self.response_create_observation.decision if self.response_create_observation else None
         terminal_selection = self.terminal_selection_observation.decision if self.terminal_selection_observation else None
         semantic_owner = self.semantic_owner_observation.decision if self.semantic_owner_observation else None
+        tool_followup = self.tool_followup_observations[-1].decision if self.tool_followup_observations else None
         return {
             "run_id": self.run_id,
             "turn_id": self.turn_id,
@@ -320,6 +372,21 @@ class TurnArbitrationTrace:
                 semantic_owner.native_reason_code if semantic_owner else None
             ),
             "semantic_owner_diverged": self.semantic_owner_diverged,
+            "latest_tool_followup_selected_candidate_id": (
+                tool_followup.selected_candidate_id if tool_followup else None
+            ),
+            "latest_tool_followup_reason_code": (
+                tool_followup.native_reason_code if tool_followup else None
+            ),
+            "latest_tool_followup_parent_coverage_state": (
+                tool_followup.parent_coverage_state if tool_followup else None
+            ),
+            "latest_tool_followup_outcome_posture": (
+                tool_followup.followup_outcome_posture if tool_followup else None
+            ),
+            "latest_tool_followup_distinctness": (
+                tool_followup.followup_distinctness if tool_followup else None
+            ),
             "transcript_final_state": _trace_transcript_final_state(
                 self.response_create_observation,
                 self.terminal_selection_observation,
@@ -340,6 +407,8 @@ _TERMINAL_SELECTION_AUTHORITY_SEAM = "ai.realtime_api._response_done_deliverable
 _TERMINAL_SELECTION_POLICY_DOMAIN = "response_terminal_selection"
 _SEMANTIC_OWNER_AUTHORITY_SEAM = "ai.realtime_api._resolve_semantic_answer_owner_for_response"
 _SEMANTIC_OWNER_POLICY_DOMAIN = "response_semantic_owner"
+_TOOL_FOLLOWUP_AUTHORITY_SEAM = "ai.realtime_api.tool_followup_observation"
+_TOOL_FOLLOWUP_POLICY_DOMAIN = "tool_followup_release"
 
 
 def _terminal_selection_candidate_id(selection_reason: str, *, selected: bool) -> NormalizedCandidateId:
@@ -548,6 +617,109 @@ def build_semantic_owner_observation(
     )
 
 
+def _tool_followup_candidate_id(
+    *,
+    parent_coverage_state: NormalizedParentCoverageState,
+    followup_outcome_posture: NormalizedToolFollowupOutcomePosture,
+) -> NormalizedCandidateId:
+    if followup_outcome_posture == "pruned":
+        return "tool_followup_pruned"
+    if followup_outcome_posture == "stale":
+        return "tool_followup_stale"
+    if parent_coverage_state == "coverage_pending":
+        return "tool_followup_parent_pending"
+    if parent_coverage_state in {"covered_canonical", "covered_terminal_selection"}:
+        return "tool_followup_parent_covered"
+    if parent_coverage_state == "uncovered":
+        return "tool_followup_uncovered"
+    return "tool_followup_parent_unknown"
+
+
+def build_tool_followup_observation(
+    *,
+    run_id: str,
+    turn_id: str,
+    input_event_key: str | None,
+    canonical_key: str,
+    origin: str,
+    parent_coverage_state: NormalizedParentCoverageState,
+    followup_outcome_posture: NormalizedToolFollowupOutcomePosture,
+    native_reason_code: str,
+    native_outcome_action: str,
+    followup_distinctness: NormalizedToolFollowupDistinctness = "unknown",
+    parent_canonical_key: str | None = None,
+    parent_semantic_owner_key: str | None = None,
+    blocked_by_parent_final_coverage: bool | None = None,
+    authority_seam: str = _TOOL_FOLLOWUP_AUTHORITY_SEAM,
+    normalization_warnings: tuple[str, ...] = (),
+) -> NormalizedArbitrationObservation:
+    candidate_id = _tool_followup_candidate_id(
+        parent_coverage_state=parent_coverage_state,
+        followup_outcome_posture=followup_outcome_posture,
+    )
+    decision_disposition: NormalizedDecisionDisposition = (
+        "allow_now" if followup_outcome_posture == "released"
+        else "defer" if followup_outcome_posture == "pending"
+        else "observe_only"
+    )
+    decision = NormalizedDecisionArtifact(
+        native_outcome_action=native_outcome_action,
+        native_reason_code=str(native_reason_code or ""),
+        selected_candidate_id=candidate_id,
+        decision_disposition=decision_disposition,
+        owner_scope="pending_tool_followup",
+        deliverable_status="none_observed",
+        confirmation_hold_state="not_evaluated",
+        transcript_final_state="not_applicable",
+        parent_coverage_state=parent_coverage_state,
+        followup_outcome_posture=followup_outcome_posture,
+        followup_distinctness=followup_distinctness,
+        child_canonical_key=canonical_key,
+        parent_canonical_key=str(parent_canonical_key or "").strip() or None,
+        parent_semantic_owner_key=str(parent_semantic_owner_key or "").strip() or None,
+        blocked_by_parent_final_coverage=blocked_by_parent_final_coverage,
+        authority_retained_by=authority_seam,
+        observational_only=True,
+        normalization_warnings=normalization_warnings,
+    )
+    context = NormalizedArbitrationContext(
+        run_id=run_id,
+        turn_id=turn_id,
+        input_event_key=str(input_event_key or "unknown"),
+        canonical_key=canonical_key,
+        policy_domain=_TOOL_FOLLOWUP_POLICY_DOMAIN,
+        origin=str(origin or "").strip().lower(),
+        authority_retained_by=authority_seam,
+        observational_only=True,
+    )
+    candidate = NormalizedDecisionCandidate(
+        candidate_id=candidate_id,
+        observed=True,
+        native_action=native_outcome_action,
+        native_reason_code=str(native_reason_code or ""),
+        owner_scope=decision.owner_scope,
+        deliverable_status=decision.deliverable_status,
+        decision_disposition=decision.decision_disposition,
+        confirmation_hold_state=decision.confirmation_hold_state,
+        transcript_final_state=decision.transcript_final_state,
+        parent_coverage_state=decision.parent_coverage_state,
+        followup_outcome_posture=decision.followup_outcome_posture,
+        followup_distinctness=decision.followup_distinctness,
+        child_canonical_key=decision.child_canonical_key,
+        parent_canonical_key=decision.parent_canonical_key,
+        parent_semantic_owner_key=decision.parent_semantic_owner_key,
+        blocked_by_parent_final_coverage=decision.blocked_by_parent_final_coverage,
+        authority_seam=authority_seam,
+        normalization_warnings=normalization_warnings,
+    )
+    return NormalizedArbitrationObservation(
+        context=context,
+        candidates=(candidate,),
+        decision=decision,
+        normalization_warnings=normalization_warnings,
+    )
+
+
 def _trace_transcript_final_state(
     response_create_observation: NormalizedArbitrationObservation | None,
     terminal_selection_observation: NormalizedArbitrationObservation | None,
@@ -588,6 +760,7 @@ def merge_arbitration_observations_for_turn(
     response_create_observation: NormalizedArbitrationObservation | None = None,
     terminal_selection_observation: NormalizedArbitrationObservation | None = None,
     semantic_owner_observation: NormalizedArbitrationObservation | None = None,
+    tool_followup_observation: NormalizedArbitrationObservation | None = None,
     semantic_owner_canonical_key: str | None = None,
 ) -> TurnArbitrationTrace:
     merged_response_create = response_create_observation or (
@@ -599,12 +772,15 @@ def merge_arbitration_observations_for_turn(
     merged_semantic_owner = semantic_owner_observation or (
         existing_trace.semantic_owner_observation if existing_trace is not None else None
     )
+    existing_tool_followups = existing_trace.tool_followup_observations if existing_trace is not None else ()
+    merged_tool_followups = existing_tool_followups + ((tool_followup_observation,) if tool_followup_observation is not None else ())
     observations = tuple(
         observation
         for observation in (
             merged_response_create,
             merged_terminal_selection,
             merged_semantic_owner,
+            *merged_tool_followups,
         )
         if observation is not None
     )
@@ -633,11 +809,13 @@ def merge_arbitration_observations_for_turn(
         merged_response_create,
         merged_terminal_selection,
         merged_semantic_owner,
+        *merged_tool_followups,
     )
     authority_seams_seen = _merge_authority_seams(
         merged_response_create,
         merged_terminal_selection,
         merged_semantic_owner,
+        *merged_tool_followups,
     )
     trace_complete = all(
         observation is not None
@@ -655,6 +833,7 @@ def merge_arbitration_observations_for_turn(
         response_create_observation=merged_response_create,
         terminal_selection_observation=merged_terminal_selection,
         semantic_owner_observation=merged_semantic_owner,
+        tool_followup_observations=merged_tool_followups,
         warning_codes=warning_codes,
         authority_seams_seen=authority_seams_seen,
         trace_complete=trace_complete,
@@ -697,6 +876,38 @@ def build_turn_arbitration_diagnostics(trace: TurnArbitrationTrace) -> TurnArbit
             suspicious_mismatch_count += 1
         if response_create.decision_disposition == "defer" and terminal.deliverable_status == "final_observed" and response_create.transcript_final_state == "awaiting_transcript_final":
             diagnostic_codes.append("deferred_create_then_final_terminal")
+
+    tool_followups = [observation.decision for observation in trace.tool_followup_observations]
+    if tool_followups:
+        if any(
+            observation.followup_outcome_posture == "suppressed"
+            and observation.parent_coverage_state == "unknown"
+            for observation in tool_followups
+        ):
+            diagnostic_codes.append("tool_followup_suppressed_with_unknown_parent_coverage")
+            suspicious_mismatch_count += 1
+        if any(
+            observation.followup_outcome_posture == "released"
+            and observation.parent_coverage_state in {"covered_canonical", "covered_terminal_selection"}
+            and observation.blocked_by_parent_final_coverage is True
+            for observation in tool_followups
+        ):
+            diagnostic_codes.append("tool_followup_released_despite_parent_final_coverage")
+            suspicious_mismatch_count += 1
+        if any(observation.parent_coverage_state == "coverage_pending" for observation in tool_followups):
+            diagnostic_codes.append("tool_followup_coverage_pending_observed")
+        if any(
+            observation.followup_outcome_posture in {"pruned", "stale"}
+            and observation.native_reason_code in {"", "unknown"}
+            for observation in tool_followups
+        ):
+            diagnostic_codes.append("tool_followup_pruned_with_weak_reason")
+        if any(
+            observation.parent_coverage_state == "covered_terminal_selection"
+            and observation.followup_outcome_posture == "released"
+            for observation in tool_followups
+        ):
+            diagnostic_codes.append("tool_followup_terminal_selection_disagreement")
 
     conservative_warning_count = sum(1 for code in trace.warning_codes if "conservative" in code or "ambiguous" in code)
     if conservative_warning_count:
