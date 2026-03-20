@@ -321,7 +321,7 @@ class ResponseTerminalHandlers:
             )
         transcript_linked_input_event_key = str(api._active_input_event_key_for_turn(turn_id) or "").strip()
         transcript_final_linked = bool(transcript_linked_input_event_key and transcript_linked_input_event_key.startswith("item_"))
-        selected, selection_reason = api._response_done_deliverable_decision(
+        selection_decision = api._response_done_deliverable_arbitration(
             turn_id=turn_id,
             origin=str(active_response_origin_before_clear or ""),
             delivery_state_before_done=delivery_state_before_done,
@@ -331,6 +331,8 @@ class ResponseTerminalHandlers:
             input_event_key=done_input_event_key,
             response_id=active_response_id_before_clear,
         )
+        selected = selection_decision.selected
+        selection_reason = selection_decision.reason_code
         terminal_selection_observation = build_terminal_selection_observation(
             run_id=api._current_run_id() or "",
             turn_id=turn_id,
@@ -339,6 +341,7 @@ class ResponseTerminalHandlers:
             origin=str(active_response_origin_before_clear or ""),
             selected=selected,
             selection_reason=selection_reason,
+            selected_candidate_id=selection_decision.selected_candidate_id,
             transcript_final_seen=transcript_final_linked,
             active_response_was_provisional=active_response_was_provisional,
         )

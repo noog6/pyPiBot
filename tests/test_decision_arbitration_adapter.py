@@ -358,6 +358,45 @@ def test_terminal_selection_observation_maps_provisional_transcript_wait() -> No
     assert observation.decision.transcript_final_state == "awaiting_transcript_final"
 
 
+def test_terminal_selection_observation_accepts_matching_explicit_candidate_id() -> None:
+    observation = build_terminal_selection_observation(
+        run_id="run-terminal",
+        turn_id="turn_terminal",
+        input_event_key="item_terminal",
+        canonical_key="turn_terminal::item_terminal",
+        origin="assistant_message",
+        selected=True,
+        selection_reason="normal",
+        selected_candidate_id="terminal_selected",
+        transcript_final_seen=True,
+        active_response_was_provisional=False,
+    )
+
+    assert observation.decision.selected_candidate_id == "terminal_selected"
+    assert observation.decision.normalization_warnings == ()
+
+
+def test_terminal_selection_observation_ignores_mismatched_explicit_candidate_id() -> None:
+    observation = build_terminal_selection_observation(
+        run_id="run-terminal",
+        turn_id="turn_terminal",
+        input_event_key="item_terminal",
+        canonical_key="turn_terminal::item_terminal",
+        origin="assistant_message",
+        selected=False,
+        selection_reason="tool_followup_precedence",
+        selected_candidate_id="terminal_selected",
+        transcript_final_seen=True,
+        active_response_was_provisional=False,
+    )
+
+    assert observation.decision.selected_candidate_id == "tool_followup_precedence"
+    assert (
+        "terminal_selected_candidate_id_mismatch_ignored:terminal_selected->tool_followup_precedence"
+        in observation.decision.normalization_warnings
+    )
+
+
 def test_semantic_owner_observation_maps_same_owner() -> None:
     observation = build_semantic_owner_observation(
         run_id="run-semantic",

@@ -1757,6 +1757,32 @@ def test_response_done_decision_marks_provisional_server_auto_pre_final_as_non_d
     assert reason == "provisional_server_auto_awaiting_transcript_final"
 
 
+def test_response_done_deliverable_decision_remains_tuple_compatible_over_pure_seam() -> None:
+    api = _make_api()
+
+    decision = api._response_done_deliverable_arbitration(
+        turn_id="turn_1",
+        origin="assistant_message",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id="turn_1", input_event_key="item_1"),
+        transcript_final_seen=True,
+    )
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id="turn_1",
+        origin="assistant_message",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id="turn_1", input_event_key="item_1"),
+        transcript_final_seen=True,
+    )
+
+    assert decision.selected is True
+    assert decision.reason_code == "normal"
+    assert decision.selected_candidate_id == "terminal_selected"
+    assert (selected, reason) == (decision.selected, decision.reason_code)
+
+
 def test_response_done_decision_rejects_assistant_message_when_tool_followup_pending() -> None:
     api = _make_api()
     turn_id = "turn_1"
