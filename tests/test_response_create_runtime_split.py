@@ -211,6 +211,39 @@ def test_response_create_arbitration_snapshot_parity_for_active_response_schedul
     assert pending_metadata["input_event_key"] == "item_busy"
 
 
+def test_evaluate_response_create_attempt_records_partial_turn_trace_without_changing_decision() -> None:
+    api = _make_api_stub()
+    runtime = api._response_create_runtime
+    event = {
+        "type": "response.create",
+        "response": {"metadata": {"turn_id": "turn_trace", "input_event_key": "item_trace"}},
+    }
+
+    snapshot = runtime.prepare_response_create_snapshot(
+        response_create_event=event,
+        origin="assistant_message",
+        utterance_context=None,
+        memory_brief_note=None,
+        now=1.0,
+    )
+    expected_decision = runtime.decide_response_create_action(snapshot)
+
+    prepared_snapshot, decision = runtime.evaluate_response_create_attempt(
+        response_create_event=event,
+        origin="assistant_message",
+        utterance_context=None,
+        memory_brief_note=None,
+        now=1.0,
+    )
+
+    assert prepared_snapshot == snapshot
+    assert decision == expected_decision
+    trace = api._turn_arbitration_trace_by_key[(prepared_snapshot.run_id, prepared_snapshot.turn_id)]
+    assert trace.trace_partial is True
+    assert trace.trace_complete is False
+    assert trace.response_create_observation is not None
+
+
 def test_response_create_arbitration_snapshot_parity_for_awaiting_transcript_schedule() -> None:
     api = _make_api_stub()
     runtime = api._response_create_runtime

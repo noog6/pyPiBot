@@ -13,6 +13,8 @@ from ai.decision_arbitration_adapter import (
     build_response_create_observation,
     build_semantic_owner_observation,
     build_terminal_selection_observation,
+    merge_arbitration_observations_for_turn,
+    summarize_turn_arbitration_trace,
 )
 from ai.interaction_lifecycle_policy import ResponseCreateDecision, ResponseCreateDecisionAction
 from ai.realtime.response_create_runtime import ResponseCreateOutcomeAction
@@ -383,3 +385,173 @@ def test_semantic_owner_observation_maps_parent_divergence() -> None:
     assert observation.decision.selected_candidate_id == "semantic_owner_parent"
     assert observation.decision.owner_scope == "semantic_parent"
     assert observation.decision.parent_coverage_state == "covered_canonical"
+
+
+def test_turn_arbitration_trace_is_complete_for_direct_send_terminal_and_same_owner() -> None:
+    api = _make_api_stub()
+    runtime = api._response_create_runtime
+    event = {"type": "response.create", "response": {"metadata": {"turn_id": "turn_trace", "input_event_key": "item_trace"}}}
+    snapshot = runtime.prepare_response_create_snapshot(
+        response_create_event=event,
+        origin="assistant_message",
+        utterance_context=None,
+        memory_brief_note=None,
+        now=1.0,
+    )
+    decision, lifecycle_decision = runtime._decide_response_create_action_with_lifecycle(snapshot)
+    response_create_observation = build_response_create_observation(
+        snapshot=snapshot,
+        execution_decision=decision,
+        lifecycle_decision=lifecycle_decision,
+        same_turn_owner_reason=snapshot.same_turn_owner_reason,
+        canonical_audio_started=False,
+    )
+    terminal_selection_observation = build_terminal_selection_observation(
+        run_id=snapshot.run_id,
+        turn_id=snapshot.turn_id,
+        input_event_key=snapshot.input_event_key,
+        canonical_key=snapshot.canonical_key,
+        origin=snapshot.normalized_origin,
+        selected=True,
+        selection_reason="normal",
+        transcript_final_seen=True,
+        active_response_was_provisional=False,
+    )
+    semantic_owner_observation = build_semantic_owner_observation(
+        run_id=snapshot.run_id,
+        turn_id=snapshot.turn_id,
+        input_event_key=snapshot.input_event_key,
+        execution_canonical_key=snapshot.canonical_key,
+        semantic_owner_canonical_key=snapshot.canonical_key,
+        origin=snapshot.normalized_origin,
+        selected=True,
+        selection_reason="normal",
+    )
+
+    trace = merge_arbitration_observations_for_turn(
+        response_create_observation=response_create_observation,
+        terminal_selection_observation=terminal_selection_observation,
+        semantic_owner_observation=semantic_owner_observation,
+        semantic_owner_canonical_key=snapshot.canonical_key,
+    )
+    summary = summarize_turn_arbitration_trace(trace)
+
+    assert trace.trace_complete is True
+    assert trace.trace_partial is False
+    assert trace.semantic_owner_diverged is False
+    assert summary["initial_response_create_selected_candidate_id"] == "direct_send"
+    assert summary["terminal_selected_candidate_id"] == "terminal_selected"
+    assert summary["semantic_owner_canonical_key"] == snapshot.canonical_key
+
+
+def test_turn_arbitration_trace_handles_parent_semantic_owner_divergence() -> None:
+    terminal_selection_observation = build_terminal_selection_observation(
+        run_id="run-semantic",
+        turn_id="turn_semantic",
+        input_event_key="tool:call_semantic",
+        canonical_key="turn_semantic::tool:call_semantic",
+        origin="tool_output",
+        selected=True,
+        selection_reason="normal",
+        transcript_final_seen=False,
+        active_response_was_provisional=False,
+    )
+    semantic_owner_observation = build_semantic_owner_observation(
+        run_id="run-semantic",
+        turn_id="turn_semantic",
+        input_event_key="tool:call_semantic",
+        execution_canonical_key="turn_semantic::tool:call_semantic",
+        semantic_owner_canonical_key="turn_semantic::item_parent",
+        origin="tool_output",
+        selected=True,
+        selection_reason="normal",
+        parent_turn_id="turn_semantic",
+        parent_input_event_key="item_parent",
+    )
+
+    trace = merge_arbitration_observations_for_turn(
+        terminal_selection_observation=terminal_selection_observation,
+        semantic_owner_observation=semantic_owner_observation,
+        semantic_owner_canonical_key="turn_semantic::item_parent",
+    )
+
+    assert trace.trace_complete is False
+    assert trace.trace_partial is True
+    assert trace.semantic_owner_diverged is True
+
+
+def test_turn_arbitration_trace_is_partial_with_only_response_create_observation() -> None:
+    api = _make_api_stub()
+    runtime = api._response_create_runtime
+    event = {"type": "response.create", "response": {"metadata": {"turn_id": "turn_partial", "input_event_key": "item_partial"}}}
+    snapshot = runtime.prepare_response_create_snapshot(
+        response_create_event=event,
+        origin="assistant_message",
+        utterance_context=None,
+        memory_brief_note=None,
+        now=1.0,
+    )
+    decision = runtime.decide_response_create_action(snapshot)
+    observation = build_response_create_observation(
+        snapshot=snapshot,
+        execution_decision=decision,
+        lifecycle_decision=None,
+        same_turn_owner_reason=None,
+        canonical_audio_started=None,
+    )
+
+    trace = merge_arbitration_observations_for_turn(response_create_observation=observation)
+
+    assert trace.trace_complete is False
+    assert trace.trace_partial is True
+    assert trace.response_create_observation is observation
+    assert trace.terminal_selection_observation is None
+
+
+def test_turn_arbitration_trace_is_partial_when_semantic_owner_missing() -> None:
+    terminal_selection_observation = build_terminal_selection_observation(
+        run_id="run-terminal",
+        turn_id="turn_terminal",
+        input_event_key="item_terminal",
+        canonical_key="turn_terminal::item_terminal",
+        origin="assistant_message",
+        selected=True,
+        selection_reason="normal",
+        transcript_final_seen=True,
+        active_response_was_provisional=False,
+    )
+
+    trace = merge_arbitration_observations_for_turn(
+        terminal_selection_observation=terminal_selection_observation,
+    )
+
+    assert trace.trace_complete is False
+    assert trace.trace_partial is True
+    assert trace.semantic_owner_observation is None
+
+
+def test_turn_arbitration_trace_propagates_warnings() -> None:
+    api = _make_api_stub()
+    runtime = api._response_create_runtime
+    event = {"type": "response.create", "response": {"metadata": {"turn_id": "turn_warn_trace", "input_event_key": "item_warn_trace"}}}
+    snapshot = runtime.prepare_response_create_snapshot(
+        response_create_event=event,
+        origin="assistant_message",
+        utterance_context=None,
+        memory_brief_note=None,
+        now=1.0,
+    )
+    response_create_observation = build_response_create_observation(
+        snapshot=snapshot,
+        execution_decision=runtime.decide_response_create_action(snapshot),
+        lifecycle_decision=None,
+        same_turn_owner_reason=None,
+        canonical_audio_started=None,
+    )
+
+    trace = merge_arbitration_observations_for_turn(
+        response_create_observation=response_create_observation,
+    )
+
+    assert "lifecycle_decision_unavailable" in trace.warning_codes
+    assert trace.normalized_warning_count >= 1

@@ -9,7 +9,11 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Protocol
 
-from ai.decision_arbitration_adapter import build_response_create_observation
+from ai.decision_arbitration_adapter import (
+    build_response_create_observation,
+    merge_arbitration_observations_for_turn,
+    summarize_turn_arbitration_trace,
+)
 from ai.interaction_lifecycle_policy import ResponseCreateDecision, ResponseCreateDecisionAction
 from ai.realtime.types import PendingResponseCreate
 from core.logging import logger, log_ws_event
@@ -593,6 +597,19 @@ class ResponseCreateRuntime:
             canonical_audio_started=canonical_audio_started,
         )
         logger.debug("decision_adapter_observation payload=%s", observation.to_log_payload())
+        trace_store = getattr(self.api, "_turn_arbitration_trace_by_key", None)
+        if not isinstance(trace_store, dict):
+            trace_store = {}
+            setattr(self.api, "_turn_arbitration_trace_by_key", trace_store)
+        trace_key = (prepared_snapshot.run_id, prepared_snapshot.turn_id)
+        trace = merge_arbitration_observations_for_turn(
+            existing_trace=trace_store.get(trace_key),
+            response_create_observation=observation,
+        )
+        trace_store[trace_key] = trace
+        while len(trace_store) > 128:
+            trace_store.pop(next(iter(trace_store)))
+        logger.debug("decision_adapter_turn_trace payload=%s", summarize_turn_arbitration_trace(trace))
         return prepared_snapshot, decision
 
     def schedule_pending_response_create(
