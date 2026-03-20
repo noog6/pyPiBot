@@ -84,6 +84,12 @@ from ai.realtime.types import (
     UtteranceContext,
 )
 from ai.realtime import preference_recall_runtime
+from ai.decision_arbitration_adapter import (
+    build_tool_followup_observation,
+    merge_arbitration_observations_for_turn,
+    summarize_turn_arbitration_diagnostics,
+    summarize_turn_arbitration_trace,
+)
 from ai.attention_continuity import AttentionContinuity, AttentionSnapshot
 from ai.embodiment_policy import (
     EMBODIMENT_PRIORITY_ALLOW,
@@ -7546,6 +7552,112 @@ class RealtimeAPI:
                 return distinct_marker
         return False
 
+    @staticmethod
+    def _normalize_parent_coverage_state_for_observation(
+        *,
+        covered: bool,
+        coverage_source: str,
+        classification_pending: bool = False,
+    ) -> str:
+        if classification_pending:
+            return "coverage_pending"
+        if covered:
+            if str(coverage_source or "").strip().lower() == "terminal_selection":
+                return "covered_terminal_selection"
+            return "covered_canonical"
+        normalized_source = str(coverage_source or "").strip().lower()
+        if normalized_source in {"none", ""}:
+            return "uncovered"
+        return "unknown"
+
+    def _record_tool_followup_observation(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str | None,
+        canonical_key: str,
+        origin: str,
+        parent_coverage_state: str,
+        followup_outcome_posture: str,
+        native_reason_code: str,
+        native_outcome_action: str,
+        response_metadata: dict[str, Any] | None = None,
+        parent_canonical_key: str | None = None,
+        parent_semantic_owner_key: str | None = None,
+        blocked_by_parent_final_coverage: bool | None = None,
+        authority_seam: str,
+        normalization_warnings: tuple[str, ...] = (),
+    ) -> None:
+        trace_store = getattr(self, "_turn_arbitration_trace_by_key", None)
+        if not isinstance(trace_store, dict):
+            trace_store = {}
+            setattr(self, "_turn_arbitration_trace_by_key", trace_store)
+        trace_key = (self._current_run_id() or "", str(turn_id or "").strip() or "turn-unknown")
+        followup_distinctness = self._normalize_tool_followup_distinctness_for_observation(
+            canonical_key=canonical_key,
+            response_metadata=response_metadata,
+            followup_outcome_posture=followup_outcome_posture,
+            native_reason_code=native_reason_code,
+        )
+        observation = build_tool_followup_observation(
+            run_id=self._current_run_id() or "",
+            turn_id=str(turn_id or "").strip() or "turn-unknown",
+            input_event_key=input_event_key,
+            canonical_key=canonical_key,
+            origin=origin,
+            parent_coverage_state=parent_coverage_state,
+            followup_outcome_posture=followup_outcome_posture,
+            native_reason_code=native_reason_code,
+            native_outcome_action=native_outcome_action,
+            followup_distinctness=followup_distinctness,
+            parent_canonical_key=parent_canonical_key,
+            parent_semantic_owner_key=parent_semantic_owner_key,
+            blocked_by_parent_final_coverage=blocked_by_parent_final_coverage,
+            authority_seam=authority_seam,
+            normalization_warnings=normalization_warnings,
+        )
+        trace = merge_arbitration_observations_for_turn(
+            existing_trace=trace_store.get(trace_key),
+            tool_followup_observation=observation,
+        )
+        trace_store[trace_key] = trace
+        while len(trace_store) > 128:
+            trace_store.pop(next(iter(trace_store)))
+        logger.debug("decision_adapter_turn_trace payload=%s", summarize_turn_arbitration_trace(trace))
+        if trace.diagnostics is not None:
+            logger.debug(
+                "decision_adapter_turn_diagnostics payload=%s",
+                summarize_turn_arbitration_diagnostics(trace.diagnostics),
+            )
+
+    def _normalize_tool_followup_distinctness_for_observation(
+        self,
+        *,
+        canonical_key: str,
+        response_metadata: dict[str, Any] | None,
+        followup_outcome_posture: str,
+        native_reason_code: str,
+    ) -> str:
+        normalized_posture = str(followup_outcome_posture or "").strip().lower()
+        normalized_reason = str(native_reason_code or "").strip().lower()
+        metadata = response_metadata if isinstance(response_metadata, dict) else {}
+        has_distinct_info = str(metadata.get("tool_result_has_distinct_info", "")).strip().lower() in {"true", "1", "yes"}
+        status_only_gesture = (
+            str(metadata.get("tool_followup_status_only", "")).strip().lower() in {"true", "1", "yes"}
+            or self._tool_followup_is_status_only_gesture(canonical_key=canonical_key)
+        )
+        if normalized_posture in {"pruned", "stale"}:
+            return "stale"
+        if has_distinct_info or normalized_reason == "distinct_info":
+            return "distinct"
+        if normalized_posture in {"pending", "observe_only"}:
+            return "not_applicable"
+        if normalized_posture == "suppressed" and (
+            normalized_reason.startswith("parent_covered_tool_result") or status_only_gesture
+        ):
+            return "redundant"
+        return "unknown"
+
     def _should_suppress_tool_followup_after_turn_deliverable(
         self,
         *,
@@ -7780,6 +7892,51 @@ class RealtimeAPI:
             canonical_deliverable_state,
             terminal_deliverable_state,
             coverage_source,
+        )
+        parent_coverage_state = "unknown"
+        blocked_by_parent_final_coverage = None
+        parent_canonical_key = parent_entry[0] if parent_entry else None
+        if parent_state is None:
+            if reason == "parent_unresolved":
+                parent_coverage_state = "unknown"
+            else:
+                parent_coverage_state = "not_applicable"
+        else:
+            classification_pending = reason == "parent_deliverable_pending"
+            parent_coverage_state = self._normalize_parent_coverage_state_for_observation(
+                covered=bool(parent_covered),
+                coverage_source=coverage_source,
+                classification_pending=classification_pending,
+            )
+            blocked_by_parent_final_coverage = bool(
+                parent_covered and (
+                    str(deliverable_class or "").strip().lower() == "final"
+                    or (bool(terminal_selected) and str(terminal_reason or "").strip().lower() == "normal")
+                )
+            )
+        current_followup_state = self._tool_followup_state(canonical_key=canonical_key)
+        followup_outcome_posture = "suppressed" if should_drop else ("pending" if reason == "parent_deliverable_pending" else "observe_only")
+        native_outcome_action = "DROP" if should_drop else ("HOLD" if reason == "parent_deliverable_pending" else "OBSERVE")
+        if (
+            not should_drop
+            and reason != "parent_deliverable_pending"
+            and current_followup_state in {"scheduled_release", "released_on_response_done"}
+        ):
+            followup_outcome_posture = "released"
+            native_outcome_action = "RELEASE"
+        self._record_tool_followup_observation(
+            turn_id=turn_id,
+            input_event_key=str(response_metadata.get("input_event_key") or "").strip() or None,
+            canonical_key=canonical_key,
+            origin="tool_output",
+            parent_coverage_state=parent_coverage_state,
+            followup_outcome_posture=followup_outcome_posture,
+            native_reason_code=reason,
+            native_outcome_action=native_outcome_action,
+            response_metadata=response_metadata,
+            parent_canonical_key=parent_canonical_key,
+            blocked_by_parent_final_coverage=blocked_by_parent_final_coverage,
+            authority_seam="ai.realtime_api._should_drop_tool_followup_at_create_seam",
         )
         if not should_drop:
             return False
@@ -8341,6 +8498,20 @@ class RealtimeAPI:
             self._response_create_queue = retained
 
         if dropped_pending or dropped_queue:
+            posture = "stale" if "stale" in normalized_reason else "pruned"
+            for pruned_canonical_key in pruned_canonical_keys:
+                self._record_tool_followup_observation(
+                    turn_id=normalized_turn_id,
+                    input_event_key=None,
+                    canonical_key=pruned_canonical_key,
+                    origin="tool_output",
+                    parent_coverage_state="covered_canonical",
+                    followup_outcome_posture=posture,
+                    native_reason_code=normalized_reason,
+                    native_outcome_action="PRUNE",
+                    blocked_by_parent_final_coverage=True,
+                    authority_seam="ai.realtime_api._prune_dead_tool_followup_creates",
+                )
             self._sync_pending_response_create_queue()
             logger.info(
                 "%s run_id=%s turn_id=%s response_id=%s dropped_pending=%s dropped_queue=%s",
@@ -8545,6 +8716,37 @@ class RealtimeAPI:
                 else "none",
             )
             if should_drop:
+                parent_coverage_state = "unknown"
+                blocked_by_parent_final_coverage = None
+                parent_canonical_key = parent_entry[0] if parent_entry else None
+                if parent_state is not None:
+                    parent_covered, coverage_source, _deliverable_observed, deliverable_class, terminal_selected, terminal_reason = self._parent_response_coverage_state(
+                        parent_state=parent_state,
+                    )
+                    parent_coverage_state = self._normalize_parent_coverage_state_for_observation(
+                        covered=bool(parent_covered),
+                        coverage_source=coverage_source,
+                    )
+                    blocked_by_parent_final_coverage = bool(
+                        parent_covered and (
+                            str(deliverable_class or "").strip().lower() == "final"
+                            or (bool(terminal_selected) and str(terminal_reason or "").strip().lower() == "normal")
+                        )
+                    )
+                self._record_tool_followup_observation(
+                    turn_id=turn_id,
+                    input_event_key=input_event_key or None,
+                    canonical_key=canonical_key,
+                    origin=origin,
+                    parent_coverage_state=parent_coverage_state,
+                    followup_outcome_posture="suppressed",
+                    native_reason_code=reason,
+                    native_outcome_action="DROP",
+                    response_metadata=response_metadata,
+                    parent_canonical_key=parent_canonical_key,
+                    blocked_by_parent_final_coverage=blocked_by_parent_final_coverage,
+                    authority_seam="ai.realtime_api._release_blocked_tool_followups_for_response_done",
+                )
                 self._prune_dead_tool_followup_creates(
                     turn_id=turn_id,
                     selected_response_id=normalized_response_id,
@@ -8559,6 +8761,20 @@ class RealtimeAPI:
                 )
                 continue
             if reason == "parent_deliverable_pending":
+                self._record_tool_followup_observation(
+                    turn_id=turn_id,
+                    input_event_key=input_event_key or None,
+                    canonical_key=canonical_key,
+                    origin=origin,
+                    parent_coverage_state="coverage_pending",
+                    followup_outcome_posture="pending",
+                    native_reason_code=reason,
+                    native_outcome_action="HOLD",
+                    response_metadata=response_metadata,
+                    parent_canonical_key=parent_entry[0] if parent_entry else None,
+                    blocked_by_parent_final_coverage=False,
+                    authority_seam="ai.realtime_api._release_blocked_tool_followups_for_response_done",
+                )
                 self._set_tool_followup_state(
                     canonical_key=canonical_key,
                     state="blocked_active_response",
@@ -8566,6 +8782,34 @@ class RealtimeAPI:
                 )
                 continue
             response_metadata["tool_followup_release"] = "true"
+            parent_coverage_state = "unknown"
+            blocked_by_parent_final_coverage = None
+            parent_canonical_key = parent_entry[0] if parent_entry else None
+            if parent_state is not None:
+                parent_covered, coverage_source, _deliverable_observed, _deliverable_class, _terminal_selected, _terminal_reason = self._parent_response_coverage_state(
+                    parent_state=parent_state,
+                )
+                parent_coverage_state = self._normalize_parent_coverage_state_for_observation(
+                    covered=bool(parent_covered),
+                    coverage_source=coverage_source,
+                )
+                blocked_by_parent_final_coverage = bool(parent_covered)
+            else:
+                parent_coverage_state = "uncovered" if reason in {"parent_not_deliverable", "not_suppressible", "distinct_info", "non_gesture_tool", "parent_not_done"} else "unknown"
+            self._record_tool_followup_observation(
+                turn_id=turn_id,
+                input_event_key=input_event_key or None,
+                canonical_key=canonical_key,
+                origin=origin,
+                parent_coverage_state=parent_coverage_state,
+                followup_outcome_posture="released",
+                native_reason_code=reason,
+                native_outcome_action="RELEASE",
+                response_metadata=response_metadata,
+                parent_canonical_key=parent_canonical_key,
+                blocked_by_parent_final_coverage=blocked_by_parent_final_coverage,
+                authority_seam="ai.realtime_api._release_blocked_tool_followups_for_response_done",
+            )
             self._set_tool_followup_state(
                 canonical_key=canonical_key,
                 state="scheduled_release",
