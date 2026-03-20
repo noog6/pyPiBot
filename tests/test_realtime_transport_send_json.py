@@ -4,6 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+import os
+import sys
+import types
+
+if "audioop" not in sys.modules:
+    sys.modules["audioop"] = types.ModuleType("audioop")
+os.environ.setdefault("OPENAI_API_KEY", "test-key")
 
 from ai.realtime.transport import RealtimeTransport
 from ai.realtime_api import RealtimeAPI
@@ -33,6 +40,7 @@ def _make_api_stub() -> RealtimeAPI:
     api._response_done_serial = 0
     api._record_ai_call = lambda: None
     api._track_outgoing_event = lambda *args, **kwargs: None
+    api._realtime_model = "gpt-realtime"
     api.profile_manager = type(
         "P",
         (),

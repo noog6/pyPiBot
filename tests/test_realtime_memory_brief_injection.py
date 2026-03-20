@@ -46,7 +46,9 @@ def _make_api_stub() -> RealtimeAPI:
     api._response_done_serial = 0
     api._record_ai_call = lambda: None
     api._track_outgoing_event = lambda *args, **kwargs: None
+    api._realtime_model = "gpt-realtime"
     api._response_create_runtime = ResponseCreateRuntime(api)
+    api._transcript_final_missing_for_turn = lambda *, turn_id, input_event_key: False
     return api
 
 
@@ -239,7 +241,7 @@ def test_server_auto_response_create_consumes_preference_context_from_turn_scope
                 "response": {
                     "metadata": {
                         "turn_id": "turn_4",
-                        "input_event_key": "synthetic_server_auto_1",
+                        "input_event_key": "item_editor",
                     }
                 },
             },
@@ -292,7 +294,7 @@ def test_server_auto_response_prefers_turn_scoped_hit_after_transition_replaced(
                 "response": {
                     "metadata": {
                         "turn_id": "turn_7",
-                        "input_event_key": "synthetic_server_auto_1",
+                        "input_event_key": "item_ABC",
                     }
                 },
             },

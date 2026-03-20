@@ -132,6 +132,7 @@ prefix_padding_ms: 500
 silence_threshold: 0.2
 silence_duration_ms: 900
 realtime:
+  model: "gpt-realtime"
   debug_vad: false
   vad_profile: "short_confirmations"
   minimum_non_confirmation_duration_ms: 120
