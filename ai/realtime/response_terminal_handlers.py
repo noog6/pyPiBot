@@ -14,6 +14,7 @@ from ai.decision_arbitration_adapter import (
     build_semantic_owner_observation,
     build_terminal_selection_observation,
     merge_arbitration_observations_for_turn,
+    summarize_turn_arbitration_diagnostics,
     summarize_turn_arbitration_trace,
 )
 from interaction import InteractionState
@@ -411,6 +412,11 @@ class ResponseTerminalHandlers:
             "decision_adapter_turn_trace payload=%s",
             summarize_turn_arbitration_trace(trace),
         )
+        if trace.diagnostics is not None:
+            logger.debug(
+                "decision_adapter_turn_diagnostics payload=%s",
+                summarize_turn_arbitration_diagnostics(trace.diagnostics),
+            )
         api._apply_terminal_deliverable_selection(
             canonical_key=done_canonical_key,
             semantic_owner_canonical_key=semantic_owner_canonical_key,

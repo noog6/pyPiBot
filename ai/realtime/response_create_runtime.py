@@ -12,6 +12,7 @@ from typing import Any, Protocol
 from ai.decision_arbitration_adapter import (
     build_response_create_observation,
     merge_arbitration_observations_for_turn,
+    summarize_turn_arbitration_diagnostics,
     summarize_turn_arbitration_trace,
 )
 from ai.interaction_lifecycle_policy import ResponseCreateDecision, ResponseCreateDecisionAction
@@ -610,6 +611,8 @@ class ResponseCreateRuntime:
         while len(trace_store) > 128:
             trace_store.pop(next(iter(trace_store)))
         logger.debug("decision_adapter_turn_trace payload=%s", summarize_turn_arbitration_trace(trace))
+        if trace.diagnostics is not None:
+            logger.debug("decision_adapter_turn_diagnostics payload=%s", summarize_turn_arbitration_diagnostics(trace.diagnostics))
         return prepared_snapshot, decision
 
     def schedule_pending_response_create(

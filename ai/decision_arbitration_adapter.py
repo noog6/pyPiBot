@@ -194,6 +194,51 @@ class NormalizedArbitrationObservation:
         }
 
 
+
+
+class TurnArbitrationDiagnosticsLogPayload(TypedDict):
+    run_id: str
+    turn_id: str
+    diagnostic_codes: tuple[str, ...]
+    severity: str
+    trace_complete: bool
+    trace_partial: bool
+    suspicious_mismatch_count: int
+    repeated_warning_count: int
+    vocabulary_alias_seen: bool
+    observational_only: bool
+    summary: str
+
+
+@dataclass(frozen=True)
+class TurnArbitrationDiagnostics:
+    run_id: str
+    turn_id: str
+    diagnostic_codes: tuple[str, ...]
+    severity: Literal["none", "info", "warning", "error"]
+    trace_complete: bool
+    trace_partial: bool
+    suspicious_mismatch_count: int
+    repeated_warning_count: int
+    vocabulary_alias_seen: bool
+    summary: str
+    observational_only: bool = True
+
+    def to_log_payload(self) -> TurnArbitrationDiagnosticsLogPayload:
+        return {
+            "run_id": self.run_id,
+            "turn_id": self.turn_id,
+            "diagnostic_codes": self.diagnostic_codes,
+            "severity": self.severity,
+            "trace_complete": self.trace_complete,
+            "trace_partial": self.trace_partial,
+            "suspicious_mismatch_count": self.suspicious_mismatch_count,
+            "repeated_warning_count": self.repeated_warning_count,
+            "vocabulary_alias_seen": self.vocabulary_alias_seen,
+            "observational_only": self.observational_only,
+            "summary": self.summary,
+        }
+
 class TurnArbitrationTraceLogPayload(TypedDict):
     run_id: str
     turn_id: str
@@ -228,6 +273,7 @@ class TurnArbitrationTrace:
     authority_seams_seen: tuple[str, ...] = ()
     trace_complete: bool = False
     trace_partial: bool = True
+    diagnostics: TurnArbitrationDiagnostics | None = None
 
     @property
     def semantic_owner_diverged(self) -> bool | None:
@@ -601,7 +647,7 @@ def merge_arbitration_observations_for_turn(
             merged_semantic_owner,
         )
     )
-    return TurnArbitrationTrace(
+    trace = TurnArbitrationTrace(
         run_id=run_id,
         turn_id=turn_id,
         execution_canonical_key=execution_canonical_key,
@@ -614,6 +660,87 @@ def merge_arbitration_observations_for_turn(
         trace_complete=trace_complete,
         trace_partial=not trace_complete,
     )
+    return TurnArbitrationTrace(**{**trace.__dict__, "diagnostics": build_turn_arbitration_diagnostics(trace)})
+
+
+def build_turn_arbitration_diagnostics(trace: TurnArbitrationTrace) -> TurnArbitrationDiagnostics:
+    diagnostic_codes: list[str] = []
+    suspicious_mismatch_count = 0
+    repeated_warning_count = 0
+
+    if trace.trace_partial:
+        diagnostic_codes.append("trace_partial")
+        if trace.response_create_observation is not None and trace.terminal_selection_observation is None:
+            diagnostic_codes.append("expected_terminal_selection_missing")
+        if trace.terminal_selection_observation is not None and trace.semantic_owner_observation is None:
+            diagnostic_codes.append("expected_semantic_owner_missing")
+
+    response_create = trace.response_create_observation.decision if trace.response_create_observation else None
+    terminal = trace.terminal_selection_observation.decision if trace.terminal_selection_observation else None
+    semantic_owner = trace.semantic_owner_observation.decision if trace.semantic_owner_observation else None
+
+    if terminal is not None and semantic_owner is None and terminal.deliverable_status == "final_observed":
+        diagnostic_codes.append("terminal_selected_without_semantic_owner")
+        suspicious_mismatch_count += 1
+    if semantic_owner is not None and trace.semantic_owner_diverged:
+        diagnostic_codes.append("semantic_owner_diverged")
+        suspicious_mismatch_count += 1
+    if terminal is not None and terminal.selected_candidate_id == "terminal_selected" and terminal.deliverable_status != "final_observed":
+        diagnostic_codes.append("terminal_selected_non_final_status")
+        suspicious_mismatch_count += 1
+    if response_create is not None and terminal is not None:
+        if response_create.decision_disposition == "block" and terminal.deliverable_status == "final_observed":
+            diagnostic_codes.append("response_create_blocked_but_terminal_final")
+            suspicious_mismatch_count += 1
+        if response_create.decision_disposition == "drop" and terminal.selected_candidate_id == "terminal_selected":
+            diagnostic_codes.append("response_create_dropped_but_terminal_selected")
+            suspicious_mismatch_count += 1
+        if response_create.decision_disposition == "defer" and terminal.deliverable_status == "final_observed" and response_create.transcript_final_state == "awaiting_transcript_final":
+            diagnostic_codes.append("deferred_create_then_final_terminal")
+
+    conservative_warning_count = sum(1 for code in trace.warning_codes if "conservative" in code or "ambiguous" in code)
+    if conservative_warning_count:
+        diagnostic_codes.append("conservative_mapping_present")
+    if trace.normalized_warning_count > 1:
+        repeated_warning_count = trace.normalized_warning_count
+        diagnostic_codes.append("repeated_normalization_warnings")
+    if any("alias" in code or "normalized_from_" in code for code in trace.warning_codes):
+        diagnostic_codes.append("vocabulary_alias_detected")
+
+    if terminal is not None and terminal.deliverable_status == "final_observed" and semantic_owner is None:
+        diagnostic_codes.append("explainability_gap_final_without_owner")
+    if response_create is not None and response_create.decision_disposition == "allow_now" and terminal is None:
+        diagnostic_codes.append("explainability_gap_runtime_resolved_without_terminal")
+
+    if not diagnostic_codes:
+        diagnostic_codes.append("trace_coherent")
+
+    if suspicious_mismatch_count:
+        severity = "warning" if suspicious_mismatch_count == 1 else "error"
+    elif trace.trace_partial or repeated_warning_count or conservative_warning_count:
+        severity = "info" if not trace.trace_complete else "warning"
+    else:
+        severity = "none"
+
+    summary = (
+        "coherent" if diagnostic_codes == ["trace_coherent"] else ",".join(diagnostic_codes)
+    )
+    return TurnArbitrationDiagnostics(
+        run_id=trace.run_id,
+        turn_id=trace.turn_id,
+        diagnostic_codes=tuple(dict.fromkeys(diagnostic_codes)),
+        severity=severity,
+        trace_complete=trace.trace_complete,
+        trace_partial=trace.trace_partial,
+        suspicious_mismatch_count=suspicious_mismatch_count,
+        repeated_warning_count=repeated_warning_count,
+        vocabulary_alias_seen="vocabulary_alias_detected" in diagnostic_codes,
+        summary=summary,
+    )
+
+
+def summarize_turn_arbitration_diagnostics(diagnostics: TurnArbitrationDiagnostics) -> TurnArbitrationDiagnosticsLogPayload:
+    return diagnostics.to_log_payload()
 
 
 def summarize_turn_arbitration_trace(trace: TurnArbitrationTrace) -> TurnArbitrationTraceLogPayload:
@@ -856,16 +983,17 @@ def build_response_create_observation(
             )
         )
 
+    raw_selected_candidate_id = execution_decision.selected_candidate_id
     selected_candidate_id: NormalizedCandidateId = _normalize_selected_candidate_id(
-        execution_decision.selected_candidate_id
+        raw_selected_candidate_id
     )
     decision_owner_scope, decision_owner_warnings = _owner_scope_for_candidate(
         selected_candidate_id,
         same_turn_owner_reason=same_turn_owner_reason,
     )
     decision_warnings = list(decision_owner_warnings)
-    if selected_candidate_id == "canonical_audio_started":
-        decision_warnings.append("selected_candidate_id_normalized")
+    if raw_selected_candidate_id != selected_candidate_id:
+        decision_warnings.append(f"selected_candidate_id_normalized_from_{raw_selected_candidate_id}")
     decision = NormalizedDecisionArtifact(
         native_outcome_action=execution_decision.action.value,
         native_reason_code=execution_decision.reason_code,

@@ -13,6 +13,7 @@ from ai.decision_arbitration_adapter import (
     build_response_create_observation,
     build_semantic_owner_observation,
     build_terminal_selection_observation,
+    build_turn_arbitration_diagnostics,
     merge_arbitration_observations_for_turn,
     summarize_turn_arbitration_trace,
 )
@@ -555,3 +556,189 @@ def test_turn_arbitration_trace_propagates_warnings() -> None:
 
     assert "lifecycle_decision_unavailable" in trace.warning_codes
     assert trace.normalized_warning_count >= 1
+
+
+def test_turn_arbitration_diagnostics_reports_clean_complete_trace() -> None:
+    api = _make_api_stub()
+    runtime = api._response_create_runtime
+    event = {"type": "response.create", "response": {"metadata": {"turn_id": "turn_diag_clean", "input_event_key": "item_diag_clean"}}}
+    snapshot = runtime.prepare_response_create_snapshot(
+        response_create_event=event,
+        origin="assistant_message",
+        utterance_context=None,
+        memory_brief_note=None,
+        now=1.0,
+    )
+    decision, lifecycle_decision = runtime._decide_response_create_action_with_lifecycle(snapshot)
+    trace = merge_arbitration_observations_for_turn(
+        response_create_observation=build_response_create_observation(
+            snapshot=snapshot,
+            execution_decision=decision,
+            lifecycle_decision=lifecycle_decision,
+            same_turn_owner_reason=snapshot.same_turn_owner_reason,
+            canonical_audio_started=False,
+        ),
+        terminal_selection_observation=build_terminal_selection_observation(
+            run_id=snapshot.run_id,
+            turn_id=snapshot.turn_id,
+            input_event_key=snapshot.input_event_key,
+            canonical_key=snapshot.canonical_key,
+            origin=snapshot.normalized_origin,
+            selected=True,
+            selection_reason="normal",
+            transcript_final_seen=True,
+            active_response_was_provisional=False,
+        ),
+        semantic_owner_observation=build_semantic_owner_observation(
+            run_id=snapshot.run_id,
+            turn_id=snapshot.turn_id,
+            input_event_key=snapshot.input_event_key,
+            execution_canonical_key=snapshot.canonical_key,
+            semantic_owner_canonical_key=snapshot.canonical_key,
+            origin=snapshot.normalized_origin,
+            selected=True,
+            selection_reason="normal",
+        ),
+        semantic_owner_canonical_key=snapshot.canonical_key,
+    )
+
+    diagnostics = build_turn_arbitration_diagnostics(trace)
+
+    assert diagnostics.diagnostic_codes == ("trace_coherent",)
+    assert diagnostics.severity == "none"
+    assert diagnostics.suspicious_mismatch_count == 0
+
+
+def test_turn_arbitration_diagnostics_reports_partial_trace_gaps() -> None:
+    api = _make_api_stub()
+    runtime = api._response_create_runtime
+    event = {"type": "response.create", "response": {"metadata": {"turn_id": "turn_diag_partial", "input_event_key": "item_diag_partial"}}}
+    snapshot = runtime.prepare_response_create_snapshot(
+        response_create_event=event,
+        origin="assistant_message",
+        utterance_context=None,
+        memory_brief_note=None,
+        now=1.0,
+    )
+    trace = merge_arbitration_observations_for_turn(
+        response_create_observation=build_response_create_observation(
+            snapshot=snapshot,
+            execution_decision=runtime.decide_response_create_action(snapshot),
+            lifecycle_decision=None,
+            same_turn_owner_reason=None,
+            canonical_audio_started=None,
+        )
+    )
+
+    diagnostics = trace.diagnostics
+
+    assert diagnostics is not None
+    assert "trace_partial" in diagnostics.diagnostic_codes
+    assert "expected_terminal_selection_missing" in diagnostics.diagnostic_codes
+    assert diagnostics.severity == "info"
+
+
+def test_turn_arbitration_diagnostics_reports_semantic_owner_divergence() -> None:
+    trace = merge_arbitration_observations_for_turn(
+        terminal_selection_observation=build_terminal_selection_observation(
+            run_id="run-diverge",
+            turn_id="turn-diverge",
+            input_event_key="tool:call_diverge",
+            canonical_key="turn-diverge::tool:call_diverge",
+            origin="tool_output",
+            selected=True,
+            selection_reason="normal",
+            transcript_final_seen=False,
+            active_response_was_provisional=False,
+        ),
+        semantic_owner_observation=build_semantic_owner_observation(
+            run_id="run-diverge",
+            turn_id="turn-diverge",
+            input_event_key="tool:call_diverge",
+            execution_canonical_key="turn-diverge::tool:call_diverge",
+            semantic_owner_canonical_key="turn-diverge::item_parent",
+            origin="tool_output",
+            selected=True,
+            selection_reason="normal",
+            parent_turn_id="turn-diverge",
+            parent_input_event_key="item_parent",
+        ),
+        semantic_owner_canonical_key="turn-diverge::item_parent",
+    )
+
+    diagnostics = trace.diagnostics
+
+    assert diagnostics is not None
+    assert "semantic_owner_diverged" in diagnostics.diagnostic_codes
+    assert diagnostics.suspicious_mismatch_count == 1
+    assert diagnostics.severity == "warning"
+
+
+def test_turn_arbitration_diagnostics_propagates_conservative_warning_hotspots() -> None:
+    api = _make_api_stub()
+    runtime = api._response_create_runtime
+    event = {"type": "response.create", "response": {"metadata": {"turn_id": "turn_diag_warn", "input_event_key": "item_diag_warn"}}}
+    snapshot = runtime.prepare_response_create_snapshot(
+        response_create_event=event,
+        origin="assistant_message",
+        utterance_context=None,
+        memory_brief_note=None,
+        now=1.0,
+    )
+    snapshot = replace(snapshot, same_turn_owner_present=True, same_turn_owner_reason=None)
+    decision = runtime._build_execution_decision(
+        action=ResponseCreateOutcomeAction.DROP,
+        reason_code="same_turn_already_owned",
+        explanation="Assistant message suppressed by same-turn owner.",
+        selected_candidate_id="same_turn_owner",
+    )
+    trace = merge_arbitration_observations_for_turn(
+        response_create_observation=build_response_create_observation(
+            snapshot=snapshot,
+            execution_decision=decision,
+            lifecycle_decision=None,
+            same_turn_owner_reason=None,
+            canonical_audio_started=None,
+        )
+    )
+
+    diagnostics = trace.diagnostics
+
+    assert diagnostics is not None
+    assert "conservative_mapping_present" in diagnostics.diagnostic_codes
+    assert "repeated_normalization_warnings" in diagnostics.diagnostic_codes
+    assert diagnostics.repeated_warning_count >= 2
+
+
+def test_turn_arbitration_diagnostics_detects_vocabulary_aliasing() -> None:
+    api = _make_api_stub()
+    runtime = api._response_create_runtime
+    event = {"type": "response.create", "response": {"metadata": {"turn_id": "turn_diag_alias", "input_event_key": "item_diag_alias"}}}
+    snapshot = runtime.prepare_response_create_snapshot(
+        response_create_event=event,
+        origin="assistant_message",
+        utterance_context=None,
+        memory_brief_note=None,
+        now=1.0,
+    )
+    decision = runtime._build_execution_decision(
+        action=ResponseCreateOutcomeAction.DROP,
+        reason_code="canonical_key_already_created",
+        explanation="Alias normalization path.",
+        selected_candidate_id="canonical_key_already_created",
+    )
+    trace = merge_arbitration_observations_for_turn(
+        response_create_observation=build_response_create_observation(
+            snapshot=replace(snapshot, already_created_for_canonical_key=True),
+            execution_decision=decision,
+            lifecycle_decision=None,
+            same_turn_owner_reason=None,
+            canonical_audio_started=None,
+        )
+    )
+
+    diagnostics = trace.diagnostics
+
+    assert diagnostics is not None
+    assert diagnostics.vocabulary_alias_seen is True
+    assert "vocabulary_alias_detected" in diagnostics.diagnostic_codes

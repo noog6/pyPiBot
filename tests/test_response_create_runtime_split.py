@@ -7,6 +7,7 @@ from dataclasses import replace
 import os
 import sys
 import types
+from unittest.mock import patch
 
 if "audioop" not in sys.modules:
     sys.modules["audioop"] = types.ModuleType("audioop")
@@ -594,3 +595,31 @@ def test_response_create_arbitration_blocks_preference_suppression_and_drops_too
     assert sent is False
     assert any("response_create_outcome" in message for message in info_messages)
     assert any("action=DROP" in message and "reason_code=already_created" in message for message in info_messages)
+
+
+def test_evaluate_response_create_attempt_logs_turn_diagnostics() -> None:
+    api = _make_api_stub()
+    runtime = api._response_create_runtime
+    event = {
+        "type": "response.create",
+        "response": {"metadata": {"turn_id": "turn_trace_log", "input_event_key": "item_trace_log"}},
+    }
+
+    with patch("ai.realtime.response_create_runtime.logger.debug") as debug_log:
+        _prepared_snapshot, _decision = runtime.evaluate_response_create_attempt(
+            response_create_event=event,
+            origin="assistant_message",
+            utterance_context=None,
+            memory_brief_note=None,
+            now=1.0,
+        )
+
+    payload = None
+    for call in debug_log.call_args_list:
+        if call.args and call.args[0] == "decision_adapter_turn_diagnostics payload=%s":
+            payload = call.args[1]
+            break
+    assert payload is not None
+    assert payload["trace_partial"] is True
+    assert "expected_terminal_selection_missing" in payload["diagnostic_codes"]
+    assert payload["observational_only"] is True
