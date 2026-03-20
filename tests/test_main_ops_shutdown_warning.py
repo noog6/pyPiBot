@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+import sys
+import types
+
+if "audioop" not in sys.modules:
+    sys.modules["audioop"] = types.ModuleType("audioop")
 
 import main
 from ai.realtime_api import RealtimeAPIStartupError, StartupDependencyOutcome
@@ -90,6 +95,8 @@ class _FakeMotionController:
 
 
 class _FakeCameraController:
+    close_calls = 0
+
     def set_realtime_instance(self, _instance) -> None:
         return None
 
@@ -98,6 +105,10 @@ class _FakeCameraController:
 
     def stop_vision_loop(self) -> None:
         return None
+
+    def close(self) -> None:
+        type(self).close_calls += 1
+        self.stop_vision_loop()
 
 
 class _FakeMonitor:
@@ -244,6 +255,32 @@ def test_main_stops_ops_orchestrator_before_other_teardown(monkeypatch) -> None:
     assert exit_code == 0
     assert stop_order[0] == "ops"
     assert set(stop_order[1:]) == {"camera", "motion", "imu", "battery"}
+
+
+def test_main_prefers_camera_close_during_shutdown(monkeypatch) -> None:
+    class ClosingCamera(_FakeCameraController):
+        close_calls = 0
+        stop_calls = 0
+
+        def stop_vision_loop(self) -> None:
+            type(self).stop_calls += 1
+
+    monkeypatch.setattr(main.ConfigController, "get_instance", lambda: _FakeConfigController())
+    monkeypatch.setattr(main.StorageController, "get_instance", lambda: _FakeStorageController())
+    monkeypatch.setattr(main.MemoryManager, "get_instance", lambda: _FakeMemoryManager())
+    monkeypatch.setattr(main, "RealtimeAPI", _FakeRealtimeAPI)
+    monkeypatch.setattr(main.MotionController, "get_instance", lambda: _FakeMotionController())
+    monkeypatch.setattr(main.CameraController, "get_instance", lambda: ClosingCamera())
+    monkeypatch.setattr(main.ImuMonitor, "get_instance", lambda: _FakeMonitor())
+    monkeypatch.setattr(main.BatteryMonitor, "get_instance", lambda: _FakeMonitor())
+    monkeypatch.setattr(main.OpsOrchestrator, "get_instance", lambda: _FakeOpsOrchestrator(loop_alive=False))
+    monkeypatch.setattr(main, "suppress_noisy_stderr", lambda *args, **kwargs: nullcontext())
+
+    exit_code = main.main([])
+
+    assert exit_code == 0
+    assert ClosingCamera.close_calls == 1
+    assert ClosingCamera.stop_calls == 1
 
 
 def test_main_logs_semantic_memory_state_at_startup(monkeypatch) -> None:
