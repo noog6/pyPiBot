@@ -14,6 +14,7 @@ if "audioop" not in sys.modules:
 from interaction import InteractionState
 from ai.orchestration import OrchestrationPhase
 from ai.realtime_api import RealtimeAPI
+from ai.realtime.types import CanonicalResponseState
 
 
 class _OrchestrationState:
@@ -989,3 +990,77 @@ def test_handle_response_completed_clears_same_active_ownership_surface_as_respo
     assert api._active_response_confirmation_guarded is False
     assert api._active_response_preference_guarded is False
     assert api._active_server_auto_input_event_key is None
+
+
+def test_handle_response_done_emits_terminal_selection_debug_observation() -> None:
+    api = _make_api()
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+
+    with patch("ai.realtime.response_terminal_handlers.logger.debug") as debug_log:
+        asyncio.run(api.handle_response_done({"type": "response.done"}))
+
+    payload = None
+    for call in debug_log.call_args_list:
+        if call.args and call.args[0] == "decision_adapter_terminal_selection_observation payload=%s":
+            payload = call.args[1]
+            break
+    assert payload is not None
+    assert payload["policy_domain"] == "response_terminal_selection"
+    assert payload["reason_code"] == "normal"
+    assert payload["deliverable_status"] == "final_observed"
+
+
+def test_handle_response_done_emits_semantic_owner_debug_observation_without_changing_native_outputs() -> None:
+    api = _make_api()
+    api._active_response_origin = "tool_output"
+    api._active_response_input_event_key = "tool:call_semantic_owner"
+    api._active_response_canonical_key = "turn_1::tool:call_semantic_owner"
+    api._active_input_event_key_for_turn = lambda _turn_id: "item_parent"
+    api._response_trace_by_id = lambda: {
+        "resp_1": {
+            "parent_turn_id": "turn_1",
+            "parent_input_event_key": "item_parent",
+        }
+    }
+    api._canonical_response_state = lambda canonical_key: CanonicalResponseState() if canonical_key == "turn_1::item_parent" else None
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    apply_selection = Mock()
+    api._apply_terminal_deliverable_selection = apply_selection
+
+    with patch("ai.realtime.response_terminal_handlers.logger.debug") as debug_log:
+        asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_1"}}))
+
+    apply_selection.assert_called_once_with(
+        canonical_key="turn_1::tool:call_semantic_owner",
+        semantic_owner_canonical_key="turn_1::item_parent",
+        response_id="resp_1",
+        turn_id="turn_1",
+        input_event_key="tool:call_semantic_owner",
+        selected=True,
+        selection_reason="normal",
+    )
+    payload = None
+    for call in debug_log.call_args_list:
+        if call.args and call.args[0] == "decision_adapter_semantic_owner_observation payload=%s":
+            payload = call.args[1]
+            break
+    assert payload is not None
+    assert payload["policy_domain"] == "response_semantic_owner"
+    assert payload["selected_candidate_id"] == "semantic_owner_parent"
+    assert payload["owner_scope"] == "semantic_parent"

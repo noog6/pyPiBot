@@ -9,7 +9,11 @@ if "audioop" not in sys.modules:
     sys.modules["audioop"] = types.ModuleType("audioop")
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
 
-from ai.decision_arbitration_adapter import build_response_create_observation
+from ai.decision_arbitration_adapter import (
+    build_response_create_observation,
+    build_semantic_owner_observation,
+    build_terminal_selection_observation,
+)
 from ai.interaction_lifecycle_policy import ResponseCreateDecision, ResponseCreateDecisionAction
 from ai.realtime.response_create_runtime import ResponseCreateOutcomeAction
 from tests.test_response_create_runtime_split import _make_api_stub
@@ -288,3 +292,94 @@ def test_lineage_guard_uses_conservative_owner_scope_warning() -> None:
 
     assert candidate.owner_scope == "subsystem_local"
     assert "owner_scope_conservative_for_lineage_guard" in candidate.normalization_warnings
+
+
+def test_terminal_selection_observation_maps_normal_selection() -> None:
+    observation = build_terminal_selection_observation(
+        run_id="run-terminal",
+        turn_id="turn_terminal",
+        input_event_key="item_terminal",
+        canonical_key="turn_terminal::item_terminal",
+        origin="assistant_message",
+        selected=True,
+        selection_reason="normal",
+        transcript_final_seen=True,
+        active_response_was_provisional=False,
+    )
+
+    assert observation.decision.native_reason_code == "normal"
+    assert observation.decision.selected_candidate_id == "terminal_selected"
+    assert observation.decision.deliverable_status == "final_observed"
+    assert observation.decision.transcript_final_state == "transcript_final_linked"
+
+
+def test_terminal_selection_observation_maps_non_deliverable_micro_ack() -> None:
+    observation = build_terminal_selection_observation(
+        run_id="run-terminal",
+        turn_id="turn_terminal",
+        input_event_key="item_terminal",
+        canonical_key="turn_terminal::item_terminal",
+        origin="micro_ack",
+        selected=False,
+        selection_reason="micro_ack_non_deliverable",
+        transcript_final_seen=False,
+        active_response_was_provisional=False,
+    )
+
+    assert observation.decision.native_outcome_action == "REJECT"
+    assert observation.decision.selected_candidate_id == "micro_ack_non_deliverable"
+    assert observation.decision.deliverable_status == "non_deliverable"
+
+
+def test_terminal_selection_observation_maps_provisional_transcript_wait() -> None:
+    observation = build_terminal_selection_observation(
+        run_id="run-terminal",
+        turn_id="turn_terminal",
+        input_event_key="synthetic_server_auto_9",
+        canonical_key="turn_terminal::synthetic_server_auto_9",
+        origin="server_auto",
+        selected=False,
+        selection_reason="provisional_server_auto_awaiting_transcript_final",
+        transcript_final_seen=False,
+        active_response_was_provisional=True,
+    )
+
+    assert observation.decision.deliverable_status == "provisional_only"
+    assert observation.decision.transcript_final_state == "awaiting_transcript_final"
+
+
+def test_semantic_owner_observation_maps_same_owner() -> None:
+    observation = build_semantic_owner_observation(
+        run_id="run-semantic",
+        turn_id="turn_semantic",
+        input_event_key="item_semantic",
+        execution_canonical_key="turn_semantic::item_semantic",
+        semantic_owner_canonical_key="turn_semantic::item_semantic",
+        origin="assistant_message",
+        selected=True,
+        selection_reason="normal",
+    )
+
+    assert observation.decision.native_outcome_action == "RETAIN"
+    assert observation.decision.selected_candidate_id == "semantic_owner_execution"
+    assert observation.decision.owner_scope == "none"
+
+
+def test_semantic_owner_observation_maps_parent_divergence() -> None:
+    observation = build_semantic_owner_observation(
+        run_id="run-semantic",
+        turn_id="turn_semantic",
+        input_event_key="tool:call_semantic",
+        execution_canonical_key="turn_semantic::tool:call_semantic",
+        semantic_owner_canonical_key="turn_semantic::item_parent",
+        origin="tool_output",
+        selected=True,
+        selection_reason="normal",
+        parent_turn_id="turn_semantic",
+        parent_input_event_key="item_parent",
+    )
+
+    assert observation.decision.native_outcome_action == "REASSIGN"
+    assert observation.decision.selected_candidate_id == "semantic_owner_parent"
+    assert observation.decision.owner_scope == "semantic_parent"
+    assert observation.decision.parent_coverage_state == "covered_canonical"

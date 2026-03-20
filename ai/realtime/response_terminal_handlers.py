@@ -10,6 +10,10 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from core.logging import log_info, logger
+from ai.decision_arbitration_adapter import (
+    build_semantic_owner_observation,
+    build_terminal_selection_observation,
+)
 from interaction import InteractionState
 from ai.orchestration import OrchestrationPhase
 from ai.realtime.asr_trust import topic_mismatch_detected
@@ -298,6 +302,21 @@ class ResponseTerminalHandlers:
             input_event_key=done_input_event_key,
             response_id=active_response_id_before_clear,
         )
+        terminal_selection_observation = build_terminal_selection_observation(
+            run_id=api._current_run_id() or "",
+            turn_id=turn_id,
+            input_event_key=done_input_event_key,
+            canonical_key=done_canonical_key,
+            origin=str(active_response_origin_before_clear or ""),
+            selected=selected,
+            selection_reason=selection_reason,
+            transcript_final_seen=transcript_final_linked,
+            active_response_was_provisional=active_response_was_provisional,
+        )
+        logger.debug(
+            "decision_adapter_terminal_selection_observation payload=%s",
+            terminal_selection_observation.to_log_payload(),
+        )
         exact_phrase_close_deferred = False
         if selection_reason == "exact_phrase_obligation_open":
             contract_before = api._active_turn_contract(turn_id=turn_id)
@@ -347,6 +366,30 @@ class ResponseTerminalHandlers:
             done_canonical_key=done_canonical_key,
             selected=selected,
             selection_reason=selection_reason,
+        )
+        parent_trace_context = {}
+        if str(active_response_origin_before_clear or "").strip().lower() == "tool_output":
+            parent_trace_context = api._resolve_parent_trace_context(
+                turn_id=turn_id,
+                input_event_key=done_input_event_key,
+                origin=str(active_response_origin_before_clear or ""),
+                response_id=resolved_response_id,
+            )
+        semantic_owner_observation = build_semantic_owner_observation(
+            run_id=api._current_run_id() or "",
+            turn_id=turn_id,
+            input_event_key=done_input_event_key,
+            execution_canonical_key=done_canonical_key,
+            semantic_owner_canonical_key=semantic_owner_canonical_key,
+            origin=str(active_response_origin_before_clear or ""),
+            selected=selected,
+            selection_reason=selection_reason,
+            parent_turn_id=parent_trace_context.get("effective_parent_turn_id"),
+            parent_input_event_key=parent_trace_context.get("effective_parent_input_event_key"),
+        )
+        logger.debug(
+            "decision_adapter_semantic_owner_observation payload=%s",
+            semantic_owner_observation.to_log_payload(),
         )
         api._apply_terminal_deliverable_selection(
             canonical_key=done_canonical_key,

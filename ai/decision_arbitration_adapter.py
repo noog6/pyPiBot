@@ -84,6 +84,16 @@ NormalizedCandidateId: TypeAlias = Literal[
     "preference_recall_suppressed",
     "awaiting_transcript_final",
     "direct_send",
+    "terminal_selected",
+    "cancelled",
+    "micro_ack_non_deliverable",
+    "provisional_empty_non_deliverable",
+    "provisional_server_auto_awaiting_transcript_final",
+    "tool_followup_precedence",
+    "exact_phrase_obligation_open",
+    "tool_output_descriptive_gesture_only",
+    "semantic_owner_execution",
+    "semantic_owner_parent",
 ]
 
 
@@ -186,6 +196,218 @@ class NormalizedArbitrationObservation:
 
 _AUTHORITY_SEAM = "ai.realtime.response_create_runtime"
 _POLICY_DOMAIN = "response_create"
+
+
+_TERMINAL_SELECTION_AUTHORITY_SEAM = "ai.realtime_api._response_done_deliverable_decision"
+_TERMINAL_SELECTION_POLICY_DOMAIN = "response_terminal_selection"
+_SEMANTIC_OWNER_AUTHORITY_SEAM = "ai.realtime_api._resolve_semantic_answer_owner_for_response"
+_SEMANTIC_OWNER_POLICY_DOMAIN = "response_semantic_owner"
+
+
+def _terminal_selection_candidate_id(selection_reason: str, *, selected: bool) -> NormalizedCandidateId:
+    normalized_reason = str(selection_reason or "").strip().lower()
+    mapping: dict[str, NormalizedCandidateId] = {
+        "cancelled": "cancelled",
+        "micro_ack_non_deliverable": "micro_ack_non_deliverable",
+        "provisional_empty_non_deliverable": "provisional_empty_non_deliverable",
+        "provisional_server_auto_awaiting_transcript_final": "provisional_server_auto_awaiting_transcript_final",
+        "tool_followup_precedence": "tool_followup_precedence",
+        "exact_phrase_obligation_open": "exact_phrase_obligation_open",
+        "tool_output_descriptive_gesture_only": "tool_output_descriptive_gesture_only",
+        "normal": "terminal_selected",
+    }
+    if normalized_reason in mapping:
+        return mapping[normalized_reason]
+    if selected:
+        return "terminal_selected"
+    raise ValueError(f"Unsupported terminal selection reason: {selection_reason}")
+
+
+def _terminal_selection_deliverable_status(
+    *,
+    selected: bool,
+    selection_reason: str,
+    active_response_was_provisional: bool,
+) -> tuple[NormalizedDeliverableStatus, tuple[str, ...]]:
+    normalized_reason = str(selection_reason or "").strip().lower()
+    warnings: list[str] = []
+    if selected:
+        return "final_observed", tuple(warnings)
+    if normalized_reason in {"micro_ack_non_deliverable", "provisional_empty_non_deliverable", "tool_output_descriptive_gesture_only", "cancelled"}:
+        return "non_deliverable", tuple(warnings)
+    if normalized_reason in {"provisional_server_auto_awaiting_transcript_final"}:
+        return "provisional_only", tuple(warnings)
+    if normalized_reason in {"exact_phrase_obligation_open", "tool_followup_precedence"}:
+        return "blocked_terminal", tuple(warnings)
+    warnings.append("deliverable_status_conservative_default")
+    return ("provisional_only" if active_response_was_provisional else "none_observed"), tuple(warnings)
+
+
+def _terminal_selection_transcript_state(
+    *,
+    transcript_final_seen: bool,
+    selection_reason: str,
+    active_response_was_provisional: bool,
+) -> tuple[NormalizedTranscriptFinalState, tuple[str, ...]]:
+    normalized_reason = str(selection_reason or "").strip().lower()
+    warnings: list[str] = []
+    if transcript_final_seen:
+        return "transcript_final_linked", tuple(warnings)
+    if normalized_reason == "provisional_server_auto_awaiting_transcript_final":
+        return "awaiting_transcript_final", tuple(warnings)
+    if active_response_was_provisional:
+        return "partial_only", tuple(warnings)
+    return "not_applicable", tuple(warnings)
+
+
+def build_terminal_selection_observation(
+    *,
+    run_id: str,
+    turn_id: str,
+    input_event_key: str | None,
+    canonical_key: str,
+    origin: str,
+    selected: bool,
+    selection_reason: str,
+    transcript_final_seen: bool,
+    active_response_was_provisional: bool,
+) -> NormalizedArbitrationObservation:
+    candidate_id = _terminal_selection_candidate_id(selection_reason, selected=selected)
+    deliverable_status, deliverable_warnings = _terminal_selection_deliverable_status(
+        selected=selected,
+        selection_reason=selection_reason,
+        active_response_was_provisional=active_response_was_provisional,
+    )
+    transcript_final_state, transcript_warnings = _terminal_selection_transcript_state(
+        transcript_final_seen=transcript_final_seen,
+        selection_reason=selection_reason,
+        active_response_was_provisional=active_response_was_provisional,
+    )
+    decision_disposition: NormalizedDecisionDisposition = "allow_now" if selected else "observe_only"
+    owner_scope: NormalizedOwnerScope = "terminal_deliverable" if selected else "subsystem_local"
+    decision_warnings = tuple([*deliverable_warnings, *transcript_warnings])
+    decision = NormalizedDecisionArtifact(
+        native_outcome_action="SELECT" if selected else "REJECT",
+        native_reason_code=str(selection_reason or ""),
+        selected_candidate_id=candidate_id,
+        decision_disposition=decision_disposition,
+        owner_scope=owner_scope,
+        deliverable_status=deliverable_status,
+        confirmation_hold_state="not_evaluated",
+        transcript_final_state=transcript_final_state,
+        parent_coverage_state="not_applicable",
+        authority_retained_by=_TERMINAL_SELECTION_AUTHORITY_SEAM,
+        observational_only=True,
+        normalization_warnings=decision_warnings,
+    )
+    context = NormalizedArbitrationContext(
+        run_id=run_id,
+        turn_id=turn_id,
+        input_event_key=str(input_event_key or "unknown"),
+        canonical_key=canonical_key,
+        policy_domain=_TERMINAL_SELECTION_POLICY_DOMAIN,
+        origin=str(origin or "").strip().lower(),
+        authority_retained_by=_TERMINAL_SELECTION_AUTHORITY_SEAM,
+        observational_only=True,
+    )
+    return NormalizedArbitrationObservation(
+        context=context,
+        candidates=(NormalizedDecisionCandidate(
+            candidate_id=candidate_id,
+            observed=True,
+            native_action=decision.native_outcome_action,
+            native_reason_code=decision.native_reason_code,
+            owner_scope=decision.owner_scope,
+            deliverable_status=decision.deliverable_status,
+            decision_disposition=decision.decision_disposition,
+            confirmation_hold_state=decision.confirmation_hold_state,
+            transcript_final_state=decision.transcript_final_state,
+            parent_coverage_state=decision.parent_coverage_state,
+            authority_seam=_TERMINAL_SELECTION_AUTHORITY_SEAM,
+            normalization_warnings=decision_warnings,
+        ),),
+        decision=decision,
+        normalization_warnings=decision_warnings,
+    )
+
+
+def build_semantic_owner_observation(
+    *,
+    run_id: str,
+    turn_id: str,
+    input_event_key: str | None,
+    execution_canonical_key: str,
+    semantic_owner_canonical_key: str,
+    origin: str,
+    selected: bool,
+    selection_reason: str,
+    parent_turn_id: str | None = None,
+    parent_input_event_key: str | None = None,
+) -> NormalizedArbitrationObservation:
+    warnings: list[str] = []
+    normalized_reason = str(selection_reason or "").strip().lower()
+    candidate_id: NormalizedCandidateId
+    owner_scope: NormalizedOwnerScope
+    parent_coverage_state: NormalizedParentCoverageState
+    if semantic_owner_canonical_key == execution_canonical_key:
+        candidate_id = "semantic_owner_execution"
+        owner_scope = "none" if selected else "subsystem_local"
+        parent_coverage_state = "not_applicable"
+        if selected and normalized_reason == "normal" and str(origin or "").strip().lower() == "tool_output":
+            warnings.append("semantic_owner_parent_not_promoted")
+    else:
+        candidate_id = "semantic_owner_parent"
+        owner_scope = "semantic_parent"
+        parent_coverage_state = "covered_canonical"
+    if not selected:
+        warnings.append("semantic_owner_resolution_without_terminal_selection")
+    if not semantic_owner_canonical_key:
+        warnings.append("semantic_owner_canonical_key_unavailable")
+    if candidate_id == "semantic_owner_parent" and (not parent_turn_id or not parent_input_event_key):
+        warnings.append("semantic_parent_lineage_unavailable")
+    decision = NormalizedDecisionArtifact(
+        native_outcome_action="RETAIN" if candidate_id == "semantic_owner_execution" else "REASSIGN",
+        native_reason_code=str(selection_reason or ""),
+        selected_candidate_id=candidate_id,
+        decision_disposition="observe_only",
+        owner_scope=owner_scope,
+        deliverable_status="final_observed" if selected else "none_observed",
+        confirmation_hold_state="not_evaluated",
+        transcript_final_state="not_applicable",
+        parent_coverage_state=parent_coverage_state,
+        authority_retained_by=_SEMANTIC_OWNER_AUTHORITY_SEAM,
+        observational_only=True,
+        normalization_warnings=tuple(warnings),
+    )
+    context = NormalizedArbitrationContext(
+        run_id=run_id,
+        turn_id=turn_id,
+        input_event_key=str(input_event_key or "unknown"),
+        canonical_key=execution_canonical_key,
+        policy_domain=_SEMANTIC_OWNER_POLICY_DOMAIN,
+        origin=str(origin or "").strip().lower(),
+        authority_retained_by=_SEMANTIC_OWNER_AUTHORITY_SEAM,
+        observational_only=True,
+    )
+    return NormalizedArbitrationObservation(
+        context=context,
+        candidates=(NormalizedDecisionCandidate(
+            candidate_id=candidate_id,
+            observed=True,
+            native_action=decision.native_outcome_action,
+            native_reason_code=decision.native_reason_code,
+            owner_scope=decision.owner_scope,
+            deliverable_status=decision.deliverable_status,
+            decision_disposition=decision.decision_disposition,
+            confirmation_hold_state=decision.confirmation_hold_state,
+            transcript_final_state=decision.transcript_final_state,
+            parent_coverage_state=decision.parent_coverage_state,
+            authority_seam=_SEMANTIC_OWNER_AUTHORITY_SEAM,
+            normalization_warnings=tuple(warnings),
+        ),),
+        decision=decision,
+        normalization_warnings=tuple(warnings),
+    )
 
 
 def _owner_scope_for_candidate(
@@ -364,6 +586,16 @@ def _normalize_selected_candidate_id(candidate_id: str) -> NormalizedCandidateId
         "preference_recall_suppressed",
         "awaiting_transcript_final",
         "direct_send",
+        "terminal_selected",
+        "cancelled",
+        "micro_ack_non_deliverable",
+        "provisional_empty_non_deliverable",
+        "provisional_server_auto_awaiting_transcript_final",
+        "tool_followup_precedence",
+        "exact_phrase_obligation_open",
+        "tool_output_descriptive_gesture_only",
+        "semantic_owner_execution",
+        "semantic_owner_parent",
     }:
         return candidate_id
     raise ValueError(f"Unsupported normalized candidate id: {candidate_id}")
