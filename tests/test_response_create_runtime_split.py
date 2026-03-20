@@ -597,6 +597,86 @@ def test_response_create_arbitration_blocks_preference_suppression_and_drops_too
     assert any("action=DROP" in message and "reason_code=already_created" in message for message in info_messages)
 
 
+def test_evaluate_response_create_attempt_does_not_log_info_turn_summary_for_partial_expected_trace() -> None:
+    api = _make_api_stub()
+    runtime = api._response_create_runtime
+    event = {
+        "type": "response.create",
+        "response": {"metadata": {"turn_id": "turn_review_info_skip", "input_event_key": "item_review_info_skip"}},
+    }
+
+    with patch("ai.realtime.response_create_runtime.logger.info") as info_log:
+        runtime.evaluate_response_create_attempt(
+            response_create_event=event,
+            origin="assistant_message",
+            utterance_context=None,
+            memory_brief_note=None,
+            now=1.0,
+        )
+
+    assert all(
+        not (call.args and call.args[0] == "decision_arbitration_turn_summary run_id=%s turn_id=%s review_bucket=%s review_priority=%s overall_verdict=%s overall_summary=%s")
+        for call in info_log.call_args_list
+    )
+
+
+def test_evaluate_response_create_attempt_logs_turn_review_summary() -> None:
+    api = _make_api_stub()
+    runtime = api._response_create_runtime
+    event = {
+        "type": "response.create",
+        "response": {"metadata": {"turn_id": "turn_review_log", "input_event_key": "item_review_log"}},
+    }
+
+    with patch("ai.realtime.response_create_runtime.logger.debug") as debug_log:
+        _prepared_snapshot, _decision = runtime.evaluate_response_create_attempt(
+            response_create_event=event,
+            origin="assistant_message",
+            utterance_context=None,
+            memory_brief_note=None,
+            now=1.0,
+        )
+
+    payload = None
+    for call in debug_log.call_args_list:
+        if call.args and call.args[0] == "decision_adapter_turn_review_summary payload=%s":
+            payload = call.args[1]
+            break
+    assert payload is not None
+    assert payload["trace_partial"] is True
+    assert payload["response_create_summary"] == "response.create allowed (direct_send)"
+    assert payload["observational_only"] is True
+
+
+def test_record_tool_followup_observation_logs_info_turn_summary_for_suspicious_partial_trace() -> None:
+    api = _make_api_stub()
+    api._current_run_id = lambda: "run-tool-info"
+    api._turn_arbitration_trace_by_key = {}
+
+    with patch("ai.realtime_api.logger.info") as info_log, patch("ai.realtime_api.logger.debug"):
+        api._record_tool_followup_observation(
+            turn_id="turn-tool-info",
+            input_event_key="tool:call_tool_info",
+            canonical_key="turn-tool-info::tool:call_tool_info",
+            origin="tool_output",
+            parent_coverage_state="unknown",
+            followup_outcome_posture="suppressed",
+            native_reason_code="parent_unresolved",
+            native_outcome_action="DROP",
+            authority_seam="ai.realtime_api",
+        )
+
+    summary_call = None
+    for call in info_log.call_args_list:
+        if call.args and call.args[0] == "decision_arbitration_turn_summary run_id=%s turn_id=%s review_bucket=%s review_priority=%s overall_verdict=%s overall_summary=%s":
+            summary_call = call
+            break
+    assert summary_call is not None
+    assert summary_call.args[1] == "run-tool-info"
+    assert summary_call.args[2] == "turn-tool-info"
+    assert summary_call.args[3] == "suspicious"
+
+
 def test_evaluate_response_create_attempt_logs_turn_diagnostics() -> None:
     api = _make_api_stub()
     runtime = api._response_create_runtime
