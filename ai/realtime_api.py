@@ -86,8 +86,11 @@ from ai.realtime.types import (
 from ai.realtime import preference_recall_runtime
 from ai.decision_arbitration_adapter import (
     build_tool_followup_observation,
+    get_latest_turn_review_summary,
     merge_arbitration_observations_for_turn,
+    should_emit_turn_review_summary_info,
     summarize_turn_arbitration_diagnostics,
+    summarize_turn_arbitration_for_review,
     summarize_turn_arbitration_trace,
 )
 from ai.attention_continuity import AttentionContinuity, AttentionSnapshot
@@ -7762,6 +7765,22 @@ class RealtimeAPI:
                 "decision_adapter_turn_diagnostics payload=%s",
                 summarize_turn_arbitration_diagnostics(trace.diagnostics),
             )
+        logger.debug(
+            "decision_adapter_turn_review_summary payload=%s",
+            summarize_turn_arbitration_for_review(trace),
+        )
+        if should_emit_turn_review_summary_info(trace):
+            review_summary = get_latest_turn_review_summary(trace)
+            if review_summary is not None:
+                logger.info(
+                    "decision_arbitration_turn_summary run_id=%s turn_id=%s review_bucket=%s review_priority=%s overall_verdict=%s overall_summary=%s",
+                    review_summary.run_id,
+                    review_summary.turn_id,
+                    review_summary.review_bucket,
+                    review_summary.review_priority,
+                    review_summary.overall_verdict,
+                    review_summary.overall_summary,
+                )
 
     def _normalize_tool_followup_distinctness_for_observation(
         self,

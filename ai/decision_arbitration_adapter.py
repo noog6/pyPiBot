@@ -1232,14 +1232,29 @@ def build_turn_review_summary(trace: TurnArbitrationTrace) -> TurnArbitrationRev
     )
 
 
-def summarize_turn_arbitration_for_review(trace: TurnArbitrationTrace) -> TurnArbitrationReviewLogPayload:
-    return build_turn_review_summary(trace).to_log_payload()
-
-
 def get_latest_turn_review_summary(trace: TurnArbitrationTrace | None) -> TurnArbitrationReviewSummary | None:
     if trace is None:
         return None
+    attached_summary = trace.review_summary
+    if attached_summary is not None:
+        return attached_summary
     return build_turn_review_summary(trace)
+
+
+def summarize_turn_arbitration_for_review(trace: TurnArbitrationTrace) -> TurnArbitrationReviewLogPayload:
+    review_summary = get_latest_turn_review_summary(trace)
+    if review_summary is None:
+        raise ValueError("A turn arbitration trace is required to summarize review output.")
+    return review_summary.to_log_payload()
+
+
+def should_emit_turn_review_summary_info(trace: TurnArbitrationTrace) -> bool:
+    review_summary = get_latest_turn_review_summary(trace)
+    if review_summary is None:
+        return False
+    if trace.trace_complete:
+        return True
+    return review_summary.review_bucket in {"suspicious", "needs_review"}
 
 
 def _owner_scope_for_candidate(

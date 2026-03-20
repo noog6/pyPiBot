@@ -13,6 +13,7 @@ from ai.decision_arbitration_adapter import (
     build_response_create_observation,
     merge_arbitration_observations_for_turn,
     summarize_turn_arbitration_diagnostics,
+    summarize_turn_arbitration_for_review,
     summarize_turn_arbitration_trace,
 )
 from ai.interaction_lifecycle_policy import ResponseCreateDecision, ResponseCreateDecisionAction
@@ -613,6 +614,7 @@ class ResponseCreateRuntime:
         logger.debug("decision_adapter_turn_trace payload=%s", summarize_turn_arbitration_trace(trace))
         if trace.diagnostics is not None:
             logger.debug("decision_adapter_turn_diagnostics payload=%s", summarize_turn_arbitration_diagnostics(trace.diagnostics))
+        logger.debug("decision_adapter_turn_review_summary payload=%s", summarize_turn_arbitration_for_review(trace))
         return prepared_snapshot, decision
 
     def schedule_pending_response_create(
