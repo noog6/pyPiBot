@@ -13,6 +13,8 @@ from core.logging import log_info, logger
 from ai.decision_arbitration_adapter import (
     build_semantic_owner_observation,
     build_terminal_selection_observation,
+    merge_arbitration_observations_for_turn,
+    summarize_turn_arbitration_trace,
 )
 from interaction import InteractionState
 from ai.orchestration import OrchestrationPhase
@@ -390,6 +392,24 @@ class ResponseTerminalHandlers:
         logger.debug(
             "decision_adapter_semantic_owner_observation payload=%s",
             semantic_owner_observation.to_log_payload(),
+        )
+        trace_store = getattr(api, "_turn_arbitration_trace_by_key", None)
+        if not isinstance(trace_store, dict):
+            trace_store = {}
+            setattr(api, "_turn_arbitration_trace_by_key", trace_store)
+        trace_key = (api._current_run_id() or "", turn_id)
+        trace = merge_arbitration_observations_for_turn(
+            existing_trace=trace_store.get(trace_key),
+            terminal_selection_observation=terminal_selection_observation,
+            semantic_owner_observation=semantic_owner_observation,
+            semantic_owner_canonical_key=semantic_owner_canonical_key,
+        )
+        trace_store[trace_key] = trace
+        while len(trace_store) > 128:
+            trace_store.pop(next(iter(trace_store)))
+        logger.debug(
+            "decision_adapter_turn_trace payload=%s",
+            summarize_turn_arbitration_trace(trace),
         )
         api._apply_terminal_deliverable_selection(
             canonical_key=done_canonical_key,

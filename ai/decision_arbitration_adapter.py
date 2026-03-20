@@ -194,6 +194,98 @@ class NormalizedArbitrationObservation:
         }
 
 
+class TurnArbitrationTraceLogPayload(TypedDict):
+    run_id: str
+    turn_id: str
+    initial_response_create_selected_candidate_id: str | None
+    initial_response_create_disposition: str | None
+    initial_response_create_reason_code: str | None
+    terminal_selected_candidate_id: str | None
+    terminal_deliverable_status: str | None
+    terminal_selection_reason_code: str | None
+    execution_canonical_key: str | None
+    semantic_owner_canonical_key: str | None
+    semantic_owner_reason_code: str | None
+    semantic_owner_diverged: bool | None
+    transcript_final_state: str | None
+    normalized_warning_count: int
+    warning_codes: tuple[str, ...]
+    authority_seams_seen: tuple[str, ...]
+    trace_complete: bool
+    trace_partial: bool
+
+
+@dataclass(frozen=True)
+class TurnArbitrationTrace:
+    run_id: str
+    turn_id: str
+    execution_canonical_key: str | None
+    semantic_owner_canonical_key: str | None
+    response_create_observation: NormalizedArbitrationObservation | None = None
+    terminal_selection_observation: NormalizedArbitrationObservation | None = None
+    semantic_owner_observation: NormalizedArbitrationObservation | None = None
+    warning_codes: tuple[str, ...] = ()
+    authority_seams_seen: tuple[str, ...] = ()
+    trace_complete: bool = False
+    trace_partial: bool = True
+
+    @property
+    def semantic_owner_diverged(self) -> bool | None:
+        if (
+            self.semantic_owner_observation is None
+            or not self.execution_canonical_key
+            or not self.semantic_owner_canonical_key
+        ):
+            return None
+        return self.semantic_owner_canonical_key != self.execution_canonical_key
+
+    @property
+    def normalized_warning_count(self) -> int:
+        return len(self.warning_codes)
+
+    def to_log_payload(self) -> TurnArbitrationTraceLogPayload:
+        response_create = self.response_create_observation.decision if self.response_create_observation else None
+        terminal_selection = self.terminal_selection_observation.decision if self.terminal_selection_observation else None
+        semantic_owner = self.semantic_owner_observation.decision if self.semantic_owner_observation else None
+        return {
+            "run_id": self.run_id,
+            "turn_id": self.turn_id,
+            "initial_response_create_selected_candidate_id": (
+                response_create.selected_candidate_id if response_create else None
+            ),
+            "initial_response_create_disposition": (
+                response_create.decision_disposition if response_create else None
+            ),
+            "initial_response_create_reason_code": (
+                response_create.native_reason_code if response_create else None
+            ),
+            "terminal_selected_candidate_id": (
+                terminal_selection.selected_candidate_id if terminal_selection else None
+            ),
+            "terminal_deliverable_status": (
+                terminal_selection.deliverable_status if terminal_selection else None
+            ),
+            "terminal_selection_reason_code": (
+                terminal_selection.native_reason_code if terminal_selection else None
+            ),
+            "execution_canonical_key": self.execution_canonical_key,
+            "semantic_owner_canonical_key": self.semantic_owner_canonical_key,
+            "semantic_owner_reason_code": (
+                semantic_owner.native_reason_code if semantic_owner else None
+            ),
+            "semantic_owner_diverged": self.semantic_owner_diverged,
+            "transcript_final_state": _trace_transcript_final_state(
+                self.response_create_observation,
+                self.terminal_selection_observation,
+            ),
+            "normalized_warning_count": self.normalized_warning_count,
+            "warning_codes": self.warning_codes,
+            "authority_seams_seen": self.authority_seams_seen,
+            "trace_complete": self.trace_complete,
+            "trace_partial": self.trace_partial,
+        }
+
+
 _AUTHORITY_SEAM = "ai.realtime.response_create_runtime"
 _POLICY_DOMAIN = "response_create"
 
@@ -410,6 +502,124 @@ def build_semantic_owner_observation(
     )
 
 
+def _trace_transcript_final_state(
+    response_create_observation: NormalizedArbitrationObservation | None,
+    terminal_selection_observation: NormalizedArbitrationObservation | None,
+) -> NormalizedTranscriptFinalState | None:
+    if terminal_selection_observation is not None:
+        return terminal_selection_observation.decision.transcript_final_state
+    if response_create_observation is not None:
+        return response_create_observation.decision.transcript_final_state
+    return None
+
+
+def _merge_warning_codes(
+    *observations: NormalizedArbitrationObservation | None,
+) -> tuple[str, ...]:
+    merged: dict[str, None] = {}
+    for observation in observations:
+        if observation is None:
+            continue
+        for warning_code in (*observation.normalization_warnings, *observation.decision.normalization_warnings):
+            merged.setdefault(warning_code, None)
+    return tuple(merged)
+
+
+def _merge_authority_seams(
+    *observations: NormalizedArbitrationObservation | None,
+) -> tuple[str, ...]:
+    merged: dict[str, None] = {}
+    for observation in observations:
+        if observation is None:
+            continue
+        merged.setdefault(observation.context.authority_retained_by, None)
+    return tuple(merged)
+
+
+def merge_arbitration_observations_for_turn(
+    *,
+    existing_trace: TurnArbitrationTrace | None = None,
+    response_create_observation: NormalizedArbitrationObservation | None = None,
+    terminal_selection_observation: NormalizedArbitrationObservation | None = None,
+    semantic_owner_observation: NormalizedArbitrationObservation | None = None,
+    semantic_owner_canonical_key: str | None = None,
+) -> TurnArbitrationTrace:
+    merged_response_create = response_create_observation or (
+        existing_trace.response_create_observation if existing_trace is not None else None
+    )
+    merged_terminal_selection = terminal_selection_observation or (
+        existing_trace.terminal_selection_observation if existing_trace is not None else None
+    )
+    merged_semantic_owner = semantic_owner_observation or (
+        existing_trace.semantic_owner_observation if existing_trace is not None else None
+    )
+    observations = tuple(
+        observation
+        for observation in (
+            merged_response_create,
+            merged_terminal_selection,
+            merged_semantic_owner,
+        )
+        if observation is not None
+    )
+    if not observations:
+        raise ValueError("At least one arbitration observation is required to build a turn trace.")
+    run_id = next((observation.context.run_id for observation in observations if observation.context.run_id), "")
+    turn_id = next((observation.context.turn_id for observation in observations if observation.context.turn_id), "")
+    execution_canonical_key = next(
+        (
+            observation.context.canonical_key
+            for observation in (
+                merged_response_create,
+                merged_terminal_selection,
+                merged_semantic_owner,
+            )
+            if observation is not None and observation.context.canonical_key
+        ),
+        existing_trace.execution_canonical_key if existing_trace is not None else None,
+    )
+    if semantic_owner_canonical_key is None and existing_trace is not None:
+        semantic_owner_canonical_key = existing_trace.semantic_owner_canonical_key
+    if semantic_owner_canonical_key is None and merged_semantic_owner is not None:
+        if merged_semantic_owner.decision.selected_candidate_id == "semantic_owner_execution":
+            semantic_owner_canonical_key = execution_canonical_key
+    warning_codes = _merge_warning_codes(
+        merged_response_create,
+        merged_terminal_selection,
+        merged_semantic_owner,
+    )
+    authority_seams_seen = _merge_authority_seams(
+        merged_response_create,
+        merged_terminal_selection,
+        merged_semantic_owner,
+    )
+    trace_complete = all(
+        observation is not None
+        for observation in (
+            merged_response_create,
+            merged_terminal_selection,
+            merged_semantic_owner,
+        )
+    )
+    return TurnArbitrationTrace(
+        run_id=run_id,
+        turn_id=turn_id,
+        execution_canonical_key=execution_canonical_key,
+        semantic_owner_canonical_key=semantic_owner_canonical_key,
+        response_create_observation=merged_response_create,
+        terminal_selection_observation=merged_terminal_selection,
+        semantic_owner_observation=merged_semantic_owner,
+        warning_codes=warning_codes,
+        authority_seams_seen=authority_seams_seen,
+        trace_complete=trace_complete,
+        trace_partial=not trace_complete,
+    )
+
+
+def summarize_turn_arbitration_trace(trace: TurnArbitrationTrace) -> TurnArbitrationTraceLogPayload:
+    return trace.to_log_payload()
+
+
 def _owner_scope_for_candidate(
     candidate_id: NormalizedCandidateId,
     *,
@@ -572,6 +782,8 @@ def _observed_candidates(
 def _normalize_selected_candidate_id(candidate_id: str) -> NormalizedCandidateId:
     if candidate_id == "canonical_audio_started":
         return "canonical_audio_already_started"
+    if candidate_id == "canonical_key_already_created":
+        return "canonical_response_already_created"
     if candidate_id in {
         "same_turn_owner",
         "tool_lineage_guard",
