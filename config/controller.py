@@ -14,6 +14,7 @@ MEMORY_SEMANTIC_QUERY_TIMEOUT_DEFAULT_MS = 2000
 MEMORY_SEMANTIC_OPENAI_TIMEOUT_DEFAULT_S = 10.0
 MEMORY_SEMANTIC_STARTUP_CANARY_TIMEOUT_FLOOR_MS = 500
 MEMORY_SEMANTIC_STARTUP_CANARY_TIMEOUT_DEFAULT_MS = 5000
+REALTIME_MODEL_DEFAULT = "gpt-realtime"
 
 
 logger = logging.getLogger(__name__)
@@ -370,5 +371,12 @@ class ConfigController:
 
         logging_cfg["user_transcripts"] = user_transcripts_cfg
         normalized["logging"] = logging_cfg
+
+        realtime_cfg = dict(normalized.get("realtime") or {})
+        requested_realtime_model = str(
+            realtime_cfg.get("model", REALTIME_MODEL_DEFAULT)
+        ).strip()
+        realtime_cfg["model"] = requested_realtime_model or REALTIME_MODEL_DEFAULT
+        normalized["realtime"] = realtime_cfg
 
         return normalized

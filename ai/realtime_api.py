@@ -672,6 +672,9 @@ class RealtimeAPI:
         if not self.api_key:
             raise RuntimeError("Please set the OPENAI_API_KEY environment variable.")
         config = ConfigController.get_instance().get_config()
+        realtime_cfg = dict(config.get("realtime") or {})
+        self._realtime_model = str(realtime_cfg.get("model", "gpt-realtime"))
+        logger.info("[Realtime] startup model=%s", self._realtime_model)
         audio_cfg = config.get("audio") or {}
         input_cfg = audio_cfg.get("input") or {}
         output_cfg = audio_cfg.get("output") or {}
@@ -13704,7 +13707,7 @@ class RealtimeAPI:
             while True:
                 try:
                     self._note_connection_attempt()
-                    url = "wss://api.openai.com/v1/realtime?model=gpt-realtime"
+                    url = f"wss://api.openai.com/v1/realtime?model={self._realtime_model}"
                     headers = {"Authorization": f"Bearer {self.api_key}"}
 
                     async with self._transport.connect(
@@ -13814,7 +13817,7 @@ class RealtimeAPI:
             "type": "session.update",
             "session": {
                 "type": "realtime",
-                "model": "gpt-realtime",
+                "model": self._realtime_model,
                 "output_modalities": ["audio"],
                 "audio": {
                     "input": {
