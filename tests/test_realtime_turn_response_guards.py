@@ -6,6 +6,7 @@ import asyncio
 import time
 import sys
 import types
+from dataclasses import replace
 
 if "audioop" not in sys.modules:
     sys.modules["audioop"] = types.ModuleType("audioop")
@@ -1255,6 +1256,58 @@ def test_playback_complete_drain_drops_same_turn_empty_retry_after_final_deliver
     assert api._pending_response_create is None
 
 
+def test_response_path_candidate_envelope_preserves_same_turn_owner_drop() -> None:
+    api = _make_api()
+    runtime = api._response_create_runtime
+    prepared_snapshot = runtime.prepare_response_create_snapshot(
+        response_create_event={"type": "response.create", "response": {"metadata": {"input_event_key": "input_evt_1"}}},
+        origin="assistant_message",
+        utterance_context=None,
+        memory_brief_note=None,
+        now=time.monotonic(),
+    )
+    prepared_snapshot = replace(
+        prepared_snapshot,
+        same_turn_owner_reason="tool_followup_owned",
+        same_turn_owner_present=True,
+        response_in_flight=True,
+        audio_playback_busy=True,
+        single_flight_block_reason="already_created",
+    )
+
+    decision = runtime.decide_response_create_action(prepared_snapshot)
+
+    assert decision.action.value == "DROP"
+    assert decision.reason_code == "same_turn_already_owned"
+    assert decision.selected_candidate_id == "same_turn_owner"
+
+
+def test_response_path_candidate_envelope_preserves_lineage_and_terminal_precedence() -> None:
+    api = _make_api()
+    runtime = api._response_create_runtime
+    prepared_snapshot = runtime.prepare_response_create_snapshot(
+        response_create_event={"type": "response.create", "response": {"metadata": {"input_event_key": "input_evt_1"}}},
+        origin="tool_output",
+        utterance_context=None,
+        memory_brief_note=None,
+        now=time.monotonic(),
+    )
+    prepared_snapshot = replace(
+        prepared_snapshot,
+        lineage_allowed=False,
+        lineage_reason="tool_parent_missing",
+        terminal_state_blocked=True,
+        response_in_flight=True,
+    )
+
+    decision = runtime.decide_response_create_action(prepared_snapshot)
+
+    assert decision.action.value == "BLOCK"
+    assert decision.reason_code == "tool_parent_missing"
+    assert decision.selected_candidate_id == "tool_lineage_guard"
+    assert decision.blocked_by_terminal_state is False
+
+
 def test_mark_transcript_response_outcome_demotes_intentional_non_action_reasons(monkeypatch) -> None:
     api = _make_api()
     info_logs: list[str] = []
@@ -2247,4 +2300,3 @@ def test_non_descriptive_turn_allows_confirmation_style_tool_output_terminal_sel
 
     assert selected is True
     assert reason == "normal"
-

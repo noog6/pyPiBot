@@ -111,6 +111,11 @@ from ai.interaction_lifecycle_policy import (
     ResponseCreateDecisionAction,
     ServerAutoCreatedDecisionAction,
 )
+from ai.tool_followup_arbitration import (
+    ToolFollowupArbitrationDecision,
+    ToolFollowupDecisionAction,
+    decide_tool_followup_arbitration,
+)
 from ai.reflection import ReflectionCoordinator, ReflectionContext
 from ai.stimuli_coordinator import StimuliCoordinator
 from ai.governance import (
@@ -7950,63 +7955,96 @@ class RealtimeAPI:
         )
         return state_entry
 
+    def _decide_tool_followup_arbitration(
+        self,
+        *,
+        response_metadata: dict[str, Any],
+        blocked_by_response_id: str | None,
+    ) -> tuple[ToolFollowupArbitrationDecision, tuple[str, CanonicalResponseState] | None]:
+        suppressible = str(response_metadata.get("tool_followup_suppress_if_parent_covered", "")).strip().lower() in {"true", "1", "yes"}
+        tool_name = str(response_metadata.get("tool_name") or "").strip().lower()
+        has_distinct_info = str(response_metadata.get("tool_result_has_distinct_info", "")).strip().lower() in {"true", "1", "yes"}
+        state_entry = self._resolve_parent_state_for_tool_followup(
+            response_metadata=response_metadata,
+            blocked_by_response_id=blocked_by_response_id,
+        )
+        parent_state = state_entry[1] if state_entry else None
+        parent_origin = str(getattr(parent_state, "origin", "") or "").strip().lower()
+        parent_done = bool(getattr(parent_state, "done", False))
+        parent_covered = False
+        coverage_source = "none"
+        deliverable_class = "unknown"
+        terminal_selected = False
+        terminal_reason = ""
+        classification_pending = False
+        if parent_state is not None and parent_origin not in {"micro_ack", "tool_output"} and parent_done:
+            (
+                parent_covered,
+                coverage_source,
+                _deliverable_observed,
+                deliverable_class,
+                terminal_selected,
+                terminal_reason,
+            ) = self._parent_response_coverage_state(parent_state=parent_state)
+            logger.debug(
+                "parent_coverage_source_of_truth run_id=%s parent_response_id=%s covered=%s source=%s canonical_observed=%s canonical_class=%s terminal_selected=%s terminal_reason=%s",
+                self._current_run_id() or "",
+                str(getattr(parent_state, "response_id", "") or "").strip() or "none",
+                str(parent_covered).lower(),
+                coverage_source,
+                str(_deliverable_observed).lower(),
+                deliverable_class or "unknown",
+                str(terminal_selected).lower(),
+                terminal_reason,
+            )
+            if parent_covered:
+                logger.info(
+                    "parent_deliverable_verdict response_id=%s covered=%s class=%s source=%s",
+                    str(getattr(parent_state, "response_id", "") or "").strip() or "none",
+                    str(parent_covered).lower(),
+                    deliverable_class or "unknown",
+                    coverage_source,
+                )
+            else:
+                classification_pending = self._parent_deliverable_classification_pending(
+                    parent_state=parent_state,
+                    response_metadata=response_metadata,
+                )
+                logger.info(
+                    "parent_deliverable_verdict response_id=%s covered=%s class=%s source=%s",
+                    str(getattr(parent_state, "response_id", "") or "").strip() or "none",
+                    str(parent_covered).lower(),
+                    deliverable_class or "unknown",
+                    coverage_source,
+                )
+
+        decision = decide_tool_followup_arbitration(
+            suppressible=suppressible,
+            has_distinct_info=has_distinct_info,
+            is_low_risk_reversible_gesture_tool=self._is_low_risk_reversible_gesture_tool(tool_name=tool_name),
+            parent_resolved=state_entry is not None,
+            parent_origin=parent_origin,
+            parent_done=parent_done,
+            parent_covered=parent_covered,
+            coverage_source=coverage_source,
+            deliverable_class=deliverable_class,
+            terminal_selected=terminal_selected,
+            terminal_reason=terminal_reason,
+            classification_pending=classification_pending,
+        )
+        return decision, state_entry
+
     def _should_suppress_queued_tool_followup_release(
         self,
         *,
         response_metadata: dict[str, Any],
         blocked_by_response_id: str | None,
     ) -> tuple[bool, tuple[str, CanonicalResponseState] | None, str]:
-        suppressible = str(response_metadata.get("tool_followup_suppress_if_parent_covered", "")).strip().lower() in {"true", "1", "yes"}
-        tool_name = str(response_metadata.get("tool_name") or "").strip().lower()
-        has_distinct_info = str(response_metadata.get("tool_result_has_distinct_info", "")).strip().lower() in {"true", "1", "yes"}
-        if not suppressible:
-            return False, None, "not_suppressible"
-        if has_distinct_info:
-            return False, None, "distinct_info"
-        if not self._is_low_risk_reversible_gesture_tool(tool_name=tool_name):
-            return False, None, "non_gesture_tool"
-
-        state_entry = self._resolve_parent_state_for_tool_followup(
+        decision, state_entry = self._decide_tool_followup_arbitration(
             response_metadata=response_metadata,
             blocked_by_response_id=blocked_by_response_id,
         )
-        if not state_entry:
-            return False, None, "parent_unresolved"
-        _, parent_state = state_entry
-        parent_origin = str(parent_state.origin or "").strip().lower()
-        if parent_origin in {"micro_ack", "tool_output"}:
-            return False, state_entry, "parent_origin_excluded"
-        if not bool(parent_state.done):
-            return False, state_entry, "parent_not_done"
-        parent_covered, coverage_source, deliverable_observed, deliverable_class, terminal_selected, terminal_reason = self._parent_response_coverage_state(
-            parent_state=parent_state,
-        )
-        logger.debug(
-            "parent_coverage_source_of_truth run_id=%s parent_response_id=%s covered=%s source=%s canonical_observed=%s canonical_class=%s terminal_selected=%s terminal_reason=%s",
-            self._current_run_id() or "",
-            str(getattr(parent_state, "response_id", "") or "").strip() or "none",
-            str(parent_covered).lower(),
-            coverage_source,
-            str(deliverable_observed).lower(),
-            deliverable_class or "unknown",
-            str(terminal_selected).lower(),
-            terminal_reason,
-        )
-        logger.info(
-            "parent_deliverable_verdict response_id=%s covered=%s class=%s source=%s",
-            str(getattr(parent_state, "response_id", "") or "").strip() or "none",
-            str(parent_covered).lower(),
-            deliverable_class or "unknown",
-            coverage_source,
-        )
-        if not parent_covered:
-            if self._parent_deliverable_classification_pending(
-                parent_state=parent_state,
-                response_metadata=response_metadata,
-            ):
-                return False, state_entry, "parent_deliverable_pending"
-            return False, state_entry, "parent_not_deliverable"
-        return True, state_entry, "parent_covered_tool_result"
+        return decision.should_suppress, state_entry, decision.reason_code
 
     def _should_drop_tool_followup_at_create_seam(
         self,
@@ -8020,10 +8058,12 @@ class RealtimeAPI:
         if not is_tool_followup:
             return False
         blocked_by_response_id = str(response_metadata.get("blocked_by_response_id") or "").strip()
-        should_drop, parent_entry, reason = self._should_suppress_queued_tool_followup_release(
+        decision, parent_entry = self._decide_tool_followup_arbitration(
             response_metadata=response_metadata,
             blocked_by_response_id=blocked_by_response_id or None,
         )
+        should_drop = decision.should_suppress
+        reason = decision.reason_code
         parent_state = parent_entry[1] if parent_entry else None
         canonical_deliverable_state = "none"
         terminal_deliverable_state = "none"
@@ -8066,33 +8106,22 @@ class RealtimeAPI:
             terminal_deliverable_state,
             coverage_source,
         )
-        parent_coverage_state = "unknown"
-        blocked_by_parent_final_coverage = None
         parent_canonical_key = parent_entry[0] if parent_entry else None
-        if parent_state is None:
-            if reason == "parent_unresolved":
-                parent_coverage_state = "unknown"
-            else:
-                parent_coverage_state = "not_applicable"
-        else:
-            classification_pending = reason == "parent_deliverable_pending"
-            parent_coverage_state = self._normalize_parent_coverage_state_for_observation(
-                covered=bool(parent_covered),
-                coverage_source=coverage_source,
-                classification_pending=classification_pending,
-            )
-            blocked_by_parent_final_coverage = bool(
-                parent_covered and (
-                    str(deliverable_class or "").strip().lower() == "final"
-                    or (bool(terminal_selected) and str(terminal_reason or "").strip().lower() == "normal")
-                )
-            )
         current_followup_state = self._tool_followup_state(canonical_key=canonical_key)
-        followup_outcome_posture = "suppressed" if should_drop else ("pending" if reason == "parent_deliverable_pending" else "observe_only")
-        native_outcome_action = "DROP" if should_drop else ("HOLD" if reason == "parent_deliverable_pending" else "OBSERVE")
+        followup_outcome_posture = (
+            "suppressed"
+            if decision.should_suppress
+            else "pending" if decision.should_hold
+            else "observe_only"
+        )
+        native_outcome_action = (
+            "DROP"
+            if decision.should_suppress
+            else "HOLD" if decision.should_hold else "OBSERVE"
+        )
         if (
             not should_drop
-            and reason != "parent_deliverable_pending"
+            and not decision.should_hold
             and current_followup_state in {"scheduled_release", "released_on_response_done"}
         ):
             followup_outcome_posture = "released"
@@ -8102,13 +8131,13 @@ class RealtimeAPI:
             input_event_key=str(response_metadata.get("input_event_key") or "").strip() or None,
             canonical_key=canonical_key,
             origin="tool_output",
-            parent_coverage_state=parent_coverage_state,
+            parent_coverage_state=decision.parent_coverage_state,
             followup_outcome_posture=followup_outcome_posture,
             native_reason_code=reason,
             native_outcome_action=native_outcome_action,
             response_metadata=response_metadata,
             parent_canonical_key=parent_canonical_key,
-            blocked_by_parent_final_coverage=blocked_by_parent_final_coverage,
+            blocked_by_parent_final_coverage=decision.blocked_by_parent_final_coverage,
             authority_seam="ai.realtime_api._should_drop_tool_followup_at_create_seam",
         )
         if not should_drop:
@@ -8862,14 +8891,16 @@ class RealtimeAPI:
                 continue
             if self._tool_followup_state(canonical_key=canonical_key) != "blocked_active_response":
                 continue
-            should_drop, parent_entry, reason = self._should_suppress_queued_tool_followup_release(
+            decision, parent_entry = self._decide_tool_followup_arbitration(
                 response_metadata=response_metadata,
                 blocked_by_response_id=normalized_response_id,
             )
+            should_drop = decision.should_suppress
+            reason = decision.reason_code
             parent_state = parent_entry[1] if parent_entry else None
-            release_decision = "drop" if should_drop else "release"
-            if reason == "parent_deliverable_pending":
-                release_decision = "hold"
+            release_decision = (
+                "drop" if decision.should_suppress else "hold" if decision.should_hold else "release"
+            )
             logger.info(
                 "queue_release_parent_eval run_id=%s turn_id=%s canonical_key=%s tool_call_id=%s release_decision=%s reason=%s resolved_parent_response_id=%s resolved_parent_origin=%s resolved_parent_deliverable_state=%s",
                 self._current_run_id() or "",
@@ -8889,35 +8920,19 @@ class RealtimeAPI:
                 else "none",
             )
             if should_drop:
-                parent_coverage_state = "unknown"
-                blocked_by_parent_final_coverage = None
                 parent_canonical_key = parent_entry[0] if parent_entry else None
-                if parent_state is not None:
-                    parent_covered, coverage_source, _deliverable_observed, deliverable_class, terminal_selected, terminal_reason = self._parent_response_coverage_state(
-                        parent_state=parent_state,
-                    )
-                    parent_coverage_state = self._normalize_parent_coverage_state_for_observation(
-                        covered=bool(parent_covered),
-                        coverage_source=coverage_source,
-                    )
-                    blocked_by_parent_final_coverage = bool(
-                        parent_covered and (
-                            str(deliverable_class or "").strip().lower() == "final"
-                            or (bool(terminal_selected) and str(terminal_reason or "").strip().lower() == "normal")
-                        )
-                    )
                 self._record_tool_followup_observation(
                     turn_id=turn_id,
                     input_event_key=input_event_key or None,
                     canonical_key=canonical_key,
                     origin=origin,
-                    parent_coverage_state=parent_coverage_state,
+                    parent_coverage_state=decision.parent_coverage_state,
                     followup_outcome_posture="suppressed",
                     native_reason_code=reason,
                     native_outcome_action="DROP",
                     response_metadata=response_metadata,
                     parent_canonical_key=parent_canonical_key,
-                    blocked_by_parent_final_coverage=blocked_by_parent_final_coverage,
+                    blocked_by_parent_final_coverage=decision.blocked_by_parent_final_coverage,
                     authority_seam="ai.realtime_api._release_blocked_tool_followups_for_response_done",
                 )
                 self._prune_dead_tool_followup_creates(
@@ -8933,19 +8948,19 @@ class RealtimeAPI:
                     normalized_response_id,
                 )
                 continue
-            if reason == "parent_deliverable_pending":
+            if decision.should_hold:
                 self._record_tool_followup_observation(
                     turn_id=turn_id,
                     input_event_key=input_event_key or None,
                     canonical_key=canonical_key,
                     origin=origin,
-                    parent_coverage_state="coverage_pending",
+                    parent_coverage_state=decision.parent_coverage_state,
                     followup_outcome_posture="pending",
                     native_reason_code=reason,
                     native_outcome_action="HOLD",
                     response_metadata=response_metadata,
                     parent_canonical_key=parent_entry[0] if parent_entry else None,
-                    blocked_by_parent_final_coverage=False,
+                    blocked_by_parent_final_coverage=decision.blocked_by_parent_final_coverage,
                     authority_seam="ai.realtime_api._release_blocked_tool_followups_for_response_done",
                 )
                 self._set_tool_followup_state(
@@ -8963,32 +8978,19 @@ class RealtimeAPI:
                 is_tool_followup=True,
                 released=True,
             )
-            parent_coverage_state = "unknown"
-            blocked_by_parent_final_coverage = None
             parent_canonical_key = parent_entry[0] if parent_entry else None
-            if parent_state is not None:
-                parent_covered, coverage_source, _deliverable_observed, _deliverable_class, _terminal_selected, _terminal_reason = self._parent_response_coverage_state(
-                    parent_state=parent_state,
-                )
-                parent_coverage_state = self._normalize_parent_coverage_state_for_observation(
-                    covered=bool(parent_covered),
-                    coverage_source=coverage_source,
-                )
-                blocked_by_parent_final_coverage = bool(parent_covered)
-            else:
-                parent_coverage_state = "uncovered" if reason in {"parent_not_deliverable", "not_suppressible", "distinct_info", "non_gesture_tool", "parent_not_done"} else "unknown"
             self._record_tool_followup_observation(
                 turn_id=turn_id,
                 input_event_key=input_event_key or None,
                 canonical_key=canonical_key,
                 origin=origin,
-                parent_coverage_state=parent_coverage_state,
+                parent_coverage_state=decision.parent_coverage_state,
                 followup_outcome_posture="released",
                 native_reason_code=reason,
                 native_outcome_action="RELEASE",
                 response_metadata=response_metadata,
                 parent_canonical_key=parent_canonical_key,
-                blocked_by_parent_final_coverage=blocked_by_parent_final_coverage,
+                blocked_by_parent_final_coverage=decision.blocked_by_parent_final_coverage,
                 authority_seam="ai.realtime_api._release_blocked_tool_followups_for_response_done",
             )
             self._set_tool_followup_state(

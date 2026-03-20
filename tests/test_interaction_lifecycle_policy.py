@@ -331,3 +331,34 @@ def test_decide_response_create_precedence_lock_is_deterministic_for_conflict_tr
     assert first == second
     assert first.reason_code == "active_response"
     assert first.selected_candidate_id == "active_response"
+
+
+def test_response_create_candidate_envelope_contains_current_contenders_in_priority_order() -> None:
+    policy = InteractionLifecyclePolicy()
+
+    candidates = policy._response_create_candidates(
+        response_in_flight=True,
+        audio_playback_busy=True,
+        consumes_canonical_slot=True,
+        canonical_audio_started=False,
+        explicit_multipart=False,
+        single_flight_block_reason="already_created",
+        already_delivered=False,
+        preference_recall_lock_blocked=False,
+        canonical_key_already_created=False,
+        has_safety_override=False,
+        suppression_active=False,
+        normalized_origin="assistant_message",
+        awaiting_transcript_final=False,
+    )
+
+    assert [candidate.candidate_id for candidate in candidates] == [
+        "active_response",
+        "audio_playback_busy",
+        "single_flight_block",
+    ]
+    assert [candidate.reason_code for candidate in candidates] == [
+        "active_response",
+        "audio_playback_busy",
+        "already_created",
+    ]

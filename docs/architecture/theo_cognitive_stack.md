@@ -71,6 +71,9 @@ YH -.-> D
   Changes that belong here are explicit choice logic for do-now vs defer vs
   refuse and conflict resolution among candidates; changes that do not belong
   here are low-level queueing/idempotency mechanics or broad permission policy.
+  Response-path arbitration around `response.create` is now more explicitly
+  formed as a seam-local decision surface, while broader multi-class
+  arbitration remains future work.
 - **Governance Spine** → `ai/governance.py`.
   Changes that belong here are risk-tier gating, confirmation requirements, and
   fail-closed policy boundaries; changes that do not belong here are memory
@@ -118,6 +121,8 @@ YH -.-> D
 - **Unlocks:** coherent behavior instead of opportunistic or locally emergent responses.
 - **Why it matters:** this is the next critical architecture frontier.
 - **Status:** **emerging / next primary build target**.
+  Response-path arbitration is now partially explicit; broader arbitration
+  structure is still frontier work.
 
 ### 5) Presence / Continuity Layer
 - **What it is:** durable short/medium-horizon continuity of goals,
