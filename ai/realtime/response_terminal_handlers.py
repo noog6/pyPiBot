@@ -390,7 +390,7 @@ class ResponseTerminalHandlers:
                 )
 
         resolved_response_id = str(active_response_id_before_clear or "")
-        semantic_owner_canonical_key = api._resolve_semantic_answer_owner_for_response(
+        semantic_owner_decision = api._semantic_owner_decision_for_response(
             turn_id=turn_id,
             input_event_key=done_input_event_key,
             origin=str(active_response_origin_before_clear or ""),
@@ -399,14 +399,7 @@ class ResponseTerminalHandlers:
             selected=selected,
             selection_reason=selection_reason,
         )
-        parent_trace_context = {}
-        if str(active_response_origin_before_clear or "").strip().lower() == "tool_output":
-            parent_trace_context = api._resolve_parent_trace_context(
-                turn_id=turn_id,
-                input_event_key=done_input_event_key,
-                origin=str(active_response_origin_before_clear or ""),
-                response_id=resolved_response_id,
-            )
+        semantic_owner_canonical_key = semantic_owner_decision.semantic_owner_canonical_key
         semantic_owner_observation = build_semantic_owner_observation(
             run_id=api._current_run_id() or "",
             turn_id=turn_id,
@@ -416,8 +409,10 @@ class ResponseTerminalHandlers:
             origin=str(active_response_origin_before_clear or ""),
             selected=selected,
             selection_reason=selection_reason,
-            parent_turn_id=parent_trace_context.get("effective_parent_turn_id"),
-            parent_input_event_key=parent_trace_context.get("effective_parent_input_event_key"),
+            parent_turn_id=semantic_owner_decision.parent_turn_id,
+            parent_input_event_key=semantic_owner_decision.parent_input_event_key,
+            selected_candidate_id=semantic_owner_decision.selected_candidate_id,
+            native_reason_code=semantic_owner_decision.reason_code,
         )
         logger.debug(
             "decision_adapter_semantic_owner_observation payload=%s",

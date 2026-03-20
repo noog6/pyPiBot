@@ -1358,3 +1358,50 @@ def test_merge_arbitration_observations_for_turn_attaches_review_summary() -> No
     assert trace.review_summary is not None
     assert trace.review_summary.review_priority == "medium"
     assert trace.review_summary.review_bucket == "partial_expected"
+
+
+def test_semantic_owner_observation_accepts_matching_explicit_candidate_id() -> None:
+    observation = build_semantic_owner_observation(
+        run_id="run-semantic",
+        turn_id="turn_semantic",
+        input_event_key="tool:call_semantic",
+        execution_canonical_key="turn_semantic::tool:call_semantic",
+        semantic_owner_canonical_key="turn_semantic::item_parent",
+        origin="tool_output",
+        selected=True,
+        selection_reason="normal",
+        parent_turn_id="turn_semantic",
+        parent_input_event_key="item_parent",
+        selected_candidate_id="semantic_owner_parent",
+        native_reason_code="parent_promoted_from_tool_output",
+    )
+
+    assert observation.decision.selected_candidate_id == "semantic_owner_parent"
+    assert observation.decision.native_reason_code == "parent_promoted_from_tool_output"
+    assert observation.decision.normalization_warnings == ()
+    assert observation.decision.observational_only is True
+
+
+def test_semantic_owner_observation_ignores_mismatched_explicit_candidate_id_with_warning() -> None:
+    observation = build_semantic_owner_observation(
+        run_id="run-semantic",
+        turn_id="turn_semantic",
+        input_event_key="tool:call_semantic",
+        execution_canonical_key="turn_semantic::tool:call_semantic",
+        semantic_owner_canonical_key="turn_semantic::item_parent",
+        origin="tool_output",
+        selected=True,
+        selection_reason="normal",
+        parent_turn_id="turn_semantic",
+        parent_input_event_key="item_parent",
+        selected_candidate_id="semantic_owner_execution",
+        native_reason_code="parent_promoted_from_tool_output",
+    )
+
+    assert observation.decision.selected_candidate_id == "semantic_owner_parent"
+    assert (
+        "semantic_owner_selected_candidate_id_mismatch_ignored:semantic_owner_execution->semantic_owner_parent"
+        in observation.decision.normalization_warnings
+    )
+    assert observation.decision.observational_only is True
+
