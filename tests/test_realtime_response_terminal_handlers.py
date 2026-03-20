@@ -1410,4 +1410,43 @@ def test_handle_response_done_builds_semantic_owner_observation_before_mutation(
         asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_1"}}))
 
     assert order[:3] == ["observe", "apply", "semantic_reconcile"]
+    trace = api._turn_arbitration_trace_by_key[(api._current_run_id() or "", "turn_1")]
+    assert trace.semantic_owner_canonical_key == "turn_1::item_parent"
+    assert trace.semantic_owner_observation is not None
+    assert trace.semantic_owner_observation.decision.selected_candidate_id == "semantic_owner_parent"
+    assert trace.semantic_owner_observation.decision.native_reason_code == "parent_promoted_from_tool_output"
 
+
+def test_handle_response_done_trace_summary_stays_execution_scoped_when_terminal_not_selected() -> None:
+    api = _make_api()
+    api._active_response_origin = "tool_output"
+    api._active_response_input_event_key = "tool:call_semantic_owner"
+    api._active_response_canonical_key = "turn_1::tool:call_semantic_owner"
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    api._response_done_deliverable_arbitration = Mock(
+        return_value=SimpleNamespace(
+            selected=False,
+            reason_code="cancelled",
+            selected_candidate_id="cancelled",
+        )
+    )
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_1"}}))
+
+    trace = api._turn_arbitration_trace_by_key[(api._current_run_id() or "", "turn_1")]
+    summary = trace.review_summary
+
+    assert trace.semantic_owner_canonical_key == "turn_1::tool:call_semantic_owner"
+    assert trace.semantic_owner_observation is not None
+    assert trace.semantic_owner_observation.decision.selected_candidate_id == "semantic_owner_execution"
+    assert trace.semantic_owner_observation.decision.native_reason_code == "terminal_not_selected"
+    assert summary is not None
+    assert summary.semantic_owner_summary == "semantic owner stayed on execution canonical"

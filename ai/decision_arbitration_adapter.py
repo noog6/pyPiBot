@@ -645,6 +645,7 @@ def build_semantic_owner_observation(
 ) -> NormalizedArbitrationObservation:
     warnings: list[str] = []
     normalized_reason = str(selection_reason or "").strip().lower()
+    normalized_native_reason = str(native_reason_code if native_reason_code is not None else selection_reason or "").strip().lower()
     expected_candidate_id: NormalizedCandidateId
     owner_scope: NormalizedOwnerScope
     parent_coverage_state: NormalizedParentCoverageState
@@ -652,7 +653,12 @@ def build_semantic_owner_observation(
         expected_candidate_id = "semantic_owner_execution"
         owner_scope = "none" if selected else "subsystem_local"
         parent_coverage_state = "not_applicable"
-        if selected and normalized_reason == "normal" and str(origin or "").strip().lower() == "tool_output":
+        if (
+            selected
+            and normalized_reason == "normal"
+            and str(origin or "").strip().lower() == "tool_output"
+            and normalized_native_reason in {"", "normal"}
+        ):
             warnings.append("semantic_owner_parent_not_promoted")
     else:
         expected_candidate_id = "semantic_owner_parent"

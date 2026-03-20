@@ -1405,3 +1405,40 @@ def test_semantic_owner_observation_ignores_mismatched_explicit_candidate_id_wit
     )
     assert observation.decision.observational_only is True
 
+
+def test_semantic_owner_observation_preserves_native_reason_without_expected_flow_warning() -> None:
+    observation = build_semantic_owner_observation(
+        run_id="run-semantic",
+        turn_id="turn_semantic",
+        input_event_key="tool:call_semantic",
+        execution_canonical_key="turn_semantic::tool:call_semantic",
+        semantic_owner_canonical_key="turn_semantic::tool:call_semantic",
+        origin="tool_output",
+        selected=True,
+        selection_reason="normal",
+        parent_turn_id=None,
+        parent_input_event_key=None,
+        native_reason_code="parent_lineage_unavailable",
+    )
+
+    assert observation.decision.selected_candidate_id == "semantic_owner_execution"
+    assert observation.decision.native_reason_code == "parent_lineage_unavailable"
+    assert observation.decision.authority_retained_by == "ai.semantic_owner_arbitration.decide_semantic_owner"
+    assert observation.decision.observational_only is True
+    assert "semantic_owner_parent_not_promoted" not in observation.decision.normalization_warnings
+
+
+def test_semantic_owner_observation_adds_warning_when_execution_retained_without_seam_reason() -> None:
+    observation = build_semantic_owner_observation(
+        run_id="run-semantic",
+        turn_id="turn_semantic",
+        input_event_key="tool:call_semantic",
+        execution_canonical_key="turn_semantic::tool:call_semantic",
+        semantic_owner_canonical_key="turn_semantic::tool:call_semantic",
+        origin="tool_output",
+        selected=True,
+        selection_reason="normal",
+    )
+
+    assert observation.decision.selected_candidate_id == "semantic_owner_execution"
+    assert "semantic_owner_parent_not_promoted" in observation.decision.normalization_warnings

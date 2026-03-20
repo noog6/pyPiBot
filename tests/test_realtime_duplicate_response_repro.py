@@ -1787,6 +1787,47 @@ def test_runtime_semantic_owner_decision_wrapper_matches_legacy_key_resolution()
     assert semantic_key == decision.semantic_owner_canonical_key
 
 
+def test_runtime_semantic_owner_decision_wrapper_falls_back_when_parent_state_missing() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_semantic_missing_parent"
+    execution_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key="tool:call_missing_parent")
+    api._record_response_trace_context(
+        "resp-semantic-missing-parent",
+        turn_id=turn_id,
+        input_event_key="tool:call_missing_parent",
+        canonical_key=execution_key,
+        origin="tool_output",
+        parent_turn_id=turn_id,
+        parent_input_event_key="item_missing_parent",
+    )
+
+    decision = api._semantic_owner_decision_for_response(
+        turn_id=turn_id,
+        input_event_key="tool:call_missing_parent",
+        origin="tool_output",
+        response_id="resp-semantic-missing-parent",
+        done_canonical_key=execution_key,
+        selected=True,
+        selection_reason="normal",
+    )
+    semantic_key = api._resolve_semantic_answer_owner_for_response(
+        turn_id=turn_id,
+        input_event_key="tool:call_missing_parent",
+        origin="tool_output",
+        response_id="resp-semantic-missing-parent",
+        done_canonical_key=execution_key,
+        selected=True,
+        selection_reason="normal",
+    )
+
+    assert decision.semantic_owner_canonical_key == execution_key
+    assert decision.selected_candidate_id == "semantic_owner_execution"
+    assert decision.reason_code == "parent_canonical_missing"
+    assert semantic_key == decision.semantic_owner_canonical_key
+
+
 def test_tool_derived_parent_lineage_does_not_create_bogus_semantic_owner() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
@@ -1813,6 +1854,37 @@ def test_tool_derived_parent_lineage_does_not_create_bogus_semantic_owner() -> N
     )
 
     assert semantic_key == execution_key
+
+
+def test_runtime_semantic_owner_decision_wrapper_rejects_bogus_nested_tool_lineage() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_semantic_nested_wrapper"
+    execution_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key="tool:call_nested_wrapper")
+    api._record_response_trace_context(
+        "resp-semantic-nested-wrapper",
+        turn_id=turn_id,
+        input_event_key="tool:call_nested_wrapper",
+        canonical_key=execution_key,
+        origin="tool_output",
+        parent_turn_id=turn_id,
+        parent_input_event_key="tool:call_parent_nested_wrapper",
+    )
+
+    decision = api._semantic_owner_decision_for_response(
+        turn_id=turn_id,
+        input_event_key="tool:call_nested_wrapper",
+        origin="tool_output",
+        response_id="resp-semantic-nested-wrapper",
+        done_canonical_key=execution_key,
+        selected=True,
+        selection_reason="normal",
+    )
+
+    assert decision.semantic_owner_canonical_key == execution_key
+    assert decision.selected_candidate_id == "semantic_owner_execution"
+    assert decision.reason_code == "parent_input_tool_prefixed"
 
 
 def test_parent_semantic_promotion_requires_terminal_text_evidence() -> None:
