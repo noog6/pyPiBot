@@ -94,6 +94,10 @@ from ai.decision_arbitration_adapter import (
     summarize_turn_arbitration_trace,
     turn_review_summary_info_fingerprint,
 )
+from ai.terminal_deliverable_arbitration import (
+    TerminalDeliverableDecision,
+    arbitrate_terminal_deliverable_selection,
+)
 from ai.attention_continuity import AttentionContinuity, AttentionSnapshot
 from ai.embodiment_policy import (
     EMBODIMENT_PRIORITY_ALLOW,
@@ -8229,25 +8233,34 @@ class RealtimeAPI:
         input_event_key: str | None = None,
         response_id: str | None = None,
     ) -> tuple[bool, str]:
+        decision = self._response_done_deliverable_arbitration(
+            turn_id=turn_id,
+            origin=origin,
+            delivery_state_before_done=delivery_state_before_done,
+            active_response_was_provisional=active_response_was_provisional,
+            done_canonical_key=done_canonical_key,
+            transcript_final_seen=transcript_final_seen,
+            input_event_key=input_event_key,
+            response_id=response_id,
+        )
+        return decision.selected, decision.reason_code
+
+    def _response_done_deliverable_arbitration(
+        self,
+        *,
+        turn_id: str,
+        origin: str,
+        delivery_state_before_done: str | None,
+        active_response_was_provisional: bool,
+        done_canonical_key: str,
+        transcript_final_seen: bool,
+        input_event_key: str | None = None,
+        response_id: str | None = None,
+    ) -> TerminalDeliverableDecision:
         normalized_origin = str(origin or "").strip().lower()
-        if delivery_state_before_done == "cancelled":
-            return False, "cancelled"
-        if normalized_origin == "micro_ack":
-            return False, "micro_ack_non_deliverable"
-        if active_response_was_provisional and self._is_empty_response_done(canonical_key=done_canonical_key):
-            return False, "provisional_empty_non_deliverable"
-        if (
-            active_response_was_provisional
-            and normalized_origin == "server_auto"
-            and not bool(transcript_final_seen)
-        ):
-            return False, "provisional_server_auto_awaiting_transcript_final"
-        # Pending tool-followup turns must terminate on the queued tool-result path.
-        # `upgraded_response` is a transcript-final answer replacement, not a tool-result origin.
-        if self._turn_has_pending_tool_followup(turn_id=turn_id) and normalized_origin != "tool_output":
-            return False, "tool_followup_precedence"
-        if self._turn_contract_exact_phrase_open(turn_id=turn_id, response_id=response_id):
-            return False, "exact_phrase_obligation_open"
+        descriptive_turn = False
+        gesture_only = False
+        descriptive_context: dict[str, str] = {}
         if normalized_origin == "tool_output":
             descriptive_turn, descriptive_context = self._is_descriptive_identification_turn(
                 turn_id=turn_id,
@@ -8256,8 +8269,9 @@ class RealtimeAPI:
                 response_id=response_id,
             )
             if descriptive_turn:
-                response_text = self._terminal_response_text(response_id)
-                gesture_only = self._is_gesture_only_tool_output_text(response_text)
+                gesture_only = self._is_gesture_only_tool_output_text(
+                    self._terminal_response_text(response_id)
+                )
                 logger.info(
                     "tool_output_descriptive_turn_eval run_id=%s turn_id=%s response_id=%s canonical_key=%s descriptive_turn=%s gesture_only=%s effective_parent_input_event_key=%s",
                     self._current_run_id() or "",
@@ -8268,16 +8282,30 @@ class RealtimeAPI:
                     str(gesture_only).lower(),
                     descriptive_context.get("effective_parent_input_event_key", "none"),
                 )
-                if gesture_only:
-                    logger.info(
-                        "tool_output_terminal_candidate_rejected run_id=%s turn_id=%s input_event_key=%s response_id=%s reason=descriptive_turn_gesture_only",
-                        self._current_run_id() or "",
-                        turn_id,
-                        str(input_event_key or "").strip() or "none",
-                        str(response_id or "").strip() or "none",
-                    )
-                    return False, "tool_output_descriptive_gesture_only"
-        return True, "normal"
+
+        decision = arbitrate_terminal_deliverable_selection(
+            delivery_state_before_done=delivery_state_before_done,
+            origin=normalized_origin,
+            active_response_was_provisional=active_response_was_provisional,
+            response_done_is_empty=self._is_empty_response_done(canonical_key=done_canonical_key),
+            transcript_final_seen=transcript_final_seen,
+            turn_has_pending_tool_followup=self._turn_has_pending_tool_followup(turn_id=turn_id),
+            exact_phrase_obligation_open=self._turn_contract_exact_phrase_open(
+                turn_id=turn_id,
+                response_id=response_id,
+            ),
+            descriptive_turn=descriptive_turn,
+            tool_output_gesture_only=gesture_only,
+        )
+        if decision.reason_code == "tool_output_descriptive_gesture_only":
+            logger.info(
+                "tool_output_terminal_candidate_rejected run_id=%s turn_id=%s input_event_key=%s response_id=%s reason=descriptive_turn_gesture_only",
+                self._current_run_id() or "",
+                turn_id,
+                str(input_event_key or "").strip() or "none",
+                str(response_id or "").strip() or "none",
+            )
+        return decision
 
     def _resolve_parent_trace_context(
         self,

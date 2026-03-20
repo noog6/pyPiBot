@@ -480,7 +480,7 @@ _AUTHORITY_SEAM = "ai.realtime.response_create_runtime"
 _POLICY_DOMAIN = "response_create"
 
 
-_TERMINAL_SELECTION_AUTHORITY_SEAM = "ai.realtime_api._response_done_deliverable_decision"
+_TERMINAL_SELECTION_AUTHORITY_SEAM = "ai.terminal_deliverable_arbitration.arbitrate_terminal_deliverable_selection"
 _TERMINAL_SELECTION_POLICY_DOMAIN = "response_terminal_selection"
 _SEMANTIC_OWNER_AUTHORITY_SEAM = "ai.realtime_api._resolve_semantic_answer_owner_for_response"
 _SEMANTIC_OWNER_POLICY_DOMAIN = "response_semantic_owner"
@@ -553,10 +553,23 @@ def build_terminal_selection_observation(
     origin: str,
     selected: bool,
     selection_reason: str,
+    selected_candidate_id: str | None = None,
     transcript_final_seen: bool,
     active_response_was_provisional: bool,
 ) -> NormalizedArbitrationObservation:
-    candidate_id = _terminal_selection_candidate_id(selection_reason, selected=selected)
+    expected_candidate_id = _terminal_selection_candidate_id(selection_reason, selected=selected)
+    decision_warnings: list[str] = []
+    if selected_candidate_id is None:
+        candidate_id = expected_candidate_id
+    else:
+        normalized_candidate_id = _normalize_selected_candidate_id(selected_candidate_id)
+        if normalized_candidate_id != expected_candidate_id:
+            candidate_id = expected_candidate_id
+            decision_warnings.append(
+                f"terminal_selected_candidate_id_mismatch_ignored:{normalized_candidate_id}->{expected_candidate_id}"
+            )
+        else:
+            candidate_id = normalized_candidate_id
     deliverable_status, deliverable_warnings = _terminal_selection_deliverable_status(
         selected=selected,
         selection_reason=selection_reason,
@@ -569,7 +582,7 @@ def build_terminal_selection_observation(
     )
     decision_disposition: NormalizedDecisionDisposition = "allow_now" if selected else "observe_only"
     owner_scope: NormalizedOwnerScope = "terminal_deliverable" if selected else "subsystem_local"
-    decision_warnings = tuple([*deliverable_warnings, *transcript_warnings])
+    decision_warnings = tuple([*decision_warnings, *deliverable_warnings, *transcript_warnings])
     decision = NormalizedDecisionArtifact(
         native_outcome_action="SELECT" if selected else "REJECT",
         native_reason_code=str(selection_reason or ""),

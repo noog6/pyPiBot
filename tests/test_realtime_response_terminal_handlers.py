@@ -13,6 +13,7 @@ if "audioop" not in sys.modules:
 
 from interaction import InteractionState
 from ai.orchestration import OrchestrationPhase
+from ai.terminal_deliverable_arbitration import TerminalDeliverableDecision
 from ai.realtime_api import RealtimeAPI
 from ai.realtime.types import CanonicalResponseState
 
@@ -76,6 +77,10 @@ def _make_api() -> RealtimeAPI:
     api._current_run_id = lambda: "run-test"
     api._is_empty_response_done = lambda **_kwargs: False
     api._is_provisional_response = lambda **_kwargs: False
+    api._turn_has_pending_tool_followup = lambda **_kwargs: False
+    api._turn_contract_exact_phrase_open = lambda **_kwargs: False
+    api._is_descriptive_identification_turn = lambda **_kwargs: (False, {})
+    api._is_gesture_only_tool_output_text = lambda _text: False
     api._mark_provisional_response_completed_empty = lambda **_kwargs: None
     api._record_silent_turn_incident = lambda **_kwargs: None
     api._emit_preference_recall_skip_trace_if_needed = lambda **_kwargs: None
@@ -89,6 +94,11 @@ def _make_api() -> RealtimeAPI:
     api._drain_response_create_queue = AsyncMock()
     api._flush_pending_image_stimulus = AsyncMock()
     api._reflection_enqueued = False
+    api._terminal_response_text_store = RealtimeAPI._terminal_response_text_store.__get__(api, RealtimeAPI)
+    api._record_terminal_response_text = RealtimeAPI._record_terminal_response_text.__get__(api, RealtimeAPI)
+    api._terminal_response_text = RealtimeAPI._terminal_response_text.__get__(api, RealtimeAPI)
+    api._clear_terminal_response_text = RealtimeAPI._clear_terminal_response_text.__get__(api, RealtimeAPI)
+    api._response_done_deliverable_arbitration = RealtimeAPI._response_done_deliverable_arbitration.__get__(api, RealtimeAPI)
     return api
 
 
@@ -341,7 +351,7 @@ def test_handle_response_done_releases_blocked_followups_after_terminal_selectio
 
     def _decision(**_kwargs):
         call_order.append("decision")
-        return True, "normal"
+        return TerminalDeliverableDecision(True, "normal", "terminal_selected")
 
     def _apply(**_kwargs):
         call_order.append("apply")
@@ -349,7 +359,7 @@ def test_handle_response_done_releases_blocked_followups_after_terminal_selectio
     def _release(**_kwargs):
         call_order.append("release")
 
-    api._response_done_deliverable_decision = Mock(side_effect=_decision)
+    api._response_done_deliverable_arbitration = Mock(side_effect=_decision)
     api._apply_terminal_deliverable_selection = Mock(side_effect=_apply)
     api._release_blocked_tool_followups_for_response_done = Mock(side_effect=_release)
 
@@ -502,7 +512,9 @@ def test_handle_response_done_defers_terminal_close_when_exact_phrase_still_open
             recover_mic=False,
         )
     )
-    api._response_done_deliverable_decision = Mock(return_value=(False, "exact_phrase_obligation_open"))
+    api._response_done_deliverable_arbitration = Mock(
+        return_value=TerminalDeliverableDecision(False, "exact_phrase_obligation_open", "exact_phrase_obligation_open")
+    )
     api._schedule_turn_contract_exact_phrase_repair_response = AsyncMock(return_value=True)
     api._log_turn_conversation_efficiency = Mock()
 
@@ -539,7 +551,9 @@ def test_handle_response_done_defers_terminal_close_for_provisional_server_auto_
     api._active_response_id = "resp_server_auto_2"
     api._is_provisional_response = lambda **_kwargs: True
     api._active_input_event_key_for_turn = lambda _turn_id: "synthetic_server_auto_2"
-    api._response_done_deliverable_decision = Mock(return_value=(True, "normal"))
+    api._response_done_deliverable_arbitration = Mock(
+        return_value=TerminalDeliverableDecision(True, "normal", "terminal_selected")
+    )
     api._maybe_schedule_empty_response_retry = AsyncMock()
     api._build_confirmation_transition_decision = Mock(
         return_value=SimpleNamespace(
@@ -575,7 +589,9 @@ def test_handle_response_done_allows_close_for_server_auto_with_transcript_final
     api._active_response_id = "resp_server_auto_2"
     api._is_provisional_response = lambda **_kwargs: True
     api._active_input_event_key_for_turn = lambda _turn_id: "item_linked_2"
-    api._response_done_deliverable_decision = Mock(return_value=(True, "normal"))
+    api._response_done_deliverable_arbitration = Mock(
+        return_value=TerminalDeliverableDecision(True, "normal", "terminal_selected")
+    )
     api._maybe_schedule_empty_response_retry = AsyncMock()
     api._build_confirmation_transition_decision = Mock(
         return_value=SimpleNamespace(
@@ -604,7 +620,9 @@ def test_handle_response_done_allows_close_when_exact_phrase_repair_not_schedule
             recover_mic=False,
         )
     )
-    api._response_done_deliverable_decision = Mock(return_value=(False, "exact_phrase_obligation_open"))
+    api._response_done_deliverable_arbitration = Mock(
+        return_value=TerminalDeliverableDecision(False, "exact_phrase_obligation_open", "exact_phrase_obligation_open")
+    )
     api._schedule_turn_contract_exact_phrase_repair_response = AsyncMock(return_value=False)
     api._log_turn_conversation_efficiency = Mock()
 
@@ -640,7 +658,9 @@ def test_handle_response_done_skips_repair_reschedule_when_already_latched() -> 
             recover_mic=False,
         )
     )
-    api._response_done_deliverable_decision = Mock(return_value=(False, "exact_phrase_obligation_open"))
+    api._response_done_deliverable_arbitration = Mock(
+        return_value=TerminalDeliverableDecision(False, "exact_phrase_obligation_open", "exact_phrase_obligation_open")
+    )
     api._turn_contracts_by_turn_id = {
         "turn_1": {
             "exact_phrase": "Sentinel Theo online.",
@@ -668,7 +688,9 @@ def test_handle_response_done_defers_close_when_exact_phrase_repair_is_queued_pe
             recover_mic=False,
         )
     )
-    api._response_done_deliverable_decision = Mock(return_value=(False, "exact_phrase_obligation_open"))
+    api._response_done_deliverable_arbitration = Mock(
+        return_value=TerminalDeliverableDecision(False, "exact_phrase_obligation_open", "exact_phrase_obligation_open")
+    )
     api._turn_contracts_by_turn_id = {
         "turn_1": {
             "exact_phrase": "Sentinel Theo online.",
