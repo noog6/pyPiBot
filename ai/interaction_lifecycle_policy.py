@@ -78,7 +78,7 @@ class WatchdogTimeoutDecision:
 class InteractionLifecyclePolicy:
     """Pure, deterministic decision adapter for response lifecycle transitions."""
 
-    def decide_response_create(
+    def _response_create_candidates(
         self,
         *,
         response_in_flight: bool,
@@ -94,7 +94,7 @@ class InteractionLifecyclePolicy:
         suppression_active: bool,
         normalized_origin: str,
         awaiting_transcript_final: bool,
-    ) -> ResponseCreateDecision:
+    ) -> list[ArbitrationCandidate]:
         candidates: list[ArbitrationCandidate] = []
         if response_in_flight and normalized_origin == "micro_ack":
             candidates.append(
@@ -186,6 +186,40 @@ class InteractionLifecyclePolicy:
                     priority=_RC_PRIORITY_AWAITING_TRANSCRIPT_FINAL,
                 )
             )
+        return candidates
+
+    def decide_response_create(
+        self,
+        *,
+        response_in_flight: bool,
+        audio_playback_busy: bool,
+        consumes_canonical_slot: bool,
+        canonical_audio_started: bool,
+        explicit_multipart: bool,
+        single_flight_block_reason: str,
+        already_delivered: bool,
+        preference_recall_lock_blocked: bool,
+        canonical_key_already_created: bool,
+        has_safety_override: bool,
+        suppression_active: bool,
+        normalized_origin: str,
+        awaiting_transcript_final: bool,
+    ) -> ResponseCreateDecision:
+        candidates = self._response_create_candidates(
+            response_in_flight=response_in_flight,
+            audio_playback_busy=audio_playback_busy,
+            consumes_canonical_slot=consumes_canonical_slot,
+            canonical_audio_started=canonical_audio_started,
+            explicit_multipart=explicit_multipart,
+            single_flight_block_reason=single_flight_block_reason,
+            already_delivered=already_delivered,
+            preference_recall_lock_blocked=preference_recall_lock_blocked,
+            canonical_key_already_created=canonical_key_already_created,
+            has_safety_override=has_safety_override,
+            suppression_active=suppression_active,
+            normalized_origin=normalized_origin,
+            awaiting_transcript_final=awaiting_transcript_final,
+        )
 
         arbitration_decision = decide_arbitration(
             policy_name="response_create",
