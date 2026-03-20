@@ -1120,3 +1120,56 @@ def test_handle_response_done_updates_turn_trace_to_complete_summary() -> None:
     assert payload["initial_response_create_selected_candidate_id"] == "direct_send"
     assert payload["terminal_selected_candidate_id"] == "terminal_selected"
     assert payload["trace_complete"] is True
+
+
+def test_handle_response_done_logs_turn_diagnostics_summary() -> None:
+    api = _make_api()
+    api._turn_arbitration_trace_by_key = {
+        ("run-test", "turn_1"): SimpleNamespace(
+            response_create_observation=SimpleNamespace(
+                context=SimpleNamespace(
+                    run_id="run-test",
+                    turn_id="turn_1",
+                    canonical_key="turn_1::input_evt_1",
+                    authority_retained_by="ai.realtime.response_create_runtime",
+                ),
+                normalization_warnings=(),
+                decision=SimpleNamespace(
+                    selected_candidate_id="direct_send",
+                    decision_disposition="allow_now",
+                    native_reason_code="direct_send",
+                    normalization_warnings=(),
+                ),
+            ),
+            terminal_selection_observation=None,
+            semantic_owner_observation=None,
+            execution_canonical_key="turn_1::input_evt_1",
+            semantic_owner_canonical_key=None,
+            warning_codes=(),
+            authority_seams_seen=("ai.realtime.response_create_runtime",),
+            trace_complete=False,
+            trace_partial=True,
+            diagnostics=None,
+        ),
+    }
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+
+    with patch("ai.realtime.response_terminal_handlers.logger.debug") as debug_log:
+        asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_1"}}))
+
+    payload = None
+    for call in debug_log.call_args_list:
+        if call.args and call.args[0] == "decision_adapter_turn_diagnostics payload=%s":
+            payload = call.args[1]
+    assert payload is not None
+    assert payload["trace_complete"] is True
+    assert payload["observational_only"] is True
+    assert payload["severity"] == "none"
