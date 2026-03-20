@@ -1367,3 +1367,47 @@ def test_handle_response_done_logs_turn_diagnostics_summary() -> None:
     assert payload["trace_complete"] is True
     assert payload["observational_only"] is True
     assert payload["severity"] == "none"
+
+
+def test_handle_response_done_builds_semantic_owner_observation_before_mutation() -> None:
+    api = _make_api()
+    api._active_response_origin = "tool_output"
+    api._active_response_input_event_key = "tool:call_semantic_owner"
+    api._active_response_canonical_key = "turn_1::tool:call_semantic_owner"
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    api._semantic_owner_decision_for_response = Mock(
+        return_value=SimpleNamespace(
+            semantic_owner_canonical_key="turn_1::item_parent",
+            selected_candidate_id="semantic_owner_parent",
+            reason_code="parent_promoted_from_tool_output",
+            parent_turn_id="turn_1",
+            parent_input_event_key="item_parent",
+        )
+    )
+    order: list[str] = []
+    api._apply_terminal_deliverable_selection = lambda **_kwargs: order.append("apply")
+    api._reconcile_semantic_substantive_owner = lambda **_kwargs: order.append("semantic_reconcile")
+    api._reconcile_terminal_substantive_response = lambda **_kwargs: order.append("terminal_reconcile")
+    api._release_blocked_tool_followups_for_response_done = lambda **_kwargs: order.append("release")
+
+    def _record_observation(**kwargs):
+        from ai.decision_arbitration_adapter import build_semantic_owner_observation as real_builder
+
+        order.append("observe")
+        assert kwargs["selected_candidate_id"] == "semantic_owner_parent"
+        assert kwargs["native_reason_code"] == "parent_promoted_from_tool_output"
+        return real_builder(**kwargs)
+
+    with patch("ai.realtime.response_terminal_handlers.build_semantic_owner_observation", side_effect=_record_observation):
+        asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_1"}}))
+
+    assert order[:3] == ["observe", "apply", "semantic_reconcile"]
+

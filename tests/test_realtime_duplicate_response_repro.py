@@ -1740,6 +1740,53 @@ def test_missing_parent_lineage_falls_back_to_execution_canonical_key() -> None:
     assert semantic_key == execution_key
 
 
+def test_runtime_semantic_owner_decision_wrapper_matches_legacy_key_resolution() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_semantic_wrapper"
+    execution_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key="tool:call_wrapper")
+    parent_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key="item_wrapper_parent")
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id=turn_id,
+        input_event_key="item_wrapper_parent",
+        mutator=lambda record: setattr(record, "created", True),
+    )
+    api._record_response_trace_context(
+        "resp-semantic-wrapper",
+        turn_id=turn_id,
+        input_event_key="tool:call_wrapper",
+        canonical_key=execution_key,
+        origin="tool_output",
+        parent_turn_id=turn_id,
+        parent_input_event_key="item_wrapper_parent",
+    )
+
+    decision = api._semantic_owner_decision_for_response(
+        turn_id=turn_id,
+        input_event_key="tool:call_wrapper",
+        origin="tool_output",
+        response_id="resp-semantic-wrapper",
+        done_canonical_key=execution_key,
+        selected=True,
+        selection_reason="normal",
+    )
+    semantic_key = api._resolve_semantic_answer_owner_for_response(
+        turn_id=turn_id,
+        input_event_key="tool:call_wrapper",
+        origin="tool_output",
+        response_id="resp-semantic-wrapper",
+        done_canonical_key=execution_key,
+        selected=True,
+        selection_reason="normal",
+    )
+
+    assert decision.semantic_owner_canonical_key == parent_key
+    assert decision.selected_candidate_id == "semantic_owner_parent"
+    assert semantic_key == decision.semantic_owner_canonical_key
+
+
 def test_tool_derived_parent_lineage_does_not_create_bogus_semantic_owner() -> None:
     api = _make_api_stub()
     _wire_runtime(api)

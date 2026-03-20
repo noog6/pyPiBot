@@ -482,7 +482,7 @@ _POLICY_DOMAIN = "response_create"
 
 _TERMINAL_SELECTION_AUTHORITY_SEAM = "ai.terminal_deliverable_arbitration.arbitrate_terminal_deliverable_selection"
 _TERMINAL_SELECTION_POLICY_DOMAIN = "response_terminal_selection"
-_SEMANTIC_OWNER_AUTHORITY_SEAM = "ai.realtime_api._resolve_semantic_answer_owner_for_response"
+_SEMANTIC_OWNER_AUTHORITY_SEAM = "ai.semantic_owner_arbitration.decide_semantic_owner"
 _SEMANTIC_OWNER_POLICY_DOMAIN = "response_semantic_owner"
 _TOOL_FOLLOWUP_AUTHORITY_SEAM = "ai.realtime_api.tool_followup_observation"
 _TOOL_FOLLOWUP_POLICY_DOMAIN = "tool_followup_release"
@@ -640,22 +640,35 @@ def build_semantic_owner_observation(
     selection_reason: str,
     parent_turn_id: str | None = None,
     parent_input_event_key: str | None = None,
+    selected_candidate_id: str | None = None,
+    native_reason_code: str | None = None,
 ) -> NormalizedArbitrationObservation:
     warnings: list[str] = []
     normalized_reason = str(selection_reason or "").strip().lower()
-    candidate_id: NormalizedCandidateId
+    expected_candidate_id: NormalizedCandidateId
     owner_scope: NormalizedOwnerScope
     parent_coverage_state: NormalizedParentCoverageState
     if semantic_owner_canonical_key == execution_canonical_key:
-        candidate_id = "semantic_owner_execution"
+        expected_candidate_id = "semantic_owner_execution"
         owner_scope = "none" if selected else "subsystem_local"
         parent_coverage_state = "not_applicable"
         if selected and normalized_reason == "normal" and str(origin or "").strip().lower() == "tool_output":
             warnings.append("semantic_owner_parent_not_promoted")
     else:
-        candidate_id = "semantic_owner_parent"
+        expected_candidate_id = "semantic_owner_parent"
         owner_scope = "semantic_parent"
         parent_coverage_state = "covered_canonical"
+    if selected_candidate_id is None:
+        candidate_id = expected_candidate_id
+    else:
+        normalized_candidate_id = _normalize_selected_candidate_id(selected_candidate_id)
+        if normalized_candidate_id != expected_candidate_id:
+            candidate_id = expected_candidate_id
+            warnings.append(
+                f"semantic_owner_selected_candidate_id_mismatch_ignored:{normalized_candidate_id}->{expected_candidate_id}"
+            )
+        else:
+            candidate_id = normalized_candidate_id
     if not selected:
         warnings.append("semantic_owner_resolution_without_terminal_selection")
     if not semantic_owner_canonical_key:
@@ -664,7 +677,7 @@ def build_semantic_owner_observation(
         warnings.append("semantic_parent_lineage_unavailable")
     decision = NormalizedDecisionArtifact(
         native_outcome_action="RETAIN" if candidate_id == "semantic_owner_execution" else "REASSIGN",
-        native_reason_code=str(selection_reason or ""),
+        native_reason_code=str(native_reason_code if native_reason_code is not None else selection_reason or ""),
         selected_candidate_id=candidate_id,
         decision_disposition="observe_only",
         owner_scope=owner_scope,

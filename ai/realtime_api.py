@@ -99,6 +99,7 @@ from ai.terminal_deliverable_arbitration import (
     arbitrate_terminal_deliverable_selection,
 )
 from ai.attention_continuity import AttentionContinuity, AttentionSnapshot
+from ai.semantic_owner_arbitration import SemanticOwnerDecision, decide_semantic_owner
 from ai.embodiment_policy import (
     EMBODIMENT_PRIORITY_ALLOW,
     EmbodimentActionType,
@@ -8346,6 +8347,61 @@ class RealtimeAPI:
             "transcript_text": transcript_text,
         }
 
+    def _semantic_owner_decision_for_response(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str | None,
+        origin: str,
+        response_id: str | None,
+        done_canonical_key: str,
+        selected: bool,
+        selection_reason: str,
+    ) -> SemanticOwnerDecision:
+        execution_canonical_key = str(done_canonical_key or "").strip()
+        lineage_context = self._resolve_parent_trace_context(
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            origin=origin,
+            response_id=response_id,
+        )
+        parent_turn_id = str(lineage_context.get("effective_parent_turn_id") or "").strip() or None
+        parent_input_event_key = str(lineage_context.get("effective_parent_input_event_key") or "").strip() or None
+        parent_canonical_key = ""
+        parent_canonical_exists = False
+        if parent_turn_id and parent_input_event_key and not parent_input_event_key.startswith("tool:"):
+            parent_canonical_key = self._canonical_utterance_key(
+                turn_id=parent_turn_id,
+                input_event_key=parent_input_event_key,
+            )
+            parent_canonical_exists = isinstance(
+                self._canonical_response_state(parent_canonical_key),
+                CanonicalResponseState,
+            )
+
+        decision = decide_semantic_owner(
+            execution_canonical_key=execution_canonical_key,
+            selected=selected,
+            selection_reason=selection_reason,
+            origin=origin,
+            parent_turn_id=parent_turn_id,
+            parent_input_event_key=parent_input_event_key,
+            parent_canonical_key=parent_canonical_key,
+            parent_canonical_exists=parent_canonical_exists,
+        )
+        if decision.action == "reassign_parent":
+            logger.info(
+                "semantic_answer_owner_resolved run_id=%s turn_id=%s response_id=%s execution_canonical_key=%s semantic_owner_canonical_key=%s origin=%s reason_code=%s",
+                self._current_run_id() or "",
+                str(turn_id or "").strip() or "turn-unknown",
+                str(response_id or "").strip() or "none",
+                execution_canonical_key,
+                decision.semantic_owner_canonical_key,
+                str(origin or "").strip().lower(),
+                decision.reason_code,
+            )
+        return decision
+
     def _resolve_semantic_answer_owner_for_response(
         self,
         *,
@@ -8357,48 +8413,15 @@ class RealtimeAPI:
         selected: bool,
         selection_reason: str,
     ) -> str:
-        execution_canonical_key = str(done_canonical_key or "").strip()
-        normalized_origin = str(origin or "").strip().lower()
-        normalized_reason = str(selection_reason or "").strip().lower()
-        if not execution_canonical_key:
-            return ""
-        if not selected or normalized_reason != "normal" or normalized_origin != "tool_output":
-            return execution_canonical_key
-
-        lineage_context = self._resolve_parent_trace_context(
+        return self._semantic_owner_decision_for_response(
             turn_id=turn_id,
             input_event_key=input_event_key,
             origin=origin,
             response_id=response_id,
-        )
-        parent_turn_id = str(lineage_context.get("effective_parent_turn_id") or "").strip()
-        parent_input_event_key = str(lineage_context.get("effective_parent_input_event_key") or "").strip()
-        if not parent_turn_id or not parent_input_event_key or parent_input_event_key.startswith("tool:"):
-            return execution_canonical_key
-
-        semantic_owner_canonical_key = self._canonical_utterance_key(
-            turn_id=parent_turn_id,
-            input_event_key=parent_input_event_key,
-        )
-        if not semantic_owner_canonical_key:
-            return execution_canonical_key
-        if semantic_owner_canonical_key == execution_canonical_key:
-            return execution_canonical_key
-
-        semantic_owner_state = self._canonical_response_state(semantic_owner_canonical_key)
-        if not isinstance(semantic_owner_state, CanonicalResponseState):
-            return execution_canonical_key
-
-        logger.info(
-            "semantic_answer_owner_resolved run_id=%s turn_id=%s response_id=%s execution_canonical_key=%s semantic_owner_canonical_key=%s origin=%s",
-            self._current_run_id() or "",
-            str(turn_id or "").strip() or "turn-unknown",
-            str(response_id or "").strip() or "none",
-            execution_canonical_key,
-            semantic_owner_canonical_key,
-            normalized_origin,
-        )
-        return semantic_owner_canonical_key
+            done_canonical_key=done_canonical_key,
+            selected=selected,
+            selection_reason=selection_reason,
+        ).semantic_owner_canonical_key
 
     def _is_descriptive_identification_turn(
         self,
