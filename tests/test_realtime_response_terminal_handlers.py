@@ -1231,6 +1231,69 @@ def test_handle_response_done_logs_turn_review_summary() -> None:
     assert payload["observational_only"] is True
 
 
+def test_handle_response_done_dedupes_identical_turn_review_summary_info() -> None:
+    api = _make_api()
+    api._emit_turn_review_summary_info_if_material = RealtimeAPI._emit_turn_review_summary_info_if_material.__get__(api, RealtimeAPI)
+    api._turn_arbitration_trace_by_key = {
+        ("run-test", "turn_1"): SimpleNamespace(
+            response_create_observation=SimpleNamespace(
+                context=SimpleNamespace(
+                    run_id="run-test",
+                    turn_id="turn_1",
+                    canonical_key="turn_1::input_evt_1",
+                    authority_retained_by="ai.realtime.response_create_runtime",
+                ),
+                normalization_warnings=(),
+                decision=SimpleNamespace(
+                    selected_candidate_id="direct_send",
+                    decision_disposition="allow_now",
+                    native_reason_code="direct_send",
+                    normalization_warnings=(),
+                ),
+            ),
+            terminal_selection_observation=None,
+            semantic_owner_observation=None,
+            execution_canonical_key="turn_1::input_evt_1",
+            semantic_owner_canonical_key=None,
+            warning_codes=(),
+            authority_seams_seen=("ai.realtime.response_create_runtime",),
+            trace_complete=False,
+            trace_partial=True,
+            diagnostics=None,
+            review_summary=None,
+        ),
+    }
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+
+    with patch("ai.realtime.response_terminal_handlers.logger.info") as terminal_info_log, patch("ai.realtime.response_terminal_handlers.logger.debug"):
+        asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_1"}}))
+    trace = api._turn_arbitration_trace_by_key[("run-test", "turn_1")]
+    with patch("ai.realtime_api.logger.info") as api_info_log:
+        emitted = api._emit_turn_review_summary_info_if_material(trace)
+
+    terminal_summary_calls = [
+        call for call in terminal_info_log.call_args_list
+        if call.args
+        and call.args[0] == "decision_arbitration_turn_summary run_id=%s turn_id=%s review_bucket=%s review_priority=%s overall_verdict=%s overall_summary=%s"
+    ]
+    api_summary_calls = [
+        call for call in api_info_log.call_args_list
+        if call.args
+        and call.args[0] == "decision_arbitration_turn_summary run_id=%s turn_id=%s review_bucket=%s review_priority=%s overall_verdict=%s overall_summary=%s"
+    ]
+    assert len(terminal_summary_calls) == 1
+    assert emitted is False
+    assert api_summary_calls == []
+
+
 def test_handle_response_done_logs_turn_diagnostics_summary() -> None:
     api = _make_api()
     api._turn_arbitration_trace_by_key = {

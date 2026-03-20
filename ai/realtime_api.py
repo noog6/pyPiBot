@@ -92,6 +92,7 @@ from ai.decision_arbitration_adapter import (
     summarize_turn_arbitration_diagnostics,
     summarize_turn_arbitration_for_review,
     summarize_turn_arbitration_trace,
+    turn_review_summary_info_fingerprint,
 )
 from ai.attention_continuity import AttentionContinuity, AttentionSnapshot
 from ai.embodiment_policy import (
@@ -7769,18 +7770,35 @@ class RealtimeAPI:
             "decision_adapter_turn_review_summary payload=%s",
             summarize_turn_arbitration_for_review(trace),
         )
-        if should_emit_turn_review_summary_info(trace):
-            review_summary = get_latest_turn_review_summary(trace)
-            if review_summary is not None:
-                logger.info(
-                    "decision_arbitration_turn_summary run_id=%s turn_id=%s review_bucket=%s review_priority=%s overall_verdict=%s overall_summary=%s",
-                    review_summary.run_id,
-                    review_summary.turn_id,
-                    review_summary.review_bucket,
-                    review_summary.review_priority,
-                    review_summary.overall_verdict,
-                    review_summary.overall_summary,
-                )
+        self._emit_turn_review_summary_info_if_material(trace)
+
+    def _emit_turn_review_summary_info_if_material(self, trace: Any) -> bool:
+        if not should_emit_turn_review_summary_info(trace):
+            return False
+        review_summary = get_latest_turn_review_summary(trace)
+        fingerprint = turn_review_summary_info_fingerprint(trace, review_summary)
+        if review_summary is None or fingerprint is None:
+            return False
+        emission_store = getattr(self, "_turn_review_summary_info_by_turn", None)
+        if not isinstance(emission_store, dict):
+            emission_store = {}
+            setattr(self, "_turn_review_summary_info_by_turn", emission_store)
+        trace_key = (str(review_summary.run_id or ""), str(review_summary.turn_id or "turn-unknown"))
+        if emission_store.get(trace_key) == fingerprint:
+            return False
+        emission_store[trace_key] = fingerprint
+        while len(emission_store) > 128:
+            emission_store.pop(next(iter(emission_store)))
+        logger.info(
+            "decision_arbitration_turn_summary run_id=%s turn_id=%s review_bucket=%s review_priority=%s overall_verdict=%s overall_summary=%s",
+            review_summary.run_id,
+            review_summary.turn_id,
+            review_summary.review_bucket,
+            review_summary.review_priority,
+            review_summary.overall_verdict,
+            review_summary.overall_summary,
+        )
+        return True
 
     def _normalize_tool_followup_distinctness_for_observation(
         self,

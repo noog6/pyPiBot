@@ -677,6 +677,82 @@ def test_record_tool_followup_observation_logs_info_turn_summary_for_suspicious_
     assert summary_call.args[3] == "suspicious"
 
 
+def test_record_tool_followup_observation_dedupes_identical_info_turn_summary() -> None:
+    api = _make_api_stub()
+    api._current_run_id = lambda: "run-tool-info"
+    api._turn_arbitration_trace_by_key = {}
+
+    with patch("ai.realtime_api.logger.info") as info_log, patch("ai.realtime_api.logger.debug"):
+        api._record_tool_followup_observation(
+            turn_id="turn-tool-info",
+            input_event_key="tool:call_tool_info",
+            canonical_key="turn-tool-info::tool:call_tool_info",
+            origin="tool_output",
+            parent_coverage_state="unknown",
+            followup_outcome_posture="suppressed",
+            native_reason_code="parent_unresolved",
+            native_outcome_action="DROP",
+            authority_seam="ai.realtime_api",
+        )
+        api._record_tool_followup_observation(
+            turn_id="turn-tool-info",
+            input_event_key="tool:call_tool_info",
+            canonical_key="turn-tool-info::tool:call_tool_info",
+            origin="tool_output",
+            parent_coverage_state="unknown",
+            followup_outcome_posture="suppressed",
+            native_reason_code="parent_unresolved",
+            native_outcome_action="DROP",
+            authority_seam="ai.realtime_api",
+        )
+
+    summary_calls = [
+        call for call in info_log.call_args_list
+        if call.args
+        and call.args[0] == "decision_arbitration_turn_summary run_id=%s turn_id=%s review_bucket=%s review_priority=%s overall_verdict=%s overall_summary=%s"
+    ]
+    assert len(summary_calls) == 1
+
+
+def test_record_tool_followup_observation_logs_material_info_turn_summary_update() -> None:
+    api = _make_api_stub()
+    api._current_run_id = lambda: "run-tool-info"
+    api._turn_arbitration_trace_by_key = {}
+
+    with patch("ai.realtime_api.logger.info") as info_log, patch("ai.realtime_api.logger.debug"):
+        api._record_tool_followup_observation(
+            turn_id="turn-tool-info",
+            input_event_key="tool:call_tool_info",
+            canonical_key="turn-tool-info::tool:call_tool_info",
+            origin="tool_output",
+            parent_coverage_state="unknown",
+            followup_outcome_posture="suppressed",
+            native_reason_code="parent_unresolved",
+            native_outcome_action="DROP",
+            authority_seam="ai.realtime_api",
+        )
+        api._record_tool_followup_observation(
+            turn_id="turn-tool-info",
+            input_event_key="tool:call_tool_info",
+            canonical_key="turn-tool-info::tool:call_tool_info",
+            origin="tool_output",
+            parent_coverage_state="uncovered",
+            followup_outcome_posture="released",
+            native_reason_code="release_after_response_done",
+            native_outcome_action="SCHEDULE",
+            authority_seam="ai.realtime_api",
+        )
+
+    summary_calls = [
+        call for call in info_log.call_args_list
+        if call.args
+        and call.args[0] == "decision_arbitration_turn_summary run_id=%s turn_id=%s review_bucket=%s review_priority=%s overall_verdict=%s overall_summary=%s"
+    ]
+    assert len(summary_calls) == 2
+    assert "tool followup suppressed" in summary_calls[0].args[6]
+    assert "tool followup released" in summary_calls[1].args[6]
+
+
 def test_evaluate_response_create_attempt_logs_turn_diagnostics() -> None:
     api = _make_api_stub()
     runtime = api._response_create_runtime
