@@ -8071,6 +8071,38 @@ class RealtimeAPI:
             return None
         return owner_turn_id, owner_input_event_key
 
+    def _tool_followup_canonical_parent_entry(
+        self,
+        *,
+        canonical_key: str | None,
+    ) -> tuple[str, CanonicalResponseState] | None:
+        normalized_canonical_key = str(canonical_key or "").strip()
+        if not normalized_canonical_key:
+            return None
+
+        visited: set[str] = set()
+        current_key = normalized_canonical_key
+        while current_key and current_key not in visited:
+            visited.add(current_key)
+            metadata = self._tool_followup_metadata_store().get(current_key)
+            if not isinstance(metadata, dict):
+                return None
+            parent_turn_id = str(metadata.get("parent_turn_id") or "").strip()
+            parent_input_event_key = str(metadata.get("parent_input_event_key") or "").strip()
+            if not parent_turn_id or not parent_input_event_key:
+                return None
+            parent_canonical_key = self._canonical_utterance_key(
+                turn_id=parent_turn_id,
+                input_event_key=parent_input_event_key,
+            )
+            if not parent_input_event_key.startswith("tool:"):
+                candidate = self._canonical_response_state_store().get(parent_canonical_key)
+                if not isinstance(candidate, CanonicalResponseState):
+                    return None
+                return parent_canonical_key, candidate
+            current_key = parent_canonical_key
+        return None
+
     def _resolve_parent_state_for_tool_followup(
         self,
         *,
@@ -8102,6 +8134,12 @@ class RealtimeAPI:
                 if candidate:
                     state_entry = candidate
                     resolved_from = "response_id"
+                    canonical_parent_entry = self._tool_followup_canonical_parent_entry(
+                        canonical_key=candidate[0],
+                    )
+                    if canonical_parent_entry is not None:
+                        state_entry = canonical_parent_entry
+                        resolved_from = "tool_parent_metadata"
 
         if parent_key_entry is not None:
             resolved_parent_origin = str(getattr(state_entry[1], "origin", "") or "").strip().lower() if state_entry else ""
@@ -8446,6 +8484,8 @@ class RealtimeAPI:
         self._tool_followup_metadata_store()[normalized_canonical_key] = {
             "tool_name": tool_name,
             "tool_followup_status_only": "true" if status_only else "false",
+            "parent_turn_id": str(metadata.get("parent_turn_id") or "").strip(),
+            "parent_input_event_key": str(metadata.get("parent_input_event_key") or "").strip(),
         }
 
     def _tool_followup_is_status_only_gesture(self, *, canonical_key: str) -> bool:

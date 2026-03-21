@@ -6,6 +6,8 @@ import sys
 import types
 from collections import deque
 
+import pytest
+
 if "audioop" not in sys.modules:
     sys.modules["audioop"] = types.ModuleType("audioop")
 
@@ -5947,6 +5949,420 @@ def test_tool_followup_parent_pending_falls_back_to_active_turn_key_when_parent_
     assert decision.should_release is True
     assert decision.reason_code == "parent_not_deliverable"
     assert decision.parent_coverage_state == "uncovered"
+
+
+def test_tool_followup_parent_resolution_rebinds_third_sibling_to_canonical_non_tool_parent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_tool_chain_canonical_parent"
+    canonical_parent_input_event_key = "item_tool_chain_canonical_parent"
+    canonical_parent_response_id = "resp-tool-chain-canonical-parent"
+    api._current_response_turn_id = turn_id
+    api._active_input_event_key_by_turn_id[turn_id] = canonical_parent_input_event_key
+    canonical_parent_key = api._canonical_utterance_key(
+        turn_id=turn_id,
+        input_event_key=canonical_parent_input_event_key,
+    )
+    api._canonical_response_state_mutate(
+        canonical_key=canonical_parent_key,
+        turn_id=turn_id,
+        input_event_key=canonical_parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "server_auto"),
+            setattr(record, "response_id", canonical_parent_response_id),
+            setattr(record, "deliverable_observed", False),
+            setattr(record, "deliverable_class", "unknown"),
+            setattr(record, "done", True),
+        ),
+    )
+
+    tool_a_event, tool_a_key = api._build_tool_followup_response_create_event(
+        call_id="call_tool_chain_a",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_around",
+    )
+    tool_a_metadata = ((tool_a_event.get("response") or {}).get("metadata") or {})
+    tool_a_metadata["turn_id"] = turn_id
+    tool_a_metadata["parent_turn_id"] = turn_id
+    tool_a_metadata["parent_input_event_key"] = canonical_parent_input_event_key
+    api._record_tool_followup_metadata(canonical_key=tool_a_key, metadata=tool_a_metadata)
+
+    tool_b_event, tool_b_key = api._build_tool_followup_response_create_event(
+        call_id="call_tool_chain_b",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+    tool_b_metadata = ((tool_b_event.get("response") or {}).get("metadata") or {})
+    tool_b_metadata["turn_id"] = turn_id
+    tool_b_metadata["parent_turn_id"] = turn_id
+    tool_b_metadata["parent_input_event_key"] = "tool:call_tool_chain_a"
+    api._record_tool_followup_metadata(canonical_key=tool_b_key, metadata=tool_b_metadata)
+
+    tool_b_response_id = "resp-tool-chain-b"
+    api._canonical_response_state_mutate(
+        canonical_key=tool_b_key,
+        turn_id=turn_id,
+        input_event_key="tool:call_tool_chain_b",
+        mutator=lambda record: (
+            setattr(record, "origin", "tool_output"),
+            setattr(record, "response_id", tool_b_response_id),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "unknown"),
+            setattr(record, "done", True),
+        ),
+    )
+
+    tool_c_event, _tool_c_key = api._build_tool_followup_response_create_event(
+        call_id="call_tool_chain_c",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_idle",
+    )
+    tool_c_metadata = ((tool_c_event.get("response") or {}).get("metadata") or {})
+    tool_c_metadata["turn_id"] = turn_id
+    tool_c_metadata["parent_turn_id"] = turn_id
+    tool_c_metadata["parent_input_event_key"] = "tool:call_tool_chain_b"
+
+    captured_logs: list[str] = []
+    original_info = logger.info
+
+    def _capture_info(message: str, *args, **kwargs):
+        rendered = str(message)
+        if args:
+            rendered = rendered % args
+        captured_logs.append(rendered)
+        return original_info(message, *args, **kwargs)
+
+    monkeypatch.setattr(logger, "info", _capture_info)
+
+    should_drop, parent_entry, reason = api._should_suppress_queued_tool_followup_release(
+        response_metadata=tool_c_metadata,
+        blocked_by_response_id=tool_b_response_id,
+    )
+
+    assert should_drop is False
+    assert reason == "parent_not_deliverable"
+    assert parent_entry is not None
+    assert parent_entry[0] == canonical_parent_key
+    assert parent_entry[1].response_id == canonical_parent_response_id
+    assert any(
+        "tool_followup_parent_resolution" in entry
+        and f"resolved_parent_canonical_key={canonical_parent_key}" in entry
+        and "resolved_from=tool_parent_metadata" in entry
+        for entry in captured_logs
+    )
+
+
+def test_tool_followup_parent_resolution_prefers_semantic_owner_promotion_for_later_sibling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_tool_chain_semantic_owner"
+    canonical_parent_input_event_key = "item_tool_chain_semantic_owner"
+    canonical_parent_response_id = "resp-tool-chain-semantic-owner-parent"
+    api._current_response_turn_id = turn_id
+    api._active_input_event_key_by_turn_id[turn_id] = canonical_parent_input_event_key
+    canonical_parent_key = api._canonical_utterance_key(
+        turn_id=turn_id,
+        input_event_key=canonical_parent_input_event_key,
+    )
+    api._canonical_response_state_mutate(
+        canonical_key=canonical_parent_key,
+        turn_id=turn_id,
+        input_event_key=canonical_parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "server_auto"),
+            setattr(record, "response_id", canonical_parent_response_id),
+            setattr(record, "deliverable_observed", False),
+            setattr(record, "deliverable_class", "unknown"),
+            setattr(record, "done", True),
+        ),
+    )
+
+    tool_b_input_event_key = "tool:call_tool_chain_semantic_b"
+    tool_b_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_b_input_event_key)
+    tool_b_response_id = "resp-tool-chain-semantic-b"
+    api._canonical_response_state_mutate(
+        canonical_key=tool_b_key,
+        turn_id=turn_id,
+        input_event_key=tool_b_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "tool_output"),
+            setattr(record, "response_id", tool_b_response_id),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "unknown"),
+            setattr(record, "done", True),
+        ),
+    )
+    api._record_tool_followup_metadata(
+        canonical_key=tool_b_key,
+        metadata={
+            "tool_name": "gesture_look_center",
+            "tool_followup_status_only": "true",
+            "parent_turn_id": turn_id,
+            "parent_input_event_key": "tool:call_tool_chain_semantic_a",
+        },
+    )
+    api._apply_terminal_deliverable_selection(
+        canonical_key=tool_b_key,
+        semantic_owner_canonical_key=canonical_parent_key,
+        response_id=tool_b_response_id,
+        turn_id=turn_id,
+        input_event_key=tool_b_input_event_key,
+        selected=True,
+        selection_reason="normal",
+    )
+
+    tool_c_event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_tool_chain_semantic_c",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_idle",
+    )
+    tool_c_metadata = ((tool_c_event.get("response") or {}).get("metadata") or {})
+    tool_c_metadata["turn_id"] = turn_id
+    tool_c_metadata["parent_turn_id"] = turn_id
+    tool_c_metadata["parent_input_event_key"] = tool_b_input_event_key
+
+    captured_logs: list[str] = []
+    original_info = logger.info
+
+    def _capture_info(message: str, *args, **kwargs):
+        rendered = str(message)
+        if args:
+            rendered = rendered % args
+        captured_logs.append(rendered)
+        return original_info(message, *args, **kwargs)
+
+    monkeypatch.setattr(logger, "info", _capture_info)
+
+    should_drop, parent_entry, reason = api._should_suppress_queued_tool_followup_release(
+        response_metadata=tool_c_metadata,
+        blocked_by_response_id=tool_b_response_id,
+    )
+
+    assert should_drop is False
+    assert reason == "parent_not_deliverable"
+    assert parent_entry is not None
+    assert parent_entry[0] == canonical_parent_key
+    assert any(
+        "tool_followup_parent_resolution" in entry
+        and f"resolved_parent_canonical_key={canonical_parent_key}" in entry
+        and "resolved_from=semantic_owner_response_id" in entry
+        for entry in captured_logs
+    )
+
+
+def test_tool_followup_uncovered_parent_release_uses_canonical_lineage_instead_of_excluded_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_tool_chain_uncovered_release"
+    canonical_parent_input_event_key = "item_tool_chain_uncovered_release"
+    canonical_parent_response_id = "resp-tool-chain-uncovered-parent"
+    api._current_response_turn_id = turn_id
+    api._active_input_event_key_by_turn_id[turn_id] = canonical_parent_input_event_key
+    canonical_parent_key = api._canonical_utterance_key(
+        turn_id=turn_id,
+        input_event_key=canonical_parent_input_event_key,
+    )
+    api._canonical_response_state_mutate(
+        canonical_key=canonical_parent_key,
+        turn_id=turn_id,
+        input_event_key=canonical_parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "server_auto"),
+            setattr(record, "response_id", canonical_parent_response_id),
+            setattr(record, "deliverable_observed", False),
+            setattr(record, "deliverable_class", "unknown"),
+            setattr(record, "done", True),
+        ),
+    )
+
+    tool_a_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key="tool:call_tool_chain_release_a")
+    api._record_tool_followup_metadata(
+        canonical_key=tool_a_key,
+        metadata={
+            "tool_name": "gesture_look_around",
+            "tool_followup_status_only": "true",
+            "parent_turn_id": turn_id,
+            "parent_input_event_key": canonical_parent_input_event_key,
+        },
+    )
+
+    tool_b_input_event_key = "tool:call_tool_chain_release_b"
+    tool_b_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_b_input_event_key)
+    api._record_tool_followup_metadata(
+        canonical_key=tool_b_key,
+        metadata={
+            "tool_name": "gesture_look_center",
+            "tool_followup_status_only": "true",
+            "parent_turn_id": turn_id,
+            "parent_input_event_key": "tool:call_tool_chain_release_a",
+        },
+    )
+    tool_b_response_id = "resp-tool-chain-release-b"
+    api._canonical_response_state_mutate(
+        canonical_key=tool_b_key,
+        turn_id=turn_id,
+        input_event_key=tool_b_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "tool_output"),
+            setattr(record, "response_id", tool_b_response_id),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "unknown"),
+            setattr(record, "done", True),
+        ),
+    )
+
+    tool_c_event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_tool_chain_release_c",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_idle",
+    )
+    tool_c_metadata = ((tool_c_event.get("response") or {}).get("metadata") or {})
+    tool_c_metadata["turn_id"] = turn_id
+    tool_c_metadata["parent_turn_id"] = turn_id
+    tool_c_metadata["parent_input_event_key"] = tool_b_input_event_key
+
+    captured_logs: list[str] = []
+    original_info = logger.info
+
+    def _capture_info(message: str, *args, **kwargs):
+        rendered = str(message)
+        if args:
+            rendered = rendered % args
+        captured_logs.append(rendered)
+        return original_info(message, *args, **kwargs)
+
+    monkeypatch.setattr(logger, "info", _capture_info)
+
+    should_drop, parent_entry, reason = api._should_suppress_queued_tool_followup_release(
+        response_metadata=tool_c_metadata,
+        blocked_by_response_id=tool_b_response_id,
+    )
+
+    assert should_drop is False
+    assert reason == "parent_not_deliverable"
+    assert parent_entry is not None
+    assert parent_entry[0] == canonical_parent_key
+    assert any(
+        "tool_followup_parent_resolution" in entry
+        and f"resolved_parent_canonical_key={canonical_parent_key}" in entry
+        and "resolved_from=tool_parent_metadata" in entry
+        for entry in captured_logs
+    )
+    assert not any("reason=parent_origin_excluded" in entry for entry in captured_logs)
+
+
+def test_tool_followup_exact_runtime_chain_resolves_tool_c_via_tool_parent_metadata_without_parent_origin_excluded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_tool_chain_exact_runtime_shape"
+    canonical_parent_input_event_key = "item_tool_chain_exact_runtime_shape"
+    canonical_parent_response_id = "resp-tool-chain-exact-runtime-parent"
+    api._current_response_turn_id = turn_id
+    api._active_input_event_key_by_turn_id[turn_id] = canonical_parent_input_event_key
+    canonical_parent_key = api._canonical_utterance_key(
+        turn_id=turn_id,
+        input_event_key=canonical_parent_input_event_key,
+    )
+    api._canonical_response_state_mutate(
+        canonical_key=canonical_parent_key,
+        turn_id=turn_id,
+        input_event_key=canonical_parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "server_auto"),
+            setattr(record, "response_id", canonical_parent_response_id),
+            setattr(record, "deliverable_observed", False),
+            setattr(record, "deliverable_class", "unknown"),
+            setattr(record, "done", True),
+        ),
+    )
+
+    tool_a_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key="tool:call_tool_chain_exact_a")
+    api._record_tool_followup_metadata(
+        canonical_key=tool_a_key,
+        metadata={
+            "tool_name": "gesture_look_around",
+            "tool_followup_status_only": "true",
+            "parent_turn_id": turn_id,
+            "parent_input_event_key": canonical_parent_input_event_key,
+        },
+    )
+
+    tool_b_input_event_key = "tool:call_tool_chain_exact_b"
+    tool_b_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_b_input_event_key)
+    api._record_tool_followup_metadata(
+        canonical_key=tool_b_key,
+        metadata={
+            "tool_name": "gesture_look_center",
+            "tool_followup_status_only": "true",
+            "parent_turn_id": turn_id,
+            "parent_input_event_key": "tool:call_tool_chain_exact_a",
+        },
+    )
+    tool_b_response_id = "resp-tool-chain-exact-runtime-b"
+    api._canonical_response_state_mutate(
+        canonical_key=tool_b_key,
+        turn_id=turn_id,
+        input_event_key=tool_b_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "tool_output"),
+            setattr(record, "response_id", tool_b_response_id),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "unknown"),
+            setattr(record, "done", True),
+        ),
+    )
+
+    tool_c_event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_tool_chain_exact_c",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_idle",
+    )
+    tool_c_metadata = ((tool_c_event.get("response") or {}).get("metadata") or {})
+    tool_c_metadata["turn_id"] = turn_id
+    tool_c_metadata["parent_turn_id"] = turn_id
+    tool_c_metadata["parent_input_event_key"] = tool_b_input_event_key
+
+    captured_logs: list[str] = []
+    original_info = logger.info
+
+    def _capture_info(message: str, *args, **kwargs):
+        rendered = str(message)
+        if args:
+            rendered = rendered % args
+        captured_logs.append(rendered)
+        return original_info(message, *args, **kwargs)
+
+    monkeypatch.setattr(logger, "info", _capture_info)
+
+    should_drop, parent_entry, reason = api._should_suppress_queued_tool_followup_release(
+        response_metadata=tool_c_metadata,
+        blocked_by_response_id=tool_b_response_id,
+    )
+
+    assert should_drop is False
+    assert reason == "parent_not_deliverable"
+    assert parent_entry is not None
+    assert parent_entry[0] == canonical_parent_key
+    assert parent_entry[1].response_id == canonical_parent_response_id
+    assert any(
+        "tool_followup_parent_resolution" in entry
+        and f"resolved_parent_canonical_key={canonical_parent_key}" in entry
+        and "resolved_from=tool_parent_metadata" in entry
+        for entry in captured_logs
+    )
+    assert not any("reason=parent_origin_excluded" in entry for entry in captured_logs)
 
 
 def test_response_done_suppression_prunes_blocked_tool_followup_lineage_artifacts() -> None:
