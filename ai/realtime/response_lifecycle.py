@@ -126,13 +126,24 @@ class ResponseLifecycleTracker:
         response_state = self._api._canonical_response_state(canonical_key)
         audio_delta_seen = bool(getattr(response_state, "audio_started", False)) or self._api._canonical_first_audio_started(canonical_key)
         deliverable_observed = bool(getattr(response_state, "deliverable_observed", False))
-        assistant_reply_present = bool(str(getattr(self._api, "assistant_reply", "") or "").strip())
-        assistant_buffer_present = bool(str(getattr(self._api, "_assistant_reply_accum", "") or "").strip())
+        deliverable_class = str(getattr(response_state, "deliverable_class", "") or "").strip().lower()
+        response_id = str(getattr(response_state, "response_id", "") or "").strip()
+        if response_id:
+            assistant_reply_present = bool(
+                str(self._api._assistant_reply_text_for_response(response_id) or "").strip()
+            )
+            assistant_buffer_present = bool(
+                str(self._api._terminal_response_text(response_id) or "").strip()
+            )
+        else:
+            assistant_reply_present = bool(str(getattr(self._api, "assistant_reply", "") or "").strip())
+            assistant_buffer_present = bool(str(getattr(self._api, "_assistant_reply_accum", "") or "").strip())
         return (
             not assistant_reply_present
             and not assistant_buffer_present
             and not audio_delta_seen
             and not deliverable_observed
+            and deliverable_class not in {"progress", "final"}
         )
 
     async def maybe_schedule_empty_response_retry(

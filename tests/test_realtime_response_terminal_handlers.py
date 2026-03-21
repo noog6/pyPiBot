@@ -650,6 +650,60 @@ def test_handle_response_done_records_silent_incident_for_non_provisional_empty(
     mark_completed.assert_not_called()
 
 
+def test_handle_response_done_downgrades_empty_tool_followup_terminal_selection() -> None:
+    api = _make_api()
+    api._active_response_origin = "tool_output"
+    api._active_response_input_event_key = "tool:call_123"
+    api._active_response_canonical_key = "turn_1::tool:call_123"
+    api._active_response_id = "resp_tool_empty_1"
+    api._active_input_event_key_for_turn = lambda _turn_id: "item_parent"
+    api._is_empty_response_done = lambda **_kwargs: True
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    api._response_done_deliverable_arbitration = RealtimeAPI._response_done_deliverable_arbitration.__get__(api, RealtimeAPI)
+    api._semantic_owner_decision_for_response = Mock(
+        return_value=SimpleNamespace(
+            semantic_owner_canonical_key="turn_1::item_parent",
+            parent_turn_id="turn_1",
+            parent_input_event_key="item_parent",
+            selected_candidate_id="semantic_owner_parent",
+            reason_code="parent_promoted_from_tool_output",
+        )
+    )
+    api._reconcile_semantic_substantive_owner = Mock()
+    api._reconcile_terminal_substantive_response = Mock()
+    apply_selection = Mock()
+    record_silent = Mock()
+    api._apply_terminal_deliverable_selection = apply_selection
+    api._record_silent_turn_incident = record_silent
+
+    with patch("ai.realtime.response_terminal_handlers.logger.info") as info_log:
+        asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_tool_empty_1"}}))
+
+    apply_selection.assert_called_once_with(
+        canonical_key="turn_1::tool:call_123",
+        semantic_owner_canonical_key="turn_1::item_parent",
+        response_id="resp_tool_empty_1",
+        turn_id="turn_1",
+        input_event_key="tool:call_123",
+        selected=False,
+        selection_reason="empty_tool_followup_non_deliverable",
+    )
+    record_silent.assert_called_once()
+    info_log.assert_any_call(
+        "deliverable_selected response_id=%s selected=%s reason=%s",
+        "resp_tool_empty_1",
+        "false",
+        "empty_tool_followup_non_deliverable",
+    )
+
 def test_handle_response_done_suppresses_exact_phrase_repair_when_startup_contract_already_satisfied() -> None:
     api = _make_api()
     api._active_response_origin = "prompt"

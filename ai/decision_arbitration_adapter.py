@@ -102,6 +102,7 @@ NormalizedCandidateId: TypeAlias = Literal[
     "terminal_selected",
     "cancelled",
     "micro_ack_non_deliverable",
+    "empty_tool_followup_non_deliverable",
     "provisional_empty_non_deliverable",
     "provisional_server_auto_awaiting_transcript_final",
     "tool_followup_precedence",
@@ -493,6 +494,7 @@ def _terminal_selection_candidate_id(selection_reason: str, *, selected: bool) -
     mapping: dict[str, NormalizedCandidateId] = {
         "cancelled": "cancelled",
         "micro_ack_non_deliverable": "micro_ack_non_deliverable",
+        "empty_tool_followup_non_deliverable": "empty_tool_followup_non_deliverable",
         "provisional_empty_non_deliverable": "provisional_empty_non_deliverable",
         "provisional_server_auto_awaiting_transcript_final": "provisional_server_auto_awaiting_transcript_final",
         "tool_followup_precedence": "tool_followup_precedence",
@@ -517,7 +519,7 @@ def _terminal_selection_deliverable_status(
     warnings: list[str] = []
     if selected:
         return "final_observed", tuple(warnings)
-    if normalized_reason in {"micro_ack_non_deliverable", "provisional_empty_non_deliverable", "tool_output_descriptive_gesture_only", "cancelled"}:
+    if normalized_reason in {"micro_ack_non_deliverable", "empty_tool_followup_non_deliverable", "provisional_empty_non_deliverable", "tool_output_descriptive_gesture_only", "cancelled"}:
         return "non_deliverable", tuple(warnings)
     if normalized_reason in {"provisional_server_auto_awaiting_transcript_final"}:
         return "provisional_only", tuple(warnings)
@@ -1553,6 +1555,7 @@ def _normalize_selected_candidate_id(candidate_id: str) -> NormalizedCandidateId
         "terminal_selected",
         "cancelled",
         "micro_ack_non_deliverable",
+        "empty_tool_followup_non_deliverable",
         "provisional_empty_non_deliverable",
         "provisional_server_auto_awaiting_transcript_final",
         "tool_followup_precedence",

@@ -42,6 +42,12 @@ def arbitrate_terminal_deliverable_selection(
             reason_code="micro_ack_non_deliverable",
             selected_candidate_id="micro_ack_non_deliverable",
         )
+    if normalized_origin == "tool_output" and response_done_is_empty:
+        return TerminalDeliverableDecision(
+            selected=False,
+            reason_code="empty_tool_followup_non_deliverable",
+            selected_candidate_id="empty_tool_followup_non_deliverable",
+        )
     if active_response_was_provisional and response_done_is_empty:
         return TerminalDeliverableDecision(
             selected=False,

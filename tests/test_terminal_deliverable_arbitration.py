@@ -85,6 +85,10 @@ def test_terminal_deliverable_arbitration_rejects_descriptive_gesture_only_tool_
 def test_terminal_deliverable_arbitration_covers_cancelled_and_other_non_deliverables() -> None:
     cancelled = _decide(delivery_state_before_done="cancelled")
     micro_ack = _decide(origin="micro_ack")
+    empty_tool_followup = _decide(
+        origin="tool_output",
+        response_done_is_empty=True,
+    )
     provisional_empty = _decide(
         active_response_was_provisional=True,
         response_done_is_empty=True,
@@ -96,6 +100,11 @@ def test_terminal_deliverable_arbitration_covers_cancelled_and_other_non_deliver
         False,
         "micro_ack_non_deliverable",
         "micro_ack_non_deliverable",
+    )
+    assert empty_tool_followup == TerminalDeliverableDecision(
+        False,
+        "empty_tool_followup_non_deliverable",
+        "empty_tool_followup_non_deliverable",
     )
     assert provisional_empty == TerminalDeliverableDecision(
         False,

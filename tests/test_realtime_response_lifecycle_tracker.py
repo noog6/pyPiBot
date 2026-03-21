@@ -46,6 +46,8 @@ def _make_api() -> RealtimeAPI:
     api = RealtimeAPI.__new__(RealtimeAPI)
     api.assistant_reply = ""
     api._assistant_reply_accum = ""
+    api._assistant_reply_text_for_response = lambda _response_id: ""
+    api._terminal_response_text = lambda _response_id: ""
     api._empty_response_retry_canonical_keys = set()
     api._empty_response_retry_counts = {}
     api._empty_response_retry_max_attempts = 2
@@ -279,6 +281,26 @@ def test_selected_response_with_partial_text_classification_counts_as_substantiv
 
     assert api._selected_response_has_substantive_evidence(response_id=response_id) is True
     assert tracker.is_empty_response_done(canonical_key=canonical_key) is False
+
+
+def test_is_empty_response_done_ignores_stale_global_text_when_response_scoped_evidence_missing() -> None:
+    api = _make_api()
+    tracker = ResponseLifecycleTracker(api)
+    canonical_key = "turn_1::tool:call_empty"
+    api.assistant_reply = "stale global reply"
+    api._assistant_reply_accum = "stale global buffer"
+    api._canonical_response_state = lambda _canonical_key: type(
+        "_State",
+        (),
+        {
+            "audio_started": False,
+            "deliverable_observed": False,
+            "deliverable_class": "unknown",
+            "response_id": "resp_current_empty",
+        },
+    )()
+
+    assert tracker.is_empty_response_done(canonical_key=canonical_key) is True
 
 
 def test_tool_only_output_item_path_marks_response_non_empty() -> None:
