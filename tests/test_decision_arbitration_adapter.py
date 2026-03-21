@@ -1338,6 +1338,114 @@ def test_turn_review_summary_accepts_aligned_unknown_distinctness_parent_promoti
     assert summary.review_bucket == "partial_expected"
 
 
+def test_turn_review_summary_accepts_read_only_sensor_parent_promotion_with_not_applicable_parent_coverage() -> None:
+    trace = merge_arbitration_observations_for_turn(
+        terminal_selection_observation=build_terminal_selection_observation(
+            run_id="run-review-followup-read-only",
+            turn_id="turn-review-followup-read-only",
+            input_event_key="tool:call_sensor",
+            canonical_key="turn-review-followup-read-only::tool:call_sensor",
+            origin="tool_output",
+            selected=True,
+            selection_reason="normal",
+            transcript_final_seen=False,
+            active_response_was_provisional=False,
+        ),
+        semantic_owner_observation=build_semantic_owner_observation(
+            run_id="run-review-followup-read-only",
+            turn_id="turn-review-followup-read-only",
+            input_event_key="tool:call_sensor",
+            execution_canonical_key="turn-review-followup-read-only::tool:call_sensor",
+            semantic_owner_canonical_key="turn-review-followup-read-only::item_parent",
+            origin="tool_output",
+            selected=True,
+            selection_reason="normal",
+            parent_turn_id="turn-review-followup-read-only",
+            parent_input_event_key="item_parent",
+            native_reason_code="parent_promoted_from_tool_output",
+        ),
+        semantic_owner_canonical_key="turn-review-followup-read-only::item_parent",
+        tool_followup_observation=build_tool_followup_observation(
+            run_id="run-review-followup-read-only",
+            turn_id="turn-review-followup-read-only",
+            input_event_key="tool:call_sensor",
+            canonical_key="turn-review-followup-read-only::tool:call_sensor",
+            origin="tool_output",
+            parent_coverage_state="not_applicable",
+            followup_outcome_posture="released",
+            native_reason_code="not_suppressible",
+            native_outcome_action="RELEASE",
+            followup_distinctness="unknown",
+            parent_canonical_key="turn-review-followup-read-only::item_parent",
+            parent_semantic_owner_key="turn-review-followup-read-only::item_parent",
+        ),
+    )
+
+    summary = build_turn_review_summary(trace)
+    diagnostics = trace.diagnostics
+
+    assert diagnostics is not None
+    assert "semantic_owner_parent_promotion_expected" in diagnostics.diagnostic_codes
+    assert "semantic_owner_diverged" not in diagnostics.diagnostic_codes
+    assert diagnostics.suspicious_mismatch_count == 0
+    assert summary.semantic_owner_summary == "semantic owner promoted to parent after tool followup delivery"
+    assert summary.review_bucket == "partial_expected"
+
+
+def test_turn_review_summary_keeps_read_only_sensor_parent_promotion_with_wrong_reason_suspicious() -> None:
+    trace = merge_arbitration_observations_for_turn(
+        terminal_selection_observation=build_terminal_selection_observation(
+            run_id="run-review-followup-read-only-wrong-reason",
+            turn_id="turn-review-followup-read-only-wrong-reason",
+            input_event_key="tool:call_sensor_wrong_reason",
+            canonical_key="turn-review-followup-read-only-wrong-reason::tool:call_sensor_wrong_reason",
+            origin="tool_output",
+            selected=True,
+            selection_reason="normal",
+            transcript_final_seen=False,
+            active_response_was_provisional=False,
+        ),
+        semantic_owner_observation=build_semantic_owner_observation(
+            run_id="run-review-followup-read-only-wrong-reason",
+            turn_id="turn-review-followup-read-only-wrong-reason",
+            input_event_key="tool:call_sensor_wrong_reason",
+            execution_canonical_key="turn-review-followup-read-only-wrong-reason::tool:call_sensor_wrong_reason",
+            semantic_owner_canonical_key="turn-review-followup-read-only-wrong-reason::item_parent",
+            origin="tool_output",
+            selected=True,
+            selection_reason="normal",
+            parent_turn_id="turn-review-followup-read-only-wrong-reason",
+            parent_input_event_key="item_parent",
+            native_reason_code="parent_promoted_from_tool_output",
+        ),
+        semantic_owner_canonical_key="turn-review-followup-read-only-wrong-reason::item_parent",
+        tool_followup_observation=build_tool_followup_observation(
+            run_id="run-review-followup-read-only-wrong-reason",
+            turn_id="turn-review-followup-read-only-wrong-reason",
+            input_event_key="tool:call_sensor_wrong_reason",
+            canonical_key="turn-review-followup-read-only-wrong-reason::tool:call_sensor_wrong_reason",
+            origin="tool_output",
+            parent_coverage_state="not_applicable",
+            followup_outcome_posture="released",
+            native_reason_code="parent_not_deliverable",
+            native_outcome_action="RELEASE",
+            followup_distinctness="unknown",
+            parent_canonical_key="turn-review-followup-read-only-wrong-reason::item_parent",
+            parent_semantic_owner_key="turn-review-followup-read-only-wrong-reason::item_parent",
+        ),
+    )
+
+    summary = build_turn_review_summary(trace)
+    diagnostics = trace.diagnostics
+
+    assert diagnostics is not None
+    assert "semantic_owner_diverged" in diagnostics.diagnostic_codes
+    assert "semantic_owner_parent_promotion_expected" not in diagnostics.diagnostic_codes
+    assert diagnostics.suspicious_mismatch_count == 1
+    assert summary.semantic_owner_summary == "semantic owner diverged to parent"
+    assert summary.review_bucket == "suspicious"
+
+
 def test_turn_review_summary_keeps_misaligned_unknown_distinctness_parent_promotion_suspicious() -> None:
     trace = merge_arbitration_observations_for_turn(
         terminal_selection_observation=build_terminal_selection_observation(
