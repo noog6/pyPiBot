@@ -986,8 +986,11 @@ def build_turn_arbitration_diagnostics(trace: TurnArbitrationTrace) -> TurnArbit
         diagnostic_codes.append("terminal_selected_without_semantic_owner")
         suspicious_mismatch_count += 1
     if semantic_owner is not None and _semantic_owner_has_explicit_parent_promotion(trace):
-        diagnostic_codes.append("semantic_owner_diverged")
-        suspicious_mismatch_count += 1
+        if _semantic_owner_parent_promotion_is_expected(trace):
+            diagnostic_codes.append("semantic_owner_parent_promotion_expected")
+        else:
+            diagnostic_codes.append("semantic_owner_diverged")
+            suspicious_mismatch_count += 1
     if terminal is not None and terminal.selected_candidate_id == "terminal_selected" and terminal.deliverable_status != "final_observed":
         diagnostic_codes.append("terminal_selected_non_final_status")
         suspicious_mismatch_count += 1
@@ -1091,6 +1094,37 @@ def _semantic_owner_has_explicit_parent_promotion(trace: TurnArbitrationTrace) -
     return str(decision.native_reason_code or "").strip().lower() == "parent_promoted_from_tool_output"
 
 
+def _semantic_owner_parent_promotion_is_expected(trace: TurnArbitrationTrace) -> bool:
+    if not _semantic_owner_has_explicit_parent_promotion(trace):
+        return False
+    terminal_observation = trace.terminal_selection_observation
+    terminal = terminal_observation.decision if terminal_observation else None
+    if terminal is None:
+        return False
+    if terminal.selected_candidate_id != "terminal_selected":
+        return False
+    if str(terminal.native_reason_code or "").strip().lower() != "normal":
+        return False
+    if str(terminal_observation.context.origin or "").strip().lower() != "tool_output":
+        return False
+    promoted_parent_key = str(trace.semantic_owner_canonical_key or "").strip()
+    if not promoted_parent_key:
+        return False
+    for observation in reversed(trace.tool_followup_observations):
+        decision = observation.decision
+        if decision.followup_outcome_posture != "released":
+            continue
+        if decision.parent_coverage_state != "uncovered":
+            continue
+        if decision.followup_distinctness != "distinct":
+            continue
+        parent_semantic_owner_key = str(decision.parent_semantic_owner_key or "").strip()
+        parent_canonical_key = str(decision.parent_canonical_key or "").strip()
+        if promoted_parent_key and promoted_parent_key in {parent_semantic_owner_key, parent_canonical_key}:
+            return True
+    return False
+
+
 def _review_bucket_for_trace(trace: TurnArbitrationTrace) -> TurnReviewBucket:
     diagnostics = trace.diagnostics
     if diagnostics is None:
@@ -1142,6 +1176,8 @@ def _semantic_owner_summary(trace: TurnArbitrationTrace) -> str:
     decision = trace.semantic_owner_observation.decision if trace.semantic_owner_observation else None
     if decision is None:
         return "semantic owner seam missing"
+    if _semantic_owner_parent_promotion_is_expected(trace):
+        return "semantic owner promoted to parent after tool followup delivery"
     if _semantic_owner_has_explicit_parent_promotion(trace):
         return "semantic owner diverged to parent"
     if decision.selected_candidate_id == "semantic_owner_execution":
