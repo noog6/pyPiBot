@@ -472,12 +472,16 @@ class IntentLedgerEntry:
     idempotency_key: str | None
     state: str
     updated_at: float
+    last_turn_id: str | None = None
     pending_at: float | None = None
     approved_at: float | None = None
     denied_at: float | None = None
     timeout_at: float | None = None
     failure_at: float | None = None
     executed_at: float | None = None
+    executed_turn_id: str | None = None
+    completed_at: float | None = None
+    completed_turn_id: str | None = None
 
 
 @dataclass
@@ -11400,11 +11404,13 @@ class RealtimeAPI:
                 idempotency_key=idempotency_key,
                 state=state,
                 updated_at=now,
+                last_turn_id=self._current_turn_id_or_unknown(),
             )
         if idempotency_key:
             entry.idempotency_key = idempotency_key
         entry.state = state
         entry.updated_at = now
+        entry.last_turn_id = self._current_turn_id_or_unknown()
         if state == "pending":
             entry.pending_at = now
         elif state == "approved":
@@ -11417,7 +11423,51 @@ class RealtimeAPI:
             entry.failure_at = now
         elif state == "executed":
             entry.executed_at = now
+            entry.executed_turn_id = self._current_turn_id_or_unknown()
         self._intent_ledger[key] = entry
+
+    def _record_intent_completion(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        *,
+        idempotency_key: str | None = None,
+    ) -> None:
+        now = time.monotonic()
+        self._prune_intent_ledger(now=now)
+        key = self._intent_ledger_key(tool_name, args)
+        entry = self._intent_ledger.get(key)
+        if entry is None:
+            self._record_intent_state(
+                tool_name,
+                args,
+                "executed",
+                idempotency_key=idempotency_key,
+            )
+            entry = self._intent_ledger.get(key)
+            if entry is None:
+                return
+        if idempotency_key:
+            entry.idempotency_key = idempotency_key
+        entry.updated_at = now
+        entry.completed_at = now
+        entry.completed_turn_id = self._current_turn_id_or_unknown()
+        entry.last_turn_id = self._current_turn_id_or_unknown()
+        self._intent_ledger[key] = entry
+
+    def _has_explicit_repeat_cue(self, text: str | None) -> bool:
+        normalized_text = " ".join(str(text or "").strip().lower().split())
+        if not normalized_text:
+            return False
+        repeat_cues = (
+            "again",
+            "back to",
+            "go back",
+            "return to",
+            "once more",
+            "one more time",
+        )
+        return any(cue in normalized_text for cue in repeat_cues)
 
     def _evaluate_intent_guard(
         self,
@@ -11504,6 +11554,24 @@ class RealtimeAPI:
             and isinstance(executed_at, (int, float))
             and now - float(executed_at) <= execution_cooldown_s
         ):
+            current_turn_id = self._current_turn_id_or_unknown()
+            entry_turn_id = str(entry.completed_turn_id or entry.executed_turn_id or "").strip()
+            completed_at = entry.completed_at
+            if (
+                self._is_low_risk_reversible_gesture_tool(tool_name=tool_name)
+                and entry_turn_id
+                and current_turn_id != entry_turn_id
+                and isinstance(completed_at, (int, float))
+            ):
+                logger.info(
+                    "INTENT_GUARD_BYPASS reason=allow_repeated_reversible_gesture phase=%s tool=%s current_turn_id=%s prior_turn_id=%s explicit_repeat=%s",
+                    phase,
+                    tool_name,
+                    current_turn_id,
+                    entry_turn_id,
+                    self._has_explicit_repeat_cue(self._last_user_input_text),
+                )
+                return False, None, None
             logger.info(
                 "INTENT_GUARD_HIT reason=blocked_duplicate_execution phase=%s tool=%s remaining_s=%.2f",
                 phase,
@@ -16685,6 +16753,7 @@ class RealtimeAPI:
                     self._current_turn_id_or_unknown(),
                     call_id,
                 )
+                self._record_intent_completion(function_name, args, idempotency_key=self._idempotency_key_for_action(action))
                 self._mark_tool_followup_timing(
                     turn_id=self._current_turn_id_or_unknown(),
                     marker="tool_result_received",
