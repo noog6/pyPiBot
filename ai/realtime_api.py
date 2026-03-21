@@ -7963,6 +7963,40 @@ class RealtimeAPI:
             return canonical_key, state
         return None
 
+    def _semantic_owner_state_for_response(
+        self,
+        *,
+        response_id: str | None,
+    ) -> tuple[str, CanonicalResponseState] | None:
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            return None
+        selection_entry = self._terminal_deliverable_selection_store().get(normalized_response_id)
+        if not isinstance(selection_entry, dict):
+            return None
+        semantic_owner_canonical_key = str(selection_entry.get("semantic_owner_canonical_key") or "").strip()
+        if not semantic_owner_canonical_key:
+            return None
+        owner_state = self._canonical_response_state(semantic_owner_canonical_key)
+        if not isinstance(owner_state, CanonicalResponseState):
+            return None
+        return semantic_owner_canonical_key, owner_state
+
+    def _semantic_owner_lineage_for_response(
+        self,
+        *,
+        response_id: str | None,
+    ) -> tuple[str, str] | None:
+        owner_entry = self._semantic_owner_state_for_response(response_id=response_id)
+        if owner_entry is None:
+            return None
+        owner_key, owner_state = owner_entry
+        owner_turn_id = str(getattr(owner_state, "turn_id", "") or "").strip()
+        owner_input_event_key = str(getattr(owner_state, "input_event_key", "") or "").strip()
+        if not owner_turn_id or not owner_input_event_key or owner_input_event_key.startswith("tool:"):
+            return None
+        return owner_turn_id, owner_input_event_key
+
     def _resolve_parent_state_for_tool_followup(
         self,
         *,
@@ -7973,10 +8007,15 @@ class RealtimeAPI:
         resolved_from = "none"
         normalized_blocked_by = str(blocked_by_response_id or "").strip()
         if normalized_blocked_by:
-            candidate = self._canonical_state_for_response_id(response_id=normalized_blocked_by)
-            if candidate:
-                state_entry = candidate
-                resolved_from = "response_id"
+            semantic_owner_entry = self._semantic_owner_state_for_response(response_id=normalized_blocked_by)
+            if semantic_owner_entry:
+                state_entry = semantic_owner_entry
+                resolved_from = "semantic_owner_response_id"
+            else:
+                candidate = self._canonical_state_for_response_id(response_id=normalized_blocked_by)
+                if candidate:
+                    state_entry = candidate
+                    resolved_from = "response_id"
         parent_turn_id = str(response_metadata.get("parent_turn_id") or response_metadata.get("turn_id") or "").strip()
         parent_input_event_key = str(response_metadata.get("parent_input_event_key") or "").strip()
         if not state_entry and parent_turn_id and parent_input_event_key and not parent_input_event_key.startswith("tool:"):
@@ -8410,6 +8449,10 @@ class RealtimeAPI:
                 effective_parent_turn_id = trace_parent_turn_id
             if trace_parent_input_event_key:
                 effective_parent_input_event_key = trace_parent_input_event_key
+            if not effective_parent_input_event_key or effective_parent_input_event_key.startswith("tool:"):
+                semantic_owner_lineage = self._semantic_owner_lineage_for_response(response_id=normalized_response_id)
+                if semantic_owner_lineage is not None:
+                    effective_parent_turn_id, effective_parent_input_event_key = semantic_owner_lineage
         if not effective_parent_input_event_key:
             fallback_input_key = normalized_input_key.removesuffix(":clarify")
             if fallback_input_key and not fallback_input_key.startswith("tool:"):
@@ -8643,6 +8686,14 @@ class RealtimeAPI:
                     setattr(record, "deliverable_observed", True),
                     setattr(record, "deliverable_class", "final"),
                 ),
+            )
+        if normalized_response_id and normalized_semantic_owner_key:
+            semantic_owner_state = self._canonical_response_state(normalized_semantic_owner_key)
+            self._record_response_trace_context(
+                normalized_response_id,
+                semantic_owner_canonical_key=normalized_semantic_owner_key,
+                semantic_owner_turn_id=str(getattr(semantic_owner_state, "turn_id", "") or turn_id),
+                semantic_owner_input_event_key=str(getattr(semantic_owner_state, "input_event_key", "") or ""),
             )
         logger.info(
             "terminal_deliverable_selection_applied run_id=%s turn_id=%s canonical_key=%s semantic_owner_canonical_key=%s response_id=%s selected=%s reason=%s",
