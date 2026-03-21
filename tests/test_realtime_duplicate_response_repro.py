@@ -1671,6 +1671,77 @@ def test_same_turn_suppression_still_holds_after_semantic_reconcile() -> None:
     assert owner_reason == "terminal_deliverable_owned"
 
 
+def test_semantic_owner_terminal_text_promotion_bridges_parent_coverage_after_selected_tool_output() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_semantic_bridge"
+    parent_input_event_key = "item_parent_semantic_bridge"
+    child_input_event_key = "tool:call_semantic_bridge"
+    response_id = "resp-semantic-bridge"
+    parent_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    child_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=child_input_event_key)
+
+    api._canonical_response_state_mutate(
+        canonical_key=parent_canonical_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: setattr(record, "origin", "assistant_message"),
+    )
+    api._canonical_response_state_mutate(
+        canonical_key=child_canonical_key,
+        turn_id=turn_id,
+        input_event_key=child_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "tool_output"),
+            setattr(record, "response_id", response_id),
+            setattr(record, "done", True),
+        ),
+    )
+
+    api._apply_terminal_deliverable_selection(
+        canonical_key=child_canonical_key,
+        semantic_owner_canonical_key=parent_canonical_key,
+        response_id=response_id,
+        turn_id=turn_id,
+        input_event_key=child_input_event_key,
+        selected=True,
+        selection_reason="normal",
+    )
+
+    parent_state = api._canonical_response_state(parent_canonical_key)
+    assert parent_state is not None
+    covered, coverage_source, _observed, deliverable_class, terminal_selected, terminal_reason = api._parent_response_coverage_state(
+        parent_state=parent_state,
+    )
+    assert covered is False
+    assert coverage_source == "none"
+    assert deliverable_class == "unknown"
+    assert terminal_selected is False
+    assert terminal_reason == "unknown"
+
+    api._record_terminal_response_text(
+        response_id=response_id,
+        text="The mug is white and your hand is centered again.",
+    )
+
+    parent_state = api._canonical_response_state(parent_canonical_key)
+    assert parent_state is not None
+    covered, coverage_source, observed, deliverable_class, terminal_selected, terminal_reason = api._parent_response_coverage_state(
+        parent_state=parent_state,
+    )
+    assert covered is True
+    assert coverage_source == "canonical"
+    assert observed is True
+    assert deliverable_class == "final"
+    assert terminal_selected is True
+    assert terminal_reason == "normal"
+    assert parent_state.response_id == response_id
+    efficiency = api._conversation_efficiency_state(turn_id=turn_id)
+    assert efficiency.substantive_count == 1
+    assert efficiency.substantive_count_by_canonical == {parent_canonical_key: 1}
+
+
 def test_semantic_substantive_owner_reconcile_is_idempotent_for_repeated_child_done() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
