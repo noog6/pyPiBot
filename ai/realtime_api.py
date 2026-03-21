@@ -6233,6 +6233,86 @@ class RealtimeAPI:
             )
         return False
 
+    def _should_admit_response_terminal_event(
+        self,
+        *,
+        event_type: str,
+        response_id: str | None,
+        turn_id: str,
+        input_event_key: str | None,
+        canonical_key: str | None,
+        origin: str | None,
+    ) -> bool:
+        """Shared admission boundary for response.done/response.completed terminal events."""
+        normalized_event_type = str(event_type or "unknown").strip() or "unknown"
+        normalized_response_id = str(response_id or "").strip()
+        normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
+        normalized_input_event_key = str(input_event_key or "").strip()
+        normalized_canonical_key = str(canonical_key or "").strip()
+        normalized_origin = str(origin or "unknown").strip().lower() or "unknown"
+        active_state = self._active_response_state()
+        active_response_id = str(active_state.response_id or "").strip()
+        active_canonical_key = str(active_state.canonical_key or "").strip()
+        expected_active_input_key = str(self._active_input_event_key_for_turn(normalized_turn_id) or "").strip()
+        expected_active_canonical_key = self._canonical_utterance_key(
+            turn_id=normalized_turn_id,
+            input_event_key=expected_active_input_key,
+        )
+        stale_context = self._stale_response_context(normalized_response_id) if normalized_response_id else {}
+        stale_response_id = bool(
+            normalized_response_id and normalized_response_id in self._stale_response_ids()
+        )
+        reasons: list[str] = []
+        missing_response_id = not normalized_response_id
+        inactive_response_id = bool(
+            normalized_response_id and active_response_id and normalized_response_id != active_response_id
+        )
+        no_active_owner = not active_response_id
+        if normalized_response_id and (stale_context or stale_response_id):
+            reasons.append("stale_response_id")
+        if normalized_origin == "unknown":
+            reasons.append("unknown_origin")
+        if inactive_response_id:
+            reasons.append("inactive_response_id")
+        if no_active_owner:
+            reasons.append("no_active_response_owner")
+        if (
+            normalized_canonical_key
+            and expected_active_input_key
+            and expected_active_canonical_key
+            and normalized_canonical_key != expected_active_canonical_key
+            and (inactive_response_id or no_active_owner)
+        ):
+            reasons.append("turn_active_key_canonical_mismatch")
+        if missing_response_id and (normalized_origin == "unknown" or no_active_owner):
+            reasons.append("missing_response_id")
+        if not reasons:
+            return True
+        classification = "stale" if {"stale_response_id", "inactive_response_id"} & set(reasons) else "orphan"
+        logger.info(
+            "response_terminal_event_ignored run_id=%s classification=%s event_type=%s response_id=%s origin=%s turn_id=%s input_event_key=%s canonical_key=%s active_response_id=%s active_canonical_key=%s reasons=%s",
+            self._current_run_id() or "",
+            classification,
+            normalized_event_type,
+            normalized_response_id or "none",
+            normalized_origin,
+            normalized_turn_id,
+            normalized_input_event_key or "none",
+            normalized_canonical_key or "none",
+            active_response_id or "none",
+            active_canonical_key or "none",
+            ",".join(reasons),
+        )
+        self._log_lifecycle_coherence(
+            stage=f"{normalized_event_type.replace('.', '_')}_ignored",
+            turn_id=normalized_turn_id,
+            response_id=normalized_response_id or None,
+            canonical_key=normalized_canonical_key or None,
+        )
+        if normalized_response_id and normalized_event_type in {"response.done", "response.completed"}:
+            self._clear_stale_response_context(normalized_response_id)
+        return False
+
     def _response_runtime_coherence_snapshot(
         self,
         *,

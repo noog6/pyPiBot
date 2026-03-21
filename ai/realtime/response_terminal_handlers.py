@@ -253,8 +253,8 @@ class ResponseTerminalHandlers:
             or ""
         ).strip()
         active_done_canonical_key = str(
-            trace_context.get("canonical_key")
-            or stale_context.get("canonical_key")
+            stale_context.get("canonical_key")
+            or trace_context.get("canonical_key")
             or getattr(api, "_active_response_canonical_key", "")
             or ""
         ).strip()
@@ -262,6 +262,21 @@ class ResponseTerminalHandlers:
             turn_id=turn_id,
             input_event_key=done_input_event_key,
         )
+        resolved_origin = str(
+            stale_context.get("origin")
+            or trace_context.get("origin")
+            or getattr(api, "_active_response_origin", "unknown")
+            or "unknown"
+        ).strip() or "unknown"
+        if not api._should_admit_response_terminal_event(
+            event_type=str((event or {}).get("type") or "response.done"),
+            response_id=response_id or None,
+            turn_id=turn_id,
+            input_event_key=done_input_event_key or None,
+            canonical_key=done_canonical_key or None,
+            origin=resolved_origin,
+        ):
+            return
         active_response_id = str(getattr(api, "_active_response_id", "") or "").strip()
         active_response_origin = str(getattr(api, "_active_response_origin", "unknown") or "unknown").strip()
         active_input_event_key = done_input_event_key
@@ -765,6 +780,15 @@ class ResponseTerminalHandlers:
         done_input_event_key = str(getattr(api, "_active_response_input_event_key", "") or "").strip()
         done_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=done_input_event_key)
         active_response_origin_before_clear = str(getattr(api, "_active_response_origin", "") or "").strip().lower()
+        if not api._should_admit_response_terminal_event(
+            event_type=str((event or {}).get("type") or "response.completed"),
+            response_id=response_id or None,
+            turn_id=turn_id,
+            input_event_key=done_input_event_key or None,
+            canonical_key=done_canonical_key or None,
+            origin=active_response_origin_before_clear or "unknown",
+        ):
+            return
         api._cancel_micro_ack(turn_id=turn_id, reason="response_completed")
         api.response_in_progress = False
         api._response_in_flight = False
