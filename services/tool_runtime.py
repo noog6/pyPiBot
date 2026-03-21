@@ -22,6 +22,7 @@ from motion import (
     gesture_no,
     gesture_nod,
 )
+from services.battery_monitor import BatteryMonitor
 from services.output_volume import OutputVolumeController
 
 
@@ -68,11 +69,19 @@ def read_battery_voltage() -> dict[str, Any]:
 
     sensor = ADS1015Sensor.get_instance()
     voltage = sensor.read_battery_voltage()
+    latest_event = BatteryMonitor.get_instance().get_latest_event()
+    inferred_charger_connected = False
+    inference_reason = "no_prior_sample"
+    if latest_event is not None:
+        inferred_charger_connected = latest_event.inferred_charger_connected
+        inference_reason = latest_event.inference_reason
     return {
         "voltage": voltage,
         "unit": "V",
         "min_voltage": 7.0,
         "max_voltage": 8.4,
+        "inferred_charger_connected": inferred_charger_connected,
+        "inference_reason": inference_reason,
     }
 
 

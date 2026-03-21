@@ -452,8 +452,13 @@ tools.append(
         "name": "read_battery_voltage",
         "description": (
             "Fetch the current voltage of the onboard 2S LiPo battery. "
-            "Safe operating range is 7.0V to 8.4V. If the reading is within "
-            "0.5V of the minimum voltage, complain about it; being near the max is fine."
+            "Safe operating range is 7.0V to 8.4V. The tool also returns charger inference "
+            "fields from the latest battery monitor event: inferred_charger_connected and "
+            "inference_reason. If inferred_charger_connected is true, report that Theo currently "
+            "infers charger connection. If false with inference_reason=voltage_rising_pending, "
+            "say charging is not yet confirmed but a rising trend was observed. For false with "
+            "other reasons, say Theo does not currently infer charger connection. If the reading "
+            "is within 0.5V of the minimum voltage, complain about it; being near the max is fine."
         ),
         "parameters": {
             "type": "object",

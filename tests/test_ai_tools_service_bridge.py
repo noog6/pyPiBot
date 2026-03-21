@@ -10,13 +10,15 @@ import ai.tools as ai_tools
 def test_read_battery_voltage_delegates_and_keeps_payload_shape(monkeypatch) -> None:
     called = {"count": 0}
 
-    def fake_read_battery_voltage() -> dict[str, float | str]:
+    def fake_read_battery_voltage() -> dict[str, float | str | bool]:
         called["count"] += 1
         return {
             "voltage": 8.1,
             "unit": "V",
             "min_voltage": 7.0,
             "max_voltage": 8.4,
+            "inferred_charger_connected": False,
+            "inference_reason": "voltage_flat",
         }
 
     monkeypatch.setattr(ai_tools.tool_runtime, "read_battery_voltage", fake_read_battery_voltage)
@@ -29,6 +31,8 @@ def test_read_battery_voltage_delegates_and_keeps_payload_shape(monkeypatch) -> 
         "unit": "V",
         "min_voltage": 7.0,
         "max_voltage": 8.4,
+        "inferred_charger_connected": False,
+        "inference_reason": "voltage_flat",
     }
 
 
