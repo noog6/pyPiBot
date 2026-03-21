@@ -1887,6 +1887,63 @@ def test_runtime_semantic_owner_decision_wrapper_rejects_bogus_nested_tool_linea
     assert decision.reason_code == "parent_input_tool_prefixed"
 
 
+def test_chained_tool_output_semantic_owner_reuses_selected_parent_lineage() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_semantic_chain"
+    parent_input_event_key = "item_semantic_chain_parent"
+    parent_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    child_input_event_key = "tool:call_chain_child"
+    child_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=child_input_event_key)
+    grandchild_input_event_key = "tool:call_chain_grandchild"
+    grandchild_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=grandchild_input_event_key)
+
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "created", True),
+            setattr(record, "response_id", "resp-semantic-chain-parent"),
+            setattr(record, "origin", "server_auto"),
+        ),
+    )
+    api._record_terminal_response_text(response_id="resp-semantic-chain-child", text="You are holding a mug.")
+    api._apply_terminal_deliverable_selection(
+        canonical_key=child_key,
+        semantic_owner_canonical_key=parent_key,
+        response_id="resp-semantic-chain-child",
+        turn_id=turn_id,
+        input_event_key=child_input_event_key,
+        selected=True,
+        selection_reason="normal",
+    )
+    api._record_response_trace_context(
+        "resp-semantic-chain-child",
+        turn_id=turn_id,
+        input_event_key=child_input_event_key,
+        canonical_key=child_key,
+        origin="tool_output",
+        parent_turn_id=turn_id,
+        parent_input_event_key=child_input_event_key,
+    )
+
+    decision = api._semantic_owner_decision_for_response(
+        turn_id=turn_id,
+        input_event_key=grandchild_input_event_key,
+        origin="tool_output",
+        response_id="resp-semantic-chain-child",
+        done_canonical_key=grandchild_key,
+        selected=True,
+        selection_reason="normal",
+    )
+
+    assert decision.semantic_owner_canonical_key == parent_key
+    assert decision.selected_candidate_id == "semantic_owner_parent"
+    assert decision.reason_code == "parent_promoted_from_tool_output"
+
+
 def test_parent_semantic_promotion_requires_terminal_text_evidence() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
@@ -3628,6 +3685,108 @@ def test_tool_followup_pruned_when_parent_has_substantive_audio_output() -> None
 
     assert should_drop is True
     assert reason == "parent_covered_tool_result"
+
+
+def test_response_done_prunes_followup_when_parent_terminal_selection_already_covers_result() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_terminal_parent_prune"
+    parent_input_event_key = "item_parent_terminal_prune"
+    parent_response_id = "resp-parent-terminal-prune"
+    parent_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "upgraded_response"),
+            setattr(record, "response_id", parent_response_id),
+            setattr(record, "done", True),
+            setattr(record, "deliverable_observed", False),
+            setattr(record, "deliverable_class", "unknown"),
+            setattr(record, "audio_started", False),
+        ),
+    )
+    api._record_terminal_response_text(response_id=parent_response_id, text="It looks like a white mug.")
+    api._apply_terminal_deliverable_selection(
+        canonical_key=parent_key,
+        response_id=parent_response_id,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        selected=True,
+        selection_reason="normal",
+    )
+
+    event, canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_terminal_parent_prune",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+    metadata = ((event.get("response") or {}).get("metadata") or {})
+    metadata["turn_id"] = turn_id
+    metadata["parent_turn_id"] = turn_id
+    metadata["parent_input_event_key"] = parent_input_event_key
+    metadata["blocked_by_response_id"] = parent_response_id
+
+    should_drop, _entry, reason = api._should_suppress_queued_tool_followup_release(
+        response_metadata=metadata,
+        blocked_by_response_id=parent_response_id,
+    )
+
+    assert should_drop is True
+    assert reason == "parent_covered_tool_result"
+
+
+def test_response_done_release_keeps_distinct_tool_followup_when_parent_terminal_selected() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_terminal_parent_release"
+    parent_input_event_key = "item_parent_terminal_release"
+    parent_response_id = "resp-parent-terminal-release"
+    parent_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "upgraded_response"),
+            setattr(record, "response_id", parent_response_id),
+            setattr(record, "done", True),
+            setattr(record, "deliverable_observed", False),
+            setattr(record, "deliverable_class", "unknown"),
+        ),
+    )
+    api._record_terminal_response_text(response_id=parent_response_id, text="I found your keys.")
+    api._apply_terminal_deliverable_selection(
+        canonical_key=parent_key,
+        response_id=parent_response_id,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        selected=True,
+        selection_reason="normal",
+    )
+
+    event, _canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_terminal_parent_release",
+        response_create_event={"type": "response.create"},
+        tool_name="perform_research",
+        tool_result_has_distinct_info=True,
+    )
+    metadata = ((event.get("response") or {}).get("metadata") or {})
+    metadata["turn_id"] = turn_id
+    metadata["parent_turn_id"] = turn_id
+    metadata["parent_input_event_key"] = parent_input_event_key
+    metadata["blocked_by_response_id"] = parent_response_id
+
+    should_drop, _entry, reason = api._should_suppress_queued_tool_followup_release(
+        response_metadata=metadata,
+        blocked_by_response_id=parent_response_id,
+    )
+
+    assert should_drop is False
+    assert reason == "not_suppressible"
 
 
 def test_tool_followup_blocked_by_active_parent_is_released_and_drained_after_parent_done() -> None:
