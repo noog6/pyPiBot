@@ -1142,6 +1142,57 @@ def test_transcript_final_handoff_invalidates_provisional_tool_followup_lineage(
     assert api._tool_followup_state(canonical_key="run-464:turn_3:tool:call_queued") == "dropped"
 
 
+def test_transcript_final_handoff_invalidates_superseded_empty_retry_lineage() -> None:
+    api = _build_api_stub()
+    api._pending_response_create = types.SimpleNamespace(
+        event={
+            "type": "response.create",
+            "response": {
+                "metadata": {
+                    "turn_id": "turn_3",
+                    "input_event_key": "synthetic_server_auto_3__empty_retry",
+                    "retry_reason": "empty_response_done",
+                }
+            },
+        },
+        turn_id="turn_3",
+    )
+    api._response_create_queue = deque(
+        [
+            {
+                "turn_id": "turn_3",
+                "event": {
+                    "type": "response.create",
+                    "response": {
+                        "metadata": {
+                            "turn_id": "turn_3",
+                            "input_event_key": "synthetic_server_auto_3__empty_retry",
+                            "retry_reason": "empty_response_done",
+                        }
+                    },
+                },
+            }
+        ]
+    )
+    api._sync_pending_response_create_queue = lambda: None
+
+    api._invalidate_superseded_empty_retry_lineage_for_turn(
+        turn_id="turn_3",
+        superseded_input_event_key="synthetic_server_auto_3",
+        reason="transcript_final_handoff",
+    )
+
+    assert api._pending_response_create is None
+    assert list(api._response_create_queue) == []
+    assert (
+        api._is_invalidated_empty_retry_lineage(
+            turn_id="turn_3",
+            input_event_key="synthetic_server_auto_3__empty_retry",
+        )
+        is True
+    )
+
+
 def test_cancel_and_replace_allows_post_done_lineage_when_active_response_cleared(monkeypatch) -> None:
     api = _build_api_stub()
     transport = _Transport()

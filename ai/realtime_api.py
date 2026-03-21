@@ -5413,6 +5413,124 @@ class RealtimeAPI:
                 dropped_queue,
             )
 
+    def _invalidated_empty_retry_lineage_store(self) -> dict[str, set[str]]:
+        store = getattr(self, "_invalidated_empty_retry_lineages_by_turn", None)
+        if not isinstance(store, dict):
+            store = {}
+            self._invalidated_empty_retry_lineages_by_turn = store
+        return store
+
+    def _prune_invalidated_empty_retry_lineage_store(self, *, drop_turn_id: str | None = None) -> None:
+        store = getattr(self, "_invalidated_empty_retry_lineages_by_turn", None)
+        if not isinstance(store, dict) or not store:
+            return
+        normalized_drop_turn_id = str(drop_turn_id or "").strip()
+        if normalized_drop_turn_id:
+            store.pop(normalized_drop_turn_id, None)
+        max_turns = max(1, int(getattr(self, "_invalidated_empty_retry_lineage_max_turns", 32) or 32))
+        if len(store) <= max_turns:
+            return
+        active_turn_ids = set()
+        active_by_turn = getattr(self, "_active_input_event_key_by_turn_id", None)
+        if isinstance(active_by_turn, dict):
+            active_turn_ids.update(str(turn_id or "").strip() for turn_id in active_by_turn.keys() if str(turn_id or "").strip())
+        pending = getattr(self, "_pending_response_create", None)
+        pending_turn_id = str(getattr(pending, "turn_id", "") or "").strip()
+        if pending_turn_id:
+            active_turn_ids.add(pending_turn_id)
+        queue = getattr(self, "_response_create_queue", None)
+        if isinstance(queue, deque):
+            active_turn_ids.update(
+                str(queued.get("turn_id") or "").strip()
+                for queued in queue
+                if isinstance(queued, dict) and str(queued.get("turn_id") or "").strip()
+            )
+        while len(store) > max_turns:
+            removable_turn_id = next((turn_id for turn_id in store.keys() if turn_id not in active_turn_ids), "")
+            if not removable_turn_id:
+                removable_turn_id = next(iter(store.keys()))
+            store.pop(removable_turn_id, None)
+
+    def _invalidate_superseded_empty_retry_lineage_for_turn(
+        self,
+        *,
+        turn_id: str,
+        superseded_input_event_key: str,
+        reason: str,
+    ) -> None:
+        normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
+        normalized_superseded_key = self._strip_empty_retry_suffix_lineage(superseded_input_event_key)
+        if not normalized_superseded_key or not self._is_synthetic_input_event_key(normalized_superseded_key):
+            return
+
+        invalidated = self._invalidated_empty_retry_lineage_store()
+        turn_invalidated = invalidated.setdefault(normalized_turn_id, set())
+        turn_invalidated.add(normalized_superseded_key)
+        self._prune_invalidated_empty_retry_lineage_store()
+
+        def _is_superseded_empty_retry(event: dict[str, Any], *, fallback_turn_id: str) -> bool:
+            metadata = self._extract_response_create_metadata(event)
+            event_turn_id = str(metadata.get("turn_id") or fallback_turn_id or "").strip() or fallback_turn_id
+            input_event_key = str(metadata.get("input_event_key") or "").strip()
+            if event_turn_id != normalized_turn_id or not input_event_key.endswith("__empty_retry"):
+                return False
+            origin_input_event_key = self._strip_empty_retry_suffix_lineage(input_event_key)
+            return origin_input_event_key == normalized_superseded_key
+
+        dropped_pending = 0
+        pending = getattr(self, "_pending_response_create", None)
+        if pending is not None and isinstance(getattr(pending, "event", None), dict):
+            if _is_superseded_empty_retry(
+                pending.event,
+                fallback_turn_id=str(getattr(pending, "turn_id", "") or normalized_turn_id),
+            ):
+                self._pending_response_create = None
+                dropped_pending = 1
+
+        dropped_queue = 0
+        queue = getattr(self, "_response_create_queue", None)
+        if isinstance(queue, deque) and queue:
+            retained: deque[dict[str, Any]] = deque()
+            for queued in queue:
+                if not isinstance(queued, dict) or not isinstance(queued.get("event"), dict):
+                    retained.append(queued)
+                    continue
+                if _is_superseded_empty_retry(
+                    queued["event"],
+                    fallback_turn_id=str(queued.get("turn_id") or normalized_turn_id),
+                ):
+                    dropped_queue += 1
+                    continue
+                retained.append(queued)
+            self._response_create_queue = retained
+
+        if dropped_pending or dropped_queue:
+            self._sync_pending_response_create_queue()
+            logger.info(
+                "superseded_empty_retry_lineage_invalidated run_id=%s turn_id=%s superseded_input_event_key=%s reason=%s dropped_pending=%s dropped_queue=%s",
+                self._current_run_id() or "",
+                normalized_turn_id,
+                normalized_superseded_key,
+                str(reason or "unknown").strip() or "unknown",
+                dropped_pending,
+                dropped_queue,
+            )
+
+    def _is_invalidated_empty_retry_lineage(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str | None,
+    ) -> bool:
+        normalized_input_event_key = str(input_event_key or "").strip()
+        if not normalized_input_event_key.endswith("__empty_retry"):
+            return False
+        normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
+        invalidated = self._invalidated_empty_retry_lineage_store().get(normalized_turn_id)
+        if not isinstance(invalidated, set) or not invalidated:
+            return False
+        return self._strip_empty_retry_suffix_lineage(normalized_input_event_key) in invalidated
+
     def _record_pending_server_auto_response(
         self,
         *,
@@ -9775,6 +9893,8 @@ class RealtimeAPI:
             kept.append(queued)
         if dropped:
             self._response_create_queue = kept
+        if normalized_turn_id:
+            self._prune_invalidated_empty_retry_lineage_store(drop_turn_id=normalized_turn_id)
         if removed_pending or dropped:
             self._sync_pending_response_create_queue()
             logger.info(
@@ -9788,6 +9908,7 @@ class RealtimeAPI:
             )
 
     def _clear_all_pending_response_creates(self, *, reason: str) -> None:
+        self._invalidated_empty_retry_lineage_store().clear()
         removed_pending = 1 if self._pending_response_create is not None else 0
         removed_queued = len(self._response_create_queue)
         self._pending_response_create = None
@@ -12681,6 +12802,30 @@ class RealtimeAPI:
             retry_reason = str(response_metadata.get("retry_reason") or "").strip().lower()
 
         is_empty_retry = retry_reason == "empty_response_done" or normalized_input_event_key.endswith("__empty_retry")
+        if is_empty_retry and self._is_invalidated_empty_retry_lineage(
+            turn_id=turn_id,
+            input_event_key=normalized_input_event_key,
+        ):
+            logger.info(
+                "response_dropped_terminal_state run_id=%s turn_id=%s canonical_key=%s prior_state=%s",
+                self._current_run_id() or "",
+                turn_id,
+                self._canonical_utterance_key(turn_id=turn_id, input_event_key=normalized_input_event_key),
+                "superseded_empty_retry_lineage",
+            )
+            self._mark_transcript_response_outcome(
+                input_event_key=normalized_input_event_key,
+                turn_id=turn_id,
+                outcome="response_not_scheduled",
+                reason="canonical_delivery_terminal_state",
+                details=(
+                    "canonical delivery terminal state "
+                    f"origin={str(origin or '').strip().lower() or 'unknown'} "
+                    "prior_state=superseded_empty_retry_lineage "
+                    f"canonical_key={self._canonical_utterance_key(turn_id=turn_id, input_event_key=normalized_input_event_key)}"
+                ),
+            )
+            return True
         if is_empty_retry and self._turn_has_final_deliverable(turn_id=turn_id):
             logger.info(
                 "response_dropped_terminal_state run_id=%s turn_id=%s canonical_key=%s prior_state=%s",
@@ -14626,6 +14771,37 @@ class RealtimeAPI:
         pending_turn_id = str(pending_origin_context.get("turn_id") or "").strip()
         pending_input_event_key = str(pending_origin_context.get("input_event_key") or "").strip()
         response_id = response.get("id")
+        turn_id = metadata_turn_id or pending_turn_id or self._current_turn_id_or_unknown()
+        candidate_input_event_key = metadata_input_event_key or pending_input_event_key or ""
+        if (
+            str(origin or "").strip().lower() == "server_auto"
+            and self._is_invalidated_empty_retry_lineage(
+                turn_id=turn_id,
+                input_event_key=candidate_input_event_key,
+            )
+        ):
+            logger.info(
+                "server_auto_stale_empty_retry_discard run_id=%s turn_id=%s input_event_key=%s response_id=%s",
+                self._current_run_id() or "",
+                turn_id,
+                candidate_input_event_key or "unknown",
+                str(response_id or "unknown"),
+            )
+            if response_id:
+                self._quarantine_cancelled_response_id(
+                    response_id=str(response_id),
+                    turn_id=turn_id,
+                    input_event_key=candidate_input_event_key,
+                    origin=str(origin or "server_auto"),
+                    reason="stale_empty_retry_lineage",
+                )
+            if websocket is not None:
+                cancel_event = {"type": "response.cancel"}
+                log_ws_event("Outgoing", cancel_event)
+                self._track_outgoing_event(cancel_event, origin="server_auto_stale_empty_retry_guard")
+                transport = self._get_or_create_transport()
+                await transport.send_json(websocket, cancel_event)
+            return
         self._set_active_response_state(
             response_id=str(response_id) if response_id else None,
             origin=str(origin),
@@ -14635,7 +14811,6 @@ class RealtimeAPI:
         self._set_response_status(response_id=self._active_response_id, status="active")
         pending_confirmation_active = self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase()
         self._set_active_response_state(preference_guarded=False)
-        turn_id = metadata_turn_id or pending_turn_id or self._current_turn_id_or_unknown()
         self._cancel_micro_ack(turn_id=turn_id, reason="response_created")
         if origin == "server_auto":
             expected_input_event_key = self._active_input_event_key_for_turn(turn_id)
@@ -15549,6 +15724,11 @@ class RealtimeAPI:
             self._invalidate_provisional_tool_followups_for_turn(
                 turn_id=resolved_turn_id,
                 provisional_parent_input_event_key=pending_server_auto_input_event_key,
+                reason="transcript_final_handoff",
+            )
+            self._invalidate_superseded_empty_retry_lineage_for_turn(
+                turn_id=resolved_turn_id,
+                superseded_input_event_key=pending_server_auto_input_event_key,
                 reason="transcript_final_handoff",
             )
         memory_intent_subtype = self._classify_memory_intent(transcript or "")
