@@ -218,7 +218,7 @@ class MicroAckManager:
             return
 
         delay_s = max(0.01, self._config.delay_ms / 1000.0)
-        handle = loop.call_later(delay_s, self._emit_if_allowed, context, reason, loop)
+        handle = self._schedule_emit(loop=loop, delay_s=delay_s, context=context, reason=reason)
         self._scheduled[dedupe_key] = _ScheduledMicroAck(context=context, reason=reason, handle=handle)
         self._scheduled_reason[dedupe_key] = reason
         self._log("scheduled", turn_id, reason, self._config.delay_ms, context)
@@ -296,12 +296,55 @@ class MicroAckManager:
             rewritten += 1
         return rewritten
 
-    def _emit_if_allowed(self, context: MicroAckContext, reason: str, loop: asyncio.AbstractEventLoop) -> None:
+    def _schedule_emit(
+        self,
+        *,
+        loop: asyncio.AbstractEventLoop,
+        delay_s: float,
+        context: MicroAckContext,
+        reason: str,
+    ) -> asyncio.TimerHandle:
+        handle_ref: dict[str, asyncio.TimerHandle] = {}
+
+        def _callback() -> None:
+            handle = handle_ref.get("handle")
+            if handle is None:
+                return
+            self._emit_if_allowed(handle=handle, fallback_context=context, fallback_reason=reason, loop=loop)
+
+        handle = loop.call_later(delay_s, _callback)
+        handle_ref["handle"] = handle
+        return handle
+
+    def _scheduled_entry_for_handle(self, handle: asyncio.TimerHandle) -> tuple[str, _ScheduledMicroAck] | None:
+        for dedupe_key, scheduled in self._scheduled.items():
+            if scheduled.handle is handle:
+                return dedupe_key, scheduled
+        return None
+
+    def _emit_if_allowed(
+        self,
+        *,
+        handle: asyncio.TimerHandle,
+        fallback_context: MicroAckContext,
+        fallback_reason: str,
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        entry = self._scheduled_entry_for_handle(handle)
+        if entry is not None:
+            dedupe_key, scheduled = entry
+            context = scheduled.context
+            reason = scheduled.reason
+            self._scheduled.pop(dedupe_key, None)
+            self._scheduled_reason.pop(dedupe_key, None)
+        else:
+            context = fallback_context
+            reason = fallback_reason
+            dedupe_key = self._dedupe_key(context)
+            self._scheduled.pop(dedupe_key, None)
+            self._scheduled_reason.pop(dedupe_key, None)
         turn_id = context.turn_id
-        dedupe_key = self._dedupe_key(context)
         scope_key = self._scope_key(context)
-        self._scheduled.pop(dedupe_key, None)
-        self._scheduled_reason.pop(dedupe_key, None)
         self._expire_ttl_state()
 
         suppress = self._suppression_reason()
@@ -353,7 +396,7 @@ class MicroAckManager:
 
         if len(scope_history) < self._config.per_turn_max and self._config.long_wait_second_ack_ms > 0:
             delay_s = self._config.long_wait_second_ack_ms / 1000.0
-            handle = loop.call_later(delay_s, self._emit_if_allowed, context, "long_wait", loop)
+            handle = self._schedule_emit(loop=loop, delay_s=delay_s, context=context, reason="long_wait")
             self._scheduled[dedupe_key] = _ScheduledMicroAck(context=context, reason="long_wait", handle=handle)
             self._scheduled_reason[dedupe_key] = "long_wait"
             self._log("scheduled", turn_id, "long_wait", self._config.long_wait_second_ack_ms, context)

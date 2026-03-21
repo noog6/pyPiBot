@@ -548,6 +548,27 @@ def test_handle_response_done_marks_micro_ack_as_non_deliverable() -> None:
     )
 
 
+def test_handle_response_done_clears_response_blocking_flags_for_micro_ack() -> None:
+    api = _make_api()
+    api._active_response_origin = "micro_ack"
+    api._active_response_input_event_key = "item_DLqb645TWTMp53kKezLBn"
+    api._active_response_canonical_key = "run-681:turn_4:item_DLqb645TWTMp53kKezLBn"
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+
+    asyncio.run(api.handle_response_done({"type": "response.done"}))
+
+    assert api.response_in_progress is False
+    assert api._response_in_flight is False
+
+
 def test_handle_response_done_uses_active_canonical_key_for_lifecycle() -> None:
     api = _make_api()
     lifecycle_calls: list[str] = []

@@ -495,3 +495,79 @@ def test_safety_sensitive_phrase_catalog_uses_neutral_pre_confirmation_wording()
         all(marker not in phrase.lower() for marker in execution_implying_markers)
         for _phrase_id, phrase in start_of_work
     )
+
+
+def test_rewrite_scheduled_context_rebinds_emit_time_context_from_authoritative_state() -> None:
+    loop = asyncio.new_event_loop()
+    fake_loop = loop
+    emits: list[tuple[MicroAckContext, str, str]] = []
+
+    manager = MicroAckManager(
+        config=MicroAckConfig(delay_ms=10, global_cooldown_ms=1, per_turn_max=1, long_wait_second_ack_ms=0),
+        on_emit=lambda context, phrase_id, phrase: emits.append((context, phrase_id, phrase)),
+        on_log=lambda *_args, **_kwargs: None,
+        suppression_reason=lambda: None,
+        rng=random.Random(7),
+    )
+
+    original = MicroAckContext(
+        category=MicroAckCategory.LATENCY_MASK,
+        channel="voice",
+        run_id="run-1",
+        session_id="session-1",
+        turn_id="turn-4",
+        action="run-1:turn-4:synthetic_server_auto_4",
+    )
+    rebound = "run-1:turn-4:item_DLqb645TWTMp53kKezLBn"
+
+    manager.maybe_schedule(context=original, reason="transcript_finalized", loop=fake_loop, expected_delay_ms=900)
+    assert len(manager._scheduled) == 1
+
+    rewritten = manager.rewrite_scheduled_contexts(
+        turn_id="turn-4",
+        rewriter=lambda context: context if context.action != original.action else MicroAckContext(**{**context.__dict__, "action": rebound}),
+    )
+
+    assert rewritten == 1
+
+    loop.run_until_complete(asyncio.sleep(0.02))
+
+    assert len(emits) == 1
+    assert emits[0][0].action == rebound
+    assert manager._scheduled == {}
+    loop.close()
+
+
+def test_rewrite_scheduled_context_does_not_allow_stale_duplicate_emit_after_same_turn_rebound() -> None:
+    loop = asyncio.new_event_loop()
+    emits: list[tuple[MicroAckContext, str, str]] = []
+
+    manager = MicroAckManager(
+        config=MicroAckConfig(delay_ms=10, global_cooldown_ms=1, per_turn_max=1, long_wait_second_ack_ms=0),
+        on_emit=lambda context, phrase_id, phrase: emits.append((context, phrase_id, phrase)),
+        on_log=lambda *_args, **_kwargs: None,
+        suppression_reason=lambda: None,
+        rng=random.Random(7),
+    )
+
+    original = MicroAckContext(
+        category=MicroAckCategory.LATENCY_MASK,
+        channel="voice",
+        run_id="run-1",
+        session_id="session-1",
+        turn_id="turn-4",
+        action="run-1:turn-4:synthetic_server_auto_4",
+    )
+    rebound = "run-1:turn-4:item_DLqb645TWTMp53kKezLBn"
+    manager.maybe_schedule(context=original, reason="transcript_finalized", loop=loop, expected_delay_ms=900)
+    manager.rewrite_scheduled_contexts(
+        turn_id="turn-4",
+        rewriter=lambda context: context if context.action != original.action else MicroAckContext(**{**context.__dict__, "action": rebound}),
+    )
+
+    loop.run_until_complete(asyncio.sleep(0.02))
+    loop.run_until_complete(asyncio.sleep(0.02))
+
+    assert [context.action for context, *_ in emits] == [rebound]
+    assert manager._scheduled == {}
+    loop.close()
