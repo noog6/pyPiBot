@@ -1116,8 +1116,13 @@ def _semantic_owner_parent_promotion_is_expected(trace: TurnArbitrationTrace) ->
             continue
         if decision.parent_coverage_state != "uncovered":
             continue
-        if decision.followup_distinctness != "distinct":
+        distinctness = str(decision.followup_distinctness or "").strip().lower()
+        if distinctness not in {"distinct", "redundant"}:
             continue
+        if distinctness == "redundant":
+            native_reason = str(decision.native_reason_code or "").strip().lower()
+            if native_reason != "parent_not_deliverable":
+                continue
         parent_semantic_owner_key = str(decision.parent_semantic_owner_key or "").strip()
         parent_canonical_key = str(decision.parent_canonical_key or "").strip()
         if promoted_parent_key and promoted_parent_key in {parent_semantic_owner_key, parent_canonical_key}:

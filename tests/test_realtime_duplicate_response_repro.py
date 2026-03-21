@@ -5499,6 +5499,46 @@ def test_upgraded_response_still_suppresses_redundant_tool_followup_after_pendin
     assert coverage_source == "canonical"
 
 
+def test_status_only_gesture_followup_observation_marks_released_child_redundant() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_status_only_release"
+    canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key="tool:call_status_only")
+    api._record_tool_followup_metadata(
+        canonical_key=canonical_key,
+        metadata={
+            "tool_name": "gesture_look_center",
+            "tool_followup_status_only": "true",
+        },
+    )
+
+    api._record_tool_followup_observation(
+        turn_id=turn_id,
+        input_event_key="tool:call_status_only",
+        canonical_key=canonical_key,
+        origin="tool_output",
+        parent_coverage_state="uncovered",
+        followup_outcome_posture="released",
+        native_reason_code="parent_not_deliverable",
+        native_outcome_action="SEND",
+        response_metadata={
+            "tool_name": "gesture_look_center",
+            "tool_followup_status_only": "true",
+        },
+        parent_canonical_key=f"{turn_id}::item_parent",
+        parent_semantic_owner_key=f"{turn_id}::item_parent",
+        authority_seam="tool_followup_release_seam",
+    )
+
+    trace = api._turn_arbitration_trace_by_key[(api._current_run_id() or "", turn_id)]
+    observation = trace.tool_followup_observations[-1]
+
+    assert observation.decision.followup_outcome_posture == "released"
+    assert observation.decision.followup_distinctness == "redundant"
+    assert observation.decision.native_reason_code == "parent_not_deliverable"
+
+
 def test_provisional_server_auto_parent_progression_holds_then_suppresses_followup_after_terminal_selection() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
