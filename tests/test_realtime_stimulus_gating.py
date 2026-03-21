@@ -28,6 +28,7 @@ def _make_api_stub() -> RealtimeAPI:
         emit_injected_event=api._emit_injected_event,
         emit_system_context_payload=api._emit_system_context_payload,
     )
+    api._expire_confirmation_awaiting_decision_timeout = lambda: None
     return api
 
 
