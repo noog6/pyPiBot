@@ -1127,6 +1127,34 @@ def test_handle_response_done_clears_active_ownership_surface_with_legacy_mirror
     assert api._active_server_auto_input_event_key is None
 
 
+def test_tool_followup_empty_response_done_still_clears_active_runtime_state() -> None:
+    api = _make_api()
+    api._active_response_origin = "tool_output"
+    api._active_response_input_event_key = "tool:call_empty"
+    api._active_response_canonical_key = "turn_1::tool:call_empty"
+    api._response_delivery_state = lambda **_kwargs: "created"
+    api._is_empty_response_done = lambda **_kwargs: True
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_1"}}))
+
+    api._maybe_schedule_empty_response_retry.assert_awaited_once()
+    assert api._active_response_id is None
+    assert api._active_response_origin == "unknown"
+    assert api._active_response_input_event_key is None
+    assert api._active_response_canonical_key is None
+    assert api._response_in_flight is False
+    assert api.response_in_progress is False
+
+
 
 def test_handle_response_completed_clears_same_active_ownership_surface_as_response_done() -> None:
     api = _make_api()
