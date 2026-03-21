@@ -5682,6 +5682,126 @@ def test_provisional_server_auto_parent_progression_holds_then_suppresses_follow
     assert followup_metadata.get("tool_followup_release") == "true"
 
 
+def test_tool_followup_release_does_not_reopen_parent_pending_after_tool_rebind() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_parent_tool_rebind"
+    parent_input_event_key = "item_parent_tool_rebind"
+    parent_response_id = "resp-parent-tool-rebind"
+    parent_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    api._canonical_response_state_mutate(
+        canonical_key=parent_canonical_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "server_auto"),
+            setattr(record, "response_id", parent_response_id),
+            setattr(record, "deliverable_observed", False),
+            setattr(record, "deliverable_class", "unknown"),
+            setattr(record, "done", True),
+        ),
+    )
+    api._mark_response_provisional(response_id=parent_response_id)
+    api._apply_terminal_deliverable_selection(
+        canonical_key=parent_canonical_key,
+        response_id=parent_response_id,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        selected=True,
+        selection_reason="normal",
+    )
+
+    first_followup_response_id = "resp-tool-followup-1"
+    first_followup_input_event_key = "tool:call_parent_tool_rebind_1"
+    first_followup_canonical_key = api._canonical_utterance_key(
+        turn_id=turn_id,
+        input_event_key=first_followup_input_event_key,
+    )
+    api._apply_terminal_deliverable_selection(
+        canonical_key=first_followup_canonical_key,
+        semantic_owner_canonical_key=parent_canonical_key,
+        response_id=first_followup_response_id,
+        turn_id=turn_id,
+        input_event_key=first_followup_input_event_key,
+        selected=True,
+        selection_reason="normal",
+    )
+
+    # Reproduce the live-run seam: once the first tool followup is released, the
+    # active key for the turn can legitimately move to the tool lineage.
+    api._active_input_event_key_by_turn_id[turn_id] = first_followup_input_event_key
+
+    second_followup_event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_parent_tool_rebind_2",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_idle",
+    )
+    second_followup_metadata = ((second_followup_event.get("response") or {}).get("metadata") or {})
+    second_followup_metadata["blocked_by_response_id"] = first_followup_response_id
+    second_followup_metadata["parent_turn_id"] = turn_id
+    second_followup_metadata["parent_input_event_key"] = first_followup_input_event_key
+
+    decision, entry = api._decide_tool_followup_arbitration(
+        response_metadata=second_followup_metadata,
+        blocked_by_response_id=first_followup_response_id,
+    )
+
+    assert entry is not None
+    assert entry[0] == parent_canonical_key
+    assert decision.should_hold is False
+    assert decision.should_release is True
+    assert decision.reason_code == "parent_not_deliverable"
+    assert decision.parent_coverage_state == "uncovered"
+
+
+def test_tool_followup_parent_pending_falls_back_to_active_turn_key_when_parent_input_key_missing() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_parent_missing_input_key"
+    parent_input_event_key = "item_parent_missing_input_key"
+    parent_response_id = "resp-parent-missing-input-key"
+    parent_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    api._canonical_response_state_mutate(
+        canonical_key=parent_canonical_key,
+        turn_id=turn_id,
+        input_event_key=None,
+        mutator=lambda record: (
+            setattr(record, "origin", "server_auto"),
+            setattr(record, "response_id", parent_response_id),
+            setattr(record, "deliverable_observed", False),
+            setattr(record, "deliverable_class", "unknown"),
+            setattr(record, "done", True),
+            setattr(record, "input_event_key", ""),
+        ),
+    )
+    api._mark_response_provisional(response_id=parent_response_id)
+    api._active_input_event_key_by_turn_id[turn_id] = parent_input_event_key
+
+    followup_event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_parent_missing_input_key",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_idle",
+    )
+    followup_metadata = ((followup_event.get("response") or {}).get("metadata") or {})
+    followup_metadata["blocked_by_response_id"] = parent_response_id
+    followup_metadata["parent_turn_id"] = turn_id
+    followup_metadata["parent_input_event_key"] = parent_input_event_key
+
+    decision, entry = api._decide_tool_followup_arbitration(
+        response_metadata=followup_metadata,
+        blocked_by_response_id=parent_response_id,
+    )
+
+    assert entry is not None
+    assert entry[0] == parent_canonical_key
+    assert decision.should_hold is False
+    assert decision.should_release is True
+    assert decision.reason_code == "parent_not_deliverable"
+    assert decision.parent_coverage_state == "uncovered"
+
+
 def test_response_done_suppression_prunes_blocked_tool_followup_lineage_artifacts() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
