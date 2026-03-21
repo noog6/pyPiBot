@@ -8080,6 +8080,18 @@ class RealtimeAPI:
         state_entry: tuple[str, CanonicalResponseState] | None = None
         resolved_from = "none"
         normalized_blocked_by = str(blocked_by_response_id or "").strip()
+        parent_turn_id = str(response_metadata.get("parent_turn_id") or response_metadata.get("turn_id") or "").strip()
+        parent_input_event_key = str(response_metadata.get("parent_input_event_key") or "").strip()
+        parent_key_entry: tuple[str, CanonicalResponseState] | None = None
+        if parent_turn_id and parent_input_event_key and not parent_input_event_key.startswith("tool:"):
+            parent_canonical_key = self._canonical_utterance_key(
+                turn_id=parent_turn_id,
+                input_event_key=parent_input_event_key,
+            )
+            candidate = self._canonical_response_state_store().get(parent_canonical_key)
+            if isinstance(candidate, CanonicalResponseState):
+                parent_key_entry = (parent_canonical_key, candidate)
+
         if normalized_blocked_by:
             semantic_owner_entry = self._semantic_owner_state_for_response(response_id=normalized_blocked_by)
             if semantic_owner_entry:
@@ -8090,16 +8102,11 @@ class RealtimeAPI:
                 if candidate:
                     state_entry = candidate
                     resolved_from = "response_id"
-        parent_turn_id = str(response_metadata.get("parent_turn_id") or response_metadata.get("turn_id") or "").strip()
-        parent_input_event_key = str(response_metadata.get("parent_input_event_key") or "").strip()
-        if not state_entry and parent_turn_id and parent_input_event_key and not parent_input_event_key.startswith("tool:"):
-            parent_canonical_key = self._canonical_utterance_key(
-                turn_id=parent_turn_id,
-                input_event_key=parent_input_event_key,
-            )
-            candidate = self._canonical_response_state_store().get(parent_canonical_key)
-            if isinstance(candidate, CanonicalResponseState):
-                state_entry = (parent_canonical_key, candidate)
+
+        if parent_key_entry is not None:
+            resolved_parent_origin = str(getattr(state_entry[1], "origin", "") or "").strip().lower() if state_entry else ""
+            if state_entry is None or resolved_parent_origin in {"micro_ack", "tool_output"}:
+                state_entry = parent_key_entry
                 resolved_from = "parent_key"
         if not state_entry and parent_turn_id:
             for canonical_key, candidate in self._canonical_response_state_store().items():
