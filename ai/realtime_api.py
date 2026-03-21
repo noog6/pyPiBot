@@ -8590,6 +8590,7 @@ class RealtimeAPI:
         if not normalized_response_id or not normalized_text:
             return
         self._terminal_response_text_store()[normalized_response_id] = normalized_text
+        self._promote_terminal_selection_evidence(response_id=normalized_response_id)
 
     def _terminal_response_text(self, response_id: str | None) -> str:
         normalized_response_id = str(response_id or "").strip()
@@ -8667,26 +8668,6 @@ class RealtimeAPI:
             input_event_key=input_event_key,
             mutator=_mutator,
         )
-        semantic_owner_evidence_present = self._selected_response_has_substantive_evidence(
-            response_id=normalized_response_id
-        )
-        if (
-            selected
-            and semantic_owner_evidence_present
-            and normalized_semantic_owner_key
-            and normalized_semantic_owner_key != normalized_canonical_key
-        ):
-            semantic_owner_state = self._canonical_response_state(normalized_semantic_owner_key)
-            self._canonical_response_state_mutate(
-                canonical_key=normalized_semantic_owner_key,
-                turn_id=str(getattr(semantic_owner_state, "turn_id", "") or ""),
-                input_event_key=str(getattr(semantic_owner_state, "input_event_key", "") or "") or None,
-                mutator=lambda record: (
-                    setattr(record, "created", True),
-                    setattr(record, "deliverable_observed", True),
-                    setattr(record, "deliverable_class", "final"),
-                ),
-            )
         if normalized_response_id and normalized_semantic_owner_key:
             semantic_owner_state = self._canonical_response_state(normalized_semantic_owner_key)
             self._record_response_trace_context(
@@ -8709,6 +8690,52 @@ class RealtimeAPI:
             self._drop_dead_tool_followup_creates_after_terminal_selection(
                 turn_id=turn_id,
                 selected_response_id=normalized_response_id,
+            )
+        if normalized_response_id:
+            self._promote_terminal_selection_evidence(response_id=normalized_response_id)
+
+    def _promote_terminal_selection_evidence(self, *, response_id: str | None) -> None:
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            return
+        selection_entry = self._terminal_deliverable_selection_store().get(normalized_response_id)
+        if not isinstance(selection_entry, dict):
+            return
+        if not bool(selection_entry.get("selected", False)):
+            return
+        selection_reason = str(selection_entry.get("reason") or "unknown").strip().lower() or "unknown"
+        if selection_reason != "normal":
+            return
+        if not self._selected_response_has_substantive_evidence(response_id=normalized_response_id):
+            return
+        semantic_owner_key = (
+            str(selection_entry.get("semantic_owner_canonical_key") or "").strip()
+            or str(selection_entry.get("canonical_key") or "").strip()
+        )
+        if not semantic_owner_key:
+            return
+        semantic_owner_state = self._canonical_response_state(semantic_owner_key)
+        semantic_owner_turn_id = str(getattr(semantic_owner_state, "turn_id", "") or "").strip()
+        semantic_owner_input_event_key = str(getattr(semantic_owner_state, "input_event_key", "") or "").strip()
+        self._canonical_response_state_mutate(
+            canonical_key=semantic_owner_key,
+            turn_id=semantic_owner_turn_id,
+            input_event_key=semantic_owner_input_event_key or None,
+            mutator=lambda record: (
+                setattr(record, "created", True),
+                setattr(record, "done", True),
+                setattr(record, "response_id", normalized_response_id),
+                setattr(record, "deliverable_observed", True),
+                setattr(record, "deliverable_class", "final"),
+            ),
+        )
+        if semantic_owner_turn_id:
+            self._reconcile_terminal_substantive_response(
+                turn_id=semantic_owner_turn_id,
+                canonical_key=semantic_owner_key,
+                response_id=normalized_response_id,
+                selected=True,
+                selection_reason=selection_reason,
             )
 
     def _invalidate_dropped_tool_followup_lineage(
