@@ -23,6 +23,7 @@ from ai.realtime_api import RealtimeAPI
 class _StubCanonicalState:
     audio_started = False
     deliverable_observed = False
+    deliverable_class = "unknown"
 
 
 class _StubFunctionCallAccumulator:
@@ -261,6 +262,23 @@ def test_created_done_with_deliverable_marker_does_not_retry() -> None:
     )
 
     assert sent_events == []
+
+
+def test_selected_response_with_partial_text_classification_counts_as_substantive() -> None:
+    api = _make_api()
+    tracker = ResponseLifecycleTracker(api)
+    canonical_key = "turn_1::tool:call_1"
+    response_id = "resp_tool_partial"
+    api._response_trace_by_id = lambda: {response_id: {"canonical_key": canonical_key}}
+    api._stale_response_context = lambda _response_id: {}
+    api._canonical_response_state = lambda _canonical_key: type(
+        "_State",
+        (),
+        {"audio_started": False, "deliverable_observed": True, "deliverable_class": "final"},
+    )()
+
+    assert api._selected_response_has_substantive_evidence(response_id=response_id) is True
+    assert tracker.is_empty_response_done(canonical_key=canonical_key) is False
 
 
 def test_tool_only_output_item_path_marks_response_non_empty() -> None:
