@@ -4703,6 +4703,153 @@ def test_tool_followup_response_created_does_not_rebind_parent_active_key_to_too
     assert api._active_input_event_key_for_turn("turn_2") == "item_parent_2"
 
 
+def test_second_same_turn_tool_followup_prefers_canonical_parent_over_prior_tool_output() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_same_turn_tool_parent"
+    parent_input_event_key = "item_parent_same_turn_tool_parent"
+    parent_canonical_key = api._canonical_utterance_key(
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+    )
+    first_tool_canonical_key = api._canonical_utterance_key(
+        turn_id=turn_id,
+        input_event_key="tool:call_same_turn_first",
+    )
+
+    api._canonical_response_state_mutate(
+        canonical_key=parent_canonical_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "assistant_message"),
+            setattr(record, "response_id", "resp-parent-same-turn"),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "progress"),
+            setattr(record, "done", True),
+        ),
+    )
+    api._canonical_response_state_mutate(
+        canonical_key=first_tool_canonical_key,
+        turn_id=turn_id,
+        input_event_key="tool:call_same_turn_first",
+        mutator=lambda record: (
+            setattr(record, "origin", "tool_output"),
+            setattr(record, "response_id", "resp-tool-first"),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "unknown"),
+            setattr(record, "done", True),
+        ),
+    )
+
+    event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_same_turn_second",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_idle",
+    )
+    metadata = ((event.get("response") or {}).get("metadata") or {})
+    metadata["turn_id"] = turn_id
+    metadata["parent_turn_id"] = turn_id
+    metadata["parent_input_event_key"] = parent_input_event_key
+    metadata["blocked_by_response_id"] = "resp-tool-first"
+
+    should_drop, parent_entry, reason = api._should_suppress_queued_tool_followup_release(
+        response_metadata=metadata,
+        blocked_by_response_id="resp-tool-first",
+    )
+
+    assert should_drop is True
+    assert reason == "parent_covered_tool_result"
+    assert parent_entry is not None
+    assert parent_entry[0] == parent_canonical_key
+    assert parent_entry[1].response_id == "resp-parent-same-turn"
+
+
+def test_second_same_turn_tool_followup_release_uses_canonical_owner_not_prior_tool_response(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_same_turn_tool_release"
+    parent_input_event_key = "item_parent_same_turn_tool_release"
+    parent_canonical_key = api._canonical_utterance_key(
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+    )
+    first_tool_canonical_key = api._canonical_utterance_key(
+        turn_id=turn_id,
+        input_event_key="tool:call_same_turn_release_first",
+    )
+
+    api._canonical_response_state_mutate(
+        canonical_key=parent_canonical_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "assistant_message"),
+            setattr(record, "response_id", "resp-parent-same-turn-release"),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "unknown"),
+            setattr(record, "done", True),
+        ),
+    )
+    api._canonical_response_state_mutate(
+        canonical_key=first_tool_canonical_key,
+        turn_id=turn_id,
+        input_event_key="tool:call_same_turn_release_first",
+        mutator=lambda record: (
+            setattr(record, "origin", "tool_output"),
+            setattr(record, "response_id", "resp-tool-same-turn-release-first"),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "unknown"),
+            setattr(record, "done", True),
+        ),
+    )
+
+    event, canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_same_turn_release_second",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_idle",
+    )
+    metadata = ((event.get("response") or {}).get("metadata") or {})
+    metadata["turn_id"] = turn_id
+    metadata["parent_turn_id"] = turn_id
+    metadata["parent_input_event_key"] = parent_input_event_key
+    metadata["blocked_by_response_id"] = "resp-tool-same-turn-release-first"
+
+    captured_logs: list[str] = []
+    original_info = logger.info
+
+    def _capture_info(message: str, *args, **kwargs):
+        rendered = str(message)
+        if args:
+            rendered = rendered % args
+        captured_logs.append(rendered)
+        return original_info(message, *args, **kwargs)
+
+    monkeypatch.setattr(logger, "info", _capture_info)
+
+    should_drop, parent_entry, reason = api._should_suppress_queued_tool_followup_release(
+        response_metadata=metadata,
+        blocked_by_response_id="resp-tool-same-turn-release-first",
+    )
+
+    assert should_drop is False
+    assert reason == "parent_not_deliverable"
+    assert parent_entry is not None
+    assert parent_entry[0] == parent_canonical_key
+    assert api._tool_followup_state(canonical_key=canonical_key) == "new"
+    assert any(
+        "tool_followup_parent_resolution" in entry
+        and "resolved_parent_response_id=resp-parent-same-turn-release" in entry
+        and f"resolved_parent_canonical_key={parent_canonical_key}" in entry
+        and "resolved_from=parent_key" in entry
+        for entry in captured_logs
+    )
+    assert not any("reason=parent_origin_excluded" in entry for entry in captured_logs)
+    assert not any("parent_deliverable_pending" in entry for entry in captured_logs)
+
+
 def test_tool_followup_parent_resolution_ignores_tool_parent_input_key() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
