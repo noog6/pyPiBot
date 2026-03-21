@@ -1157,6 +1157,32 @@ def test_empty_retry_create_dropped_after_same_turn_final_deliverable() -> None:
     assert outcomes[0]["reason"] == "canonical_delivery_terminal_state"
 
 
+def test_empty_retry_create_dropped_after_transcript_final_supersedes_provisional_lineage() -> None:
+    api = _make_api()
+    outcomes: list[dict[str, str]] = []
+    api._mark_transcript_response_outcome = lambda **kwargs: outcomes.append(kwargs)
+    turn_id = "turn_1"
+    api._invalidate_superseded_empty_retry_lineage_for_turn(
+        turn_id=turn_id,
+        superseded_input_event_key="synthetic_server_auto_3",
+        reason="transcript_final_handoff",
+    )
+
+    dropped = api._drop_response_create_for_terminal_state(
+        turn_id=turn_id,
+        input_event_key="synthetic_server_auto_3__empty_retry",
+        origin="server_auto",
+        response_metadata={
+            "input_event_key": "synthetic_server_auto_3__empty_retry",
+            "retry_reason": "empty_response_done",
+        },
+    )
+
+    assert dropped is True
+    assert outcomes
+    assert outcomes[0]["reason"] == "canonical_delivery_terminal_state"
+
+
 def test_empty_retry_create_not_dropped_without_same_turn_final_deliverable() -> None:
     api = _make_api()
     turn_id = "turn_1"
@@ -1254,6 +1280,124 @@ def test_playback_complete_drain_drops_same_turn_empty_retry_after_final_deliver
 
     assert sent == []
     assert api._pending_response_create is None
+
+
+def test_response_created_discards_invalidated_empty_retry_before_activation() -> None:
+    api = _make_api()
+    cancelled: list[dict[str, str]] = []
+    sent_events: list[dict[str, object]] = []
+
+    async def _async_capture(_websocket, event):
+        sent_events.append(event)
+
+    api._consume_response_origin = lambda _event: "server_auto"
+    api._set_active_response_state = lambda **_kwargs: (_ for _ in ()).throw(
+        AssertionError("stale empty retry should not become active")
+    )
+    api._quarantine_cancelled_response_id = lambda **kwargs: cancelled.append(kwargs)
+    api._track_outgoing_event = lambda *_args, **_kwargs: None
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._current_turn_id_or_unknown = lambda: "turn_1"
+    api._invalidate_superseded_empty_retry_lineage_for_turn(
+        turn_id="turn_1",
+        superseded_input_event_key="synthetic_server_auto_3",
+        reason="transcript_final_handoff",
+    )
+
+    api._get_or_create_transport = lambda: types.SimpleNamespace(send_json=_async_capture)
+
+    asyncio.run(
+        api._handle_response_created_event(
+            {
+                "response": {
+                    "id": "resp-stale-retry",
+                    "metadata": {
+                        "turn_id": "turn_1",
+                        "input_event_key": "synthetic_server_auto_3__empty_retry",
+                    },
+                }
+            },
+            object(),
+        )
+    )
+
+    assert cancelled == [
+        {
+            "response_id": "resp-stale-retry",
+            "turn_id": "turn_1",
+            "input_event_key": "synthetic_server_auto_3__empty_retry",
+            "origin": "server_auto",
+            "reason": "stale_empty_retry_lineage",
+        }
+    ]
+    assert sent_events == [{"type": "response.cancel"}]
+
+
+def test_invalidated_empty_retry_store_clears_on_turn_contender_cleanup() -> None:
+    api = _make_api()
+    api._invalidate_superseded_empty_retry_lineage_for_turn(
+        turn_id="turn_cleanup",
+        superseded_input_event_key="synthetic_server_auto_cleanup",
+        reason="transcript_final_handoff",
+    )
+
+    api._clear_pending_response_contenders(
+        turn_id="turn_cleanup",
+        input_event_key="item_cleanup",
+        reason="turn_complete",
+    )
+
+    assert (
+        api._is_invalidated_empty_retry_lineage(
+            turn_id="turn_cleanup",
+            input_event_key="synthetic_server_auto_cleanup__empty_retry",
+        )
+        is False
+    )
+
+
+def test_invalidated_empty_retry_store_prunes_oldest_stale_turns() -> None:
+    api = _make_api()
+    api._invalidated_empty_retry_lineage_max_turns = 2
+    api._active_input_event_key_by_turn_id = {"turn_keep": "item_keep"}
+
+    api._invalidate_superseded_empty_retry_lineage_for_turn(
+        turn_id="turn_oldest",
+        superseded_input_event_key="synthetic_server_auto_oldest",
+        reason="transcript_final_handoff",
+    )
+    api._invalidate_superseded_empty_retry_lineage_for_turn(
+        turn_id="turn_keep",
+        superseded_input_event_key="synthetic_server_auto_keep",
+        reason="transcript_final_handoff",
+    )
+    api._invalidate_superseded_empty_retry_lineage_for_turn(
+        turn_id="turn_newest",
+        superseded_input_event_key="synthetic_server_auto_newest",
+        reason="transcript_final_handoff",
+    )
+
+    assert (
+        api._is_invalidated_empty_retry_lineage(
+            turn_id="turn_oldest",
+            input_event_key="synthetic_server_auto_oldest__empty_retry",
+        )
+        is False
+    )
+    assert (
+        api._is_invalidated_empty_retry_lineage(
+            turn_id="turn_keep",
+            input_event_key="synthetic_server_auto_keep__empty_retry",
+        )
+        is True
+    )
+    assert (
+        api._is_invalidated_empty_retry_lineage(
+            turn_id="turn_newest",
+            input_event_key="synthetic_server_auto_newest__empty_retry",
+        )
+        is True
+    )
 
 
 def test_response_path_candidate_envelope_preserves_same_turn_owner_drop() -> None:
