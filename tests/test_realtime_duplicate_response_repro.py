@@ -2098,6 +2098,102 @@ def test_parent_semantic_promotion_preserves_parent_input_lineage() -> None:
     assert child_state.response_id == "resp-child-lineage"
 
 
+def test_chained_tool_followup_parent_coverage_uses_promoted_semantic_owner_state() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_semantic_followup_chain"
+    parent_input_event_key = "item_semantic_followup_parent"
+    first_child_input_event_key = "tool:call_gesture_look_center"
+    second_child_input_event_key = "tool:call_recall_memories"
+    parent_response_id = "resp-semantic-followup-parent"
+    first_child_response_id = "resp-semantic-followup-child"
+
+    parent_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    first_child_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=first_child_input_event_key)
+    second_child_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=second_child_input_event_key)
+
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "created", True),
+            setattr(record, "done", True),
+            setattr(record, "origin", "server_auto"),
+            setattr(record, "response_id", parent_response_id),
+            setattr(record, "deliverable_observed", False),
+            setattr(record, "deliverable_class", "unknown"),
+        ),
+    )
+    api._canonical_response_state_mutate(
+        canonical_key=first_child_key,
+        turn_id=turn_id,
+        input_event_key=first_child_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "created", True),
+            setattr(record, "done", True),
+            setattr(record, "origin", "tool_output"),
+            setattr(record, "response_id", first_child_response_id),
+        ),
+    )
+    api._record_terminal_response_text(
+        response_id=first_child_response_id,
+        text="I centered my gaze and found the mug in your hand.",
+    )
+    api._apply_terminal_deliverable_selection(
+        canonical_key=first_child_key,
+        semantic_owner_canonical_key=parent_key,
+        response_id=first_child_response_id,
+        turn_id=turn_id,
+        input_event_key=first_child_input_event_key,
+        selected=True,
+        selection_reason="normal",
+    )
+
+    parent_state = api._canonical_response_state(parent_key)
+    assert parent_state is not None
+    covered, coverage_source, observed, deliverable_class, terminal_selected, terminal_reason = api._parent_response_coverage_state(
+        parent_state=parent_state,
+        parent_canonical_key=parent_key,
+    )
+    assert covered is True
+    assert coverage_source == "canonical"
+    assert observed is True
+    assert deliverable_class == "final"
+    assert terminal_selected is True
+    assert terminal_reason == "normal"
+    assert parent_state.response_id == parent_response_id
+
+    parent_entry = api._resolve_parent_state_for_tool_followup(
+        response_metadata={
+            "turn_id": turn_id,
+            "parent_turn_id": turn_id,
+            "parent_input_event_key": parent_input_event_key,
+            "input_event_key": second_child_input_event_key,
+            "tool_call_id": "call_recall_memories",
+        },
+        blocked_by_response_id=first_child_response_id,
+    )
+
+    assert parent_entry is not None
+    assert parent_entry[0] == parent_key
+    assert parent_entry[1].response_id == parent_response_id
+
+    covered, coverage_source, observed, deliverable_class, terminal_selected, terminal_reason = api._parent_response_coverage_state(
+        parent_state=parent_entry[1],
+        parent_canonical_key=parent_entry[0],
+    )
+    assert covered is True
+    assert coverage_source == "canonical"
+    assert observed is True
+    assert deliverable_class == "final"
+    assert terminal_selected is True
+    assert terminal_reason == "normal"
+    assert parent_entry[1].response_id == parent_response_id
+    assert second_child_key not in (api._conversation_efficiency_state(turn_id=turn_id).substantive_count_by_canonical or {})
+
+
 def test_semantic_substantive_owner_reconcile_moves_create_time_count_to_parent_once() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
@@ -5254,7 +5350,7 @@ def test_upgraded_response_still_suppresses_redundant_tool_followup_after_pendin
         parent_state=entry[1],
     )
     assert parent_covered is True
-    assert coverage_source == "terminal_selection"
+    assert coverage_source == "canonical"
 
 
 def test_provisional_server_auto_parent_progression_holds_then_suppresses_followup_after_terminal_selection() -> None:
