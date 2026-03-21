@@ -734,6 +734,66 @@ def test_transcript_final_micro_ack_rebind_leaves_already_canonical_pending_ack_
 
 
 
+def test_transcript_final_rebound_micro_ack_logs_and_emits_item_key_then_clears_scheduled_state(monkeypatch) -> None:
+    api = _api_stub()
+    fake_loop = _FakeLoop()
+    api.loop.close()
+    api.loop = fake_loop
+    api.state_manager.state = InteractionState.THINKING
+    api._current_run_id = lambda: "run-681"
+    api._active_input_event_key_by_turn_id = {"turn-4": "synthetic_server_auto_4"}
+    api._active_session_id = "session-1"
+    api._current_utterance_seq = lambda: 4
+    sent_messages: list[tuple[str, object, dict[str, object]]] = []
+    info_messages: list[str] = []
+
+    async def _send_assistant_message(message: str, _websocket, **kwargs) -> None:
+        sent_messages.append((message, kwargs.get("utterance_context"), kwargs.get("response_metadata") or {}))
+
+    def _capture_info(message, *args, **kwargs):
+        _ = kwargs
+        info_messages.append(message % args)
+        return None
+
+    monkeypatch.setattr("ai.realtime_api.logger.info", _capture_info)
+    api.send_assistant_message = _send_assistant_message
+    api._micro_ack_manager = api._build_micro_ack_manager({
+        "micro_ack_delay_ms": 450,
+        "micro_ack_expected_wait_threshold_ms": 700,
+        "micro_ack_global_cooldown_ms": 0,
+        "micro_ack_per_turn_max": 1,
+    })
+
+    api._maybe_schedule_micro_ack(
+        turn_id="turn-4",
+        category=MicroAckCategory.LATENCY_MASK,
+        channel="voice",
+        reason="transcript_finalized",
+        expected_delay_ms=700,
+    )
+
+    rewritten = api._rebind_pending_micro_ack_after_transcript_final(
+        turn_id="turn-4",
+        replacement_input_event_key="item_DLqb645TWTMp53kKezLBn",
+    )
+
+    assert rewritten == 1
+    fake_loop.fire_scheduled_callbacks()
+    fake_loop.drain_created_coroutines()
+
+    assert len(sent_messages) == 1
+    _message, utterance_context, metadata = sent_messages[0]
+    assert metadata["micro_ack_action"] == "run-681:turn-4:item_DLqb645TWTMp53kKezLBn"
+    assert utterance_context.input_event_key == "item_DLqb645TWTMp53kKezLBn"
+    assert utterance_context.canonical_key == "run-681:turn-4:item_DLqb645TWTMp53kKezLBn"
+    assert any(
+        "micro_ack_emitted" in msg and "action=run-681:turn-4:item_DLqb645TWTMp53kKezLBn" in msg
+        for msg in info_messages
+    )
+    assert not any("micro_ack_emitted" in msg and "synthetic_server_auto_4" in msg for msg in info_messages)
+    assert api._micro_ack_manager._scheduled == {}
+
+
 
 def test_latency_mask_micro_ack_suppression_reason_codes_distinguish_pending_clarify_and_upgrade() -> None:
     api = _api_stub()
