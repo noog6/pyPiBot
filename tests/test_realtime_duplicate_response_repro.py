@@ -4608,6 +4608,28 @@ def test_low_risk_gesture_followup_payload_is_status_only() -> None:
     assert "Do not narrate environment/vision context" in instructions
 
 
+def test_low_risk_gesture_followup_payload_preserves_distinct_motion_state() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    api._current_response_turn_id = "turn_gesture_distinct"
+    api._active_input_event_key_by_turn_id["turn_gesture_distinct"] = "item_parent_distinct"
+
+    response_create_event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_gesture_distinct",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+        tool_result_has_distinct_info=api._tool_result_has_distinct_followup_info(
+            tool_name="gesture_look_center",
+            result={"motion_request_state": "already_satisfied", "tool_result_has_distinct_info": True},
+        ),
+    )
+
+    metadata = ((response_create_event.get("response") or {}).get("metadata") or {})
+
+    assert metadata.get("tool_followup_status_only") == "true"
+    assert metadata.get("tool_result_has_distinct_info") == "true"
+
+
 def test_tool_followup_queue_does_not_rebind_turn_active_key_to_tool_key() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
