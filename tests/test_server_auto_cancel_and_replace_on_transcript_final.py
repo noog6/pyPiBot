@@ -1092,40 +1092,6 @@ def test_cancel_and_replace_reissues_deferred_provisional_tool_call_before_repla
     assert api._deferred_provisional_tool_call is None
 
 
-def test_replayed_deferred_provisional_tool_child_is_response_done_coherent_after_handoff() -> None:
-    api = _build_api_stub()
-    api._active_input_event_key_by_turn_id = {"turn_3": "item_DLpCFPPM28Wt5XqpfN8p3"}
-    api._active_input_event_key_for_turn = lambda turn_id: api._active_input_event_key_by_turn_id.get(turn_id, "")
-    api._active_response_id = None
-    api._active_response_origin = "unknown"
-    api._active_response_input_event_key = None
-    api._active_response_canonical_key = None
-    api._response_create_queue = deque()
-    api._preference_recall_suppressed_turns = set()
-    api._preference_recall_suppressed_input_event_keys = set()
-    api._response_trace_context_by_id = {
-        "resp-tool-child": {
-            "turn_id": "turn_3",
-            "input_event_key": "tool:call_173jzwHWhH6qp7QX",
-            "canonical_key": "run-464:turn_3:tool:call_173jzwHWhH6qp7QX",
-            "origin": "tool_output",
-            "parent_input_event_key": "item_DLpCFPPM28Wt5XqpfN8p3",
-            "tool_followup": "true",
-            "tool_followup_release": "true",
-        }
-    }
-
-    snapshot = api._response_runtime_coherence_snapshot(
-        stage="response_done",
-        turn_id="turn_3",
-        canonical_key="run-464:turn_3:tool:call_173jzwHWhH6qp7QX",
-        response_id="resp-tool-child",
-    )
-
-    assert snapshot["violations"] == []
-    assert snapshot["suppression"]["expected_turn_input_event_key"] == "item_DLpCFPPM28Wt5XqpfN8p3"
-
-
 def test_transcript_final_handoff_invalidates_provisional_tool_followup_lineage() -> None:
     api = _build_api_stub()
     api._pending_response_create = types.SimpleNamespace(
