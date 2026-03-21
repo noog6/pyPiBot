@@ -25,6 +25,8 @@ class BatteryStatusEvent:
     transition: str = "steady"
     delta_percent: float = 0.0
     rapid_drop: bool = False
+    inferred_charger_connected: bool = False
+    inference_reason: str = "no_prior_sample"
 
 
 class BatteryMonitor:
@@ -52,6 +54,7 @@ class BatteryMonitor:
         self._response_allow_warning = True
         self._response_allow_critical = True
         self._response_require_transition = False
+        self._charger_inference_min_voltage_rise = 0.03
         self._load_config()
         self._loop_period_s = 60.0
         self._low_battery_period_s = 30.0
@@ -137,6 +140,8 @@ class BatteryMonitor:
                         "transition": event.transition,
                         "delta_percent": event.delta_percent,
                         "rapid_drop": event.rapid_drop,
+                        "inferred_charger_connected": event.inferred_charger_connected,
+                        "inference_reason": event.inference_reason,
                     },
                 ),
                 coalesce=True,
@@ -172,7 +177,11 @@ class BatteryMonitor:
 
         previous_percent = previous_event.percent_of_range if previous_event else percent
         delta_percent = (percent - previous_percent) * 100.0
+        delta_voltage = voltage - previous_event.voltage if previous_event else None
         transition = self._derive_transition(severity, previous_event, delta_percent)
+        inferred_charger_connected, inference_reason = self._infer_charger_connected(
+            delta_voltage, previous_event
+        )
 
         return BatteryStatusEvent(
             timestamp=time.time(),
@@ -183,6 +192,8 @@ class BatteryMonitor:
             transition=transition,
             delta_percent=delta_percent,
             rapid_drop=self._is_rapid_drop(delta_percent),
+            inferred_charger_connected=inferred_charger_connected,
+            inference_reason=inference_reason,
         )
 
     def _derive_severity(
@@ -261,6 +272,8 @@ class BatteryMonitor:
                 transition="recover_info",
                 delta_percent=event.delta_percent,
                 rapid_drop=event.rapid_drop,
+                inferred_charger_connected=event.inferred_charger_connected,
+                inference_reason=event.inference_reason,
             )
 
         self._emit_events([clear_event, event] if clear_event else [event])
@@ -271,19 +284,42 @@ class BatteryMonitor:
             return
         for event in events:
             LOGGER.info(
-                "[Battery] Emitting event: voltage=%.2fV severity=%s percent=%.2f transition=%s delta=%.2f rapid_drop=%s",
+                "[Battery] Emitting event: voltage=%.2fV severity=%s percent=%.2f transition=%s delta=%.2f rapid_drop=%s inferred_charger_connected=%s inference_reason=%s",
                 event.voltage,
                 event.severity,
                 event.percent_of_range,
                 event.transition,
                 event.delta_percent,
                 event.rapid_drop,
+                event.inferred_charger_connected,
+                event.inference_reason,
             )
             for handler in handlers:
                 try:
                     handler(event)
                 except Exception as exc:
                     LOGGER.exception("[Battery] Event handler failed: %s", exc)
+
+    def _infer_charger_connected(
+        self,
+        delta_voltage: float | None,
+        previous_event: BatteryStatusEvent | None,
+    ) -> tuple[bool, str]:
+        if delta_voltage is None:
+            return False, "no_prior_sample"
+        if delta_voltage >= self._charger_inference_min_voltage_rise:
+            previous_rise_qualifies = previous_event is not None and previous_event.inference_reason in {
+                "voltage_rising",
+                "voltage_rising_pending",
+            }
+            if previous_rise_qualifies:
+                return True, "voltage_rising"
+            return False, "voltage_rising_pending"
+        if delta_voltage > 0.0:
+            return False, "voltage_rise_below_threshold"
+        if delta_voltage < 0.0:
+            return False, "voltage_falling"
+        return False, "voltage_flat"
 
     def _warning_threshold(self) -> float:
         return min(max(self._warning_percent / 100.0, 0.0), 1.0)
