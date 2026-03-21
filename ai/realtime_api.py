@@ -8053,6 +8053,7 @@ class RealtimeAPI:
             if parent_origin not in {"micro_ack", "tool_output"} and bool(state_entry[1].done):
                 parent_covered, coverage_source, deliverable_observed, deliverable_class, terminal_selected, terminal_reason = self._parent_response_coverage_state(
                     parent_state=state_entry[1],
+                    parent_canonical_key=state_entry[0],
                 )
                 logger.debug(
                     "parent_coverage_source_of_truth run_id=%s parent_response_id=%s covered=%s source=%s canonical_observed=%s canonical_class=%s terminal_selected=%s terminal_reason=%s",
@@ -8109,7 +8110,10 @@ class RealtimeAPI:
                 deliverable_class,
                 terminal_selected,
                 terminal_reason,
-            ) = self._parent_response_coverage_state(parent_state=parent_state)
+            ) = self._parent_response_coverage_state(
+                parent_state=parent_state,
+                parent_canonical_key=state_entry[0],
+            )
             logger.debug(
                 "parent_coverage_source_of_truth run_id=%s parent_response_id=%s covered=%s source=%s canonical_observed=%s canonical_class=%s terminal_selected=%s terminal_reason=%s",
                 self._current_run_id() or "",
@@ -8195,6 +8199,7 @@ class RealtimeAPI:
         if parent_state is not None:
             parent_covered, coverage_source, deliverable_observed, deliverable_class, terminal_selected, terminal_reason = self._parent_response_coverage_state(
                 parent_state=parent_state,
+                parent_canonical_key=parent_entry[0],
             )
             canonical_deliverable_state = (
                 f"done={str(bool(getattr(parent_state, 'done', False))).lower()},"
@@ -8724,7 +8729,7 @@ class RealtimeAPI:
             mutator=lambda record: (
                 setattr(record, "created", True),
                 setattr(record, "done", True),
-                setattr(record, "response_id", normalized_response_id),
+                setattr(record, "response_id", str(record.response_id or "").strip() or normalized_response_id),
                 setattr(record, "deliverable_observed", True),
                 setattr(record, "deliverable_class", "final"),
             ),
@@ -8952,6 +8957,7 @@ class RealtimeAPI:
         self,
         *,
         parent_state: CanonicalResponseState,
+        parent_canonical_key: str | None = None,
     ) -> tuple[bool, str, bool, str, bool, str]:
         deliverable_class = str(getattr(parent_state, "deliverable_class", "") or "").strip().lower()
         deliverable_observed = bool(getattr(parent_state, "deliverable_observed", False))
@@ -8963,17 +8969,35 @@ class RealtimeAPI:
         normalized_response_id = str(getattr(parent_state, "response_id", "") or "").strip()
         terminal_selected = False
         terminal_reason = "unknown"
-        if normalized_response_id:
-            selection_entry = self._terminal_deliverable_selection_store().get(normalized_response_id)
-            if isinstance(selection_entry, dict):
-                terminal_selected = bool(selection_entry.get("selected", False))
-                terminal_reason = str(selection_entry.get("reason") or "unknown").strip().lower() or "unknown"
+        selected_response_id = normalized_response_id
+        selection_entry = self._terminal_deliverable_selection_store().get(normalized_response_id)
+        normalized_parent_canonical_key = str(parent_canonical_key or "").strip()
+        if not isinstance(selection_entry, dict) and normalized_parent_canonical_key:
+            for candidate_response_id, candidate_entry in reversed(
+                tuple(self._terminal_deliverable_selection_store().items())
+            ):
+                if not isinstance(candidate_entry, dict):
+                    continue
+                candidate_owner_key = (
+                    str(candidate_entry.get("semantic_owner_canonical_key") or "").strip()
+                    or str(candidate_entry.get("canonical_key") or "").strip()
+                )
+                if candidate_owner_key != normalized_parent_canonical_key:
+                    continue
+                selection_entry = candidate_entry
+                selected_response_id = str(candidate_response_id or "").strip()
+                break
+        if isinstance(selection_entry, dict):
+            terminal_selected = bool(selection_entry.get("selected", False))
+            terminal_reason = str(selection_entry.get("reason") or "unknown").strip().lower() or "unknown"
         covered = canonical_covered
         source = "canonical" if canonical_covered else "none"
-        terminal_text_present = self._selected_response_has_substantive_evidence(response_id=normalized_response_id)
+        terminal_text_present = self._selected_response_has_substantive_evidence(response_id=selected_response_id)
         if not covered and terminal_selected and terminal_reason == "normal" and terminal_text_present:
             covered = True
             source = "terminal_selection"
+            deliverable_observed = True
+            deliverable_class = "final"
         return covered, source, deliverable_observed, deliverable_class, terminal_selected, terminal_reason
 
     def _parent_deliverable_classification_pending(
