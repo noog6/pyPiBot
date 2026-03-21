@@ -2883,7 +2883,7 @@ class RealtimeAPI:
         if not selected or normalized_reason != "normal":
             return
         if not self._selected_response_has_substantive_evidence(response_id=response_id):
-            logger.info(
+            logger.debug(
                 "terminal_substantive_reconcile_skipped run_id=%s turn_id=%s canonical_key=%s response_id=%s selected=%s reason=%s evidence=missing_terminal_text",
                 self._current_run_id() or "",
                 str(turn_id or "").strip() or "turn-unknown",
@@ -3370,11 +3370,23 @@ class RealtimeAPI:
                 return True
         return False
 
+    def _suppressed_stimulus_log_level(self, *, source: str, reason: str) -> int:
+        normalized_source = str(source or "").strip().lower()
+        normalized_reason = str(reason or "").strip().lower()
+        if normalized_source == "camera" and normalized_reason in {
+            "awaiting_confirmation_policy",
+            "startup_gate_closed",
+            "realtime_loop_not_ready",
+        }:
+            return logging.DEBUG
+        return logging.INFO
+
     def _log_suppressed_stimulus(self, source: str, kind: str, reason: str) -> None:
         phase = getattr(self.orchestration_state, "phase", None)
         phase_name = getattr(phase, "value", str(phase))
-        logger.info(
-            "Suppressed external stimulus source=%s kind=%s phase=%s reason=%s",
+        logger.log(
+            self._suppressed_stimulus_log_level(source=source, reason=reason),
+            "suppressed_external_stimulus source=%s kind=%s phase=%s reason=%s",
             source,
             kind,
             phase_name,
@@ -7557,7 +7569,7 @@ class RealtimeAPI:
         if normalized_state == "blocked_active_response":
             log_method = logger.debug
         if prior_state == normalized_state:
-            log_method(
+            logger.debug(
                 "tool_followup_state canonical_key=%s state=%s reason=%s",
                 normalized_canonical_key,
                 normalized_state,
@@ -9297,7 +9309,7 @@ class RealtimeAPI:
             release_decision = (
                 "drop" if decision.should_suppress else "hold" if decision.should_hold else "release"
             )
-            logger.info(
+            logger.debug(
                 "queue_release_parent_eval run_id=%s turn_id=%s canonical_key=%s tool_call_id=%s release_decision=%s reason=%s resolved_parent_response_id=%s resolved_parent_origin=%s resolved_parent_deliverable_state=%s",
                 self._current_run_id() or "",
                 turn_id,
@@ -11469,6 +11481,34 @@ class RealtimeAPI:
         )
         return any(cue in normalized_text for cue in repeat_cues)
 
+    def _log_intent_guard_bypass_once(
+        self,
+        *,
+        phase: str,
+        tool_name: str,
+        current_turn_id: str,
+        prior_turn_id: str,
+        explicit_repeat: bool,
+    ) -> None:
+        emission_store = getattr(self, "_intent_guard_bypass_log_keys", None)
+        if not isinstance(emission_store, set):
+            emission_store = set()
+            self._intent_guard_bypass_log_keys = emission_store
+        emission_key = (str(phase or ""), str(tool_name or ""), str(current_turn_id or ""), str(prior_turn_id or ""))
+        if emission_key in emission_store:
+            return
+        emission_store.add(emission_key)
+        while len(emission_store) > 128:
+            emission_store.pop()
+        logger.info(
+            "INTENT_GUARD_BYPASS reason=allow_repeated_reversible_gesture phase=%s tool=%s current_turn_id=%s prior_turn_id=%s explicit_repeat=%s",
+            phase,
+            tool_name,
+            current_turn_id,
+            prior_turn_id,
+            explicit_repeat,
+        )
+
     def _evaluate_intent_guard(
         self,
         tool_name: str,
@@ -11563,13 +11603,12 @@ class RealtimeAPI:
                 and current_turn_id != entry_turn_id
                 and isinstance(completed_at, (int, float))
             ):
-                logger.info(
-                    "INTENT_GUARD_BYPASS reason=allow_repeated_reversible_gesture phase=%s tool=%s current_turn_id=%s prior_turn_id=%s explicit_repeat=%s",
-                    phase,
-                    tool_name,
-                    current_turn_id,
-                    entry_turn_id,
-                    self._has_explicit_repeat_cue(self._last_user_input_text),
+                self._log_intent_guard_bypass_once(
+                    phase=phase,
+                    tool_name=tool_name,
+                    current_turn_id=current_turn_id,
+                    prior_turn_id=entry_turn_id,
+                    explicit_repeat=self._has_explicit_repeat_cue(self._last_user_input_text),
                 )
                 return False, None, None
             logger.info(
