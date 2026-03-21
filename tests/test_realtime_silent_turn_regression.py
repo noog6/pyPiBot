@@ -6,6 +6,7 @@ import asyncio
 import sys
 import types
 from collections import deque
+from types import SimpleNamespace
 
 if "audioop" not in sys.modules:
     sys.modules["audioop"] = types.ModuleType("audioop")
@@ -86,6 +87,12 @@ def _make_api() -> RealtimeAPI:
     api._awaiting_confirmation_completion = False
     api._last_outgoing_event_type = None
     api._silent_turn_incident_count = 0
+    api._conversation_efficiency_by_turn = {}
+    api._conversation_efficiency_logged_turns = set()
+    api._lifecycle_trace_transcript_delta_state = {}
+    api._lifecycle_trace_transcript_delta_sample_n = 1
+    api._lifecycle_trace_transcript_delta_inactivity_ms = 1000
+    api._assistant_reply_by_response_id = {}
     api.rate_limits = {}
     api.audio_player = None
     api.mic = type("_Mic", (), {"is_receiving": False, "start_receiving": lambda self: None})()
@@ -111,6 +118,12 @@ def _make_api() -> RealtimeAPI:
     api._record_user_input = lambda *_args, **_kwargs: None
     api._mark_first_assistant_utterance_observed_if_needed = lambda *_args, **_kwargs: None
     api._track_outgoing_event = RealtimeAPI._track_outgoing_event.__get__(api, RealtimeAPI)
+    api._input_audio_events = SimpleNamespace(
+        handle_input_audio_buffer_speech_started=lambda *_args, **_kwargs: None,
+        handle_input_audio_buffer_speech_stopped=lambda *_args, **_kwargs: None,
+        handle_input_audio_buffer_committed=lambda *_args, **_kwargs: None,
+        handle_input_audio_transcription_partial=lambda *_args, **_kwargs: None,
+    )
 
     async def _false(*_args, **_kwargs) -> bool:
         return False
@@ -144,7 +157,12 @@ def test_prompt_origin_delivery_prevents_silent_turn_false_positive() -> None:
     )
 
     asyncio.run(api.handle_event({"type": "response.created", "response": {"id": "resp_prompt_1"}}, websocket=None))
-    asyncio.run(api.handle_event({"type": "response.output_text.delta", "delta": "Hello from prompt."}, websocket=None))
+    asyncio.run(
+        api.handle_event(
+            {"type": "response.output_text.delta", "response_id": "resp_prompt_1", "delta": "Hello from prompt."},
+            websocket=None,
+        )
+    )
 
     buffer_before_done = api._assistant_reply_accum
     silent_before_done = api._silent_turn_incident_count
@@ -199,5 +217,95 @@ def test_prompt_origin_response_created_binds_active_key_before_output(monkeypat
     )
     assert not any("response_binding" in line and "active_key=unknown" in line for line in response_binding_logs)
 
-    asyncio.run(api.handle_event({"type": "response.output_text.delta", "delta": "bound"}, websocket=None))
+    asyncio.run(
+        api.handle_event(
+            {"type": "response.output_text.delta", "response_id": "resp_bind_1", "delta": "bound"},
+            websocket=None,
+        )
+    )
     assert api._assistant_reply_accum == "bound"
+
+
+def test_tool_output_partial_transcript_delta_prevents_empty_silent_turn_false_positive() -> None:
+    api = _make_api()
+    turn_id = "turn_tool_followup"
+    input_event_key = "tool:call_123"
+    response_id = "resp_tool_1"
+    api._current_response_turn_id = turn_id
+    api._current_input_event_key = input_event_key
+    api._active_input_event_key_by_turn_id[turn_id] = input_event_key
+
+    api._track_outgoing_event(
+        {
+            "type": "response.create",
+            "response": {
+                "metadata": {
+                    "origin": "tool_output",
+                    "turn_id": turn_id,
+                    "input_event_key": input_event_key,
+                    "tool_followup": "true",
+                    "tool_followup_release": "true",
+                    "tool_call_id": "call_123",
+                }
+            },
+        },
+        origin="tool_output",
+    )
+
+    asyncio.run(api.handle_event({"type": "response.created", "response": {"id": response_id}}, websocket=None))
+    asyncio.run(
+        api.handle_event(
+            {
+                "type": "response.output_audio_transcript.delta",
+                "response_id": response_id,
+                "delta": "Right now the onboard ambient",
+            },
+            websocket=None,
+        )
+    )
+
+    canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+    assert api._is_empty_response_done(canonical_key=canonical_key) is False
+
+    silent_before_done = api._silent_turn_incident_count
+    asyncio.run(api.handle_event({"type": "response.done", "response": {"id": response_id}}, websocket=None))
+
+    state = api._canonical_response_state(canonical_key)
+    assert api._silent_turn_incident_count == silent_before_done
+    assert state.deliverable_observed is True
+    assert state.deliverable_class == "final"
+
+
+def test_blank_partial_output_delta_does_not_mark_deliverable_observed() -> None:
+    api = _make_api()
+    turn_id = "turn_blank_delta"
+    input_event_key = "evt_blank_1"
+    response_id = "resp_blank_1"
+    api._current_response_turn_id = turn_id
+    api._current_input_event_key = input_event_key
+    api._active_input_event_key_by_turn_id[turn_id] = input_event_key
+
+    api._track_outgoing_event(
+        {
+            "type": "response.create",
+            "response": {"metadata": {"origin": "prompt", "turn_id": turn_id, "input_event_key": input_event_key}},
+        },
+        origin="prompt",
+    )
+
+    asyncio.run(api.handle_event({"type": "response.created", "response": {"id": response_id}}, websocket=None))
+    asyncio.run(
+        api.handle_event(
+            {
+                "type": "response.output_audio_transcript.delta",
+                "response_id": response_id,
+                "delta": "   ",
+            },
+            websocket=None,
+        )
+    )
+
+    canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+    state = api._canonical_response_state(canonical_key)
+    assert state.deliverable_observed is False
+    assert state.deliverable_class == "unknown"
