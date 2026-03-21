@@ -4841,18 +4841,6 @@ def test_dropped_tool_followup_lineage_blocks_micro_ack_non_consuming_create(mon
     assert [event for event in ws.sent if event.get("type") == "response.create"] == []
     assert any("micro_ack_lineage_guard outcome=deny reason=tool_followup_state_dropped" in entry for entry in captured_logs)
     assert any(
-        "active_key_transition" in entry
-        and "cause=prepare_response_create" in entry
-        and "origin=micro_ack" in entry
-        for entry in captured_logs
-    )
-    assert any(
-        "derived_response_lineage_eval origin=micro_ack" in entry
-        and f"canonical_key={canonical_key}" in entry
-        and "allowed=false" in entry
-        for entry in captured_logs
-    )
-    assert any(
         "suppressed_tool_lineage_block origin=micro_ack" in entry
         and f"canonical_key={canonical_key}" in entry
         for entry in captured_logs

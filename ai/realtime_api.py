@@ -1106,6 +1106,7 @@ class RealtimeAPI:
         self._canonical_invariant_logged: set[str] = set()
         self._already_scheduled_for_input_event_key: set[str] = set()
         self._tool_followup_state_by_canonical_key: dict[str, str] = {}
+        self._info_log_dedupe_signatures: set[tuple[str, tuple[Any, ...]]] = set()
         self._active_response_input_event_key: str | None = None
         self._active_response_canonical_key: str | None = None
         self._sync_active_response_legacy_fields()
@@ -1633,7 +1634,7 @@ class RealtimeAPI:
                         item_role=resolved_item_role,
                     )
         else:
-            logger.info(
+            logger.debug(
                 "response_lifecycle_trace response_id=%s event_type=%s turn_id=%s input_event_key=%s canonical_key=%s "
                 "origin=%s active_input_event_key=%s active_canonical_key=%s",
                 response_key,
@@ -5161,7 +5162,7 @@ class RealtimeAPI:
             input_event_key=resolved_key,
         )
         if should_block_tool_rebind:
-            logger.info(
+            logger.debug(
                 "active_key_transition run_id=%s turn_id=%s old_active_key=%s new_active_key=%s requested_key=%s cause=%s response_id=%s origin=%s blocked_tool_rebind=true",
                 self._current_run_id() or "",
                 normalized_turn_id,
@@ -5174,7 +5175,7 @@ class RealtimeAPI:
             )
             return
         if old_active_key != resolved_key:
-            logger.info(
+            logger.debug(
                 "active_key_transition run_id=%s turn_id=%s old_active_key=%s new_active_key=%s cause=%s response_id=%s origin=%s blocked_tool_rebind=false",
                 self._current_run_id() or "",
                 normalized_turn_id,
@@ -5186,7 +5187,7 @@ class RealtimeAPI:
             )
 
     def _log_response_binding_event(self, *, response_key: str, turn_id: str, origin: str) -> None:
-        logger.info(
+        logger.debug(
             "response_binding run_id=%s active_key=%s response_key=%s turn_id=%s origin=%s",
             self._current_run_id() or "",
             self._active_input_event_key_for_turn(turn_id) or "unknown",
@@ -5206,7 +5207,7 @@ class RealtimeAPI:
         response_metadata: dict[str, Any] | None,
     ) -> None:
         metadata = response_metadata if isinstance(response_metadata, dict) else {}
-        logger.info(
+        logger.debug(
             "parent_binding_snapshot run_id=%s turn_id=%s response_id=%s origin=%s input_event_key=%s active_key=%s response_key=%s active_input_event_key=%s active_canonical_key=%s parent_input_event_key=%s parent_turn_id=%s tool_call_id=%s",
             self._current_run_id() or "",
             turn_id or "turn-unknown",
@@ -7619,7 +7620,7 @@ class RealtimeAPI:
         }
         allowed = allow_suppressed or parent_state != "dropped"
         reason = "explicit_allowlist" if allow_suppressed else f"tool_followup_state_{parent_state}"
-        logger.info(
+        logger.debug(
             "derived_response_lineage_eval origin=%s canonical_key=%s parent_state=%s allowed=%s",
             lineage_origin,
             canonical_key,
@@ -8078,17 +8079,33 @@ class RealtimeAPI:
                     str(terminal_selected).lower(),
                     terminal_reason,
                 )
-        logger.info(
-            "tool_followup_parent_resolution run_id=%s turn_id=%s tool_call_id=%s parent_input_event_key=%s blocked_by_response_id=%s resolved_parent_response_id=%s resolved_parent_canonical_key=%s resolved_from=%s parent_covered=%s",
-            self._current_run_id() or "",
-            parent_turn_id or str(response_metadata.get("turn_id") or "").strip() or "turn-unknown",
-            tool_call_id or "unknown",
-            parent_input_event_key or "none",
-            normalized_blocked_by or "none",
-            resolved_parent_response_id,
-            resolved_parent_canonical_key,
-            resolved_from,
-            str(parent_covered).lower(),
+        self._log_info_once(
+            family="tool_followup_parent_resolution",
+            signature=(
+                self._current_run_id() or "",
+                parent_turn_id or str(response_metadata.get("turn_id") or "").strip() or "turn-unknown",
+                tool_call_id or "unknown",
+                parent_input_event_key or "none",
+                normalized_blocked_by or "none",
+                resolved_parent_response_id,
+                resolved_parent_canonical_key,
+                resolved_from,
+                str(parent_covered).lower(),
+            ),
+            message=(
+                "tool_followup_parent_resolution run_id=%s turn_id=%s tool_call_id=%s parent_input_event_key=%s blocked_by_response_id=%s resolved_parent_response_id=%s resolved_parent_canonical_key=%s resolved_from=%s parent_covered=%s"
+            ),
+            args=(
+                self._current_run_id() or "",
+                parent_turn_id or str(response_metadata.get("turn_id") or "").strip() or "turn-unknown",
+                tool_call_id or "unknown",
+                parent_input_event_key or "none",
+                normalized_blocked_by or "none",
+                resolved_parent_response_id,
+                resolved_parent_canonical_key,
+                resolved_from,
+                str(parent_covered).lower(),
+            ),
         )
         return state_entry
 
@@ -8138,24 +8155,42 @@ class RealtimeAPI:
                 terminal_reason,
             )
             if parent_covered:
-                logger.info(
-                    "parent_deliverable_verdict response_id=%s covered=%s class=%s source=%s",
-                    str(getattr(parent_state, "response_id", "") or "").strip() or "none",
-                    str(parent_covered).lower(),
-                    deliverable_class or "unknown",
-                    coverage_source,
+                self._log_info_once(
+                    family="parent_deliverable_verdict",
+                    signature=(
+                        str(getattr(parent_state, "response_id", "") or "").strip() or "none",
+                        str(parent_covered).lower(),
+                        deliverable_class or "unknown",
+                        coverage_source,
+                    ),
+                    message="parent_deliverable_verdict response_id=%s covered=%s class=%s source=%s",
+                    args=(
+                        str(getattr(parent_state, "response_id", "") or "").strip() or "none",
+                        str(parent_covered).lower(),
+                        deliverable_class or "unknown",
+                        coverage_source,
+                    ),
                 )
             else:
                 classification_pending = self._parent_deliverable_classification_pending(
                     parent_state=parent_state,
                     response_metadata=response_metadata,
                 )
-                logger.info(
-                    "parent_deliverable_verdict response_id=%s covered=%s class=%s source=%s",
-                    str(getattr(parent_state, "response_id", "") or "").strip() or "none",
-                    str(parent_covered).lower(),
-                    deliverable_class or "unknown",
-                    coverage_source,
+                self._log_info_once(
+                    family="parent_deliverable_verdict",
+                    signature=(
+                        str(getattr(parent_state, "response_id", "") or "").strip() or "none",
+                        str(parent_covered).lower(),
+                        deliverable_class or "unknown",
+                        coverage_source,
+                    ),
+                    message="parent_deliverable_verdict response_id=%s covered=%s class=%s source=%s",
+                    args=(
+                        str(getattr(parent_state, "response_id", "") or "").strip() or "none",
+                        str(parent_covered).lower(),
+                        deliverable_class or "unknown",
+                        coverage_source,
+                    ),
                 )
 
         decision = decide_tool_followup_arbitration(
@@ -9412,7 +9447,7 @@ class RealtimeAPI:
         origin: str,
         response_id: str | None,
         decision: str,
-        level: int = logging.INFO,
+        level: int = logging.DEBUG,
         upgrade_chain_id: str | None = None,
     ) -> None:
         resolved_turn_id = str(turn_id or "").strip() or "turn-unknown"
@@ -9451,6 +9486,27 @@ class RealtimeAPI:
                 f"input_event_key={resolved_input_event_key};upgrade_chain_id={resolved_upgrade_chain_id or 'none'}"
             ),
         )
+
+
+    def _log_info_once(
+        self,
+        *,
+        family: str,
+        signature: tuple[Any, ...],
+        message: str,
+        args: tuple[Any, ...],
+    ) -> None:
+        seen = getattr(self, "_info_log_dedupe_signatures", None)
+        if not isinstance(seen, set):
+            seen = set()
+            self._info_log_dedupe_signatures = seen
+        dedupe_key = (str(family or "unknown").strip() or "unknown", tuple(signature))
+        if dedupe_key in seen:
+            return
+        if len(seen) >= 512:
+            seen.clear()
+        seen.add(dedupe_key)
+        logger.info(message, *args)
 
     def _canonical_first_audio_started(self, canonical_key: str) -> bool:
         if self._lifecycle_controller().audio_started(canonical_key):
