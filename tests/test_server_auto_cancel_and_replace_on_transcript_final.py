@@ -1021,8 +1021,75 @@ def test_provisional_server_auto_tool_call_is_deferred_before_transcript_final(m
 
     assert captured["reason"] == "provisional_server_auto_pre_audio_hold"
     assert captured["status"] == "deferred"
+    assert api._deferred_provisional_tool_call == {
+        "tool_name": "gesture_look_around",
+        "call_id": "call-provisional",
+        "args": {},
+        "turn_id": "turn_3",
+        "response_id": "resp-server-auto",
+        "input_event_key": "synthetic_server_auto_3",
+        "stored_at": api._deferred_provisional_tool_call["stored_at"],
+    }
     assert api.function_call is None
     assert api.function_call_args == ""
+
+
+def test_cancel_and_replace_reissues_deferred_provisional_tool_call_before_replacement(monkeypatch) -> None:
+    api = _build_api_stub()
+    transport = _Transport()
+    api._pending_server_auto_response_by_turn_id["turn_3"] = PendingServerAutoResponse(
+        turn_id="turn_3",
+        response_id="resp-server-auto",
+        canonical_key="run-464:turn_3:synthetic_server_auto_3",
+        created_at_ms=1,
+        active=True,
+    )
+    api._deferred_provisional_tool_call = {
+        "tool_name": "read_battery_voltage",
+        "call_id": "call-provisional",
+        "args": {},
+        "turn_id": "turn_3",
+        "response_id": "resp-server-auto",
+        "input_event_key": "synthetic_server_auto_3",
+        "stored_at": 1.0,
+    }
+    api._get_or_create_transport = lambda: transport
+    api._peek_pending_preference_memory_context_payload = lambda **_kwargs: None
+    replayed: list[dict[str, object]] = []
+
+    async def _fake_handle_function_call(_event, _websocket):
+        replayed.append(
+            {
+                "function_call": dict(api.function_call or {}),
+                "function_call_args": api.function_call_args,
+            }
+        )
+        api.function_call = None
+        api.function_call_args = ""
+
+    replacement_create = AsyncMock(return_value=True)
+    monkeypatch.setattr(api, "handle_function_call", _fake_handle_function_call)
+    monkeypatch.setattr(api, "_send_response_create", replacement_create)
+
+    replaced = asyncio.run(
+        api._cancel_and_replace_pending_server_auto_on_transcript_final(
+            websocket=object(),
+            turn_id="turn_3",
+            input_event_key="item-final",
+            origin_label="upgraded_response",
+        )
+    )
+
+    assert replaced is True
+    assert transport.sent == [{"type": "response.cancel", "response_id": "resp-server-auto"}]
+    assert replayed == [
+        {
+            "function_call": {"name": "read_battery_voltage", "call_id": "call-provisional"},
+            "function_call_args": "{}",
+        }
+    ]
+    replacement_create.assert_not_awaited()
+    assert api._deferred_provisional_tool_call is None
 
 
 def test_transcript_final_handoff_invalidates_provisional_tool_followup_lineage() -> None:
