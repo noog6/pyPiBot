@@ -205,6 +205,49 @@ def test_handle_response_done_logs_normal_deliverable_selection() -> None:
     )
 
 
+def test_handle_response_done_logs_stale_lifecycle_noise_classification_once() -> None:
+    api = _make_api()
+    api._active_response_id = "resp_new"
+    api._active_response_origin = "assistant_message"
+    api._active_response_input_event_key = "item_2"
+    api._active_response_canonical_key = "turn_1::item_2"
+    api._active_input_event_key_for_turn = lambda _turn_id: "item_2"
+    api._stale_response_ids_set = {"resp_old"}
+    api._stale_response_map = {
+        "resp_old": {
+            "canonical_key": "turn_1::synthetic_server_auto_1",
+            "origin": "server_auto",
+            "turn_id": "turn_1",
+            "input_event_key": "synthetic_server_auto_1",
+            "expires_at": 9999999999.0,
+        }
+    }
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock()
+    api._apply_terminal_deliverable_selection = Mock()
+
+    with patch("ai.realtime_api.logger.info") as api_info_log:
+        asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_old"}}))
+
+    matching_call = None
+    for call in api_info_log.call_args_list:
+        if call.args and call.args[0] == (
+            "response_terminal_event_ignored run_id=%s classification=%s event_type=%s response_id=%s origin=%s turn_id=%s input_event_key=%s canonical_key=%s active_response_id=%s active_canonical_key=%s reasons=%s"
+        ):
+            matching_call = call
+            break
+
+    assert matching_call is not None
+    assert matching_call.args[1] == "run-test"
+    assert matching_call.args[2] == "stale"
+    assert matching_call.args[3] == "response.done"
+    assert matching_call.args[4] == "resp_old"
+    assert matching_call.args[9] == "resp_new"
+    assert matching_call.args[10] == "turn_1::item_2"
+    assert "stale_response_id" in matching_call.args[11]
+    assert "inactive_response_id" in matching_call.args[11]
+
+
 
 
 def test_handle_response_done_applies_terminal_selection_to_canonical_state() -> None:
@@ -232,6 +275,119 @@ def test_handle_response_done_applies_terminal_selection_to_canonical_state() ->
         selected=True,
         selection_reason="normal",
     )
+
+
+def test_handle_response_done_drops_stale_response_after_upgraded_replacement() -> None:
+    api = _make_api()
+    api._active_response_id = "resp_new"
+    api._active_response_origin = "assistant_message"
+    api._active_response_input_event_key = "item_2"
+    api._active_response_canonical_key = "turn_1::item_2"
+    api._active_input_event_key_for_turn = lambda _turn_id: "item_2"
+    api._stale_response_ids_set = {"resp_old"}
+    api._stale_response_map = {
+        "resp_old": {
+            "canonical_key": "turn_1::synthetic_server_auto_1",
+            "origin": "server_auto",
+            "turn_id": "turn_1",
+            "input_event_key": "synthetic_server_auto_1",
+            "expires_at": 9999999999.0,
+        }
+    }
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock()
+    api._apply_terminal_deliverable_selection = Mock()
+    api._reconcile_semantic_substantive_owner = Mock()
+    api._reconcile_terminal_substantive_response = Mock()
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_old"}}))
+
+    api._apply_terminal_deliverable_selection.assert_not_called()
+    api._reconcile_semantic_substantive_owner.assert_not_called()
+    api._reconcile_terminal_substantive_response.assert_not_called()
+    api._maybe_schedule_empty_response_retry.assert_not_awaited()
+    api._build_confirmation_transition_decision.assert_not_called()
+    assert api._active_response_id == "resp_new"
+
+
+def test_handle_response_done_drops_missing_response_id_with_unknown_origin_before_terminal_mutation() -> None:
+    api = _make_api()
+    api._active_response_id = None
+    api._active_response_origin = "unknown"
+    api._active_response_input_event_key = None
+    api._active_response_canonical_key = None
+    api._active_input_event_key_for_turn = lambda _turn_id: "item_current"
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock()
+    api._apply_terminal_deliverable_selection = Mock()
+
+    asyncio.run(api.handle_response_done({"type": "response.done"}))
+
+    api._apply_terminal_deliverable_selection.assert_not_called()
+    api._maybe_schedule_empty_response_retry.assert_not_awaited()
+    api._build_confirmation_transition_decision.assert_not_called()
+
+
+def test_handle_response_done_late_server_auto_after_turn_finalized_does_not_emit_duplicate_output() -> None:
+    api = _make_api()
+    api._active_response_id = None
+    api._active_response_origin = "unknown"
+    api._active_response_input_event_key = None
+    api._active_response_canonical_key = None
+    api._active_input_event_key_for_turn = lambda _turn_id: "item_final"
+    api._stale_response_ids_set = {"resp_server_auto_old"}
+    api._stale_response_map = {
+        "resp_server_auto_old": {
+            "canonical_key": "turn_1::synthetic_server_auto_9",
+            "origin": "server_auto",
+            "turn_id": "turn_1",
+            "input_event_key": "synthetic_server_auto_9",
+            "expires_at": 9999999999.0,
+        }
+    }
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock()
+    api._apply_terminal_deliverable_selection = Mock()
+    api._clear_active_response_state = Mock()
+
+    asyncio.run(
+        api.handle_response_done({"type": "response.done", "response": {"id": "resp_server_auto_old"}})
+    )
+
+    api._apply_terminal_deliverable_selection.assert_not_called()
+    api._clear_active_response_state.assert_not_called()
+    api._maybe_schedule_empty_response_retry.assert_not_awaited()
+    api._build_confirmation_transition_decision.assert_not_called()
+
+
+def test_handle_response_completed_shares_terminal_event_admission_guard() -> None:
+    api = _make_api()
+    api._active_response_id = None
+    api._active_response_origin = "unknown"
+    api._active_response_input_event_key = None
+    api._active_response_canonical_key = None
+    api._active_input_event_key_for_turn = lambda _turn_id: "item_final"
+    api._stale_response_ids_set = {"resp_server_auto_old"}
+    api._stale_response_map = {
+        "resp_server_auto_old": {
+            "canonical_key": "turn_1::synthetic_server_auto_9",
+            "origin": "server_auto",
+            "turn_id": "turn_1",
+            "input_event_key": "synthetic_server_auto_9",
+            "expires_at": 9999999999.0,
+        }
+    }
+    api._clear_active_response_state = Mock()
+    api._build_confirmation_transition_decision = Mock()
+
+    asyncio.run(
+        api.handle_response_completed(
+            {"type": "response.completed", "response": {"id": "resp_server_auto_old"}}
+        )
+    )
+
+    api._clear_active_response_state.assert_not_called()
+    api._build_confirmation_transition_decision.assert_not_called()
 
 
 def test_active_response_lifecycle_clear_keeps_legacy_fields_in_sync() -> None:
@@ -1449,4 +1605,4 @@ def test_handle_response_done_trace_summary_stays_execution_scoped_when_terminal
     assert trace.semantic_owner_observation.decision.selected_candidate_id == "semantic_owner_execution"
     assert trace.semantic_owner_observation.decision.native_reason_code == "terminal_not_selected"
     assert summary is not None
-    assert summary.semantic_owner_summary == "semantic owner stayed on execution canonical"
+    assert summary.semantic_owner_summary == "semantic owner remained execution-scoped pending terminal selection"
