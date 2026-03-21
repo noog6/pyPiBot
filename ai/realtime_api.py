@@ -6316,6 +6316,7 @@ class RealtimeAPI:
     def _response_runtime_coherence_snapshot(
         self,
         *,
+        stage: str | None = None,
         turn_id: str,
         canonical_key: str | None = None,
         response_id: str | None = None,
@@ -6400,7 +6401,15 @@ class RealtimeAPI:
                 turn_id=normalized_turn_id,
                 input_event_key=expected_active_input_key,
             )
-            if expected_canonical_key != normalized_canonical_key and not active_canonical_key:
+            allowed_completed_canonicals = {normalized_canonical_key}
+            if stage == "response_done" and not active_canonical_key:
+                allowed_completed_canonicals.update(
+                    str(entry.get("canonical_key") or "").strip()
+                    for entry in queue_entries
+                    if str(entry.get("turn_id") or "").strip() == normalized_turn_id
+                    and str(entry.get("canonical_key") or "").strip()
+                )
+            if expected_canonical_key not in allowed_completed_canonicals and not active_canonical_key:
                 violations.append("turn_active_key_canonical_mismatch")
         return {
             "turn_id": normalized_turn_id,
@@ -6431,6 +6440,7 @@ class RealtimeAPI:
         canonical_key: str | None = None,
     ) -> None:
         snapshot = self._response_runtime_coherence_snapshot(
+            stage=stage,
             turn_id=turn_id,
             canonical_key=canonical_key,
             response_id=response_id,
