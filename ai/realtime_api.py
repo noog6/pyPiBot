@@ -1043,6 +1043,7 @@ class RealtimeAPI:
         self._research_suppressed_fingerprints: dict[str, str] = {}
         self._research_pending_call_ids: set[str] = set()
         self._deferred_research_tool_call: dict[str, Any] | None = None
+        self._deferred_provisional_tool_call: dict[str, Any] | None = None
         self._tool_call_dedupe_ttl_s = float(research_cfg.get("tool_call_dedupe_ttl_s", 30.0))
         self._research_spoken_response_dedupe_ttl_s = float(
             research_cfg.get("spoken_response_dedupe_ttl_s", 60.0)
@@ -13743,6 +13744,71 @@ class RealtimeAPI:
             )
             return True
 
+    def _store_deferred_provisional_tool_call(
+        self,
+        *,
+        tool_name: str,
+        call_id: str | None,
+        args: dict[str, Any],
+    ) -> None:
+        previous = getattr(self, "_deferred_provisional_tool_call", None)
+        previous_call_id = str(previous.get("call_id") or "").strip() if isinstance(previous, dict) else ""
+        self._deferred_provisional_tool_call = {
+            "tool_name": str(tool_name or "").strip(),
+            "call_id": str(call_id or "").strip(),
+            "args": dict(args),
+            "turn_id": str(getattr(self, "_current_response_turn_id", "") or "").strip(),
+            "response_id": str(getattr(self, "_active_response_id", "") or "").strip(),
+            "input_event_key": str(getattr(self, "_active_response_input_event_key", "") or "").strip()
+            or str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip(),
+            "stored_at": time.monotonic(),
+        }
+        logger.info(
+            "provisional_tool_call_stored run_id=%s turn_id=%s response_id=%s tool=%s call_id=%s replaced_call_id=%s",
+            self._current_run_id() or "",
+            str(getattr(self, "_current_response_turn_id", "") or "").strip() or "turn-unknown",
+            str(getattr(self, "_active_response_id", "") or "").strip() or "none",
+            str(tool_name or "").strip() or "unknown",
+            str(call_id or "").strip() or "none",
+            previous_call_id or "none",
+        )
+
+    async def _dispatch_deferred_provisional_tool_call_for_turn(
+        self,
+        websocket: Any,
+        *,
+        turn_id: str,
+        replacement_input_event_key: str,
+        prior_response_id: str | None,
+    ) -> bool:
+        pending = getattr(self, "_deferred_provisional_tool_call", None)
+        if not isinstance(pending, dict):
+            return False
+        pending_turn_id = str(pending.get("turn_id") or "").strip()
+        pending_response_id = str(pending.get("response_id") or "").strip()
+        if pending_turn_id != str(turn_id or "").strip():
+            return False
+        normalized_prior_response_id = str(prior_response_id or "").strip()
+        if normalized_prior_response_id and pending_response_id and pending_response_id != normalized_prior_response_id:
+            return False
+        tool_name = str(pending.get("tool_name") or "").strip() or "unknown"
+        call_id = str(pending.get("call_id") or "").strip() or f"deferred_{uuid.uuid4().hex}"
+        args = pending.get("args") if isinstance(pending.get("args"), dict) else {}
+        self._deferred_provisional_tool_call = None
+        self.function_call = {"name": tool_name, "call_id": call_id}
+        self.function_call_args = json.dumps(args, separators=(",", ":"), sort_keys=True)
+        logger.info(
+            "provisional_tool_call_reissued run_id=%s turn_id=%s prior_response_id=%s replacement_input_event_key=%s tool=%s call_id=%s",
+            self._current_run_id() or "",
+            str(turn_id or "").strip() or "turn-unknown",
+            normalized_prior_response_id or "none",
+            str(replacement_input_event_key or "").strip() or "none",
+            tool_name,
+            call_id,
+        )
+        await self.handle_function_call({}, websocket)
+        return True
+
     def _build_response_done_prompt(self, trigger: str) -> str:
         tool_calls = self._clip_text(
             json.dumps(self._tool_call_records, ensure_ascii=False)
@@ -15098,6 +15164,21 @@ class RealtimeAPI:
                 self._response_in_flight = False
                 self.response_in_progress = False
 
+        if await self._dispatch_deferred_provisional_tool_call_for_turn(
+            websocket,
+            turn_id=turn_id,
+            replacement_input_event_key=input_event_key,
+            prior_response_id=old_response_id or None,
+        ):
+            self._mark_pending_server_auto_response_replaced(turn_id=turn_id)
+            self._log_lifecycle_coherence(
+                stage="replacement_tool_reissued",
+                turn_id=turn_id,
+                response_id=old_response_id,
+                canonical_key=replacement_canonical_key,
+            )
+            return True
+
         replacement_event = {"type": "response.create", "response": {"metadata": {}}}
         metadata = replacement_event["response"]["metadata"]
         metadata["turn_id"] = str(turn_id or "").strip() or "turn-unknown"
@@ -15814,6 +15895,11 @@ class RealtimeAPI:
                 call_id=str(call_id or "").strip() or None,
             )
             if self._should_defer_provisional_server_auto_tool_call():
+                self._store_deferred_provisional_tool_call(
+                    tool_name=function_name,
+                    call_id=call_id,
+                    args=args,
+                )
                 logger.info(
                     "Function call deferred | tool=%s call_id=%s reason=provisional_server_auto_pre_audio_hold",
                     function_name,
