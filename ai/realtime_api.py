@@ -6315,48 +6315,6 @@ class RealtimeAPI:
             self._clear_stale_response_context(normalized_response_id)
         return False
 
-    def _response_done_accepts_replayed_tool_child_canonical(
-        self,
-        *,
-        turn_id: str,
-        canonical_key: str,
-        response_id: str | None,
-        expected_active_input_key: str,
-    ) -> bool:
-        normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
-        normalized_canonical_key = str(canonical_key or "").strip()
-        normalized_response_id = str(response_id or "").strip()
-        normalized_expected_key = str(expected_active_input_key or "").strip()
-        if not (
-            normalized_turn_id
-            and normalized_canonical_key
-            and normalized_response_id
-            and normalized_expected_key
-        ):
-            return False
-        trace_context = self._response_trace_by_id().get(normalized_response_id, {})
-        if not isinstance(trace_context, dict):
-            return False
-        trace_turn_id = str(trace_context.get("turn_id") or "").strip()
-        trace_canonical_key = str(trace_context.get("canonical_key") or "").strip()
-        trace_parent_input_event_key = str(trace_context.get("parent_input_event_key") or "").strip()
-        trace_tool_followup = str(trace_context.get("tool_followup") or "").strip().lower()
-        trace_tool_followup_release = str(trace_context.get("tool_followup_release") or "").strip().lower()
-        trace_origin = str(trace_context.get("origin") or "").strip().lower()
-        if trace_turn_id != normalized_turn_id:
-            return False
-        if trace_canonical_key and trace_canonical_key != normalized_canonical_key:
-            return False
-        if trace_origin != "tool_output":
-            return False
-        if trace_tool_followup not in {"true", "1", "yes"}:
-            return False
-        if trace_tool_followup_release not in {"true", "1", "yes"}:
-            return False
-        if trace_parent_input_event_key != normalized_expected_key:
-            return False
-        return True
-
     def _response_runtime_coherence_snapshot(
         self,
         *,
@@ -6453,13 +6411,6 @@ class RealtimeAPI:
                     if str(entry.get("turn_id") or "").strip() == normalized_turn_id
                     and str(entry.get("canonical_key") or "").strip()
                 )
-                if self._response_done_accepts_replayed_tool_child_canonical(
-                    turn_id=normalized_turn_id,
-                    canonical_key=normalized_canonical_key,
-                    response_id=normalized_response_id or None,
-                    expected_active_input_key=expected_active_input_key,
-                ):
-                    allowed_completed_canonicals.add(expected_canonical_key)
             if expected_canonical_key not in allowed_completed_canonicals and not active_canonical_key:
                 violations.append("turn_active_key_canonical_mismatch")
         return {

@@ -422,36 +422,6 @@ def test_active_response_lifecycle_clear_keeps_legacy_fields_in_sync() -> None:
     assert api._active_response_preference_guarded is False
 
 
-def test_response_done_coherence_snapshot_accepts_replayed_tool_child_after_transcript_final_handoff() -> None:
-    api = _make_api()
-    api._active_input_event_key_for_turn = lambda _turn_id: "item_final"
-    api._active_response_id = None
-    api._active_response_origin = "unknown"
-    api._active_response_input_event_key = None
-    api._active_response_canonical_key = None
-    api._response_trace_context_by_id = {
-        "resp_tool_child": {
-            "turn_id": "turn_1",
-            "input_event_key": "tool:call_173jzwHWhH6qp7QX",
-            "canonical_key": "turn_1::tool:call_173jzwHWhH6qp7QX",
-            "origin": "tool_output",
-            "parent_input_event_key": "item_final",
-            "tool_followup": "true",
-            "tool_followup_release": "true",
-        }
-    }
-
-    snapshot = api._response_runtime_coherence_snapshot(
-        stage="response_done",
-        turn_id="turn_1",
-        canonical_key="turn_1::tool:call_173jzwHWhH6qp7QX",
-        response_id="resp_tool_child",
-    )
-
-    assert snapshot["violations"] == []
-    assert snapshot["suppression"]["expected_turn_input_event_key"] == "item_final"
-
-
 def test_handle_response_done_coherence_snapshot_stays_consistent_after_cleanup() -> None:
     api = _make_api()
     api._apply_terminal_deliverable_selection = RealtimeAPI._apply_terminal_deliverable_selection.__get__(api, RealtimeAPI)
@@ -494,35 +464,6 @@ def test_handle_response_done_coherence_snapshot_stays_consistent_after_cleanup(
         "canonical_key": "turn_1::input_evt_1",
     }
     assert snapshot["suppression"]["turn_suppressed"] is False
-
-
-def test_response_done_coherence_snapshot_keeps_mismatch_for_unrelated_tool_child() -> None:
-    api = _make_api()
-    api._active_input_event_key_for_turn = lambda _turn_id: "item_final"
-    api._active_response_id = None
-    api._active_response_origin = "unknown"
-    api._active_response_input_event_key = None
-    api._active_response_canonical_key = None
-    api._response_trace_context_by_id = {
-        "resp_tool_child_other": {
-            "turn_id": "turn_2",
-            "input_event_key": "tool:call_other_turn",
-            "canonical_key": "turn_2::tool:call_other_turn",
-            "origin": "tool_output",
-            "parent_input_event_key": "item_final",
-            "tool_followup": "true",
-            "tool_followup_release": "true",
-        }
-    }
-
-    snapshot = api._response_runtime_coherence_snapshot(
-        stage="response_done",
-        turn_id="turn_1",
-        canonical_key="turn_1::tool:call_other_turn",
-        response_id="resp_tool_child_other",
-    )
-
-    assert snapshot["violations"] == ["turn_active_key_canonical_mismatch"]
 
 
 def test_handle_response_done_reconciles_terminal_substantive_count() -> None:
