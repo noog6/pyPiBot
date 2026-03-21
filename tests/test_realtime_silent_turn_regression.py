@@ -185,7 +185,7 @@ def test_prompt_origin_response_created_binds_active_key_before_output(monkeypat
     response_binding_logs: list[str] = []
 
     monkeypatch.setattr(
-        "ai.realtime_api.logger.info",
+        "ai.realtime_api.logger.debug",
         lambda message, *args: response_binding_logs.append(message % args),
     )
 

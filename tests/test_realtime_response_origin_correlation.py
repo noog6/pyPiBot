@@ -209,7 +209,7 @@ def test_response_created_binding_prompt_happy_path_never_logs_unknown_active_ke
     binding_logs: list[str] = []
 
     monkeypatch.setattr(
-        "ai.realtime_api.logger.info",
+        "ai.realtime_api.logger.debug",
         lambda message, *args: binding_logs.append(message % args),
     )
 
@@ -243,7 +243,7 @@ def test_response_created_binding_server_auto_happy_path_never_logs_unknown_acti
     binding_logs: list[str] = []
 
     monkeypatch.setattr(
-        "ai.realtime_api.logger.info",
+        "ai.realtime_api.logger.debug",
         lambda message, *args: binding_logs.append(message % args),
     )
 
@@ -565,7 +565,7 @@ def test_response_lifecycle_trace_continuity_created_content_done(monkeypatch) -
 
     lifecycle_anchors = [
         line
-        for line in info_logs
+        for line in debug_logs
         if line.startswith("response_lifecycle_trace response_id=resp_trace_1")
     ]
     assert any("event_type=response.created" in line for line in lifecycle_anchors)
