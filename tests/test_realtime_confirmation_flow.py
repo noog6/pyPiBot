@@ -2364,6 +2364,126 @@ def test_intent_guard_changed_args_creates_new_intent() -> None:
     assert status is None
 
 
+def test_intent_guard_allows_repeated_reversible_gesture_in_new_turn_with_again_after_completion() -> None:
+    api = _make_api_stub()
+    api._intent_execution_cooldown_s = 30.0
+    api._current_response_turn_id = "turn_2"
+    api._last_user_input_text = "Look at center."
+
+    api._record_intent_state(
+        "gesture_look_center",
+        {},
+        "executed",
+        idempotency_key="idem-gesture-center",
+    )
+    api._record_intent_completion(
+        "gesture_look_center",
+        {},
+        idempotency_key="idem-gesture-center",
+    )
+
+    api._current_response_turn_id = "turn_3"
+    api._last_user_input_text = "Can you go back to center again?"
+
+    blocked, status, _message = api._evaluate_intent_guard(
+        "gesture_look_center",
+        {},
+        phase="execution",
+        idempotency_key="idem-gesture-center",
+    )
+
+    assert blocked is False
+    assert status is None
+
+
+def test_intent_guard_allows_repeated_reversible_gesture_in_new_turn_after_completion_without_again() -> None:
+    api = _make_api_stub()
+    api._intent_execution_cooldown_s = 30.0
+    api._current_response_turn_id = "turn_2"
+    api._last_user_input_text = "Center."
+
+    api._record_intent_state(
+        "gesture_look_center",
+        {},
+        "executed",
+        idempotency_key="idem-gesture-center",
+    )
+    api._record_intent_completion(
+        "gesture_look_center",
+        {},
+        idempotency_key="idem-gesture-center",
+    )
+
+    api._current_response_turn_id = "turn_3"
+    api._last_user_input_text = "Center please."
+
+    blocked, status, _message = api._evaluate_intent_guard(
+        "gesture_look_center",
+        {},
+        phase="execution",
+        idempotency_key="idem-gesture-center",
+    )
+
+    assert blocked is False
+    assert status is None
+
+
+def test_intent_guard_blocks_same_turn_reversible_gesture_duplicate_after_completion() -> None:
+    api = _make_api_stub()
+    api._intent_execution_cooldown_s = 30.0
+    api._current_response_turn_id = "turn_2"
+    api._last_user_input_text = "Again."
+
+    api._record_intent_state(
+        "gesture_look_center",
+        {},
+        "executed",
+        idempotency_key="idem-gesture-center",
+    )
+    api._record_intent_completion(
+        "gesture_look_center",
+        {},
+        idempotency_key="idem-gesture-center",
+    )
+
+    blocked, status, _message = api._evaluate_intent_guard(
+        "gesture_look_center",
+        {},
+        phase="execution",
+        idempotency_key="idem-gesture-center",
+    )
+
+    assert blocked is True
+    assert status == "blocked_duplicate_execution"
+
+
+def test_intent_guard_blocks_in_flight_reversible_gesture_duplicate_in_new_turn() -> None:
+    api = _make_api_stub()
+    api._intent_execution_cooldown_s = 30.0
+    api._current_response_turn_id = "turn_2"
+    api._last_user_input_text = "Center."
+
+    api._record_intent_state(
+        "gesture_look_center",
+        {},
+        "executed",
+        idempotency_key="idem-gesture-center",
+    )
+
+    api._current_response_turn_id = "turn_3"
+    api._last_user_input_text = "Can you go back to center again?"
+
+    blocked, status, _message = api._evaluate_intent_guard(
+        "gesture_look_center",
+        {},
+        phase="execution",
+        idempotency_key="idem-gesture-center",
+    )
+
+    assert blocked is True
+    assert status == "blocked_duplicate_execution"
+
+
 def test_tool_confirmation_retry_after_denial_returns_noop_without_prompt() -> None:
     api = _make_api_stub()
     api._pending_action = None
