@@ -1580,6 +1580,152 @@ def test_tool_output_semantic_answer_ownership_reconciles_to_parent_canonical_ke
     )
 
 
+def test_response_done_coherence_allows_execution_or_queued_canonical_after_tool_output_cleanup(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+
+    turn_id = "turn_tool_done_coherence"
+    parent_input_event_key = "item_parent_tool_done_coherence"
+    parent_response_id = "resp-parent-tool-done-coherence"
+    parent_canonical_key = api._canonical_utterance_key(
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+    )
+
+    api._current_response_turn_id = turn_id
+    api._active_input_event_key_by_turn_id[turn_id] = parent_input_event_key
+    api._active_server_auto_input_event_key = parent_input_event_key
+    api._active_response_origin = "server_auto"
+    api._active_response_id = parent_response_id
+    api._active_response_input_event_key = parent_input_event_key
+    api._active_response_canonical_key = parent_canonical_key
+    api._response_in_flight = True
+    api.response_in_progress = True
+    api._canonical_response_state_mutate(
+        canonical_key=parent_canonical_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "created", True),
+            setattr(record, "done", False),
+            setattr(record, "origin", "server_auto"),
+            setattr(record, "response_id", parent_response_id),
+        ),
+    )
+    api._record_response_trace_context(
+        parent_response_id,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        canonical_key=parent_canonical_key,
+        origin="server_auto",
+    )
+    api._record_pending_server_auto_response(
+        turn_id=turn_id,
+        response_id=parent_response_id,
+        canonical_key=parent_canonical_key,
+    )
+
+    first_event, first_canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_tool_done_coherence_first",
+        response_create_event={"type": "response.create"},
+    )
+    second_event, second_canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_tool_done_coherence_second",
+        response_create_event={"type": "response.create"},
+    )
+
+    captured_logs: list[str] = []
+    original_info = logger.info
+    original_warning = logger.warning
+    original_debug = logger.debug
+
+    def _capture_info(message: str, *args, **kwargs):
+        rendered = str(message)
+        if args:
+            rendered = rendered % args
+        captured_logs.append(rendered)
+        return original_info(message, *args, **kwargs)
+
+    def _capture_warning(message: str, *args, **kwargs):
+        rendered = str(message)
+        if args:
+            rendered = rendered % args
+        captured_logs.append(rendered)
+        return original_warning(message, *args, **kwargs)
+
+    def _capture_debug(message: str, *args, **kwargs):
+        rendered = str(message)
+        if args:
+            rendered = rendered % args
+        captured_logs.append(rendered)
+        return original_debug(message, *args, **kwargs)
+
+    monkeypatch.setattr(logger, "info", _capture_info)
+    monkeypatch.setattr(logger, "warning", _capture_warning)
+    monkeypatch.setattr(logger, "debug", _capture_debug)
+
+    async def _run() -> None:
+        await api._send_response_create(ws, first_event, origin="tool_output")
+        assert api._tool_followup_state(canonical_key=first_canonical_key) == "blocked_active_response"
+
+        await api._send_response_create(ws, second_event, origin="tool_output")
+        assert api._tool_followup_state(canonical_key=second_canonical_key) == "blocked_active_response"
+
+        await api.handle_response_done({"type": "response.done", "response": {"id": parent_response_id}})
+
+        await api._handle_response_created_event(
+            {
+                "type": "response.created",
+                "response": {
+                    "id": "resp-child-tool-done-coherence-1",
+                    "metadata": {
+                        "turn_id": turn_id,
+                        "input_event_key": "tool:call_tool_done_coherence_first",
+                        "tool_followup": "true",
+                        "tool_followup_release": "true",
+                        "tool_call_id": "call_tool_done_coherence_first",
+                        "parent_turn_id": turn_id,
+                        "parent_input_event_key": parent_input_event_key,
+                    },
+                },
+            },
+            ws,
+        )
+        api._record_terminal_response_text(
+            response_id="resp-child-tool-done-coherence-1",
+            text="The first tool-output turn completed with a substantive answer.",
+        )
+
+        api._active_input_event_key_by_turn_id[turn_id] = "tool:call_tool_done_coherence_second"
+        await api.handle_response_done({"type": "response.done", "response": {"id": "resp-child-tool-done-coherence-1"}})
+
+    asyncio.run(_run())
+
+    assert api._tool_followup_state(canonical_key=first_canonical_key) == "done"
+    assert api._tool_followup_state(canonical_key=second_canonical_key) in {
+        "scheduled_release",
+        "creating",
+        "created",
+        "released_on_response_done",
+        "dropped",
+    }
+    assert any(
+        "semantic_answer_owner_resolved" in entry
+        and "response_id=resp-child-tool-done-coherence-1" in entry
+        and f"semantic_owner_canonical_key={parent_canonical_key}" in entry
+        and "reason_code=parent_promoted_from_tool_output" in entry
+        for entry in captured_logs
+    )
+    assert not any(
+        "lifecycle_coherence_violation" in entry
+        and "turn_active_key_canonical_mismatch" in entry
+        and "response_id=resp-child-tool-done-coherence-1" in entry
+        for entry in captured_logs
+    )
+
+
 def test_parent_without_terminal_text_still_releases_child_followup_after_response_done() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
