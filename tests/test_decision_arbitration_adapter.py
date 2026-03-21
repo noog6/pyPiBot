@@ -1176,6 +1176,60 @@ def test_turn_review_summary_downgrades_expected_tool_followup_parent_promotion_
     assert summary.review_bucket == "coherent"
 
 
+def test_turn_review_summary_accepts_status_only_gesture_parent_promotion() -> None:
+    trace = merge_arbitration_observations_for_turn(
+        terminal_selection_observation=build_terminal_selection_observation(
+            run_id="run-review-followup-gesture",
+            turn_id="turn-review-followup-gesture",
+            input_event_key="tool:call_gesture",
+            canonical_key="turn-review-followup-gesture::tool:call_gesture",
+            origin="tool_output",
+            selected=True,
+            selection_reason="normal",
+            transcript_final_seen=False,
+            active_response_was_provisional=False,
+        ),
+        semantic_owner_observation=build_semantic_owner_observation(
+            run_id="run-review-followup-gesture",
+            turn_id="turn-review-followup-gesture",
+            input_event_key="tool:call_gesture",
+            execution_canonical_key="turn-review-followup-gesture::tool:call_gesture",
+            semantic_owner_canonical_key="turn-review-followup-gesture::item_parent",
+            origin="tool_output",
+            selected=True,
+            selection_reason="normal",
+            parent_turn_id="turn-review-followup-gesture",
+            parent_input_event_key="item_parent",
+            native_reason_code="parent_promoted_from_tool_output",
+        ),
+        semantic_owner_canonical_key="turn-review-followup-gesture::item_parent",
+        tool_followup_observation=build_tool_followup_observation(
+            run_id="run-review-followup-gesture",
+            turn_id="turn-review-followup-gesture",
+            input_event_key="tool:call_gesture",
+            canonical_key="turn-review-followup-gesture::tool:call_gesture",
+            origin="tool_output",
+            parent_coverage_state="uncovered",
+            followup_outcome_posture="released",
+            native_reason_code="parent_not_deliverable",
+            native_outcome_action="SEND",
+            followup_distinctness="redundant",
+            parent_canonical_key="turn-review-followup-gesture::item_parent",
+            parent_semantic_owner_key="turn-review-followup-gesture::item_parent",
+        ),
+    )
+
+    summary = build_turn_review_summary(trace)
+    diagnostics = trace.diagnostics
+
+    assert diagnostics is not None
+    assert "semantic_owner_parent_promotion_expected" in diagnostics.diagnostic_codes
+    assert "semantic_owner_diverged" not in diagnostics.diagnostic_codes
+    assert diagnostics.suspicious_mismatch_count == 0
+    assert summary.semantic_owner_summary == "semantic owner promoted to parent after tool followup delivery"
+    assert summary.review_bucket == "coherent"
+
+
 def test_turn_review_summary_requires_distinct_followup_for_expected_parent_promotion() -> None:
     trace = merge_arbitration_observations_for_turn(
         terminal_selection_observation=build_terminal_selection_observation(

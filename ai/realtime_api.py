@@ -7925,6 +7925,8 @@ class RealtimeAPI:
             return "distinct"
         if normalized_posture in {"pending", "observe_only"}:
             return "not_applicable"
+        if status_only_gesture and normalized_posture == "released":
+            return "redundant"
         if normalized_posture == "suppressed" and (
             normalized_reason.startswith("parent_covered_tool_result") or status_only_gesture
         ):
