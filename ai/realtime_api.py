@@ -6451,6 +6451,14 @@ class RealtimeAPI:
                 turn_id=normalized_turn_id,
                 input_event_key=expected_active_input_key,
             )
+            suppress_turn_active_key_canonical_mismatch = bool(
+                stage == "response_done"
+                and isinstance(canonical_snapshot, dict)
+                and not active_response_id
+                and not active_canonical_key
+                and canonical_snapshot.get("done") is True
+                and str(canonical_snapshot.get("response_id") or "").strip() == normalized_response_id
+            )
             allowed_completed_canonicals = {normalized_canonical_key}
             if stage == "response_done" and not active_canonical_key:
                 allowed_completed_canonicals.update(
@@ -6459,7 +6467,11 @@ class RealtimeAPI:
                     if str(entry.get("turn_id") or "").strip() == normalized_turn_id
                     and str(entry.get("canonical_key") or "").strip()
                 )
-            if expected_canonical_key not in allowed_completed_canonicals and not active_canonical_key:
+            if (
+                expected_canonical_key not in allowed_completed_canonicals
+                and not active_canonical_key
+                and not suppress_turn_active_key_canonical_mismatch
+            ):
                 violations.append("turn_active_key_canonical_mismatch")
         return {
             "turn_id": normalized_turn_id,

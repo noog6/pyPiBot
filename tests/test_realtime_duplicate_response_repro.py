@@ -2971,6 +2971,73 @@ def test_transcript_final_rebind_coherence_snapshot_stays_consistent() -> None:
     assert snapshot["canonical_state"]["input_event_key"] == new_key
 
 
+def test_response_done_snapshot_suppresses_cleared_terminal_turn_active_mismatch() -> None:
+    api = _make_api_stub()
+    turn_id = "turn_response_done_false_positive_guard"
+    parent_input_event_key = "item_parent_guard"
+    tool_input_event_key = "tool:call_guard"
+    response_id = "resp-tool-guard"
+    tool_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_input_event_key)
+    api._active_input_event_key_by_turn_id[turn_id] = parent_input_event_key
+    api._canonical_response_state_mutate(
+        canonical_key=tool_canonical_key,
+        turn_id=turn_id,
+        input_event_key=tool_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "created", True),
+            setattr(record, "done", True),
+            setattr(record, "origin", "tool_output"),
+            setattr(record, "response_id", response_id),
+        ),
+    )
+    api._clear_active_response_state()
+
+    snapshot = api._response_runtime_coherence_snapshot(
+        stage="response_done",
+        turn_id=turn_id,
+        canonical_key=tool_canonical_key,
+        response_id=response_id,
+    )
+
+    assert "turn_active_key_canonical_mismatch" not in snapshot["violations"]
+    assert snapshot["canonical_state"]["done"] is True
+    assert snapshot["active_response"]["response_id"] is None
+    assert snapshot["active_response"]["canonical_key"] is None
+
+
+def test_response_done_snapshot_still_flags_turn_active_mismatch_outside_cleared_terminal_case() -> None:
+    api = _make_api_stub()
+    turn_id = "turn_response_done_negative_guard"
+    parent_input_event_key = "item_parent_negative"
+    tool_input_event_key = "tool:call_negative"
+    response_id = "resp-tool-negative"
+    tool_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_input_event_key)
+    api._active_input_event_key_by_turn_id[turn_id] = parent_input_event_key
+    api._canonical_response_state_mutate(
+        canonical_key=tool_canonical_key,
+        turn_id=turn_id,
+        input_event_key=tool_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "created", True),
+            setattr(record, "done", True),
+            setattr(record, "origin", "tool_output"),
+            setattr(record, "response_id", response_id),
+        ),
+    )
+    api._clear_active_response_state()
+
+    snapshot = api._response_runtime_coherence_snapshot(
+        stage="response_done",
+        turn_id=turn_id,
+        canonical_key=tool_canonical_key,
+        response_id="resp-other-negative",
+    )
+
+    assert "turn_active_key_canonical_mismatch" in snapshot["violations"]
+    assert snapshot["active_response"]["response_id"] is None
+    assert snapshot["active_response"]["canonical_key"] is None
+
+
 def test_websocket_close_clears_active_ownership_surface_and_legacy_mirrors(monkeypatch) -> None:
     api = _make_api_stub()
     api._transport = type(
