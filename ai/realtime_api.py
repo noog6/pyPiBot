@@ -2684,6 +2684,54 @@ class RealtimeAPI:
             input_event_key=input_event_key or None,
         )
 
+    def _micro_ack_action_token(self, *, turn_id: str, input_event_key: str) -> str:
+        normalized_turn_id = str(turn_id or "").strip() or self._current_turn_id_or_unknown()
+        normalized_input_event_key = str(input_event_key or "").strip()
+        return f"{self._current_run_id() or 'run-unknown'}:{normalized_turn_id}:{normalized_input_event_key}"
+
+    def _rebind_pending_micro_ack_after_transcript_final(
+        self,
+        *,
+        turn_id: str,
+        replacement_input_event_key: str,
+    ) -> int:
+        manager = getattr(self, "_micro_ack_manager", None)
+        if manager is None or not hasattr(manager, "rewrite_scheduled_contexts"):
+            return 0
+        normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
+        normalized_input_event_key = str(replacement_input_event_key or "").strip()
+        if not normalized_input_event_key:
+            return 0
+        replacement_action = self._micro_ack_action_token(
+            turn_id=normalized_turn_id,
+            input_event_key=normalized_input_event_key,
+        )
+        action_prefix = f"{self._current_run_id() or 'run-unknown'}:{normalized_turn_id}:"
+
+        def _rewriter(context: MicroAckContext) -> MicroAckContext | None:
+            action = str(getattr(context, "action", "") or "").strip()
+            if not action.startswith(action_prefix):
+                return None
+            scheduled_input_event_key = action[len(action_prefix) :].strip()
+            if (
+                not scheduled_input_event_key
+                or not self._is_synthetic_input_event_key(scheduled_input_event_key)
+                or scheduled_input_event_key == normalized_input_event_key
+            ):
+                return None
+            return replace(context, action=replacement_action)
+
+        rewritten = int(manager.rewrite_scheduled_contexts(turn_id=normalized_turn_id, rewriter=_rewriter) or 0)
+        if rewritten:
+            logger.info(
+                "micro_ack_handoff_rebound run_id=%s turn_id=%s input_event_key=%s rewritten=%s",
+                self._current_run_id() or "",
+                normalized_turn_id,
+                normalized_input_event_key,
+                rewritten,
+            )
+        return rewritten
+
     def _micro_ack_phrase_is_non_substantive(self, phrase: str) -> bool:
         normalized_phrase = str(phrase or "").strip()
         if not normalized_phrase:
@@ -15507,6 +15555,10 @@ class RealtimeAPI:
                     decision_path,
                 )
             if decision_path != "upgraded_response":
+                self._rebind_pending_micro_ack_after_transcript_final(
+                    turn_id=resolved_turn_id,
+                    replacement_input_event_key=input_event_key,
+                )
                 self._maybe_schedule_micro_ack(
                     turn_id=resolved_turn_id,
                     category=self._micro_ack_category_for_reason("transcript_finalized"),

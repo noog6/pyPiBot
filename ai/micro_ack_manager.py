@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 import hashlib
 import random
@@ -261,6 +261,40 @@ class MicroAckManager:
                 continue
             scheduled.handle.cancel()
             self._log("cancelled", scheduled.context.turn_id, reason, None, scheduled.context)
+
+    def rewrite_scheduled_contexts(
+        self,
+        *,
+        turn_id: str,
+        rewriter: Callable[[MicroAckContext], MicroAckContext | None],
+    ) -> int:
+        rewritten = 0
+        updates: list[tuple[str, str, _ScheduledMicroAck]] = []
+        for dedupe_key, scheduled in list(self._scheduled.items()):
+            if scheduled.context.turn_id != turn_id:
+                continue
+            updated_context = rewriter(scheduled.context)
+            if updated_context is None or updated_context == scheduled.context:
+                continue
+            updated_dedupe_key = self._dedupe_key(updated_context)
+            updates.append(
+                (
+                    dedupe_key,
+                    updated_dedupe_key,
+                    _ScheduledMicroAck(
+                        context=updated_context,
+                        reason=scheduled.reason,
+                        handle=scheduled.handle,
+                    ),
+                )
+            )
+        for old_key, new_key, updated in updates:
+            self._scheduled.pop(old_key, None)
+            self._scheduled_reason.pop(old_key, None)
+            self._scheduled[new_key] = updated
+            self._scheduled_reason[new_key] = updated.reason
+            rewritten += 1
+        return rewritten
 
     def _emit_if_allowed(self, context: MicroAckContext, reason: str, loop: asyncio.AbstractEventLoop) -> None:
         turn_id = context.turn_id

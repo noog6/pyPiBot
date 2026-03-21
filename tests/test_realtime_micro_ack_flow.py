@@ -661,6 +661,78 @@ def test_latency_mask_micro_ack_not_over_suppressed_for_transcript_final_defer_o
     api.loop.close()
 
 
+def test_transcript_final_rebinds_pending_micro_ack_from_synthetic_server_auto_key() -> None:
+    api = _api_stub()
+    fake_loop = _FakeLoop()
+    api.loop.close()
+    api.loop = fake_loop
+    api.state_manager.state = InteractionState.THINKING
+    api._current_run_id = lambda: "run-507"
+    api._micro_ack_manager = MicroAckManager(
+        config=MicroAckConfig(delay_ms=450, expected_wait_threshold_ms=700),
+        on_emit=lambda *_args, **_kwargs: None,
+        on_log=lambda *_args, **_kwargs: None,
+        suppression_reason=lambda: None,
+    )
+    api._active_input_event_key_by_turn_id = {"turn-5": "synthetic_server_auto_5"}
+
+    api._maybe_schedule_micro_ack(
+        turn_id="turn-5",
+        category=MicroAckCategory.LATENCY_MASK,
+        channel="voice",
+        reason="transcript_finalized",
+        expected_delay_ms=700,
+    )
+
+    scheduled_before = next(iter(api._micro_ack_manager._scheduled.values()))
+    assert scheduled_before.context.action == "run-507:turn-5:synthetic_server_auto_5"
+
+    api._active_input_event_key_by_turn_id["turn-5"] = "item_transcript_final_5"
+
+    rewritten = api._rebind_pending_micro_ack_after_transcript_final(
+        turn_id="turn-5",
+        replacement_input_event_key="item_transcript_final_5",
+    )
+
+    assert rewritten == 1
+    scheduled_after = next(iter(api._micro_ack_manager._scheduled.values()))
+    assert scheduled_after.context.action == "run-507:turn-5:item_transcript_final_5"
+
+
+def test_transcript_final_micro_ack_rebind_leaves_already_canonical_pending_ack_unchanged() -> None:
+    api = _api_stub()
+    fake_loop = _FakeLoop()
+    api.loop.close()
+    api.loop = fake_loop
+    api.state_manager.state = InteractionState.THINKING
+    api._current_run_id = lambda: "run-507"
+    api._micro_ack_manager = MicroAckManager(
+        config=MicroAckConfig(delay_ms=450, expected_wait_threshold_ms=700),
+        on_emit=lambda *_args, **_kwargs: None,
+        on_log=lambda *_args, **_kwargs: None,
+        suppression_reason=lambda: None,
+    )
+    api._active_input_event_key_by_turn_id = {"turn-5": "item_transcript_final_5"}
+
+    api._maybe_schedule_micro_ack(
+        turn_id="turn-5",
+        category=MicroAckCategory.LATENCY_MASK,
+        channel="voice",
+        action="run-507:turn-5:item_transcript_final_5",
+        reason="transcript_finalized",
+        expected_delay_ms=700,
+    )
+
+    rewritten = api._rebind_pending_micro_ack_after_transcript_final(
+        turn_id="turn-5",
+        replacement_input_event_key="item_transcript_final_5",
+    )
+
+    assert rewritten == 0
+    scheduled_after = next(iter(api._micro_ack_manager._scheduled.values()))
+    assert scheduled_after.context.action == "run-507:turn-5:item_transcript_final_5"
+
+
 
 
 def test_latency_mask_micro_ack_suppression_reason_codes_distinguish_pending_clarify_and_upgrade() -> None:
