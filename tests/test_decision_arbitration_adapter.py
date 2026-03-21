@@ -1227,10 +1227,10 @@ def test_turn_review_summary_accepts_status_only_gesture_parent_promotion() -> N
     assert "semantic_owner_diverged" not in diagnostics.diagnostic_codes
     assert diagnostics.suspicious_mismatch_count == 0
     assert summary.semantic_owner_summary == "semantic owner promoted to parent after tool followup delivery"
-    assert summary.review_bucket == "coherent"
+    assert summary.review_bucket == "partial_expected"
 
 
-def test_turn_review_summary_requires_distinct_followup_for_expected_parent_promotion() -> None:
+def test_turn_review_summary_keeps_redundant_followup_with_delivery_reason_suspicious() -> None:
     trace = merge_arbitration_observations_for_turn(
         terminal_selection_observation=build_terminal_selection_observation(
             run_id="run-review-followup-redundant",
@@ -1270,6 +1270,114 @@ def test_turn_review_summary_requires_distinct_followup_for_expected_parent_prom
             followup_distinctness="redundant",
             parent_canonical_key="turn-review-followup-redundant::item_parent",
             parent_semantic_owner_key="turn-review-followup-redundant::item_parent",
+        ),
+    )
+
+    summary = build_turn_review_summary(trace)
+    diagnostics = trace.diagnostics
+
+    assert diagnostics is not None
+    assert "semantic_owner_diverged" in diagnostics.diagnostic_codes
+    assert "semantic_owner_parent_promotion_expected" not in diagnostics.diagnostic_codes
+    assert diagnostics.suspicious_mismatch_count == 1
+    assert summary.semantic_owner_summary == "semantic owner diverged to parent"
+    assert summary.review_bucket == "suspicious"
+
+
+def test_turn_review_summary_accepts_aligned_unknown_distinctness_parent_promotion() -> None:
+    trace = merge_arbitration_observations_for_turn(
+        terminal_selection_observation=build_terminal_selection_observation(
+            run_id="run-review-followup-unknown-aligned",
+            turn_id="turn-review-followup-unknown-aligned",
+            input_event_key="tool:call_unknown_aligned",
+            canonical_key="turn-review-followup-unknown-aligned::tool:call_unknown_aligned",
+            origin="tool_output",
+            selected=True,
+            selection_reason="normal",
+            transcript_final_seen=False,
+            active_response_was_provisional=False,
+        ),
+        semantic_owner_observation=build_semantic_owner_observation(
+            run_id="run-review-followup-unknown-aligned",
+            turn_id="turn-review-followup-unknown-aligned",
+            input_event_key="tool:call_unknown_aligned",
+            execution_canonical_key="turn-review-followup-unknown-aligned::tool:call_unknown_aligned",
+            semantic_owner_canonical_key="turn-review-followup-unknown-aligned::item_parent",
+            origin="tool_output",
+            selected=True,
+            selection_reason="normal",
+            parent_turn_id="turn-review-followup-unknown-aligned",
+            parent_input_event_key="item_parent",
+            native_reason_code="parent_promoted_from_tool_output",
+        ),
+        semantic_owner_canonical_key="turn-review-followup-unknown-aligned::item_parent",
+        tool_followup_observation=build_tool_followup_observation(
+            run_id="run-review-followup-unknown-aligned",
+            turn_id="turn-review-followup-unknown-aligned",
+            input_event_key="tool:call_unknown_aligned",
+            canonical_key="turn-review-followup-unknown-aligned::tool:call_unknown_aligned",
+            origin="tool_output",
+            parent_coverage_state="uncovered",
+            followup_outcome_posture="released",
+            native_reason_code="released_for_followup_delivery",
+            native_outcome_action="SEND",
+            followup_distinctness="unknown",
+            parent_canonical_key="turn-review-followup-unknown-aligned::item_parent",
+            parent_semantic_owner_key="turn-review-followup-unknown-aligned::item_parent",
+        ),
+    )
+
+    summary = build_turn_review_summary(trace)
+    diagnostics = trace.diagnostics
+
+    assert diagnostics is not None
+    assert "semantic_owner_parent_promotion_expected" in diagnostics.diagnostic_codes
+    assert "semantic_owner_diverged" not in diagnostics.diagnostic_codes
+    assert diagnostics.suspicious_mismatch_count == 0
+    assert summary.semantic_owner_summary == "semantic owner promoted to parent after tool followup delivery"
+    assert summary.review_bucket == "partial_expected"
+
+
+def test_turn_review_summary_keeps_misaligned_unknown_distinctness_parent_promotion_suspicious() -> None:
+    trace = merge_arbitration_observations_for_turn(
+        terminal_selection_observation=build_terminal_selection_observation(
+            run_id="run-review-followup-unknown-misaligned",
+            turn_id="turn-review-followup-unknown-misaligned",
+            input_event_key="tool:call_unknown_misaligned",
+            canonical_key="turn-review-followup-unknown-misaligned::tool:call_unknown_misaligned",
+            origin="tool_output",
+            selected=True,
+            selection_reason="normal",
+            transcript_final_seen=False,
+            active_response_was_provisional=False,
+        ),
+        semantic_owner_observation=build_semantic_owner_observation(
+            run_id="run-review-followup-unknown-misaligned",
+            turn_id="turn-review-followup-unknown-misaligned",
+            input_event_key="tool:call_unknown_misaligned",
+            execution_canonical_key="turn-review-followup-unknown-misaligned::tool:call_unknown_misaligned",
+            semantic_owner_canonical_key="turn-review-followup-unknown-misaligned::item_parent",
+            origin="tool_output",
+            selected=True,
+            selection_reason="normal",
+            parent_turn_id="turn-review-followup-unknown-misaligned",
+            parent_input_event_key="item_parent",
+            native_reason_code="parent_promoted_from_tool_output",
+        ),
+        semantic_owner_canonical_key="turn-review-followup-unknown-misaligned::item_parent",
+        tool_followup_observation=build_tool_followup_observation(
+            run_id="run-review-followup-unknown-misaligned",
+            turn_id="turn-review-followup-unknown-misaligned",
+            input_event_key="tool:call_unknown_misaligned",
+            canonical_key="turn-review-followup-unknown-misaligned::tool:call_unknown_misaligned",
+            origin="tool_output",
+            parent_coverage_state="uncovered",
+            followup_outcome_posture="released",
+            native_reason_code="released_for_followup_delivery",
+            native_outcome_action="SEND",
+            followup_distinctness="unknown",
+            parent_canonical_key="turn-review-followup-unknown-misaligned::item_other_parent",
+            parent_semantic_owner_key="turn-review-followup-unknown-misaligned::item_other_parent",
         ),
     )
 
