@@ -8846,6 +8846,7 @@ class RealtimeAPI:
                         record.deliverable_class = "final"
             elif normalized_reason in {
                 "micro_ack_non_deliverable",
+                "empty_tool_followup_non_deliverable",
                 "cancelled",
                 "provisional_empty_non_deliverable",
                 "provisional_server_auto_awaiting_transcript_final",
