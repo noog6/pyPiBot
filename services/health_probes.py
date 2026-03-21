@@ -107,6 +107,7 @@ def probe_battery() -> HealthProbeResult:
             "voltage": latest.voltage,
             "percent": latest.percent_of_range,
             "severity": latest.severity,
+            "inferred_charger_connected": int(latest.inferred_charger_connected),
         }
     )
     if latest.severity == "critical":
