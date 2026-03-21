@@ -9128,7 +9128,11 @@ class RealtimeAPI:
         ).strip()
         if not parent_turn_id:
             return True
-        transcript_linked_input_event_key = str(self._active_input_event_key_for_turn(parent_turn_id) or "").strip()
+        transcript_linked_input_event_key = str(getattr(parent_state, "input_event_key", "") or "").strip()
+        if not transcript_linked_input_event_key or transcript_linked_input_event_key.startswith("tool:"):
+            transcript_linked_input_event_key = str(
+                self._active_input_event_key_for_turn(parent_turn_id) or ""
+            ).strip()
         transcript_final_seen = bool(
             transcript_linked_input_event_key and transcript_linked_input_event_key.startswith("item_")
         )
