@@ -985,7 +985,7 @@ def build_turn_arbitration_diagnostics(trace: TurnArbitrationTrace) -> TurnArbit
     if terminal is not None and semantic_owner is None and terminal.deliverable_status == "final_observed":
         diagnostic_codes.append("terminal_selected_without_semantic_owner")
         suspicious_mismatch_count += 1
-    if semantic_owner is not None and trace.semantic_owner_diverged:
+    if semantic_owner is not None and _semantic_owner_has_explicit_parent_promotion(trace):
         diagnostic_codes.append("semantic_owner_diverged")
         suspicious_mismatch_count += 1
     if terminal is not None and terminal.selected_candidate_id == "terminal_selected" and terminal.deliverable_status != "final_observed":
@@ -1082,6 +1082,15 @@ def summarize_turn_arbitration_trace(trace: TurnArbitrationTrace) -> TurnArbitra
     return trace.to_log_payload()
 
 
+def _semantic_owner_has_explicit_parent_promotion(trace: TurnArbitrationTrace) -> bool:
+    decision = trace.semantic_owner_observation.decision if trace.semantic_owner_observation else None
+    if decision is None:
+        return False
+    if decision.selected_candidate_id != "semantic_owner_parent":
+        return False
+    return str(decision.native_reason_code or "").strip().lower() == "parent_promoted_from_tool_output"
+
+
 def _review_bucket_for_trace(trace: TurnArbitrationTrace) -> TurnReviewBucket:
     diagnostics = trace.diagnostics
     if diagnostics is None:
@@ -1133,9 +1142,12 @@ def _semantic_owner_summary(trace: TurnArbitrationTrace) -> str:
     decision = trace.semantic_owner_observation.decision if trace.semantic_owner_observation else None
     if decision is None:
         return "semantic owner seam missing"
-    if trace.semantic_owner_diverged:
+    if _semantic_owner_has_explicit_parent_promotion(trace):
         return "semantic owner diverged to parent"
     if decision.selected_candidate_id == "semantic_owner_execution":
+        reason_code = str(decision.native_reason_code or "").strip().lower()
+        if reason_code == "terminal_not_selected":
+            return "semantic owner remained execution-scoped pending terminal selection"
         return "semantic owner stayed on execution canonical"
     return f"semantic owner observed ({decision.selected_candidate_id})"
 
