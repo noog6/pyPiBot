@@ -158,6 +158,149 @@ def test_unchanged_status_does_not_trigger_response_and_metadata_present(tmp_pat
 
 
 
+def test_first_sample_uses_no_prior_sample_reason(tmp_path: Path, monkeypatch) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "default.yaml").write_text("battery: {}\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("services.battery_monitor.ADS1015Sensor.get_instance", lambda: _FakeSensor())
+    _reset_singletons()
+
+    monitor = BatteryMonitor.get_instance()
+
+    event = monitor._build_event(7.54, None)
+
+    assert event.inferred_charger_connected is False
+    assert event.inference_reason == "no_prior_sample"
+
+
+def test_one_meaningful_rise_sets_pending_reason(tmp_path: Path, monkeypatch) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "default.yaml").write_text("battery: {}\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("services.battery_monitor.ADS1015Sensor.get_instance", lambda: _FakeSensor())
+    _reset_singletons()
+
+    monitor = BatteryMonitor.get_instance()
+    baseline = BatteryStatusEvent(timestamp=0.0, voltage=7.50, percent_of_range=0.36, severity="warning")
+
+    event = monitor._build_event(7.54, baseline)
+
+    assert event.inferred_charger_connected is False
+    assert event.inference_reason == "voltage_rising_pending"
+
+
+def test_rise_then_flat_preserves_supported_pending(tmp_path: Path, monkeypatch) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "default.yaml").write_text("battery: {}\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("services.battery_monitor.ADS1015Sensor.get_instance", lambda: _FakeSensor())
+    _reset_singletons()
+
+    monitor = BatteryMonitor.get_instance()
+    baseline = BatteryStatusEvent(timestamp=0.0, voltage=7.50, percent_of_range=0.36, severity="warning")
+
+    first_rise = monitor._build_event(7.54, baseline)
+    flat_after_rise = monitor._build_event(7.54, first_rise)
+
+    assert first_rise.inference_reason == "voltage_rising_pending"
+    assert flat_after_rise.inferred_charger_connected is False
+    assert flat_after_rise.inference_reason == "voltage_supported_pending"
+
+
+def test_rise_then_tiny_uptick_preserves_supported_pending(tmp_path: Path, monkeypatch) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "default.yaml").write_text("battery: {}\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("services.battery_monitor.ADS1015Sensor.get_instance", lambda: _FakeSensor())
+    _reset_singletons()
+
+    monitor = BatteryMonitor.get_instance()
+    baseline = BatteryStatusEvent(timestamp=0.0, voltage=7.50, percent_of_range=0.36, severity="warning")
+
+    first_rise = monitor._build_event(7.54, baseline)
+    tiny_uptick = monitor._build_event(7.56, first_rise)
+
+    assert tiny_uptick.inferred_charger_connected is False
+    assert tiny_uptick.inference_reason == "voltage_supported_pending"
+
+
+def test_rise_then_flat_then_meaningful_rise_confirms_charger_connected(tmp_path: Path, monkeypatch) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "default.yaml").write_text("battery: {}\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("services.battery_monitor.ADS1015Sensor.get_instance", lambda: _FakeSensor())
+    _reset_singletons()
+
+    monitor = BatteryMonitor.get_instance()
+    baseline = BatteryStatusEvent(timestamp=0.0, voltage=7.50, percent_of_range=0.36, severity="warning")
+
+    first_rise = monitor._build_event(7.54, baseline)
+    supported_pending = monitor._build_event(7.54, first_rise)
+    confirmed = monitor._build_event(7.58, supported_pending)
+
+    assert supported_pending.inference_reason == "voltage_supported_pending"
+    assert confirmed.inferred_charger_connected is True
+    assert confirmed.inference_reason == "voltage_rising"
+
+
+def test_rise_then_falling_clears_charger_inference(tmp_path: Path, monkeypatch) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "default.yaml").write_text("battery: {}\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("services.battery_monitor.ADS1015Sensor.get_instance", lambda: _FakeSensor())
+    _reset_singletons()
+
+    monitor = BatteryMonitor.get_instance()
+    baseline = BatteryStatusEvent(timestamp=0.0, voltage=7.50, percent_of_range=0.36, severity="warning")
+
+    first_rise = monitor._build_event(7.54, baseline)
+    falling = monitor._build_event(7.46, first_rise)
+
+    assert first_rise.inference_reason == "voltage_rising_pending"
+    assert falling.inferred_charger_connected is False
+    assert falling.inference_reason == "voltage_falling"
+
+
+def test_flat_voltage_without_pending_state_stays_flat(tmp_path: Path, monkeypatch) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "default.yaml").write_text("battery: {}\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("services.battery_monitor.ADS1015Sensor.get_instance", lambda: _FakeSensor())
+    _reset_singletons()
+
+    monitor = BatteryMonitor.get_instance()
+    previous = BatteryStatusEvent(timestamp=0.0, voltage=7.50, percent_of_range=0.36, severity="warning")
+
+    event = monitor._build_event(7.50, previous)
+
+    assert event.inferred_charger_connected is False
+    assert event.inference_reason == "voltage_flat"
+
+
+def test_tiny_voltage_uptick_without_pending_state_stays_below_threshold(tmp_path: Path, monkeypatch) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "default.yaml").write_text("battery: {}\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("services.battery_monitor.ADS1015Sensor.get_instance", lambda: _FakeSensor())
+    _reset_singletons()
+
+    monitor = BatteryMonitor.get_instance()
+    previous = BatteryStatusEvent(timestamp=0.0, voltage=7.50, percent_of_range=0.36, severity="warning")
+
+    event = monitor._build_event(7.52, previous)
+
+    assert event.inferred_charger_connected is False
+    assert event.inference_reason == "voltage_rise_below_threshold"
+
+
 def test_two_consecutive_rising_voltage_samples_set_inferred_charger_connected(tmp_path: Path, monkeypatch) -> None:
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -176,95 +319,6 @@ def test_two_consecutive_rising_voltage_samples_set_inferred_charger_connected(t
     assert first_rise.inference_reason == "voltage_rising_pending"
     assert second_rise.inferred_charger_connected is True
     assert second_rise.inference_reason == "voltage_rising"
-
-
-def test_first_sample_uses_no_prior_sample_reason(tmp_path: Path, monkeypatch) -> None:
-    config_dir = tmp_path / "config"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "default.yaml").write_text("battery: {}\n", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("services.battery_monitor.ADS1015Sensor.get_instance", lambda: _FakeSensor())
-    _reset_singletons()
-
-    monitor = BatteryMonitor.get_instance()
-
-    event = monitor._build_event(7.54, None)
-
-    assert event.inferred_charger_connected is False
-    assert event.inference_reason == "no_prior_sample"
-
-
-def test_flat_sample_clears_pending_rise_before_charger_connects(tmp_path: Path, monkeypatch) -> None:
-    config_dir = tmp_path / "config"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "default.yaml").write_text("battery: {}\n", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("services.battery_monitor.ADS1015Sensor.get_instance", lambda: _FakeSensor())
-    _reset_singletons()
-
-    monitor = BatteryMonitor.get_instance()
-    baseline = BatteryStatusEvent(timestamp=0.0, voltage=7.50, percent_of_range=0.36, severity="warning")
-
-    first_rise = monitor._build_event(7.54, baseline)
-    flat_after_rise = monitor._build_event(7.54, first_rise)
-    second_rise_after_flat = monitor._build_event(7.58, flat_after_rise)
-
-    assert first_rise.inference_reason == "voltage_rising_pending"
-    assert flat_after_rise.inferred_charger_connected is False
-    assert flat_after_rise.inference_reason == "voltage_flat"
-    assert second_rise_after_flat.inferred_charger_connected is False
-    assert second_rise_after_flat.inference_reason == "voltage_rising_pending"
-
-
-def test_flat_voltage_keeps_inferred_charger_disconnected(tmp_path: Path, monkeypatch) -> None:
-    config_dir = tmp_path / "config"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "default.yaml").write_text("battery: {}\n", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("services.battery_monitor.ADS1015Sensor.get_instance", lambda: _FakeSensor())
-    _reset_singletons()
-
-    monitor = BatteryMonitor.get_instance()
-    previous = BatteryStatusEvent(timestamp=0.0, voltage=7.50, percent_of_range=0.36, severity="warning")
-
-    event = monitor._build_event(7.50, previous)
-
-    assert event.inferred_charger_connected is False
-    assert event.inference_reason == "voltage_flat"
-
-
-def test_falling_voltage_keeps_inferred_charger_disconnected(tmp_path: Path, monkeypatch) -> None:
-    config_dir = tmp_path / "config"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "default.yaml").write_text("battery: {}\n", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("services.battery_monitor.ADS1015Sensor.get_instance", lambda: _FakeSensor())
-    _reset_singletons()
-
-    monitor = BatteryMonitor.get_instance()
-    previous = BatteryStatusEvent(timestamp=0.0, voltage=7.50, percent_of_range=0.36, severity="warning")
-
-    event = monitor._build_event(7.46, previous)
-
-    assert event.inferred_charger_connected is False
-    assert event.inference_reason == "voltage_falling"
-
-
-def test_tiny_voltage_uptick_below_threshold_does_not_set_inferred_charger_connected(tmp_path: Path, monkeypatch) -> None:
-    config_dir = tmp_path / "config"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "default.yaml").write_text("battery: {}\n", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("services.battery_monitor.ADS1015Sensor.get_instance", lambda: _FakeSensor())
-    _reset_singletons()
-
-    monitor = BatteryMonitor.get_instance()
-    previous = BatteryStatusEvent(timestamp=0.0, voltage=7.50, percent_of_range=0.36, severity="warning")
-
-    event = monitor._build_event(7.52, previous)
-
-    assert event.inferred_charger_connected is False
-    assert event.inference_reason == "voltage_rise_below_threshold"
 
 
 def test_battery_event_bus_metadata_includes_inferred_charger_state(tmp_path: Path, monkeypatch) -> None:

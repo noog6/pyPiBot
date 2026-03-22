@@ -307,19 +307,30 @@ class BatteryMonitor:
     ) -> tuple[bool, str]:
         if delta_voltage is None:
             return False, "no_prior_sample"
+
+        prior_pending_support = previous_event is not None and previous_event.inference_reason in {
+            "voltage_rising",
+            "voltage_rising_pending",
+            "voltage_supported_pending",
+        }
+        prior_pending_only = previous_event is not None and previous_event.inference_reason in {
+            "voltage_rising_pending",
+            "voltage_supported_pending",
+        }
+
         if delta_voltage >= self._charger_inference_min_voltage_rise:
-            previous_rise_qualifies = previous_event is not None and previous_event.inference_reason in {
-                "voltage_rising",
-                "voltage_rising_pending",
-            }
-            if previous_rise_qualifies:
+            if prior_pending_support:
                 return True, "voltage_rising"
             return False, "voltage_rising_pending"
-        if delta_voltage > 0.0:
-            return False, "voltage_rise_below_threshold"
         if delta_voltage < 0.0:
             return False, "voltage_falling"
-        return False, "voltage_flat"
+        if delta_voltage == 0.0:
+            if prior_pending_only:
+                return False, "voltage_supported_pending"
+            return False, "voltage_flat"
+        if prior_pending_only:
+            return False, "voltage_supported_pending"
+        return False, "voltage_rise_below_threshold"
 
     def _warning_threshold(self) -> float:
         return min(max(self._warning_percent / 100.0, 0.0), 1.0)
