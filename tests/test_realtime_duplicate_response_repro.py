@@ -3944,7 +3944,7 @@ def test_tool_followup_release_not_suppressed_when_parent_only_has_unclassified_
     )
 
     assert should_drop is False
-    assert reason == "parent_not_deliverable"
+    assert reason == "parent_not_coverage_qualified"
 
 def test_tool_followup_create_seam_requires_terminal_text_before_terminal_selection_counts_as_parent_coverage() -> None:
     api = _make_api_stub()
@@ -4859,7 +4859,7 @@ def test_second_same_turn_tool_followup_release_uses_canonical_owner_not_prior_t
     )
 
     assert should_drop is False
-    assert reason == "parent_not_deliverable"
+    assert reason == "parent_not_coverage_qualified"
     assert parent_entry is not None
     assert parent_entry[0] == parent_canonical_key
     assert api._tool_followup_state(canonical_key=canonical_key) == "new"
@@ -5700,7 +5700,7 @@ def test_upgraded_response_still_suppresses_redundant_tool_followup_after_pendin
     )
 
     assert should_drop is False
-    assert reason == "parent_not_deliverable"
+    assert reason == "parent_terminal_selection_not_coverage_qualified"
     assert entry is not None
     parent_covered, coverage_source, _observed, _klass, _selected, _sel_reason = api._parent_response_coverage_state(
         parent_state=entry[1],
@@ -5922,7 +5922,7 @@ def test_tool_followup_release_does_not_reopen_parent_pending_after_tool_rebind(
     assert entry[0] == parent_canonical_key
     assert decision.should_hold is False
     assert decision.should_release is True
-    assert decision.reason_code == "parent_not_deliverable"
+    assert decision.reason_code == "parent_terminal_selection_not_coverage_qualified"
     assert decision.parent_coverage_state == "uncovered"
 
 
@@ -5969,7 +5969,7 @@ def test_tool_followup_parent_pending_falls_back_to_active_turn_key_when_parent_
     assert entry[0] == parent_canonical_key
     assert decision.should_hold is False
     assert decision.should_release is True
-    assert decision.reason_code == "parent_not_deliverable"
+    assert decision.reason_code == "parent_not_coverage_qualified"
     assert decision.parent_coverage_state == "uncovered"
 
 
@@ -6065,7 +6065,7 @@ def test_tool_followup_parent_resolution_rebinds_third_sibling_to_canonical_non_
     )
 
     assert should_drop is False
-    assert reason == "parent_not_deliverable"
+    assert reason == "parent_terminal_selection_not_coverage_qualified"
     assert parent_entry is not None
     assert parent_entry[0] == canonical_parent_key
     assert parent_entry[1].response_id == canonical_parent_response_id
@@ -6167,7 +6167,7 @@ def test_tool_followup_parent_resolution_prefers_semantic_owner_promotion_for_la
     )
 
     assert should_drop is False
-    assert reason == "parent_not_deliverable"
+    assert reason == "parent_terminal_selection_not_coverage_qualified"
     assert parent_entry is not None
     assert parent_entry[0] == canonical_parent_key
     assert any(
@@ -6270,7 +6270,7 @@ def test_tool_followup_uncovered_parent_release_uses_canonical_lineage_instead_o
     )
 
     assert should_drop is False
-    assert reason == "parent_not_deliverable"
+    assert reason == "parent_not_coverage_qualified"
     assert parent_entry is not None
     assert parent_entry[0] == canonical_parent_key
     assert any(
@@ -6374,7 +6374,7 @@ def test_tool_followup_exact_runtime_chain_resolves_tool_c_via_tool_parent_metad
     )
 
     assert should_drop is False
-    assert reason == "parent_not_deliverable"
+    assert reason == "parent_not_coverage_qualified"
     assert parent_entry is not None
     assert parent_entry[0] == canonical_parent_key
     assert parent_entry[1].response_id == canonical_parent_response_id
@@ -6994,7 +6994,7 @@ def test_tool_followup_release_after_response_done_does_not_hold_for_unrelated_o
     assert entry[0] == parent_canonical_key
     assert decision.should_hold is False
     assert decision.should_release is True
-    assert decision.reason_code == "parent_not_deliverable"
+    assert decision.reason_code == "parent_not_coverage_qualified"
 
 
 def test_tool_followup_release_after_response_done_drains_after_listening_clears() -> None:

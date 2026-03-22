@@ -32,6 +32,16 @@ class ToolFollowupArbitrationDecision:
         return self.action is ToolFollowupDecisionAction.HOLD
 
 
+def _release_reason_for_uncovered_parent(*, terminal_selected: bool, terminal_reason: str, coverage_source: str) -> str:
+    normalized_terminal_reason = str(terminal_reason or "").strip().lower()
+    normalized_coverage_source = str(coverage_source or "").strip().lower()
+    if terminal_selected and normalized_terminal_reason == "normal":
+        return "parent_terminal_selection_not_coverage_qualified"
+    if normalized_coverage_source not in {"", "none"}:
+        return "parent_coverage_unknown"
+    return "parent_not_coverage_qualified"
+
+
 def decide_tool_followup_arbitration(
     *,
     suppressible: bool,
@@ -104,7 +114,11 @@ def decide_tool_followup_arbitration(
             )
         return ToolFollowupArbitrationDecision(
             action=ToolFollowupDecisionAction.RELEASE,
-            reason_code="parent_not_deliverable",
+            reason_code=_release_reason_for_uncovered_parent(
+                terminal_selected=terminal_selected,
+                terminal_reason=normalized_terminal_reason,
+                coverage_source=normalized_coverage_source,
+            ),
             parent_coverage_state="unknown" if normalized_coverage_source not in {"", "none"} else "uncovered",
             blocked_by_parent_final_coverage=False,
         )
