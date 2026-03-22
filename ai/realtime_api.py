@@ -9313,9 +9313,17 @@ class RealtimeAPI:
         response_metadata: dict[str, Any],
     ) -> bool:
         parent_origin = str(getattr(parent_state, "origin", "") or "").strip().lower()
+        parent_response_id = str(getattr(parent_state, "response_id", "") or "").strip()
+        selection_entry = self._terminal_deliverable_selection_store().get(parent_response_id)
+        selection_reason = (
+            str(selection_entry.get("reason") or "").strip().lower()
+            if isinstance(selection_entry, dict)
+            else ""
+        )
+        if selection_reason == "exact_phrase_obligation_open":
+            return True
         if parent_origin != "server_auto":
             return False
-        parent_response_id = str(getattr(parent_state, "response_id", "") or "").strip()
         if not parent_response_id or not self._is_provisional_response(response_id=parent_response_id):
             return False
         parent_turn_id = str(
