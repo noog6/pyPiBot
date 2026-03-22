@@ -1124,7 +1124,7 @@ def _semantic_owner_parent_promotion_is_expected(trace: TurnArbitrationTrace) ->
                 if native_reason != "released_for_followup_delivery":
                     continue
             elif distinctness == "redundant":
-                if native_reason != "parent_not_deliverable":
+                if native_reason not in {"parent_not_coverage_qualified", "parent_not_deliverable"}:
                     continue
             elif distinctness != "distinct":
                 continue
@@ -1185,6 +1185,14 @@ def _terminal_summary(trace: TurnArbitrationTrace) -> str:
     if decision is None:
         return "terminal seam missing"
     if decision.selected_candidate_id == "terminal_selected":
+        latest_tool_followup = trace.tool_followup_observations[-1].decision if trace.tool_followup_observations else None
+        if latest_tool_followup is not None and latest_tool_followup.parent_coverage_state == "uncovered":
+            if (
+                str(latest_tool_followup.native_reason_code or "").strip().lower()
+                == "parent_terminal_selection_not_coverage_qualified"
+            ):
+                return "terminal selected but parent coverage not qualified"
+            return "terminal selected while parent coverage remained uncovered"
         return "terminal deliverable selected"
     return f"terminal not selected ({decision.native_reason_code or decision.selected_candidate_id})"
 
@@ -1194,7 +1202,7 @@ def _semantic_owner_summary(trace: TurnArbitrationTrace) -> str:
     if decision is None:
         return "semantic owner seam missing"
     if _semantic_owner_parent_promotion_is_expected(trace):
-        return "semantic owner promoted to parent after tool followup delivery"
+        return "semantic owner promoted to parent after tool-output delivery"
     if _semantic_owner_has_explicit_parent_promotion(trace):
         return "semantic owner diverged to parent"
     if decision.selected_candidate_id == "semantic_owner_execution":
@@ -1205,13 +1213,45 @@ def _semantic_owner_summary(trace: TurnArbitrationTrace) -> str:
     return f"semantic owner observed ({decision.selected_candidate_id})"
 
 
+def _tool_followup_parent_summary(decision: NormalizedDecisionArtifact) -> str:
+    parent_state = str(decision.parent_coverage_state or "").strip().lower()
+    reason_code = str(decision.native_reason_code or "").strip().lower()
+    if parent_state == "coverage_pending":
+        return "parent coverage pending"
+    if parent_state == "uncovered":
+        if reason_code == "parent_terminal_selection_not_coverage_qualified":
+            return "parent selected but not coverage-qualified"
+        return "parent uncovered"
+    if parent_state == "unknown":
+        return "parent coverage unresolved"
+    if parent_state == "covered_terminal_selection":
+        return "parent coverage-qualified via terminal selection"
+    if parent_state == "covered_canonical":
+        return "parent coverage-qualified"
+    return "parent coverage not applicable"
+
+
+def _tool_followup_distinctness_summary(decision: NormalizedDecisionArtifact) -> str:
+    distinctness = str(decision.followup_distinctness or "").strip().lower()
+    parent_state = str(decision.parent_coverage_state or "").strip().lower()
+    if distinctness == "unknown":
+        if parent_state == "coverage_pending":
+            return "distinctness pending"
+        if parent_state == "not_applicable":
+            return "distinctness not evaluated"
+        return "distinctness unknown"
+    if distinctness == "not_applicable":
+        return "distinctness not applicable"
+    return f"distinctness {distinctness}"
+
+
 def _tool_followup_summary(trace: TurnArbitrationTrace) -> str:
     if not trace.tool_followup_observations:
         return "no tool followup observations"
     latest = trace.tool_followup_observations[-1].decision
     return (
         f"tool followup {latest.followup_outcome_posture} "
-        f"(parent={latest.parent_coverage_state}, distinctness={latest.followup_distinctness})"
+        f"({_tool_followup_parent_summary(latest)}; {_tool_followup_distinctness_summary(latest)})"
     )
 
 

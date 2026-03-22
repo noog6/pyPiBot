@@ -443,7 +443,7 @@ def test_tool_followup_observation_maps_parent_uncovered_release() -> None:
         origin="tool_output",
         parent_coverage_state="uncovered",
         followup_outcome_posture="released",
-        native_reason_code="parent_not_deliverable",
+        native_reason_code="parent_not_coverage_qualified",
         native_outcome_action="RELEASE",
         followup_distinctness="distinct",
     )
@@ -630,7 +630,7 @@ def test_turn_arbitration_trace_includes_latest_tool_followup_observation() -> N
             origin="tool_output",
             parent_coverage_state="uncovered",
             followup_outcome_posture="released",
-            native_reason_code="parent_not_deliverable",
+            native_reason_code="parent_not_coverage_qualified",
             native_outcome_action="RELEASE",
             followup_distinctness="distinct",
         ),
@@ -1171,7 +1171,7 @@ def test_turn_review_summary_downgrades_expected_tool_followup_parent_promotion_
     assert "semantic_owner_parent_promotion_expected" in diagnostics.diagnostic_codes
     assert "semantic_owner_diverged" not in diagnostics.diagnostic_codes
     assert diagnostics.suspicious_mismatch_count == 0
-    assert summary.semantic_owner_summary == "semantic owner promoted to parent after tool followup delivery"
+    assert summary.semantic_owner_summary == "semantic owner promoted to parent after tool-output delivery"
     assert "semantic owner diverged from execution canonical" not in summary.notable_mismatches
     assert summary.review_bucket == "coherent"
 
@@ -1211,7 +1211,7 @@ def test_turn_review_summary_accepts_status_only_gesture_parent_promotion() -> N
             origin="tool_output",
             parent_coverage_state="uncovered",
             followup_outcome_posture="released",
-            native_reason_code="parent_not_deliverable",
+            native_reason_code="parent_not_coverage_qualified",
             native_outcome_action="SEND",
             followup_distinctness="redundant",
             parent_canonical_key="turn-review-followup-gesture::item_parent",
@@ -1226,8 +1226,60 @@ def test_turn_review_summary_accepts_status_only_gesture_parent_promotion() -> N
     assert "semantic_owner_parent_promotion_expected" in diagnostics.diagnostic_codes
     assert "semantic_owner_diverged" not in diagnostics.diagnostic_codes
     assert diagnostics.suspicious_mismatch_count == 0
-    assert summary.semantic_owner_summary == "semantic owner promoted to parent after tool followup delivery"
+    assert summary.semantic_owner_summary == "semantic owner promoted to parent after tool-output delivery"
     assert summary.review_bucket == "partial_expected"
+
+
+def test_turn_review_summary_keeps_legacy_parent_not_deliverable_reason_compatible() -> None:
+    trace = merge_arbitration_observations_for_turn(
+        terminal_selection_observation=build_terminal_selection_observation(
+            run_id="run-review-followup-gesture-legacy",
+            turn_id="turn-review-followup-gesture-legacy",
+            input_event_key="tool:call_gesture_legacy",
+            canonical_key="turn-review-followup-gesture-legacy::tool:call_gesture_legacy",
+            origin="tool_output",
+            selected=True,
+            selection_reason="normal",
+            transcript_final_seen=False,
+            active_response_was_provisional=False,
+        ),
+        semantic_owner_observation=build_semantic_owner_observation(
+            run_id="run-review-followup-gesture-legacy",
+            turn_id="turn-review-followup-gesture-legacy",
+            input_event_key="tool:call_gesture_legacy",
+            execution_canonical_key="turn-review-followup-gesture-legacy::tool:call_gesture_legacy",
+            semantic_owner_canonical_key="turn-review-followup-gesture-legacy::item_parent",
+            origin="tool_output",
+            selected=True,
+            selection_reason="normal",
+            parent_turn_id="turn-review-followup-gesture-legacy",
+            parent_input_event_key="item_parent",
+            native_reason_code="parent_promoted_from_tool_output",
+        ),
+        semantic_owner_canonical_key="turn-review-followup-gesture-legacy::item_parent",
+        tool_followup_observation=build_tool_followup_observation(
+            run_id="run-review-followup-gesture-legacy",
+            turn_id="turn-review-followup-gesture-legacy",
+            input_event_key="tool:call_gesture_legacy",
+            canonical_key="turn-review-followup-gesture-legacy::tool:call_gesture_legacy",
+            origin="tool_output",
+            parent_coverage_state="uncovered",
+            followup_outcome_posture="released",
+            native_reason_code="parent_not_deliverable",
+            native_outcome_action="SEND",
+            followup_distinctness="redundant",
+            parent_canonical_key="turn-review-followup-gesture-legacy::item_parent",
+            parent_semantic_owner_key="turn-review-followup-gesture-legacy::item_parent",
+        ),
+    )
+
+    summary = build_turn_review_summary(trace)
+    diagnostics = trace.diagnostics
+
+    assert diagnostics is not None
+    assert "semantic_owner_parent_promotion_expected" in diagnostics.diagnostic_codes
+    assert "semantic_owner_diverged" not in diagnostics.diagnostic_codes
+    assert summary.semantic_owner_summary == "semantic owner promoted to parent after tool-output delivery"
 
 
 def test_turn_review_summary_keeps_redundant_followup_with_delivery_reason_suspicious() -> None:
@@ -1334,7 +1386,7 @@ def test_turn_review_summary_accepts_aligned_unknown_distinctness_parent_promoti
     assert "semantic_owner_parent_promotion_expected" in diagnostics.diagnostic_codes
     assert "semantic_owner_diverged" not in diagnostics.diagnostic_codes
     assert diagnostics.suspicious_mismatch_count == 0
-    assert summary.semantic_owner_summary == "semantic owner promoted to parent after tool followup delivery"
+    assert summary.semantic_owner_summary == "semantic owner promoted to parent after tool-output delivery"
     assert summary.review_bucket == "partial_expected"
 
 
@@ -1388,7 +1440,7 @@ def test_turn_review_summary_accepts_read_only_sensor_parent_promotion_with_not_
     assert "semantic_owner_parent_promotion_expected" in diagnostics.diagnostic_codes
     assert "semantic_owner_diverged" not in diagnostics.diagnostic_codes
     assert diagnostics.suspicious_mismatch_count == 0
-    assert summary.semantic_owner_summary == "semantic owner promoted to parent after tool followup delivery"
+    assert summary.semantic_owner_summary == "semantic owner promoted to parent after tool-output delivery"
     assert summary.review_bucket == "partial_expected"
 
 
@@ -1427,7 +1479,7 @@ def test_turn_review_summary_keeps_read_only_sensor_parent_promotion_with_wrong_
             origin="tool_output",
             parent_coverage_state="not_applicable",
             followup_outcome_posture="released",
-            native_reason_code="parent_not_deliverable",
+            native_reason_code="parent_not_coverage_qualified",
             native_outcome_action="RELEASE",
             followup_distinctness="unknown",
             parent_canonical_key="turn-review-followup-read-only-wrong-reason::item_parent",
@@ -1625,8 +1677,130 @@ def test_turn_review_summary_reports_tool_followup_heavy_case() -> None:
 
     assert summary is not None
     assert summary.review_bucket == "suspicious"
-    assert summary.tool_followup_summary == "tool followup suppressed (parent=unknown, distinctness=unknown)"
+    assert summary.tool_followup_summary == "tool followup suppressed (parent coverage unresolved; distinctness unknown)"
     assert "tool followup suppressed while parent coverage stayed unknown" in summary.suspicious_signals
+
+
+def test_turn_review_summary_distinguishes_selected_parent_that_is_not_coverage_qualified() -> None:
+    trace = merge_arbitration_observations_for_turn(
+        terminal_selection_observation=build_terminal_selection_observation(
+            run_id="run-review-parent-selected-uncovered",
+            turn_id="turn-review-parent-selected-uncovered",
+            input_event_key="tool:call_parent_selected",
+            canonical_key="turn-review-parent-selected-uncovered::tool:call_parent_selected",
+            origin="tool_output",
+            selected=True,
+            selection_reason="normal",
+            transcript_final_seen=False,
+            active_response_was_provisional=False,
+        ),
+        tool_followup_observation=build_tool_followup_observation(
+            run_id="run-review-parent-selected-uncovered",
+            turn_id="turn-review-parent-selected-uncovered",
+            input_event_key="tool:call_parent_selected",
+            canonical_key="turn-review-parent-selected-uncovered::tool:call_parent_selected",
+            origin="tool_output",
+            parent_coverage_state="uncovered",
+            followup_outcome_posture="released",
+            native_reason_code="parent_terminal_selection_not_coverage_qualified",
+            native_outcome_action="SEND",
+            followup_distinctness="distinct",
+            parent_canonical_key="turn-review-parent-selected-uncovered::item_parent",
+            parent_semantic_owner_key="turn-review-parent-selected-uncovered::item_parent",
+        ),
+    )
+
+    summary = build_turn_review_summary(trace)
+
+    assert summary.terminal_summary == "terminal selected but parent coverage not qualified"
+    assert (
+        summary.tool_followup_summary
+        == "tool followup released (parent selected but not coverage-qualified; distinctness distinct)"
+    )
+
+
+def test_turn_review_summary_uses_structured_uncovered_parent_state_without_special_reason() -> None:
+    trace = merge_arbitration_observations_for_turn(
+        terminal_selection_observation=build_terminal_selection_observation(
+            run_id="run-review-parent-uncovered-generic",
+            turn_id="turn-review-parent-uncovered-generic",
+            input_event_key="tool:call_parent_uncovered_generic",
+            canonical_key="turn-review-parent-uncovered-generic::tool:call_parent_uncovered_generic",
+            origin="tool_output",
+            selected=True,
+            selection_reason="normal",
+            transcript_final_seen=False,
+            active_response_was_provisional=False,
+        ),
+        tool_followup_observation=build_tool_followup_observation(
+            run_id="run-review-parent-uncovered-generic",
+            turn_id="turn-review-parent-uncovered-generic",
+            input_event_key="tool:call_parent_uncovered_generic",
+            canonical_key="turn-review-parent-uncovered-generic::tool:call_parent_uncovered_generic",
+            origin="tool_output",
+            parent_coverage_state="uncovered",
+            followup_outcome_posture="released",
+            native_reason_code="parent_not_coverage_qualified",
+            native_outcome_action="SEND",
+            followup_distinctness="distinct",
+            parent_canonical_key="turn-review-parent-uncovered-generic::item_parent",
+            parent_semantic_owner_key="turn-review-parent-uncovered-generic::item_parent",
+        ),
+    )
+
+    summary = build_turn_review_summary(trace)
+
+    assert summary.terminal_summary == "terminal selected while parent coverage remained uncovered"
+    assert summary.tool_followup_summary == "tool followup released (parent uncovered; distinctness distinct)"
+
+
+def test_turn_review_summary_distinguishes_pending_parent_coverage_from_unknown_distinctness() -> None:
+    trace = merge_arbitration_observations_for_turn(
+        tool_followup_observation=build_tool_followup_observation(
+            run_id="run-review-parent-pending",
+            turn_id="turn-review-parent-pending",
+            input_event_key="tool:call_parent_pending",
+            canonical_key="turn-review-parent-pending::tool:call_parent_pending",
+            origin="tool_output",
+            parent_coverage_state="coverage_pending",
+            followup_outcome_posture="pending",
+            native_reason_code="parent_deliverable_pending",
+            native_outcome_action="HOLD",
+            followup_distinctness="unknown",
+            parent_canonical_key="turn-review-parent-pending::item_parent",
+            parent_semantic_owner_key="turn-review-parent-pending::item_parent",
+        ),
+    )
+
+    summary = build_turn_review_summary(trace)
+
+    assert summary.tool_followup_summary == "tool followup pending (parent coverage pending; distinctness pending)"
+
+
+def test_turn_review_summary_uses_not_evaluated_distinctness_for_not_applicable_parent_coverage() -> None:
+    trace = merge_arbitration_observations_for_turn(
+        tool_followup_observation=build_tool_followup_observation(
+            run_id="run-review-parent-not-applicable",
+            turn_id="turn-review-parent-not-applicable",
+            input_event_key="tool:call_parent_not_applicable",
+            canonical_key="turn-review-parent-not-applicable::tool:call_parent_not_applicable",
+            origin="tool_output",
+            parent_coverage_state="not_applicable",
+            followup_outcome_posture="released",
+            native_reason_code="not_suppressible",
+            native_outcome_action="RELEASE",
+            followup_distinctness="unknown",
+            parent_canonical_key="turn-review-parent-not-applicable::item_parent",
+            parent_semantic_owner_key="turn-review-parent-not-applicable::item_parent",
+        ),
+    )
+
+    summary = build_turn_review_summary(trace)
+
+    assert (
+        summary.tool_followup_summary
+        == "tool followup released (parent coverage not applicable; distinctness not evaluated)"
+    )
 
 
 def test_turn_review_helpers_are_observational_only_and_preserve_trace() -> None:
