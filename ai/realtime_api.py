@@ -8325,11 +8325,17 @@ class RealtimeAPI:
                     parent_canonical_key=state_entry[0],
                 )
                 logger.debug(
-                    "parent_coverage_source_of_truth run_id=%s parent_response_id=%s covered=%s source=%s canonical_observed=%s canonical_class=%s terminal_selected=%s terminal_reason=%s",
+                    "parent_coverage_source_of_truth run_id=%s parent_response_id=%s covered=%s source=%s coverage_gap=%s canonical_observed=%s canonical_class=%s terminal_selected=%s terminal_reason=%s",
                     self._current_run_id() or "",
                     resolved_parent_response_id,
                     str(parent_covered).lower(),
                     coverage_source,
+                    self._parent_coverage_gap_reason(
+                        covered=parent_covered,
+                        terminal_selected=terminal_selected,
+                        terminal_reason=terminal_reason,
+                        coverage_source=coverage_source,
+                    ),
                     str(deliverable_observed).lower(),
                     deliverable_class or "unknown",
                     str(terminal_selected).lower(),
@@ -8400,11 +8406,17 @@ class RealtimeAPI:
                 parent_canonical_key=state_entry[0],
             )
             logger.debug(
-                "parent_coverage_source_of_truth run_id=%s parent_response_id=%s covered=%s source=%s canonical_observed=%s canonical_class=%s terminal_selected=%s terminal_reason=%s",
+                "parent_coverage_source_of_truth run_id=%s parent_response_id=%s covered=%s source=%s coverage_gap=%s canonical_observed=%s canonical_class=%s terminal_selected=%s terminal_reason=%s",
                 self._current_run_id() or "",
                 str(getattr(parent_state, "response_id", "") or "").strip() or "none",
                 str(parent_covered).lower(),
                 coverage_source,
+                self._parent_coverage_gap_reason(
+                    covered=parent_covered,
+                    terminal_selected=terminal_selected,
+                    terminal_reason=terminal_reason,
+                    coverage_source=coverage_source,
+                ),
                 str(_deliverable_observed).lower(),
                 deliverable_class or "unknown",
                 str(terminal_selected).lower(),
@@ -8514,11 +8526,17 @@ class RealtimeAPI:
                 f"reason={terminal_reason}"
             )
             logger.info(
-                "parent_coverage_source_of_truth run_id=%s parent_response_id=%s covered=%s source=%s canonical_observed=%s canonical_class=%s terminal_selected=%s terminal_reason=%s",
+                "parent_coverage_source_of_truth run_id=%s parent_response_id=%s covered=%s source=%s coverage_gap=%s canonical_observed=%s canonical_class=%s terminal_selected=%s terminal_reason=%s",
                 self._current_run_id() or "",
                 str(getattr(parent_state, "response_id", "") or "").strip() or "none",
                 str(parent_covered).lower(),
                 coverage_source,
+                self._parent_coverage_gap_reason(
+                    covered=parent_covered,
+                    terminal_selected=terminal_selected,
+                    terminal_reason=terminal_reason,
+                    coverage_source=coverage_source,
+                ),
                 str(deliverable_observed).lower(),
                 deliverable_class or "unknown",
                 str(terminal_selected).lower(),
@@ -9258,6 +9276,18 @@ class RealtimeAPI:
             reason="parent_covered_tool_result terminal_deliverable_selected",
             log_label="terminal_deliverable_tool_followup_prune",
         )
+
+    @staticmethod
+    def _parent_coverage_gap_reason(*, covered: bool, terminal_selected: bool, terminal_reason: str, coverage_source: str) -> str:
+        if covered:
+            return "none"
+        normalized_terminal_reason = str(terminal_reason or "").strip().lower()
+        normalized_coverage_source = str(coverage_source or "").strip().lower()
+        if terminal_selected and normalized_terminal_reason == "normal":
+            return "selected_terminal_not_coverage_qualified"
+        if normalized_coverage_source not in {"", "none"}:
+            return "coverage_unknown"
+        return "uncovered"
 
     def _parent_response_coverage_state(
         self,
