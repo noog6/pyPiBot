@@ -6867,6 +6867,136 @@ def test_tool_followup_release_after_response_done_drains_for_nonsubstantive_par
     assert len(response_create_events) == 1
 
 
+def test_tool_followup_release_after_response_done_holds_when_exact_phrase_repair_is_open() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+
+    turn_id = "turn_exact_phrase_hold"
+    parent_input_event_key = "item_parent_exact_phrase_hold"
+    parent_response_id = "resp_parent_exact_phrase_hold"
+
+    parent_canonical_key = api._canonical_utterance_key(
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+    )
+    api._canonical_response_state_mutate(
+        canonical_key=parent_canonical_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "upgraded_response"),
+            setattr(record, "response_id", parent_response_id),
+            setattr(record, "deliverable_observed", False),
+            setattr(record, "deliverable_class", "unknown"),
+            setattr(record, "done", True),
+        ),
+    )
+    api._apply_terminal_deliverable_selection(
+        canonical_key=parent_canonical_key,
+        response_id=parent_response_id,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        selected=False,
+        selection_reason="exact_phrase_obligation_open",
+    )
+
+    followup_event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_exact_phrase_hold",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_around",
+    )
+    followup_metadata = ((followup_event.get("response") or {}).get("metadata") or {})
+    followup_metadata["blocked_by_response_id"] = parent_response_id
+    followup_metadata["parent_turn_id"] = turn_id
+    followup_metadata["parent_input_event_key"] = parent_input_event_key
+    api._response_create_queue.append(
+        {
+            "websocket": ws,
+            "event": followup_event,
+            "origin": "tool_output",
+            "turn_id": turn_id,
+            "record_ai_call": False,
+            "debug_context": None,
+        }
+    )
+    tool_canonical_key = api._canonical_utterance_key(
+        turn_id=turn_id,
+        input_event_key=str(followup_metadata.get("input_event_key") or ""),
+    )
+    api._set_tool_followup_state(
+        canonical_key=tool_canonical_key,
+        state="blocked_active_response",
+        reason="test_seed_blocked",
+    )
+
+    decision, entry = api._decide_tool_followup_arbitration(
+        response_metadata=followup_metadata,
+        blocked_by_response_id=parent_response_id,
+    )
+
+    assert entry is not None
+    assert entry[0] == parent_canonical_key
+    assert decision.should_hold is True
+    assert decision.reason_code == "parent_deliverable_pending"
+
+    api._release_blocked_tool_followups_for_response_done(response_id=parent_response_id)
+
+    assert api._tool_followup_state(canonical_key=tool_canonical_key) == "blocked_active_response"
+    assert followup_metadata.get("tool_followup_release") != "true"
+
+
+def test_tool_followup_release_after_response_done_does_not_hold_for_unrelated_open_contract() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_unrelated_contract"
+    parent_input_event_key = "item_parent_unrelated_contract"
+    parent_response_id = "resp_parent_unrelated_contract"
+
+    parent_canonical_key = api._canonical_utterance_key(
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+    )
+    api._canonical_response_state_mutate(
+        canonical_key=parent_canonical_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "upgraded_response"),
+            setattr(record, "response_id", parent_response_id),
+            setattr(record, "deliverable_observed", False),
+            setattr(record, "deliverable_class", "unknown"),
+            setattr(record, "done", True),
+        ),
+    )
+    api._turn_contracts_by_turn_id = {
+        turn_id: {"exact_phrase": "Ready.", "exact_phrase_repair_scheduled": False}
+    }
+
+    followup_event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_unrelated_contract",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_around",
+    )
+    followup_metadata = ((followup_event.get("response") or {}).get("metadata") or {})
+    followup_metadata["blocked_by_response_id"] = parent_response_id
+    followup_metadata["parent_turn_id"] = turn_id
+    followup_metadata["parent_input_event_key"] = parent_input_event_key
+
+    decision, entry = api._decide_tool_followup_arbitration(
+        response_metadata=followup_metadata,
+        blocked_by_response_id=parent_response_id,
+    )
+
+    assert entry is not None
+    assert entry[0] == parent_canonical_key
+    assert decision.should_hold is False
+    assert decision.should_release is True
+    assert decision.reason_code == "parent_not_deliverable"
+
+
 def test_tool_followup_release_after_response_done_drains_after_listening_clears() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
