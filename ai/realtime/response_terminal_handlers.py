@@ -96,6 +96,16 @@ class ResponseTerminalHandlers:
         reply_text = api._assistant_reply_text_for_response(response_id) if response_id else str(api.assistant_reply or "")
 
         if reply_text:
+            audit_call_id = api._battery_wording_audit_call_id_for_response(response_id)
+            if audit_call_id:
+                logger.info(
+                    "battery_wording_audit_final_text run_id=%s turn_id=%s response_id=%s call_id=%s assembled_text=%r",
+                    api._current_run_id() or "",
+                    api._current_turn_id_or_unknown(),
+                    response_id or "unknown",
+                    audit_call_id,
+                    reply_text,
+                )
             active_input_event_key = str(getattr(api, "_active_response_input_event_key", "") or "").strip()
             snapshot = getattr(api, "_utterance_trust_snapshot_by_input_event_key", {}).get(active_input_event_key, {})
             transcript_text = str(snapshot.get("transcript_text") or "")
@@ -124,6 +134,15 @@ class ResponseTerminalHandlers:
                     api.response_in_progress = False
                     return
             normalized_reply = api._normalize_memory_recall_answer(reply_text)
+            if audit_call_id:
+                logger.info(
+                    "battery_wording_audit_logged_text run_id=%s turn_id=%s response_id=%s call_id=%s text=%r",
+                    api._current_run_id() or "",
+                    api._current_turn_id_or_unknown(),
+                    response_id or "unknown",
+                    audit_call_id,
+                    normalized_reply,
+                )
             log_info(f"Assistant Response: {normalized_reply}", style="bold blue")
             if response_id:
                 per_response = getattr(api, "_assistant_reply_by_response_id", None)

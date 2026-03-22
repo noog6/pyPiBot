@@ -1113,6 +1113,41 @@ def test_handle_transcribe_response_done_for_stale_response_id_does_not_finalize
     info_log.assert_not_called()
 
 
+def test_handle_transcribe_response_done_logs_battery_wording_audit_final_and_logged_text() -> None:
+    api = _make_api()
+    api._assistant_reply_by_response_id = {"resp_1": "I'm at8.08 volts right now."}
+    api._assistant_reply_response_id = "resp_1"
+    api.assistant_reply = "I'm at8.08 volts right now."
+    api._assistant_reply_accum = "I'm at8.08 volts right now."
+    api._battery_wording_audit_call_ids = {"call_battery_1"}
+    api._response_trace_context_by_id = {"resp_1": {"tool_call_id": "call_battery_1"}}
+    api._maybe_enqueue_reflection = Mock()
+
+    with patch("ai.realtime.response_terminal_handlers.logger.info") as info_log:
+        asyncio.run(
+            api.handle_transcribe_response_done(
+                {"type": "response.output_audio_transcript.done", "response_id": "resp_1"}
+            )
+        )
+
+    info_log.assert_any_call(
+        "battery_wording_audit_final_text run_id=%s turn_id=%s response_id=%s call_id=%s assembled_text=%r",
+        "run-test",
+        "turn_1",
+        "resp_1",
+        "call_battery_1",
+        "I'm at8.08 volts right now.",
+    )
+    info_log.assert_any_call(
+        "battery_wording_audit_logged_text run_id=%s turn_id=%s response_id=%s call_id=%s text=%r",
+        "run-test",
+        "turn_1",
+        "resp_1",
+        "call_battery_1",
+        "I'm at8.08 volts right now.",
+    )
+
+
 def test_output_audio_transcript_done_event_router_passes_full_event_and_finalizes_matching_buffer() -> None:
     api = _make_api()
     api._should_process_response_event_ingress = lambda *_args, **_kwargs: True

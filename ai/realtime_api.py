@@ -5072,6 +5072,55 @@ class RealtimeAPI:
         self.assistant_reply = updated
         self._assistant_reply_accum = updated
 
+    def _battery_wording_audit_call_id_store(self) -> set[str]:
+        store = getattr(self, "_battery_wording_audit_call_ids", None)
+        if not isinstance(store, set):
+            store = set()
+            self._battery_wording_audit_call_ids = store
+        return store
+
+    def _record_battery_wording_audit_call_id(self, call_id: str | None) -> None:
+        normalized_call_id = str(call_id or "").strip()
+        if normalized_call_id:
+            self._battery_wording_audit_call_id_store().add(normalized_call_id)
+
+    def _battery_wording_audit_call_id_for_response(self, response_id: str | None) -> str:
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            return ""
+        trace_context = self._response_trace_by_id().get(normalized_response_id, {})
+        call_id = str(trace_context.get("tool_call_id") or "").strip()
+        if call_id and call_id in self._battery_wording_audit_call_id_store():
+            return call_id
+        stale_context = self._stale_response_context(normalized_response_id)
+        stale_call_id = str(stale_context.get("tool_call_id") or "").strip()
+        if stale_call_id and stale_call_id in self._battery_wording_audit_call_id_store():
+            return stale_call_id
+        return ""
+
+    def _log_battery_wording_audit_model_text(
+        self,
+        *,
+        event_type: str,
+        response_id: str | None,
+        text: str | None,
+    ) -> None:
+        normalized_text = str(text or "")
+        if not normalized_text:
+            return
+        call_id = self._battery_wording_audit_call_id_for_response(response_id)
+        if not call_id:
+            return
+        logger.info(
+            "battery_wording_audit_model_text run_id=%s turn_id=%s response_id=%s call_id=%s event_type=%s text=%r",
+            self._current_run_id() or "",
+            self._current_turn_id_or_unknown(),
+            str(response_id or "").strip() or "unknown",
+            call_id,
+            event_type,
+            normalized_text,
+        )
+
     def _assistant_reply_text_for_response(self, response_id: str | None) -> str:
         normalized_response_id = str(response_id or "").strip()
         if not normalized_response_id:
@@ -16074,6 +16123,11 @@ class RealtimeAPI:
             delta = event.get("delta", "")
             if not str(delta or "").strip():
                 return
+            self._log_battery_wording_audit_model_text(
+                event_type=event_type,
+                response_id=response_id,
+                text=delta,
+            )
             self._mark_utterance_info_summary(deliverable_seen=True)
             self._mark_active_canonical_deliverable_observed(reason=event_type)
             self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
@@ -16089,6 +16143,11 @@ class RealtimeAPI:
             delta = event.get("delta", "")
             if not str(delta or "").strip():
                 return
+            self._log_battery_wording_audit_model_text(
+                event_type=event_type,
+                response_id=response_id,
+                text=delta,
+            )
             self._mark_utterance_info_summary(deliverable_seen=True)
             self._mark_active_canonical_deliverable_observed(reason=event_type)
             self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
@@ -16114,6 +16173,11 @@ class RealtimeAPI:
             delta = event.get("delta", "")
             if not str(delta or "").strip():
                 return
+            self._log_battery_wording_audit_model_text(
+                event_type=event_type,
+                response_id=response_id,
+                text=delta,
+            )
             self._mark_utterance_info_summary(deliverable_seen=True)
             self._mark_active_canonical_deliverable_observed(reason=event_type)
             self._record_active_canonical_deliverable_class(text=delta, reason=event_type)
@@ -16994,6 +17058,16 @@ class RealtimeAPI:
             try:
                 result = await function_map[function_name](**args)
                 log_tool_call(function_name, args, result)
+                if function_name == "read_battery_voltage":
+                    self._record_battery_wording_audit_call_id(call_id)
+                    logger.info(
+                        "battery_wording_audit_tool_payload run_id=%s turn_id=%s call_id=%s tool=%s raw_payload=%r",
+                        self._current_run_id() or "",
+                        self._current_turn_id_or_unknown(),
+                        call_id,
+                        function_name,
+                        result,
+                    )
                 logger.info(
                     "tool_result_received run_id=%s turn_id=%s call_id=%s",
                     self._current_run_id() or "",

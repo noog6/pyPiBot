@@ -1164,6 +1164,65 @@ def test_duplicate_tool_result_is_deduped_by_tool_followup_canonical_key(monkeyp
     )
 
 
+def test_read_battery_voltage_tool_and_delta_audit_logs_capture_exact_spacing(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_response_turn_id = "turn_battery_1"
+    api._current_input_event_key = "item_user_battery"
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._cancel_micro_ack = lambda **_kwargs: None
+    api._mark_active_canonical_deliverable_observed = lambda **_kwargs: None
+    api._record_active_canonical_deliverable_class = lambda **_kwargs: None
+    api._mark_first_assistant_utterance_observed_if_needed = lambda *_args, **_kwargs: None
+    api._allow_text_output_state_transition = lambda **_kwargs: True
+    api._is_active_response_guarded = lambda: False
+    api._intent_ledger = {}
+    captured_logs: list[str] = []
+
+    async def _fake_battery(**_kwargs):
+        return {"voltage": 8.08, "summary": "Battery is at 8.08 volts."}
+
+    def _capture_info(message: str, *args, **_kwargs):
+        rendered = str(message)
+        if args:
+            rendered = rendered % args
+        captured_logs.append(rendered)
+
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "read_battery_voltage", _fake_battery)
+    monkeypatch.setattr(logger, "info", _capture_info)
+
+    asyncio.run(api.execute_function_call("read_battery_voltage", "call_battery_1", {}, ws))
+
+    response_id = "resp_battery_1"
+    api._response_trace_context_by_id = {response_id: {"tool_call_id": "call_battery_1"}}
+    asyncio.run(
+        api._handle_event_legacy(
+            {
+                "type": "response.output_audio_transcript.delta",
+                "response_id": response_id,
+                "delta": "I'm at8.08 volts right now.",
+            },
+            ws,
+        )
+    )
+
+    assert any(
+        "battery_wording_audit_tool_payload" in entry
+        and "call_id=call_battery_1" in entry
+        and "raw_payload={'voltage': 8.08, 'summary': 'Battery is at 8.08 volts.'}" in entry
+        for entry in captured_logs
+    )
+    assert any(
+        "battery_wording_audit_model_text" in entry
+        and "response_id=resp_battery_1" in entry
+        and "call_id=call_battery_1" in entry
+        and 'text="I\'m at8.08 volts right now."' in entry
+        for entry in captured_logs
+    )
+
+
 def test_non_tool_response_create_path_still_single_flight_guarded() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
