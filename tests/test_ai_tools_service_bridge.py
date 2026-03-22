@@ -36,6 +36,23 @@ def test_read_battery_voltage_delegates_and_keeps_payload_shape(monkeypatch) -> 
     }
 
 
+def test_read_battery_voltage_tool_description_guides_first_person_reason_aware_answers() -> None:
+    battery_tool = next(tool for tool in ai_tools.tools if tool.get("name") == "read_battery_voltage")
+    description = battery_tool["description"]
+
+    assert "speak in first person" in description
+    assert "never default to third-person phrasing" in description
+    assert "I'm at 8.08 volts." in description
+    assert "I don't have enough trend data yet to infer whether my charger is connected." in description
+    assert "I may be seeing the start of charging, but I can't confirm it yet." in description
+    assert (
+        "My voltage looks supported in a way that could fit a weak charger, but I still can't "
+        "confirm charging yet." in description
+    )
+    assert "I currently infer that my charger is connected." in description
+    assert "I do not currently infer that my charger is connected." in description
+
+
 def test_gesture_nod_delegates_and_keeps_payload_shape(monkeypatch) -> None:
     captured: dict[str, float | int] = {}
 
