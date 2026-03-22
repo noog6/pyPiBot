@@ -41,8 +41,10 @@ def test_read_battery_voltage_tool_description_guides_first_person_reason_aware_
     description = battery_tool["description"]
 
     assert "speak in first person" in description
+    assert "Start the answer with the exact phrasing pattern" in description
+    assert "space after 'at'" in description
     assert "never default to third-person phrasing" in description
-    assert "I'm at 8.08 volts." in description
+    assert "I'm at {voltage:.2f} volts right now." in description
     assert "I don't have enough trend data yet to infer whether my charger is connected." in description
     assert "I may be seeing the start of charging, but I can't confirm it yet." in description
     assert (
