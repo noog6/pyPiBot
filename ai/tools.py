@@ -586,6 +586,8 @@ tools.append(
         "name": "gesture_look_around",
         "description": (
             "Queue a casual look around gesture on the pan/tilt rig. "
+            "Use for short embodied direction requests like 'look around' or 'look around a bit'. "
+            "Do not use for web or research lookups. "
             "Provide an optional delay in milliseconds and intensity (1.0 is normal)."
         ),
         "parameters": {
@@ -607,7 +609,9 @@ tools.append(
         "name": "gesture_look_up",
         "description": (
             "Tilt the camera all the way up while keeping the current pan. "
-            "Use for requests like 'look up' or 'look all the way up'. "
+            "Prefer this for short embodied direction requests like 'look up', 'look up please', 'look up now', "
+            "or 'look up and then right'. "
+            "Do not use this when the user names a searchable topic or object after 'look up' (for example 'look up the weather'). "
             "Provide an optional delay in milliseconds and intensity (1.0 is normal)."
         ),
         "parameters": {
@@ -629,7 +633,8 @@ tools.append(
         "name": "gesture_look_left",
         "description": (
             "Pan the camera all the way left while keeping the current tilt. "
-            "Use for requests like 'look left' or 'look all the way left'. "
+            "Prefer this for short embodied direction requests like 'look left' or 'look left and then up'. "
+            "Do not use for research or information lookup requests. "
             "Provide an optional delay in milliseconds and intensity (1.0 is normal)."
         ),
         "parameters": {
@@ -651,7 +656,8 @@ tools.append(
         "name": "gesture_look_right",
         "description": (
             "Pan the camera all the way right while keeping the current tilt. "
-            "Use for requests like 'look right' or 'look all the way right'. "
+            "Prefer this for short embodied direction requests like 'look right' or 'look up and then right'. "
+            "Do not use for research or information lookup requests. "
             "Provide an optional delay in milliseconds and intensity (1.0 is normal)."
         ),
         "parameters": {
@@ -673,7 +679,8 @@ tools.append(
         "name": "gesture_look_down",
         "description": (
             "Tilt the camera all the way down while keeping the current pan. "
-            "Use for requests like 'look down' or 'look all the way down'. "
+            "Prefer this for short embodied direction requests like 'look down' or 'look down a bit'. "
+            "Do not use for research or information lookup requests. "
             "Provide an optional delay in milliseconds and intensity (1.0 is normal)."
         ),
         "parameters": {
@@ -695,7 +702,8 @@ tools.append(
         "name": "gesture_look_center",
         "description": (
             "Return the camera to a neutral, centered pan/tilt position. "
-            "Use for requests like 'look back to center' or 'return to neutral'. "
+            "Use for embodied requests like 'look center', 'look back to center', or 'return to neutral'. "
+            "Do not use for research or information lookup requests. "
             "Provide an optional delay in milliseconds."
         ),
         "parameters": {
@@ -887,7 +895,10 @@ tools.append(
         "name": "perform_research",
         "description": (
             "Perform a web lookup using Theo's research service and return a structured "
-            "research packet summary with facts and sources."
+            "research packet summary with facts and sources. Use this only when the user clearly names a searchable "
+            "object, topic, question, or information target, such as 'look up the weather', 'look up Sectigo', "
+            "or 'look up what this means'. Do not use it for stand-alone embodied direction requests like 'look up', "
+            "'look up please', or 'look up and then right'."
         ),
         "parameters": {
             "type": "object",
