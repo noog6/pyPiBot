@@ -381,6 +381,134 @@ def test_continuity_inspection_logging_is_bounded_and_deterministic(
     )
 
 
+class _FakeClock:
+    def __init__(self, start: float = 0.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def test_identical_repeated_build_brief_calls_do_not_log_before_cooldown(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    clock = _FakeClock()
+    ledger = ContinuityLedger(time_source=clock, brief_log_cooldown_s=10.0)
+
+    with caplog.at_level(logging.INFO, logger="ai.continuity"):
+        ledger.build_brief("run-1", "turn-1", "session_health")
+        clock.advance(3.0)
+        ledger.build_brief("run-1", "turn-1", "session_health")
+        clock.advance(3.0)
+        ledger.build_brief("run-1", "turn-1", "session_health")
+
+    brief_logs = [
+        record for record in caplog.records if record.message.startswith("continuity_brief_built")
+    ]
+    assert len(brief_logs) == 1
+    assert "reason=session_health" in brief_logs[0].message
+    assert "fingerprint_changed=True" in brief_logs[0].message
+    assert "reminder=False" in brief_logs[0].message
+    assert "cooldown_elapsed_s=0.0" in brief_logs[0].message
+
+
+def test_materially_changed_brief_logs_immediately_even_before_cooldown(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    clock = _FakeClock()
+    ledger = ContinuityLedger(time_source=clock, brief_log_cooldown_s=10.0)
+
+    with caplog.at_level(logging.INFO, logger="ai.continuity"):
+        ledger.build_brief("run-1", "turn-1", "session_health")
+        clock.advance(1.0)
+        ledger.update_from_event(
+            "transcript_final",
+            text="Hey Theo, can you run a diagnostic?",
+            source="input_audio_transcription",
+        )
+        ledger.build_brief("run-1", "turn-1", "session_health")
+
+    brief_logs = [
+        record for record in caplog.records if record.message.startswith("continuity_brief_built")
+    ]
+    assert len(brief_logs) == 2
+    assert "fingerprint_changed=True" in brief_logs[0].message
+    assert "fingerprint_changed=True" in brief_logs[1].message
+    assert "ongoing=1" in brief_logs[1].message
+    assert "reason=session_health" in brief_logs[1].message
+    assert "cooldown_elapsed_s=1.0" in brief_logs[1].message
+
+
+def test_unchanged_brief_logs_again_after_cooldown_expiry(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    clock = _FakeClock()
+    ledger = ContinuityLedger(time_source=clock, brief_log_cooldown_s=10.0)
+
+    with caplog.at_level(logging.INFO, logger="ai.continuity"):
+        ledger.build_brief("run-1", "turn-1", "session_health")
+        clock.advance(10.0)
+        ledger.build_brief("run-1", "turn-1", "session_health")
+
+    brief_logs = [
+        record for record in caplog.records if record.message.startswith("continuity_brief_built")
+    ]
+    assert len(brief_logs) == 2
+    assert "fingerprint_changed=True" in brief_logs[0].message
+    assert "fingerprint_changed=False" in brief_logs[1].message
+    assert "reminder=True" in brief_logs[1].message
+    assert "cooldown_elapsed_s=10.0" in brief_logs[1].message
+
+
+def test_session_health_style_repeated_build_brief_calls_are_suppressed_when_unchanged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    clock = _FakeClock()
+    ledger = ContinuityLedger(time_source=clock, brief_log_cooldown_s=10.0)
+
+    ledger.update_from_event(
+        "transcript_final",
+        text="Hey Theo, can you run a diagnostic?",
+        source="input_audio_transcription",
+    )
+
+    with caplog.at_level(logging.INFO, logger="ai.continuity"):
+        for _ in range(5):
+            ledger.build_brief("run-7", "turn-2", "session_health")
+            clock.advance(1.0)
+
+    brief_logs = [
+        record for record in caplog.records if record.message.startswith("continuity_brief_built")
+    ]
+    assert len(brief_logs) == 1
+    assert "ongoing=1" in brief_logs[0].message
+    assert "reason=session_health" in brief_logs[0].message
+
+
+def test_build_brief_logging_cache_is_observational_only() -> None:
+    clock = _FakeClock()
+    ledger = ContinuityLedger(time_source=clock, brief_log_cooldown_s=10.0)
+    ledger.update_from_event(
+        "tool_call_started",
+        tool_name="read_runtime_diagnostics",
+        call_id="call-1",
+        commitment_summary="Run a diagnostic and report back.",
+    )
+
+    before_items = dict(ledger._items)
+
+    ledger.build_brief("run-1", "turn-1", "session_health")
+    clock.advance(1.0)
+    ledger.build_brief("run-1", "turn-1", "session_health")
+
+    after_items = dict(ledger._items)
+    assert before_items == after_items
+    assert ledger._items["blocker:tool:call-1"].detail == "tool=read_runtime_diagnostics call_id=call-1"
+
+
 def test_realtime_api_get_continuity_brief_is_observational() -> None:
     api = RealtimeAPI.__new__(RealtimeAPI)
     api._continuity_ledger = ContinuityLedger()

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import logging
+import time
 import re
-from typing import Literal
+from typing import Callable, Literal
 
 TurnSettlementState = Literal[
     "settled",
@@ -43,6 +44,7 @@ ContinuityStance = Literal[
 _MAX_ITEMS_PER_BUCKET = 3
 _MAX_LOG_SUMMARY_CHARS = 72
 _MAX_LOG_DETAIL_CHARS = 48
+_CONTINUITY_BRIEF_LOG_COOLDOWN_S = 10.0
 _TOOL_COMMITMENT_PREFIXES = ("gesture_", "move", "look", "center", "turn", "navigate")
 _ACTION_PATTERNS = (
     re.compile(r"\bmove\b", re.IGNORECASE),
@@ -136,6 +138,17 @@ class ContinuityBrief:
     stance_detail: str = ""
 
 
+@dataclass(frozen=True)
+class ContinuityBriefLogFingerprint:
+    stance: ContinuityStance
+    stance_detail: str
+    settlement_state: TurnSettlementState
+    settlement_detail: str
+    counts: tuple[tuple[str, int], ...]
+    current_items: tuple[tuple[str, str, str, str], ...]
+    recently_closed_items: tuple[tuple[str, str, str, str], ...]
+
+
 class ContinuityLedger:
     """Small in-memory continuity ledger.
 
@@ -143,9 +156,18 @@ class ContinuityLedger:
     schedule, or execute behavior.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        brief_log_cooldown_s: float = _CONTINUITY_BRIEF_LOG_COOLDOWN_S,
+        time_source: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._stance: ContinuityStance = "idle"
         self._items: dict[str, ContinuityItem] = {}
+        self._brief_log_cooldown_s = max(0.0, float(brief_log_cooldown_s))
+        self._time_source = time_source
+        self._last_brief_log_fingerprint: ContinuityBriefLogFingerprint | None = None
+        self._last_brief_log_ts: float | None = None
 
     def update_from_event(self, event_type: str, **payload: object) -> None:
         normalized = str(event_type or "").strip().lower()
@@ -227,8 +249,29 @@ class ContinuityLedger:
 
     def build_brief(self, run_id: str, turn_id: str, reason: str) -> ContinuityBrief:
         brief = self._build_brief_projection(run_id=run_id, turn_id=turn_id, reason=reason)
+        self._log_brief_if_material(run_id=run_id, turn_id=turn_id, brief=brief)
+        return brief
+
+    def _log_brief_if_material(self, *, run_id: str, turn_id: str, brief: ContinuityBrief) -> None:
+        fingerprint = self._brief_log_fingerprint(brief)
+        now = float(self._time_source())
+        last_fingerprint = self._last_brief_log_fingerprint
+        last_ts = self._last_brief_log_ts
+        cooldown_elapsed_s = 0.0 if last_ts is None else max(0.0, now - last_ts)
+        fingerprint_changed = fingerprint != last_fingerprint
+        cooldown_expired = (
+            last_ts is None
+            or self._brief_log_cooldown_s <= 0
+            or cooldown_elapsed_s >= self._brief_log_cooldown_s
+        )
+        if not fingerprint_changed and not cooldown_expired:
+            return
+
+        reminder_due = not fingerprint_changed and cooldown_expired and last_ts is not None
+        self._last_brief_log_fingerprint = fingerprint
+        self._last_brief_log_ts = now
         logger.info(
-            "continuity_brief_built run_id=%s turn_id=%s stance=%s ongoing=%s blockers=%s commitments=%s current=%s closed=%s reason=%s",
+            "continuity_brief_built run_id=%s turn_id=%s stance=%s ongoing=%s blockers=%s commitments=%s current=%s closed=%s reason=%s settlement=%s reminder=%s fingerprint_changed=%s cooldown_s=%s cooldown_elapsed_s=%s",
             run_id,
             turn_id,
             brief.stance,
@@ -238,9 +281,44 @@ class ContinuityLedger:
             len(brief.current),
             len(brief.recently_closed),
             brief.generated_reason or "none",
+            fingerprint.settlement_state,
+            reminder_due,
+            fingerprint_changed,
+            self._brief_log_cooldown_s,
+            cooldown_elapsed_s,
         )
-        return brief
 
+    def _brief_log_fingerprint(self, brief: ContinuityBrief) -> ContinuityBriefLogFingerprint:
+        settlement = self.build_turn_settlement(brief)
+        return ContinuityBriefLogFingerprint(
+            stance=brief.stance,
+            stance_detail=brief.stance_detail,
+            settlement_state=settlement.settlement_state,
+            settlement_detail=settlement.settlement_detail,
+            counts=(
+                ("current", len(brief.current)),
+                ("ongoing", len(brief.ongoing)),
+                ("unresolved", len(brief.unresolved)),
+                ("commitments", len(brief.commitments)),
+                ("blockers", len(brief.blockers)),
+                ("constraints", len(brief.constraints)),
+                ("recently_closed", len(brief.recently_closed)),
+            ),
+            current_items=self._brief_item_signature(brief.current),
+            recently_closed_items=self._brief_item_signature(brief.recently_closed),
+        )
+
+    @staticmethod
+    def _brief_item_signature(items: tuple[ContinuityItem, ...]) -> tuple[tuple[str, str, str, str], ...]:
+        return tuple(
+            (
+                item.kind,
+                item.status,
+                ContinuityLedger._trim_text(item.summary, _MAX_LOG_SUMMARY_CHARS),
+                ContinuityLedger._trim_text(item.detail, _MAX_LOG_DETAIL_CHARS),
+            )
+            for item in items[:_MAX_ITEMS_PER_BUCKET]
+        )
 
     def _build_brief_projection(self, *, run_id: str, turn_id: str, reason: str) -> ContinuityBrief:
         """Project the current continuity ledger into the shared brief shape."""
