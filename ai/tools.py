@@ -50,6 +50,11 @@ async def read_environment() -> dict[str, Any]:
     return tool_runtime.read_environment()
 
 
+async def read_runtime_diagnostics() -> dict[str, Any]:
+    """Return the current runtime diagnostics bundle, including continuity state."""
+    return tool_runtime.read_runtime_diagnostics()
+
+
 async def read_imu_data() -> dict[str, Any]:
     """Return the latest IMU orientation and sensor readings."""
 
@@ -500,6 +505,30 @@ tools.append(
 )
 
 function_map["read_environment"] = read_environment
+
+tools.append(
+    {
+        "type": "function",
+        "name": "read_runtime_diagnostics",
+        "description": (
+            "Fetch your current runtime diagnostics bundle. This includes connected/ready session health, "
+            "memory retrieval health, rate limits, sensor aggregation counters, silent-turn incidents, and a "
+            "compact read-only continuity snapshot with stance, settlement, and bounded counts. "
+            "Use this when the user asks for diagnostics or runtime continuity state, including questions like "
+            "'what is your continuity state?', 'what diagnostics do you have right now?', "
+            "'are you in the middle of something?', or 'do you still have an unresolved follow-up?'. "
+            "Continuity here is observational diagnostics only; it does not control scheduling, arbitration, "
+            "or response gating."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    }
+)
+
+function_map["read_runtime_diagnostics"] = read_runtime_diagnostics
 
 tools.append(
     {

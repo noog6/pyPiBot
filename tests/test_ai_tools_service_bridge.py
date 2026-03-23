@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import sys
+import types
+
+if "audioop" not in sys.modules:
+    sys.modules["audioop"] = types.ModuleType("audioop")
 
 import ai.tools as ai_tools
 
@@ -53,6 +58,72 @@ def test_read_battery_voltage_tool_description_guides_first_person_reason_aware_
     )
     assert "I currently infer that my charger is connected." in description
     assert "I do not currently infer that my charger is connected." in description
+
+
+def test_read_runtime_diagnostics_delegates_and_exposes_compact_continuity(monkeypatch) -> None:
+    called = {"count": 0}
+
+    def fake_read_runtime_diagnostics() -> dict[str, object]:
+        called["count"] += 1
+        return {
+            "connected": True,
+            "ready": True,
+            "memory_retrieval": {"retrieval_count": 3},
+            "continuity": {
+                "stance": "awaiting_tool",
+                "stance_detail": "tool=perform_research call_id=call-1",
+                "settlement": "awaiting_tool",
+                "settlement_detail": "tool=perform_research call_id=call-1",
+                "counts": {
+                    "current": 2,
+                    "ongoing": 0,
+                    "commitments": 1,
+                    "unresolved": 0,
+                    "blockers": 1,
+                    "constraints": 0,
+                    "recently_closed": 0,
+                },
+            },
+        }
+
+    monkeypatch.setattr(ai_tools.tool_runtime, "read_runtime_diagnostics", fake_read_runtime_diagnostics)
+
+    payload = asyncio.run(ai_tools.read_runtime_diagnostics())
+
+    assert called["count"] == 1
+    assert payload["connected"] is True
+    assert payload["ready"] is True
+    assert payload["memory_retrieval"] == {"retrieval_count": 3}
+    assert payload["continuity"] == {
+        "stance": "awaiting_tool",
+        "stance_detail": "tool=perform_research call_id=call-1",
+        "settlement": "awaiting_tool",
+        "settlement_detail": "tool=perform_research call_id=call-1",
+        "counts": {
+            "current": 2,
+            "ongoing": 0,
+            "commitments": 1,
+            "unresolved": 0,
+            "blockers": 1,
+            "constraints": 0,
+            "recently_closed": 0,
+        },
+    }
+
+
+def test_read_runtime_diagnostics_tool_description_mentions_continuity_diagnostics() -> None:
+    diagnostics_tool = next(tool for tool in ai_tools.tools if tool.get("name") == "read_runtime_diagnostics")
+    description = diagnostics_tool["description"]
+
+    assert "runtime diagnostics bundle" in description
+    assert "Fetch your current runtime diagnostics bundle." in description
+    assert "continuity snapshot" in description
+    assert "what is your continuity state?" in description
+    assert "are you in the middle of something?" in description
+    assert "unresolved follow-up" in description
+    assert "observational diagnostics only" in description
+    assert "does not control scheduling, arbitration, or response gating" in description
+    assert "Theo's current runtime diagnostics bundle" not in description
 
 
 def test_gesture_nod_delegates_and_keeps_payload_shape(monkeypatch) -> None:

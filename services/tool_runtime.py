@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import subprocess
+from collections.abc import Callable
 from typing import Any
 
 from hardware import ADS1015Sensor, LPS22HBSensor
@@ -27,6 +28,34 @@ from services.output_volume import OutputVolumeController
 
 
 logger = logging.getLogger(__name__)
+
+
+_runtime_diagnostics_provider: Callable[[], dict[str, Any]] | None = None
+
+
+def set_runtime_diagnostics_provider(provider: Callable[[], dict[str, Any]] | None) -> None:
+    """Register the read-only runtime diagnostics provider used by AI tools."""
+
+    global _runtime_diagnostics_provider
+    _runtime_diagnostics_provider = provider
+
+
+def read_runtime_diagnostics() -> dict[str, Any]:
+    """Return the current runtime diagnostics bundle if a provider is registered."""
+
+    provider = _runtime_diagnostics_provider
+    if not callable(provider):
+        return {
+            "status": "unavailable",
+            "message": "Runtime diagnostics are not currently available.",
+        }
+    payload = provider()
+    if isinstance(payload, dict):
+        return payload
+    return {
+        "status": "unavailable",
+        "message": "Runtime diagnostics provider returned an unexpected payload.",
+    }
 
 
 _LOOK_CENTER_PAN_DEGREES = 0.0
@@ -256,4 +285,3 @@ def _enqueue_gesture(action: Any, delay_ms: int, intensity: float) -> dict[str, 
 def _add_action_to_motion_queue(action: Any) -> None:
     controller = MotionController.get_instance()
     controller.add_action_to_queue(action)
-
