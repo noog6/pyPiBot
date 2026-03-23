@@ -1823,6 +1823,7 @@ def test_handle_response_done_logs_continuity_summary_once_when_enabled() -> Non
     assert continuity_calls[0].args[1] == "run-test"
     assert continuity_calls[0].args[2] == "turn_1"
     assert "stance=" in continuity_calls[0].args[3]
+    assert "settlement=" in continuity_calls[0].args[3]
     assert api._response_in_flight is False
     assert api.function_call == {"name": "gesture_look_center"}
 
@@ -1850,8 +1851,12 @@ def test_continuity_summary_turn_close_logger_deduplicates_same_turn() -> None:
 
     continuity_calls = [call for call in info_log.call_args_list if call.args and call.args[0] == "CONTINUITY SUMMARY | run=%s turn=%s | %s"]
     assert len(continuity_calls) == 1
-    assert continuity_calls[0].args[1:] == (
-        "run-test",
-        "turn_1",
-        "stance=assisting_query | detail=read_query_detected | current=[ongoing/active:Do you know what your battery voltage is at? [origin=user_transcript]] | recently_closed=[-]",
-    )
+    assert continuity_calls[0].args[1] == "run-test"
+    assert continuity_calls[0].args[2] == "turn_1"
+    summary = continuity_calls[0].args[3]
+    assert "stance=assisting_query |" in summary
+    assert "detail=read_query_detected |" in summary
+    assert "settlement=active_items_only |" in summary
+    assert "settlement_detail=origin=user_transcript |" in summary
+    assert "current=[ongoing/active:Do you know what your battery voltage is at? [origin=user_transcript]]" in summary
+    assert "recently_closed=[-]" in summary
