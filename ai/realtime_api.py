@@ -4236,6 +4236,10 @@ class RealtimeAPI:
     def build_continuity_brief(self, run_id: str, turn_id: str, reason: str) -> ContinuityBrief:
         return self._continuity_ledger_instance().build_brief(run_id=run_id, turn_id=turn_id, reason=reason)
 
+    def get_continuity_brief(self, run_id: str, turn_id: str, reason: str = "inspection") -> ContinuityBrief:
+        """Read-only continuity inspection seam for diagnostics and tests."""
+        return self.build_continuity_brief(run_id=run_id, turn_id=turn_id, reason=reason)
+
     def _record_user_input(self, text: str, *, source: str) -> None:
         clean_text = text.strip()
         if not clean_text:
