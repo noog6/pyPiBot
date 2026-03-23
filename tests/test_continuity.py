@@ -10,7 +10,7 @@ import pytest
 
 sys.modules.setdefault("audioop", types.ModuleType("audioop"))
 
-from ai.continuity import ContinuityBrief, ContinuityLedger
+from ai.continuity import ContinuityBrief, ContinuityItem, ContinuityLedger
 from ai.realtime_api import RealtimeAPI
 
 
@@ -288,6 +288,113 @@ def test_realtime_api_get_continuity_brief_is_observational() -> None:
     assert brief.current[0].kind == "commitment"
     assert brief.unresolved[0].detail == "opened_by=transcript_final"
     assert api._response_in_flight is False
+
+
+def test_realtime_api_continuity_debug_summary_is_read_only_and_deterministic() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._continuity_ledger = ContinuityLedger()
+    api._response_in_flight = False
+    api._active_response_origin = "tool_output"
+
+    api._apply_continuity_event(
+        "transcript_final",
+        text=(
+            "Look at the whiteboard and tell me whether the planning notes "
+            "mention a delivery date after the next sprint review."
+        ),
+        source="input_audio_transcription",
+    )
+    api._apply_continuity_event(
+        "tool_call_started",
+        tool_name="gesture_look_center",
+        call_id="call-22",
+        commitment_summary=(
+            "Look at the whiteboard and tell me whether the planning notes "
+            "mention a delivery date after the next sprint review."
+        ),
+    )
+    api._apply_continuity_event(
+        "tool_result_received",
+        tool_name="gesture_look_center",
+        call_id="call-22",
+    )
+
+    before_items = dict(api._continuity_ledger._items)
+    summary = api.get_continuity_debug_summary("run-7", "turn-11")
+    after_items = dict(api._continuity_ledger._items)
+
+    assert summary == (
+        "stance=idle; "
+        "stance_detail=current=commitment:active; "
+        "current=[commitment/active:Look at the whiteboard and tell me whether the… "
+        "[origin=tool_followthrough tool=…] | unresolved/pending:tell me whether the planning notes mention a de… "
+        "[opened_by=transcript_final] | ongoing/active:Look at the whiteboard and tell me whether the… "
+        "[origin=user_transcript]]; "
+        "recently_closed=[recently_closed/resolved:Waiting for tool result: gesture_look_center "
+        "[tool=gesture_look_center call_i…]]"
+    )
+    assert before_items == after_items
+    assert api._response_in_flight is False
+    assert api._active_response_origin == "tool_output"
+
+
+def test_realtime_api_continuity_debug_summary_bounds_current_and_closed_items() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._continuity_ledger = ContinuityLedger()
+
+    for idx in range(5):
+        api._continuity_ledger._set_item(
+            ContinuityItem(
+                id=f"constraint:{idx}",
+                kind="constraint",
+                summary=f"Constraint item number {idx} with extra detail for trimming checks.",
+                status="active",
+                priority="medium",
+                source="unit_test",
+                detail=f"detail={idx}",
+                expires_after_turns=3,
+            )
+        )
+        api._continuity_ledger._set_item(
+            ContinuityItem(
+                id=f"closed:{idx}",
+                kind="recently_closed",
+                summary=f"Closed item number {idx} with extra detail for trimming checks.",
+                status="resolved",
+                priority="medium",
+                source="unit_test",
+                detail=f"closed_detail={idx}",
+                expires_after_turns=1,
+            )
+        )
+
+    summary = api.get_continuity_debug_summary("run-8", "turn-12")
+
+    assert "constraint:3" not in summary
+    assert "constraint:4" not in summary
+    assert "closed:3" not in summary
+    assert "closed:4" not in summary
+    assert summary.count(" | ") == 4
+    assert "stance=idle;" in summary
+    assert "recently_closed=[" in summary
+
+
+def test_realtime_api_continuity_debug_summary_exposes_assisting_query_stance() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._continuity_ledger = ContinuityLedger()
+
+    api._apply_continuity_event(
+        "transcript_final",
+        text="Do you know what your battery voltage is at?",
+        source="input_audio_transcription",
+    )
+
+    summary = api.get_continuity_debug_summary("run-9", "turn-13")
+
+    assert "stance=assisting_query;" in summary
+    assert "stance_detail=read_query_detected;" in summary
+    assert "current=[ongoing/active:Do you know what your battery voltage is at?" in summary
+    assert "recently_closed=[-]" in summary
 
 
 def test_continuity_does_not_invent_authority_or_mutate_unrelated_runtime_state() -> None:
