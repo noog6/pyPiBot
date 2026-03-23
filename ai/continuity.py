@@ -29,6 +29,8 @@ ContinuityKind = Literal[
 ]
 ContinuityStatus = Literal["active", "blocked", "pending", "resolved", "expired"]
 ContinuityPriority = Literal["low", "medium", "high"]
+CompoundStepKind = Literal["gesture", "diagnostics", "observation", "followup", "report"]
+CompoundStepStatus = Literal["pending", "active", "completed"]
 # Deterministic continuity stance labels used for bookkeeping and inspection.
 ContinuityStance = Literal[
     "idle",
@@ -46,6 +48,7 @@ _MAX_LOG_SUMMARY_CHARS = 72
 _MAX_LOG_DETAIL_CHARS = 48
 _CONTINUITY_BRIEF_LOG_COOLDOWN_S = 10.0
 _TOOL_COMMITMENT_PREFIXES = ("gesture_", "move", "look", "center", "turn", "navigate")
+_MAX_COMPOUND_STEPS = 8
 _ACTION_PATTERNS = (
     re.compile(r"\bmove\b", re.IGNORECASE),
     re.compile(r"\blook\b", re.IGNORECASE),
@@ -91,6 +94,13 @@ _FOLLOW_UP_PATTERNS = (
     re.compile(r"\b(whether\b.*)", re.IGNORECASE),
     re.compile(r"\b(what\b.*\?)", re.IGNORECASE),
 )
+_COMPOUND_SPLIT_RE = re.compile(r"\s*(?:,|;|\band then\b|\bthen\b)\s*", re.IGNORECASE)
+_FOLLOWUP_ONLY_PREFIX_RE = re.compile(r"^(?:then\s+)?(?:tell me|let me know|report back|report|say)\b", re.IGNORECASE)
+_SILENT_RE = re.compile(r"\bsilently\b", re.IGNORECASE)
+_DIAGNOSTIC_STEP_RE = re.compile(r"\b(?:check|run|read|query)\b.*\b(?:diagnostic|diagnostics|status|battery|temperature|pressure|environment)\b", re.IGNORECASE)
+_REPORT_STEP_RE = re.compile(r"\b(?:tell me|let me know|report back|report|say)\b", re.IGNORECASE)
+_OBSERVATION_STEP_RE = re.compile(r"\b(?:observe|describe|identify|what do you see|what(?:'s| is) in|do you see|can you see)\b", re.IGNORECASE)
+_GESTURE_STEP_RE = re.compile(r"\b(?:look|move|center|turn|rotate|point|go to|navigate)\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -103,6 +113,27 @@ class ContinuityItem:
     source: str
     detail: str = ""
     expires_after_turns: int | None = None
+
+
+@dataclass(frozen=True)
+class CompoundContinuityStep:
+    step_id: str
+    kind: CompoundStepKind
+    summary: str
+    status: CompoundStepStatus
+    source_detail: str = ""
+
+
+@dataclass(frozen=True)
+class CompoundContinuityState:
+    request_id: str
+    summary: str
+    steps: tuple[CompoundContinuityStep, ...]
+    active_step_index: int | None
+    completed_step_ids: tuple[str, ...]
+    final_followup_pending: bool
+    recent_completed_step_id: str | None = None
+    next_pending_step_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -136,6 +167,7 @@ class ContinuityBrief:
     current: tuple[ContinuityItem, ...] = ()
     generated_reason: str = ""
     stance_detail: str = ""
+    compound_request: CompoundContinuityState | None = None
 
 
 @dataclass(frozen=True)
@@ -147,6 +179,7 @@ class ContinuityBriefLogFingerprint:
     counts: tuple[tuple[str, int], ...]
     current_items: tuple[tuple[str, str, str, str], ...]
     recently_closed_items: tuple[tuple[str, str, str, str], ...]
+    compound_signature: tuple[str, ...] = ()
 
 
 class ContinuityLedger:
@@ -164,6 +197,7 @@ class ContinuityLedger:
     ) -> None:
         self._stance: ContinuityStance = "idle"
         self._items: dict[str, ContinuityItem] = {}
+        self._compound_state: CompoundContinuityState | None = None
         self._brief_log_cooldown_s = max(0.0, float(brief_log_cooldown_s))
         self._time_source = time_source
         self._last_brief_log_fingerprint: ContinuityBriefLogFingerprint | None = None
@@ -217,6 +251,7 @@ class ContinuityLedger:
             "current": len(brief.current),
             "current_items": self._project_items(brief.current),
             "recently_closed_items": self._project_items(brief.recently_closed),
+            "compound_request": self._project_compound_state(brief.compound_request),
         }
 
     def _log_inspection_summary(self, *, event_type: str, payload: dict[str, object]) -> None:
@@ -228,7 +263,7 @@ class ContinuityLedger:
             event_type=event_type,
         )
         logger.info(
-            "continuity_inspection_summary run_id=%s turn_id=%s event_type=%s stance=%s stance_detail=%s settlement=%s settlement_detail=%s ongoing=%s unresolved=%s commitments=%s blockers=%s constraints=%s recently_closed=%s current=%s current_items=%s recently_closed_items=%s",
+            "continuity_inspection_summary run_id=%s turn_id=%s event_type=%s stance=%s stance_detail=%s settlement=%s settlement_detail=%s ongoing=%s unresolved=%s commitments=%s blockers=%s constraints=%s recently_closed=%s current=%s compound_request=%s current_items=%s recently_closed_items=%s",
             summary["run_id"] or "",
             summary["turn_id"] or "",
             summary["event_type"],
@@ -243,6 +278,7 @@ class ContinuityLedger:
             summary["constraints"],
             summary["recently_closed"],
             summary["current"],
+            summary["compound_request"],
             summary["current_items"],
             summary["recently_closed_items"],
         )
@@ -271,7 +307,7 @@ class ContinuityLedger:
         self._last_brief_log_fingerprint = fingerprint
         self._last_brief_log_ts = now
         logger.info(
-            "continuity_brief_built run_id=%s turn_id=%s stance=%s ongoing=%s blockers=%s commitments=%s current=%s closed=%s reason=%s settlement=%s reminder=%s fingerprint_changed=%s cooldown_s=%s cooldown_elapsed_s=%s",
+            "continuity_brief_built run_id=%s turn_id=%s stance=%s ongoing=%s blockers=%s commitments=%s current=%s closed=%s compound_steps=%s reason=%s settlement=%s reminder=%s fingerprint_changed=%s cooldown_s=%s cooldown_elapsed_s=%s",
             run_id,
             turn_id,
             brief.stance,
@@ -280,6 +316,7 @@ class ContinuityLedger:
             len(brief.commitments),
             len(brief.current),
             len(brief.recently_closed),
+            0 if brief.compound_request is None else len(brief.compound_request.steps),
             brief.generated_reason or "none",
             fingerprint.settlement_state,
             reminder_due,
@@ -290,6 +327,17 @@ class ContinuityLedger:
 
     def _brief_log_fingerprint(self, brief: ContinuityBrief) -> ContinuityBriefLogFingerprint:
         settlement = self.build_turn_settlement(brief)
+        compound_signature = ()
+        if brief.compound_request is not None:
+            compound_signature = tuple(
+                f"{step.step_id}:{step.kind}:{step.status}:{self._trim_text(step.summary, 32)}"
+                for step in brief.compound_request.steps
+            ) + (
+                f"active={brief.compound_request.active_step_index}",
+                f"recent={brief.compound_request.recent_completed_step_id or ''}",
+                f"next={brief.compound_request.next_pending_step_id or ''}",
+                f"followup={brief.compound_request.final_followup_pending}",
+            )
         return ContinuityBriefLogFingerprint(
             stance=brief.stance,
             stance_detail=brief.stance_detail,
@@ -306,6 +354,7 @@ class ContinuityLedger:
             ),
             current_items=self._brief_item_signature(brief.current),
             recently_closed_items=self._brief_item_signature(brief.recently_closed),
+            compound_signature=compound_signature,
         )
 
     @staticmethod
@@ -348,6 +397,7 @@ class ContinuityLedger:
                 unresolved=unresolved,
                 commitments=commitments,
             ),
+            compound_request=self._compound_state,
         )
 
     def build_turn_settlement(self, brief: ContinuityBrief) -> ContinuityTurnSettlement:
@@ -425,10 +475,12 @@ class ContinuityLedger:
         source = self._clean_text(payload.get("source")) or "transcript_final"
         if not transcript:
             self._stance = "recovering_context"
+            self._compound_state = None
             return
 
         is_action_request = self._is_action_request(transcript)
         followup_summary = self._extract_followup_summary(transcript, requires_action=is_action_request)
+        self._compound_state = self._derive_compound_state(transcript, source=source, unresolved_summary=followup_summary)
 
         self._set_item(
             ContinuityItem(
@@ -503,10 +555,12 @@ class ContinuityLedger:
                     expires_after_turns=4,
                 )
             )
+        self._advance_compound_state_on_tool_start(tool_name=tool_name)
         self._stance = "awaiting_tool"
 
     def _apply_tool_result_received(self, payload: dict[str, object]) -> None:
         call_id = self._clean_text(payload.get("call_id"))
+        tool_name = self._clean_text(payload.get("tool_name"))
         if call_id:
             blocker_id = f"blocker:tool:{call_id}"
             blocker = self._items.get(blocker_id)
@@ -527,6 +581,7 @@ class ContinuityLedger:
                     source="tool_result_received",
                 )
             )
+        self._advance_compound_state_on_tool_result(tool_name=tool_name)
         self._stance = "idle"
 
     def _apply_response_done(self, payload: dict[str, object]) -> None:
@@ -545,7 +600,131 @@ class ContinuityLedger:
             elif item.kind == "ongoing":
                 if close_ongoing and not keep_ongoing:
                     self._remove_item(item_id)
+        self._advance_compound_state_on_response_done(
+            close_commitment=close_commitment,
+            close_unresolved=close_unresolved,
+        )
         self._stance = "idle" if close_ongoing or close_commitment or close_unresolved else "awaiting_user"
+
+    def _advance_compound_state_on_tool_start(self, *, tool_name: str) -> None:
+        state = self._compound_state
+        if state is None:
+            return
+        active_idx = state.active_step_index
+        normalized_tool = tool_name.lower()
+        if active_idx is not None and active_idx < len(state.steps):
+            active_step = state.steps[active_idx]
+            if active_step.kind == "diagnostics" or (
+                active_step.kind == "gesture" and normalized_tool.startswith(_TOOL_COMMITMENT_PREFIXES)
+            ):
+                return
+        idx = self._first_pending_step_index(state)
+        if idx is None:
+            return
+        step = state.steps[idx]
+        if step.kind == "report":
+            return
+        if step.kind == "diagnostics" or normalized_tool.startswith(_TOOL_COMMITMENT_PREFIXES):
+            self._compound_state = self._replace_compound_step_status(state, idx, "active")
+
+    def _advance_compound_state_on_tool_result(self, *, tool_name: str) -> None:
+        state = self._compound_state
+        if state is None:
+            return
+        idx = state.active_step_index
+        if idx is None:
+            idx = self._first_pending_step_index(state)
+            if idx is None:
+                return
+        step = state.steps[idx]
+        normalized_tool = tool_name.lower()
+        clear_match = (
+            step.kind == "diagnostics"
+            or (step.kind == "gesture" and normalized_tool.startswith(_TOOL_COMMITMENT_PREFIXES))
+        )
+        if clear_match:
+            self._compound_state = self._replace_compound_step_status(state, idx, "completed")
+
+    def _advance_compound_state_on_response_done(self, *, close_commitment: bool, close_unresolved: bool) -> None:
+        state = self._compound_state
+        if state is None:
+            return
+        updated = state
+        if close_commitment:
+            idx = updated.active_step_index
+            if idx is None:
+                idx = self._first_pending_step_index(updated, include_report=False)
+            if idx is not None:
+                step = updated.steps[idx]
+                if step.kind != "report":
+                    updated = self._replace_compound_step_status(updated, idx, "completed")
+        if close_unresolved and updated.final_followup_pending:
+            idx = self._first_pending_step_index(updated, kinds={"report"})
+            if idx is not None:
+                updated = self._replace_compound_step_status(updated, idx, "completed")
+        self._compound_state = None if self._compound_state_resolved(updated) else updated
+
+    def _replace_compound_step_status(
+        self,
+        state: CompoundContinuityState,
+        step_index: int,
+        status: CompoundStepStatus,
+    ) -> CompoundContinuityState:
+        updated_steps = list(state.steps)
+        target = updated_steps[step_index]
+        updated_steps[step_index] = replace(target, status=status)
+        if status == "completed":
+            for idx, step in enumerate(updated_steps):
+                if idx != step_index and step.status == "active":
+                    updated_steps[idx] = replace(step, status="completed")
+        elif status == "active":
+            for idx, step in enumerate(updated_steps):
+                if idx != step_index and step.status == "active":
+                    updated_steps[idx] = replace(step, status="pending")
+        for idx, step in enumerate(updated_steps):
+            if step.status == "pending" and idx < step_index and status == "completed":
+                continue
+            if status == "completed" and idx > step_index and step.status == "pending":
+                break
+        next_pending_index = next((idx for idx, step in enumerate(updated_steps) if step.status == "pending"), None)
+        if status == "completed" and next_pending_index is not None:
+            next_step = updated_steps[next_pending_index]
+            if next_step.kind != "report":
+                updated_steps[next_pending_index] = replace(next_step, status="active")
+        active_step_index = next((idx for idx, step in enumerate(updated_steps) if step.status == "active"), None)
+        completed_ids = tuple(step.step_id for step in updated_steps if step.status == "completed")
+        next_pending_id = next((step.step_id for step in updated_steps if step.status == "pending"), None)
+        recent_completed = target.step_id if status == "completed" else state.recent_completed_step_id
+        final_followup_pending = any(step.kind == "report" and step.status != "completed" for step in updated_steps)
+        return replace(
+            state,
+            steps=tuple(updated_steps),
+            active_step_index=active_step_index,
+            completed_step_ids=completed_ids,
+            final_followup_pending=final_followup_pending,
+            recent_completed_step_id=recent_completed,
+            next_pending_step_id=next_pending_id,
+        )
+
+    def _compound_state_resolved(self, state: CompoundContinuityState) -> bool:
+        return bool(state.steps) and all(step.status == "completed" for step in state.steps)
+
+    def _first_pending_step_index(
+        self,
+        state: CompoundContinuityState,
+        *,
+        include_report: bool = True,
+        kinds: set[str] | None = None,
+    ) -> int | None:
+        for idx, step in enumerate(state.steps):
+            if step.status != "pending":
+                continue
+            if not include_report and step.kind == "report":
+                continue
+            if kinds is not None and step.kind not in kinds:
+                continue
+            return idx
+        return None
 
     def _close_item(self, item_id: str) -> None:
         item = self._items.get(item_id)
@@ -601,6 +780,37 @@ class ContinuityLedger:
             }
             for item in items[:_MAX_ITEMS_PER_BUCKET]
         )
+
+    def _project_compound_state(
+        self,
+        state: CompoundContinuityState | None,
+    ) -> dict[str, object] | None:
+        if state is None:
+            return None
+        active_step = state.steps[state.active_step_index] if state.active_step_index is not None and state.active_step_index < len(state.steps) else None
+        next_step = next((step for step in state.steps if step.step_id == state.next_pending_step_id), None)
+        recent_step = next((step for step in state.steps if step.step_id == state.recent_completed_step_id), None)
+        return {
+            "request_id": state.request_id,
+            "summary": self._trim_text(state.summary, _MAX_LOG_SUMMARY_CHARS),
+            "substeps_total": len(state.steps),
+            "substeps_completed": len(state.completed_step_ids),
+            "active_step_index": state.active_step_index,
+            "active_substep": None if active_step is None else self._trim_text(active_step.summary, 48),
+            "recently_completed_substep": None if recent_step is None else self._trim_text(recent_step.summary, 48),
+            "next_substep": None if next_step is None else self._trim_text(next_step.summary, 48),
+            "final_followup_pending": state.final_followup_pending,
+            "steps": tuple(
+                {
+                    "step_id": step.step_id,
+                    "kind": step.kind,
+                    "status": step.status,
+                    "summary": self._trim_text(step.summary, 48),
+                    "source_detail": self._trim_text(step.source_detail, 32),
+                }
+                for step in state.steps[:_MAX_COMPOUND_STEPS]
+            ),
+        }
 
     @staticmethod
     def _trim_text(value: str, limit: int) -> str:
@@ -697,3 +907,107 @@ class ContinuityLedger:
         if len(text.split()) <= 1:
             return "recovering_context"
         return "idle"
+
+    def _derive_compound_state(
+        self,
+        transcript: str,
+        *,
+        source: str,
+        unresolved_summary: str | None,
+    ) -> CompoundContinuityState | None:
+        clauses = self._split_compound_request(transcript)
+        if len(clauses) <= 1:
+            return None
+        steps: list[CompoundContinuityStep] = []
+        followup_recorded = False
+        for idx, clause in enumerate(clauses[:_MAX_COMPOUND_STEPS]):
+            step = self._build_compound_step(
+                clause,
+                step_index=idx,
+                source=source,
+                unresolved_summary=unresolved_summary,
+                followup_recorded=followup_recorded,
+            )
+            if step is None:
+                continue
+            followup_recorded = followup_recorded or step.kind == "report"
+            steps.append(step)
+        if len(steps) <= 1:
+            return None
+        active_step_index = next((idx for idx, step in enumerate(steps) if step.status == "active"), None)
+        next_pending_step_id = next((step.step_id for step in steps if step.status == "pending"), None)
+        final_followup_pending = any(step.kind == "report" and step.status != "completed" for step in steps)
+        return CompoundContinuityState(
+            request_id="request:current",
+            summary=transcript,
+            steps=tuple(steps),
+            active_step_index=active_step_index,
+            completed_step_ids=(),
+            final_followup_pending=final_followup_pending,
+            recent_completed_step_id=None,
+            next_pending_step_id=next_pending_step_id,
+        )
+
+    def _split_compound_request(self, transcript: str) -> tuple[str, ...]:
+        normalized = re.sub(r"\s+", " ", transcript).strip()
+        coarse_parts = [part.strip(" .") for part in _COMPOUND_SPLIT_RE.split(normalized) if part.strip(" .")]
+        parts: list[str] = []
+        for part in coarse_parts:
+            parts.extend(self._split_on_bare_and(part))
+        return tuple(parts[:_MAX_COMPOUND_STEPS])
+
+    def _split_on_bare_and(self, clause: str) -> list[str]:
+        normalized = clause.strip(" .")
+        if not normalized:
+            return []
+        for match in re.finditer(r"\band\b", normalized, flags=re.IGNORECASE):
+            left = normalized[: match.start()].strip(" ,.")
+            right = normalized[match.end() :].strip(" ,.")
+            if not left or not right:
+                continue
+            if self._should_split_bare_and(left, right):
+                return [*self._split_on_bare_and(left), *self._split_on_bare_and(right)]
+        return [normalized]
+
+    def _should_split_bare_and(self, left: str, right: str) -> bool:
+        allowed = {"gesture", "diagnostics", "report"}
+        left_kind = self._classify_compound_step_kind(left, unresolved_summary=None)
+        right_kind = self._classify_compound_step_kind(right, unresolved_summary=None)
+        return left_kind in allowed and right_kind in allowed
+
+    def _build_compound_step(
+        self,
+        clause: str,
+        *,
+        step_index: int,
+        source: str,
+        unresolved_summary: str | None,
+        followup_recorded: bool,
+    ) -> CompoundContinuityStep | None:
+        normalized = clause.strip()
+        if not normalized:
+            return None
+        kind = self._classify_compound_step_kind(normalized, unresolved_summary=unresolved_summary)
+        if kind == "report" and followup_recorded:
+            return None
+        return CompoundContinuityStep(
+            step_id=f"step_{step_index + 1}",
+            kind=kind,
+            summary=normalized if normalized.endswith((".", "?")) else f"{normalized}.",
+            status="active" if step_index == 0 else "pending",
+            source_detail=f"origin={source}",
+        )
+
+    def _classify_compound_step_kind(self, clause: str, *, unresolved_summary: str | None) -> CompoundStepKind:
+        lowered = clause.lower().strip()
+        if unresolved_summary and (lowered in unresolved_summary.lower() or _FOLLOWUP_ONLY_PREFIX_RE.search(clause)):
+            return "report"
+        if _DIAGNOSTIC_STEP_RE.search(clause):
+            return "diagnostics"
+        if _REPORT_STEP_RE.search(clause):
+            return "report"
+        if _OBSERVATION_STEP_RE.search(clause):
+            return "observation"
+        if _GESTURE_STEP_RE.search(clause):
+            return "gesture"
+        return "followup"

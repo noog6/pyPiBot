@@ -4278,7 +4278,7 @@ class RealtimeAPI:
             reason=reason,
         )
         settlement = self._continuity_ledger_instance().build_turn_settlement(brief)
-        return {
+        diagnostics = {
             "stance": str(brief.stance or "idle").strip() or "idle",
             "stance_detail": str(brief.stance_detail or "").strip(),
             "settlement": str(settlement.settlement_state or "settled").strip() or "settled",
@@ -4293,6 +4293,19 @@ class RealtimeAPI:
                 "recently_closed": len(brief.recently_closed),
             },
         }
+        if brief.compound_request is not None:
+            active_step = None
+            if brief.compound_request.active_step_index is not None and brief.compound_request.active_step_index < len(brief.compound_request.steps):
+                active_step = brief.compound_request.steps[brief.compound_request.active_step_index]
+            next_step = next((step for step in brief.compound_request.steps if step.step_id == brief.compound_request.next_pending_step_id), None)
+            diagnostics["compound"] = {
+                "substeps_total": len(brief.compound_request.steps),
+                "substeps_completed": len(brief.compound_request.completed_step_ids),
+                "active_substep": str(getattr(active_step, "summary", "") or "").strip() or None,
+                "next_substep": str(getattr(next_step, "summary", "") or "").strip() or None,
+                "final_followup_pending": bool(brief.compound_request.final_followup_pending),
+            }
+        return diagnostics
 
     @staticmethod
     def _format_continuity_debug_items(items: tuple[Any, ...], *, max_items: int = 3) -> str:
@@ -4325,11 +4338,26 @@ class RealtimeAPI:
         settlement_detail = str(settlement.settlement_detail or "-").strip() or "-"
         current = self._format_continuity_debug_items(brief.current)
         recently_closed = self._format_continuity_debug_items(brief.recently_closed)
+        compound_summary = "-"
+        if brief.compound_request is not None:
+            active_step = None
+            if brief.compound_request.active_step_index is not None and brief.compound_request.active_step_index < len(brief.compound_request.steps):
+                active_step = brief.compound_request.steps[brief.compound_request.active_step_index]
+            next_step = next((step for step in brief.compound_request.steps if step.step_id == brief.compound_request.next_pending_step_id), None)
+            recent_step = next((step for step in brief.compound_request.steps if step.step_id == brief.compound_request.recent_completed_step_id), None)
+            compound_summary = (
+                f"total={len(brief.compound_request.steps)} completed={len(brief.compound_request.completed_step_ids)} "
+                f"active={ContinuityLedger._trim_text(str(getattr(active_step, 'summary', '') or '').strip(), 32) or '-'} "
+                f"recent={ContinuityLedger._trim_text(str(getattr(recent_step, 'summary', '') or '').strip(), 32) or '-'} "
+                f"next={ContinuityLedger._trim_text(str(getattr(next_step, 'summary', '') or '').strip(), 32) or '-'} "
+                f"followup_pending={brief.compound_request.final_followup_pending}"
+            )
         return (
             f"stance={stance} | "
             f"detail={stance_detail} | "
             f"settlement={settlement_state} | "
             f"settlement_detail={settlement_detail} | "
+            f"compound=[{compound_summary}] | "
             f"current=[{current}] | "
             f"recently_closed=[{recently_closed}]"
         )
