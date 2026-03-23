@@ -713,6 +713,59 @@ def test_handle_response_done_downgrades_empty_tool_followup_terminal_selection(
         "empty_tool_followup_non_deliverable",
     )
 
+
+def test_handle_response_done_suppresses_empty_tool_followup_silent_incident_when_chain_continues() -> None:
+    api = _make_api()
+    api._active_response_origin = "tool_output"
+    api._active_response_input_event_key = "tool:call_left"
+    api._active_response_canonical_key = "turn_1::tool:call_left"
+    api._active_response_id = "resp_tool_left"
+    api._is_empty_response_done = lambda **_kwargs: True
+    api._turn_has_pending_tool_followup = lambda **_kwargs: True
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    api._release_blocked_tool_followups_for_response_done = lambda **_kwargs: None
+    record_silent = Mock()
+    api._record_silent_turn_incident = record_silent
+    api._maybe_recover_mic_after_response_done = Mock(return_value=False)
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_tool_left"}}))
+
+    record_silent.assert_not_called()
+    api._maybe_recover_mic_after_response_done.assert_not_called()
+
+
+def test_handle_response_done_defers_mic_recovery_until_after_chained_tool_followups_drain() -> None:
+    api = _make_api()
+    api._active_response_origin = "tool_output"
+    api._active_response_input_event_key = "tool:call_left"
+    api._active_response_canonical_key = "turn_1::tool:call_left"
+    api._active_response_id = "resp_tool_left"
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    api._release_blocked_tool_followups_for_response_done = lambda **_kwargs: None
+    api._turn_has_pending_tool_followup = lambda **_kwargs: True
+    api._maybe_recover_mic_after_response_done = Mock(return_value=False)
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_tool_left"}}))
+
+    api._drain_response_create_queue.assert_awaited_once()
+    api._maybe_recover_mic_after_response_done.assert_not_called()
+
 def test_handle_response_done_suppresses_exact_phrase_repair_when_startup_contract_already_satisfied() -> None:
     api = _make_api()
     api._active_response_origin = "prompt"
