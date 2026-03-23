@@ -486,6 +486,7 @@ class ResponseTerminalHandlers:
         api._release_blocked_tool_followups_for_response_done(
             response_id=resolved_response_id,
         )
+        pending_tool_followup_after_release = api._turn_has_pending_tool_followup(turn_id=turn_id)
         transcript_linked_input_event_key = str(api._active_input_event_key_for_turn(turn_id) or "").strip()
         transcript_final_linked = bool(transcript_linked_input_event_key and transcript_linked_input_event_key.startswith("item_"))
         obligations_map = getattr(api, "_response_obligations", {})
@@ -663,7 +664,20 @@ class ResponseTerminalHandlers:
         api._emit_utterance_info_summary(anchor="response.done")
         api._prune_curiosity_surface_candidates(completed_turn_id=turn_id)
         is_empty_done = api._is_empty_response_done(canonical_key=done_canonical_key)
-        if is_empty_done and not active_response_was_provisional:
+        suppress_empty_tool_followup_silent_incident = (
+            is_empty_done
+            and str(active_response_origin_before_clear or "").strip().lower() == "tool_output"
+            and pending_tool_followup_after_release
+        )
+        if suppress_empty_tool_followup_silent_incident:
+            logger.info(
+                "tool_followup_empty_bridge run_id=%s turn_id=%s response_id=%s canonical_key=%s action=suppress_silent_incident reason=pending_followup_after_release",
+                api._current_run_id() or "",
+                turn_id,
+                str(active_response_id_before_clear or "none"),
+                done_canonical_key,
+            )
+        elif is_empty_done and not active_response_was_provisional:
             api._record_silent_turn_incident(
                 turn_id=turn_id,
                 canonical_key=done_canonical_key,
@@ -766,13 +780,24 @@ class ResponseTerminalHandlers:
                 OrchestrationPhase.IDLE,
                 reason="response done reflection",
             )
-        api._maybe_recover_mic_after_response_done(
-            turn_id=turn_id,
-            response_id=active_response_id_before_clear,
-            canonical_key=resolved_canonical_key,
-            origin=str(active_response_origin_before_clear or "unknown"),
-            trigger="response_done_terminal",
-        )
+        if pending_tool_followup_after_release:
+            logger.info(
+                "response_done_mic_recovery_deferred run_id=%s turn_id=%s response_id=%s canonical_key=%s origin=%s trigger=%s reason=pending_tool_followup",
+                api._current_run_id() or "",
+                turn_id,
+                str(active_response_id_before_clear or "none"),
+                resolved_canonical_key,
+                str(active_response_origin_before_clear or "unknown"),
+                "response_done_terminal",
+            )
+        else:
+            api._maybe_recover_mic_after_response_done(
+                turn_id=turn_id,
+                response_id=active_response_id_before_clear,
+                canonical_key=resolved_canonical_key,
+                origin=str(active_response_origin_before_clear or "unknown"),
+                trigger="response_done_terminal",
+            )
         if was_confirmation_guarded:
             if token_active:
                 api._mark_confirmation_activity(reason="guarded_response_done")
