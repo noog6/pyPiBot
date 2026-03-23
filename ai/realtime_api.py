@@ -99,7 +99,7 @@ from ai.terminal_deliverable_arbitration import (
     arbitrate_terminal_deliverable_selection,
 )
 from ai.attention_continuity import AttentionContinuity, AttentionSnapshot
-from ai.continuity import ContinuityBrief, ContinuityLedger
+from ai.continuity import ContinuityBrief, ContinuityLedger, ContinuityTurnSettlement
 from ai.semantic_owner_arbitration import SemanticOwnerDecision, decide_semantic_owner
 from ai.embodiment_policy import (
     EMBODIMENT_PRIORITY_ALLOW,
@@ -4245,6 +4245,16 @@ class RealtimeAPI:
         """Read-only continuity inspection seam for diagnostics and tests."""
         return self.build_continuity_brief(run_id=run_id, turn_id=turn_id, reason=reason)
 
+    def get_continuity_turn_settlement(
+        self,
+        run_id: str,
+        turn_id: str,
+        reason: str = "inspection",
+    ) -> ContinuityTurnSettlement:
+        """Read-only turn settlement seam derived from the continuity brief."""
+        brief = self.get_continuity_brief(run_id=run_id, turn_id=turn_id, reason=reason)
+        return self._continuity_ledger_instance().build_turn_settlement(brief)
+
     @staticmethod
     def _format_continuity_debug_items(items: tuple[Any, ...], *, max_items: int = 3) -> str:
         if not items:
@@ -4269,13 +4279,18 @@ class RealtimeAPI:
     ) -> str:
         """Return a compact read-only continuity summary for diagnostics/tests."""
         brief = self.get_continuity_brief(run_id=run_id, turn_id=turn_id, reason=reason)
+        settlement = self._continuity_ledger_instance().build_turn_settlement(brief)
         stance = str(brief.stance or "idle").strip() or "idle"
         stance_detail = str(brief.stance_detail or "-").strip() or "-"
+        settlement_state = str(settlement.settlement_state or "settled").strip() or "settled"
+        settlement_detail = str(settlement.settlement_detail or "-").strip() or "-"
         current = self._format_continuity_debug_items(brief.current)
         recently_closed = self._format_continuity_debug_items(brief.recently_closed)
         return (
             f"stance={stance} | "
             f"detail={stance_detail} | "
+            f"settlement={settlement_state} | "
+            f"settlement_detail={settlement_detail} | "
             f"current=[{current}] | "
             f"recently_closed=[{recently_closed}]"
         )

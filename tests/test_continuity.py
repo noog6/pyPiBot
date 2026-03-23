@@ -10,7 +10,12 @@ import pytest
 
 sys.modules.setdefault("audioop", types.ModuleType("audioop"))
 
-from ai.continuity import ContinuityBrief, ContinuityItem, ContinuityLedger
+from ai.continuity import (
+    ContinuityBrief,
+    ContinuityItem,
+    ContinuityLedger,
+    ContinuityTurnSettlement,
+)
 from ai.realtime_api import RealtimeAPI
 
 
@@ -196,6 +201,86 @@ def test_response_done_keeps_followup_open_without_explicit_close_signal() -> No
     assert brief.unresolved[0].summary == "tell me whether it is open."
 
 
+def test_build_turn_settlement_reports_settled_without_open_items() -> None:
+    ledger = ContinuityLedger()
+
+    settlement = ledger.build_turn_settlement(ledger.build_brief("run-0", "turn-0", "settled_case"))
+
+    assert isinstance(settlement, ContinuityTurnSettlement)
+    assert settlement.settlement_state == "settled"
+    assert settlement.settlement_detail == "no_open_continuity_items"
+    assert settlement.has_current_items is False
+    assert settlement.has_commitments is False
+    assert settlement.has_unresolved is False
+    assert settlement.has_blockers is False
+    assert settlement.has_recently_closed is False
+
+
+def test_build_turn_settlement_reports_awaiting_tool_when_blocker_present() -> None:
+    ledger = ContinuityLedger()
+    ledger.update_from_event(
+        "tool_call_started",
+        tool_name="gesture_look_center",
+        call_id="call-1",
+        commitment_summary="Look at the center of the room.",
+    )
+
+    settlement = ledger.build_turn_settlement(ledger.build_brief("run-1", "turn-1", "awaiting_tool_case"))
+
+    assert settlement.settlement_state == "awaiting_tool"
+    assert settlement.settlement_detail == "tool=gesture_look_center call_id=call-1"
+    assert settlement.has_current_items is True
+    assert settlement.has_commitments is True
+    assert settlement.has_unresolved is False
+    assert settlement.has_blockers is True
+    assert settlement.has_recently_closed is False
+
+
+def test_build_turn_settlement_reports_unresolved_followup_when_commitment_and_question_open() -> None:
+    ledger = ContinuityLedger()
+    ledger.update_from_event(
+        "transcript_final",
+        text="Look at the door and tell me whether it is open.",
+        source="input_audio_transcription",
+    )
+
+    settlement = ledger.build_turn_settlement(ledger.build_brief("run-2", "turn-2", "followthrough_case"))
+
+    assert settlement.settlement_state == "unresolved_followup"
+    assert settlement.settlement_detail == "opened_by=transcript_final"
+    assert settlement.has_current_items is True
+    assert settlement.has_commitments is True
+    assert settlement.has_unresolved is True
+    assert settlement.has_blockers is False
+    assert settlement.has_recently_closed is False
+
+
+def test_build_turn_settlement_reports_recently_closed_only_when_open_items_are_closed() -> None:
+    ledger = ContinuityLedger()
+    ledger.update_from_event(
+        "transcript_final",
+        text="Center on the whiteboard.",
+        source="input_audio_transcription",
+    )
+    ledger.update_from_event(
+        "response_done",
+        close_ongoing="true",
+        close_commitment="true",
+    )
+
+    settlement = ledger.build_turn_settlement(
+        ledger.build_brief("run-3", "turn-3", "recently_closed_case")
+    )
+
+    assert settlement.settlement_state == "recently_closed_only"
+    assert settlement.settlement_detail == "origin=user_request"
+    assert settlement.has_current_items is False
+    assert settlement.has_commitments is False
+    assert settlement.has_unresolved is False
+    assert settlement.has_blockers is False
+    assert settlement.has_recently_closed is True
+
+
 def test_build_continuity_brief_returns_compact_structured_output() -> None:
     ledger = ContinuityLedger()
     ledger.update_from_event(
@@ -219,6 +304,29 @@ def test_build_continuity_brief_returns_compact_structured_output() -> None:
     assert len(brief.ongoing) <= 3
     assert len(brief.blockers) <= 3
     assert len(brief.current) <= 3
+
+
+def test_inspect_state_reuses_brief_projection_shape() -> None:
+    ledger = ContinuityLedger()
+    ledger.update_from_event(
+        "tool_call_started",
+        tool_name="gesture_look_center",
+        call_id="call-9",
+        commitment_summary="Look at the center of the room.",
+    )
+
+    brief = ledger.build_brief("run-5", "turn-6", "shared_projection")
+    inspection = ledger.inspect_state(run_id="run-5", turn_id="turn-6", event_type="inspection")
+    settlement = ledger.build_turn_settlement(brief)
+
+    assert inspection["stance"] == brief.stance
+    assert inspection["stance_detail"] == brief.stance_detail
+    assert inspection["current"] == len(brief.current)
+    assert inspection["ongoing"] == len(brief.ongoing)
+    assert inspection["commitments"] == len(brief.commitments)
+    assert inspection["blockers"] == len(brief.blockers)
+    assert inspection["settlement_state"] == settlement.settlement_state
+    assert inspection["settlement_detail"] == settlement.settlement_detail
 
 
 def test_continuity_inspection_logging_is_bounded_and_deterministic(
@@ -249,6 +357,8 @@ def test_continuity_inspection_logging_is_bounded_and_deterministic(
     assert "event_type=transcript_final" in message
     assert "stance=assisting_query" in message
     assert "stance_detail=read_query_detected" in message
+    assert "settlement=active_items_only" in message
+    assert "settlement_detail=origin=user_transcript" in message
     assert "current_items=(" in message
     assert "recently_closed_items=()" in message
     assert "while preserving…" in message
@@ -257,6 +367,8 @@ def test_continuity_inspection_logging_is_bounded_and_deterministic(
     inspection = ledger.inspect_state(run_id="run-42", turn_id="turn-7", event_type="transcript_final")
     assert inspection["stance"] == "assisting_query"
     assert inspection["stance_detail"] == "read_query_detected"
+    assert inspection["settlement_state"] == "active_items_only"
+    assert inspection["settlement_detail"] == "origin=user_transcript"
     assert inspection["current"] == 1
     assert inspection["current_items"] == (
         {
@@ -320,10 +432,18 @@ def test_realtime_api_continuity_debug_summary_is_read_only_and_deterministic() 
     )
 
     before_items = dict(api._continuity_ledger._items)
+    settlement = api.get_continuity_turn_settlement("run-7", "turn-11")
     summary = api.get_continuity_debug_summary("run-7", "turn-11")
     after_items = dict(api._continuity_ledger._items)
 
-    assert summary.startswith("stance=idle | detail=current=commitment:active | current=[")
+    assert settlement.settlement_state == "unresolved_followup"
+    assert settlement.settlement_detail == "opened_by=transcript_final"
+    assert settlement.has_current_items is True
+    assert settlement.has_commitments is True
+    assert settlement.has_unresolved is True
+    assert settlement.has_blockers is False
+    assert settlement.has_recently_closed is True
+    assert summary.startswith("stance=idle | detail=current=commitment:active | settlement=unresolved_followup | settlement_detail=opened_by=transcript_final | current=[")
     assert "current=[commitment/active:" in summary
     assert "[origin=tool_followthrough tool=…]" in summary
     assert "unresolved/pending:" in summary
@@ -377,6 +497,8 @@ def test_realtime_api_continuity_debug_summary_bounds_current_and_closed_items()
     assert summary.count(" | ") >= 5
     assert "stance=idle |" in summary
     assert "detail=current=constraint:active |" in summary
+    assert "settlement=active_items_only |" in summary
+    assert "settlement_detail=detail=0 |" in summary
     assert "recently_closed=[" in summary
 
 
@@ -390,10 +512,15 @@ def test_realtime_api_continuity_debug_summary_exposes_assisting_query_stance() 
         source="input_audio_transcription",
     )
 
+    settlement = api.get_continuity_turn_settlement("run-9", "turn-13")
     summary = api.get_continuity_debug_summary("run-9", "turn-13")
 
+    assert settlement.settlement_state == "active_items_only"
+    assert settlement.settlement_detail == "origin=user_transcript"
     assert "stance=assisting_query |" in summary
     assert "detail=read_query_detected |" in summary
+    assert "settlement=active_items_only |" in summary
+    assert "settlement_detail=origin=user_transcript |" in summary
     assert "current=[ongoing/active:Do you know what your battery voltage is at?" in summary
     assert "recently_closed=[-]" in summary
 
@@ -412,8 +539,15 @@ def test_continuity_does_not_invent_authority_or_mutate_unrelated_runtime_state(
         commitment_summary="Look at the center of the room.",
     )
 
+    before_items = dict(api._continuity_ledger._items)
     brief = api.build_continuity_brief("run-2", "turn-4", "authority_boundary")
+    settlement = api.get_continuity_turn_settlement("run-2", "turn-4", reason="authority_boundary")
+    after_items = dict(api._continuity_ledger._items)
+
     assert brief.stance == "awaiting_tool"
+    assert settlement.settlement_state == "awaiting_tool"
+    assert settlement.settlement_detail == "tool=gesture_look_center call_id=call-1"
+    assert before_items == after_items
     assert api._response_in_flight is True
     assert api.function_call == {"name": "gesture_look_center"}
     assert api._active_response_origin == "server_auto"

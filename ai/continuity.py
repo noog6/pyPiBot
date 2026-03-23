@@ -7,6 +7,15 @@ import logging
 import re
 from typing import Literal
 
+TurnSettlementState = Literal[
+    "settled",
+    "awaiting_tool",
+    "followthrough_remaining",
+    "unresolved_followup",
+    "recently_closed_only",
+    "active_items_only",
+]
+
 logger = logging.getLogger(__name__)
 
 ContinuityKind = Literal[
@@ -95,6 +104,23 @@ class ContinuityItem:
 
 
 @dataclass(frozen=True)
+class ContinuityTurnSettlement:
+    """Read-only turn settlement classification derived from continuity state.
+
+    This observational helper is intended for diagnostics only. It must not be
+    treated as an authority surface for arbitration, scheduling, or persistence.
+    """
+
+    settlement_state: TurnSettlementState
+    settlement_detail: str
+    has_current_items: bool
+    has_commitments: bool
+    has_unresolved: bool
+    has_blockers: bool
+    has_recently_closed: bool
+
+
+@dataclass(frozen=True)
 class ContinuityBrief:
     run_id: str
     turn_id: str
@@ -150,34 +176,25 @@ class ContinuityLedger:
         turn_id: str = "",
         event_type: str = "inspection",
     ) -> dict[str, object]:
-        ongoing = self._bucket("ongoing", {"active", "pending"})
-        unresolved = self._bucket("unresolved", {"active", "pending", "blocked"})
-        commitments = self._bucket("commitment", {"active", "pending", "blocked"})
-        blockers = self._bucket("blocker", {"active", "pending", "blocked"})
-        constraints = self._bucket("constraint", {"active", "pending", "blocked"})
-        recently_closed = self._bucket("recently_closed", {"resolved"})
-        current = self._current_projection(ongoing, unresolved, commitments, blockers, constraints)
+        brief = self._build_brief_projection(run_id=run_id, turn_id=turn_id, reason=event_type)
+        settlement = self.build_turn_settlement(brief)
         return {
             "run_id": run_id,
             "turn_id": turn_id,
             "event_type": event_type,
-            "stance": self._stance,
-            "stance_detail": self._stance_detail(
-                stance=self._stance,
-                current=current,
-                blockers=blockers,
-                unresolved=unresolved,
-                commitments=commitments,
-            ),
-            "ongoing": len(ongoing),
-            "unresolved": len(unresolved),
-            "commitments": len(commitments),
-            "blockers": len(blockers),
-            "constraints": len(constraints),
-            "recently_closed": len(recently_closed),
-            "current": len(current),
-            "current_items": self._project_items(current),
-            "recently_closed_items": self._project_items(recently_closed),
+            "stance": brief.stance,
+            "stance_detail": brief.stance_detail,
+            "settlement_state": settlement.settlement_state,
+            "settlement_detail": settlement.settlement_detail,
+            "ongoing": len(brief.ongoing),
+            "unresolved": len(brief.unresolved),
+            "commitments": len(brief.commitments),
+            "blockers": len(brief.blockers),
+            "constraints": len(brief.constraints),
+            "recently_closed": len(brief.recently_closed),
+            "current": len(brief.current),
+            "current_items": self._project_items(brief.current),
+            "recently_closed_items": self._project_items(brief.recently_closed),
         }
 
     def _log_inspection_summary(self, *, event_type: str, payload: dict[str, object]) -> None:
@@ -189,12 +206,14 @@ class ContinuityLedger:
             event_type=event_type,
         )
         logger.info(
-            "continuity_inspection_summary run_id=%s turn_id=%s event_type=%s stance=%s stance_detail=%s ongoing=%s unresolved=%s commitments=%s blockers=%s constraints=%s recently_closed=%s current=%s current_items=%s recently_closed_items=%s",
+            "continuity_inspection_summary run_id=%s turn_id=%s event_type=%s stance=%s stance_detail=%s settlement=%s settlement_detail=%s ongoing=%s unresolved=%s commitments=%s blockers=%s constraints=%s recently_closed=%s current=%s current_items=%s recently_closed_items=%s",
             summary["run_id"] or "",
             summary["turn_id"] or "",
             summary["event_type"],
             summary["stance"],
             summary["stance_detail"] or "",
+            summary["settlement_state"],
+            summary["settlement_detail"] or "",
             summary["ongoing"],
             summary["unresolved"],
             summary["commitments"],
@@ -207,6 +226,24 @@ class ContinuityLedger:
         )
 
     def build_brief(self, run_id: str, turn_id: str, reason: str) -> ContinuityBrief:
+        brief = self._build_brief_projection(run_id=run_id, turn_id=turn_id, reason=reason)
+        logger.info(
+            "continuity_brief_built run_id=%s turn_id=%s stance=%s ongoing=%s blockers=%s commitments=%s current=%s closed=%s reason=%s",
+            run_id,
+            turn_id,
+            brief.stance,
+            len(brief.ongoing),
+            len(brief.blockers),
+            len(brief.commitments),
+            len(brief.current),
+            len(brief.recently_closed),
+            brief.generated_reason or "none",
+        )
+        return brief
+
+
+    def _build_brief_projection(self, *, run_id: str, turn_id: str, reason: str) -> ContinuityBrief:
+        """Project the current continuity ledger into the shared brief shape."""
         ongoing = self._bucket("ongoing", {"active", "pending"})
         unresolved = self._bucket("unresolved", {"active", "pending", "blocked"})
         commitments = self._bucket("commitment", {"active", "pending", "blocked"})
@@ -214,7 +251,7 @@ class ContinuityLedger:
         constraints = self._bucket("constraint", {"active", "pending", "blocked"})
         recently_closed = self._bucket("recently_closed", {"resolved"})
         current = self._current_projection(ongoing, unresolved, commitments, blockers, constraints)
-        brief = ContinuityBrief(
+        return ContinuityBrief(
             run_id=run_id,
             turn_id=turn_id,
             stance=self._stance,
@@ -234,19 +271,70 @@ class ContinuityLedger:
                 commitments=commitments,
             ),
         )
-        logger.info(
-            "continuity_brief_built run_id=%s turn_id=%s stance=%s ongoing=%s blockers=%s commitments=%s current=%s closed=%s reason=%s",
-            run_id,
-            turn_id,
-            brief.stance,
-            len(brief.ongoing),
-            len(brief.blockers),
-            len(brief.commitments),
-            len(brief.current),
-            len(brief.recently_closed),
-            brief.generated_reason or "none",
+
+    def build_turn_settlement(self, brief: ContinuityBrief) -> ContinuityTurnSettlement:
+        """Return a compact observational settlement view for a continuity brief."""
+        return self.classify_turn_settlement(
+            current=brief.current,
+            blockers=brief.blockers,
+            commitments=brief.commitments,
+            unresolved=brief.unresolved,
+            recently_closed=brief.recently_closed,
         )
-        return brief
+
+    @staticmethod
+    def classify_turn_settlement(
+        *,
+        current: tuple[ContinuityItem, ...],
+        blockers: tuple[ContinuityItem, ...],
+        commitments: tuple[ContinuityItem, ...],
+        unresolved: tuple[ContinuityItem, ...],
+        recently_closed: tuple[ContinuityItem, ...],
+    ) -> ContinuityTurnSettlement:
+        """Classify turn settlement from existing continuity buckets only."""
+        has_current_items = bool(current)
+        has_blockers = bool(blockers)
+        has_commitments = bool(commitments)
+        has_unresolved = bool(unresolved)
+        has_recently_closed = bool(recently_closed)
+
+        if has_blockers:
+            first_blocker = blockers[0]
+            detail = first_blocker.detail or first_blocker.summary
+            state = "awaiting_tool"
+        elif has_commitments and has_unresolved:
+            first_unresolved = unresolved[0]
+            detail = first_unresolved.detail or first_unresolved.summary
+            state = "unresolved_followup"
+        elif has_commitments:
+            first_commitment = commitments[0]
+            detail = first_commitment.detail or first_commitment.summary
+            state = "followthrough_remaining"
+        elif has_unresolved:
+            first_unresolved = unresolved[0]
+            detail = first_unresolved.detail or first_unresolved.summary
+            state = "unresolved_followup"
+        elif has_current_items:
+            first_current = current[0]
+            detail = first_current.detail or f"current={first_current.kind}:{first_current.status}"
+            state = "active_items_only"
+        elif has_recently_closed:
+            first_closed = recently_closed[0]
+            detail = first_closed.detail or first_closed.summary
+            state = "recently_closed_only"
+        else:
+            detail = "no_open_continuity_items"
+            state = "settled"
+
+        return ContinuityTurnSettlement(
+            settlement_state=state,
+            settlement_detail=detail,
+            has_current_items=has_current_items,
+            has_commitments=has_commitments,
+            has_unresolved=has_unresolved,
+            has_blockers=has_blockers,
+            has_recently_closed=has_recently_closed,
+        )
 
     def commitment_summary_for_tool(self, tool_name: str, transcript: str | None = None) -> str | None:
         normalized_tool = self._clean_text(tool_name).lower()
