@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 import types
+
+import pytest
 
 sys.modules.setdefault("audioop", types.ModuleType("audioop"))
 
@@ -43,6 +46,64 @@ def test_action_request_creates_commitment() -> None:
     assert brief.unresolved[0].detail == "opened_by=transcript_final"
     assert brief.current[0].kind == "commitment"
     assert brief.stance_detail == "origin=user_request"
+
+
+def test_read_query_request_uses_non_idle_stance() -> None:
+    ledger = ContinuityLedger()
+
+    ledger.update_from_event(
+        "transcript_final",
+        text="Do you know what your battery voltage is at?",
+        source="input_audio_transcription",
+    )
+
+    brief = ledger.build_brief("run-1", "turn-1", "query")
+    assert brief.stance == "assisting_query"
+    assert brief.stance_detail == "read_query_detected"
+    assert brief.commitments == ()
+    assert brief.ongoing[0].summary == "Do you know what your battery voltage is at?"
+
+
+def test_environment_read_queries_stay_in_assisting_query() -> None:
+    ledger = ContinuityLedger()
+
+    ledger.update_from_event(
+        "transcript_final",
+        text="Can you check the air pressure and temperature?",
+        source="input_audio_transcription",
+    )
+
+    brief = ledger.build_brief("run-1", "turn-2", "environment_query")
+    assert brief.stance == "assisting_query"
+    assert brief.stance_detail == "read_query_detected"
+
+
+def test_tool_named_read_environment_stays_in_assisting_query() -> None:
+    ledger = ContinuityLedger()
+
+    ledger.update_from_event(
+        "transcript_final",
+        text="Please run read_environment and report the air pressure.",
+        source="input_audio_transcription",
+    )
+
+    brief = ledger.build_brief("run-1", "turn-2b", "tool_named_query")
+    assert brief.stance == "assisting_query"
+    assert brief.stance_detail == "read_query_detected"
+
+
+def test_status_check_requests_do_not_collapse_into_assisting_query() -> None:
+    ledger = ContinuityLedger()
+
+    ledger.update_from_event(
+        "transcript_final",
+        text="Can you still hear me?",
+        source="input_audio_transcription",
+    )
+
+    brief = ledger.build_brief("run-1", "turn-3", "status_check")
+    assert brief.stance == "assisting_observation"
+    assert brief.stance_detail == ""
 
 
 def test_transcript_final_uses_tool_waiting_stance_only_when_needed() -> None:
@@ -158,6 +219,54 @@ def test_build_continuity_brief_returns_compact_structured_output() -> None:
     assert len(brief.ongoing) <= 3
     assert len(brief.blockers) <= 3
     assert len(brief.current) <= 3
+
+
+def test_continuity_inspection_logging_is_bounded_and_deterministic(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    ledger = ContinuityLedger()
+    long_summary = (
+        "Tell me your current battery voltage and air pressure while preserving "
+        "a compact inspection payload for operators."
+    )
+
+    with caplog.at_level(logging.INFO, logger="ai.continuity"):
+        ledger.update_from_event(
+            "transcript_final",
+            run_id="run-42",
+            turn_id="turn-7",
+            text=long_summary,
+            source="input_audio_transcription",
+        )
+
+    summaries = [
+        record for record in caplog.records if record.message.startswith("continuity_inspection_summary")
+    ]
+    assert len(summaries) == 1
+    message = summaries[0].message
+    assert "run_id=run-42" in message
+    assert "turn_id=turn-7" in message
+    assert "event_type=transcript_final" in message
+    assert "stance=assisting_query" in message
+    assert "stance_detail=read_query_detected" in message
+    assert "current_items=(" in message
+    assert "recently_closed_items=()" in message
+    assert "while preserving…" in message
+    assert long_summary not in message
+
+    inspection = ledger.inspect_state(run_id="run-42", turn_id="turn-7", event_type="transcript_final")
+    assert inspection["stance"] == "assisting_query"
+    assert inspection["stance_detail"] == "read_query_detected"
+    assert inspection["current"] == 1
+    assert inspection["current_items"] == (
+        {
+            "kind": "ongoing",
+            "status": "active",
+            "id": "request:current",
+            "summary": "Tell me your current battery voltage and air pressure while preserving…",
+            "detail": "origin=user_transcript",
+        },
+    )
 
 
 def test_realtime_api_get_continuity_brief_is_observational() -> None:

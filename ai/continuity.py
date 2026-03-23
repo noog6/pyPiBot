@@ -19,10 +19,12 @@ ContinuityKind = Literal[
 ]
 ContinuityStatus = Literal["active", "blocked", "pending", "resolved", "expired"]
 ContinuityPriority = Literal["low", "medium", "high"]
+# Deterministic continuity stance labels used for bookkeeping and inspection.
 ContinuityStance = Literal[
     "idle",
     "assisting_observation",
     "assisting_execution",
+    "assisting_query",
     "awaiting_user",
     "awaiting_tool",
     "awaiting_perception",
@@ -30,6 +32,8 @@ ContinuityStance = Literal[
 ]
 
 _MAX_ITEMS_PER_BUCKET = 3
+_MAX_LOG_SUMMARY_CHARS = 72
+_MAX_LOG_DETAIL_CHARS = 48
 _TOOL_COMMITMENT_PREFIXES = ("gesture_", "move", "look", "center", "turn", "navigate")
 _ACTION_PATTERNS = (
     re.compile(r"\bmove\b", re.IGNORECASE),
@@ -47,6 +51,19 @@ _OBSERVATION_PATTERNS = (
     re.compile(r"\bidentify\b", re.IGNORECASE),
     re.compile(r"\bcan you see\b", re.IGNORECASE),
     re.compile(r"\bdo you see\b", re.IGNORECASE),
+)
+_STATUS_CHECK_PATTERNS = (
+    re.compile(r"\bcan you still hear me\b", re.IGNORECASE),
+    re.compile(r"\bdo you still hear me\b", re.IGNORECASE),
+    re.compile(r"\bare you still listening\b", re.IGNORECASE),
+)
+_QUERY_REQUEST_PATTERNS = (
+    re.compile(r"\bdo you know\b", re.IGNORECASE),
+    re.compile(r"\bcan you check\s+(?:the\s+)?(?:battery|voltage|temperature|air pressure|pressure|environment)\b", re.IGNORECASE),
+    re.compile(r"\bwhat(?:'s| is) your\s+(?:battery|battery voltage|temperature|air pressure|pressure|status)\b", re.IGNORECASE),
+    re.compile(r"\btell me your current\s+(?:battery|battery voltage|temperature|air pressure|pressure|status)\b", re.IGNORECASE),
+    re.compile(r"\bread_(?:battery_voltage|environment)\b", re.IGNORECASE),
+    re.compile(r"\b(?:battery voltage|air pressure|temperature|environment(?:al)? status)\b", re.IGNORECASE),
 )
 _TOOL_REQUIRED_PATTERNS = (
     re.compile(r"\bcamera\b", re.IGNORECASE),
@@ -124,6 +141,69 @@ class ContinuityLedger:
             normalized,
             self._stance,
             len(self._items),
+        )
+        self._log_inspection_summary(event_type=normalized, payload=payload)
+
+    def inspect_state(
+        self,
+        run_id: str = "",
+        turn_id: str = "",
+        event_type: str = "inspection",
+    ) -> dict[str, object]:
+        ongoing = self._bucket("ongoing", {"active", "pending"})
+        unresolved = self._bucket("unresolved", {"active", "pending", "blocked"})
+        commitments = self._bucket("commitment", {"active", "pending", "blocked"})
+        blockers = self._bucket("blocker", {"active", "pending", "blocked"})
+        constraints = self._bucket("constraint", {"active", "pending", "blocked"})
+        recently_closed = self._bucket("recently_closed", {"resolved"})
+        current = self._current_projection(ongoing, unresolved, commitments, blockers, constraints)
+        return {
+            "run_id": run_id,
+            "turn_id": turn_id,
+            "event_type": event_type,
+            "stance": self._stance,
+            "stance_detail": self._stance_detail(
+                stance=self._stance,
+                current=current,
+                blockers=blockers,
+                unresolved=unresolved,
+                commitments=commitments,
+            ),
+            "ongoing": len(ongoing),
+            "unresolved": len(unresolved),
+            "commitments": len(commitments),
+            "blockers": len(blockers),
+            "constraints": len(constraints),
+            "recently_closed": len(recently_closed),
+            "current": len(current),
+            "current_items": self._project_items(current),
+            "recently_closed_items": self._project_items(recently_closed),
+        }
+
+    def _log_inspection_summary(self, *, event_type: str, payload: dict[str, object]) -> None:
+        if event_type not in {"transcript_final", "tool_call_started", "tool_result_received", "response_done"}:
+            return
+        summary = self.inspect_state(
+            run_id=self._clean_text(payload.get("run_id")),
+            turn_id=self._clean_text(payload.get("turn_id")),
+            event_type=event_type,
+        )
+        logger.info(
+            "continuity_inspection_summary run_id=%s turn_id=%s event_type=%s stance=%s stance_detail=%s ongoing=%s unresolved=%s commitments=%s blockers=%s constraints=%s recently_closed=%s current=%s current_items=%s recently_closed_items=%s",
+            summary["run_id"] or "",
+            summary["turn_id"] or "",
+            summary["event_type"],
+            summary["stance"],
+            summary["stance_detail"] or "",
+            summary["ongoing"],
+            summary["unresolved"],
+            summary["commitments"],
+            summary["blockers"],
+            summary["constraints"],
+            summary["recently_closed"],
+            summary["current"],
+            summary["current_items"],
+            summary["recently_closed_items"],
         )
 
     def build_brief(self, run_id: str, turn_id: str, reason: str) -> ContinuityBrief:
@@ -344,6 +424,26 @@ class ContinuityLedger:
         return tuple(current[:_MAX_ITEMS_PER_BUCKET])
 
     @staticmethod
+    def _project_items(items: tuple[ContinuityItem, ...]) -> tuple[dict[str, str], ...]:
+        return tuple(
+            {
+                "kind": item.kind,
+                "status": item.status,
+                "id": item.id,
+                "summary": ContinuityLedger._trim_text(item.summary, _MAX_LOG_SUMMARY_CHARS),
+                "detail": ContinuityLedger._trim_text(item.detail, _MAX_LOG_DETAIL_CHARS),
+            }
+            for item in items[:_MAX_ITEMS_PER_BUCKET]
+        )
+
+    @staticmethod
+    def _trim_text(value: str, limit: int) -> str:
+        text = str(value or "").strip()
+        if len(text) <= limit:
+            return text
+        return f"{text[: max(0, limit - 1)].rstrip()}…"
+
+    @staticmethod
     def _stance_detail(
         *,
         stance: ContinuityStance,
@@ -358,6 +458,8 @@ class ContinuityLedger:
             return unresolved[0].detail or unresolved[0].summary
         if stance == "assisting_execution" and commitments:
             return commitments[0].detail or commitments[0].summary
+        if stance == "assisting_query":
+            return "read_query_detected"
         if stance == "idle" and current:
             return f"current={current[0].kind}:{current[0].status}"
         return ""
@@ -393,6 +495,12 @@ class ContinuityLedger:
     def _is_observation_request(self, text: str) -> bool:
         return any(pattern.search(text) for pattern in _OBSERVATION_PATTERNS)
 
+    def _is_status_check_request(self, text: str) -> bool:
+        return any(pattern.search(text) for pattern in _STATUS_CHECK_PATTERNS)
+
+    def _is_query_request(self, text: str) -> bool:
+        return any(pattern.search(text) for pattern in _QUERY_REQUEST_PATTERNS)
+
     def _tool_needed_by_transcript(self, text: str) -> bool:
         return any(pattern.search(text) for pattern in _TOOL_REQUIRED_PATTERNS)
 
@@ -414,6 +522,10 @@ class ContinuityLedger:
             return "assisting_execution"
         if self._is_observation_request(text):
             return "assisting_observation"
+        if self._is_status_check_request(text):
+            return "assisting_observation"
+        if self._is_query_request(text):
+            return "assisting_query"
         if self._tool_needed_by_transcript(text):
             return "awaiting_tool"
         if len(text.split()) <= 1:

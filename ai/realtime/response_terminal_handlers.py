@@ -688,6 +688,7 @@ class ResponseTerminalHandlers:
         continuity_close_unresolved = continuity_close_commitment and not obligation_open
         api._apply_continuity_event(
             "response_done",
+            run_id=api._current_run_id(),
             turn_id=turn_id,
             response_id=active_response_id_before_clear,
             origin=active_response_origin_before_clear,

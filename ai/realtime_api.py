@@ -15998,6 +15998,7 @@ class RealtimeAPI:
                 "transcript_final",
                 text=transcript,
                 source="input_audio_transcription",
+                run_id=self._current_run_id(),
                 turn_id=resolved_turn_id,
             )
             if await self._maybe_handle_approval_response(transcript, websocket):
@@ -16746,6 +16747,8 @@ class RealtimeAPI:
                 )
                 self._apply_continuity_event(
                     "tool_call_started",
+                    run_id=self._current_run_id(),
+                    turn_id=self._current_turn_id_or_unknown(),
                     tool_name=function_name,
                     call_id=call_id,
                     commitment_summary=self._continuity_ledger_instance().commitment_summary_for_tool(
@@ -17080,6 +17083,8 @@ class RealtimeAPI:
                 )
                 self._apply_continuity_event(
                     "tool_result_received",
+                    run_id=self._current_run_id(),
+                    turn_id=self._current_turn_id_or_unknown(),
                     tool_name=function_name,
                     call_id=call_id,
                 )
