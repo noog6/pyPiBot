@@ -3473,6 +3473,7 @@ class RealtimeAPI:
             "last_disconnect_reason": self._last_disconnect_reason or "",
             "last_failure_reason": self._last_failure_reason or "",
             "memory_retrieval": retrieval_metrics,
+            "continuity": self.get_continuity_diagnostics(),
             "rate_limits": {
                 "supports_tokens": int(self.rate_limits_supports_tokens),
                 "supports_requests": int(self.rate_limits_supports_requests),
@@ -4254,6 +4255,37 @@ class RealtimeAPI:
         """Read-only turn settlement seam derived from the continuity brief."""
         brief = self.get_continuity_brief(run_id=run_id, turn_id=turn_id, reason=reason)
         return self._continuity_ledger_instance().build_turn_settlement(brief)
+
+    def get_continuity_diagnostics(
+        self,
+        run_id: str | None = None,
+        turn_id: str | None = None,
+        reason: str = "session_health",
+    ) -> dict[str, Any]:
+        """Return a compact read-only continuity diagnostics snapshot."""
+        resolved_run_id = str(run_id if run_id is not None else (self._current_run_id() or "")).strip()
+        resolved_turn_id = str(turn_id if turn_id is not None else self._current_turn_id_or_unknown()).strip() or "turn-unknown"
+        brief = self.get_continuity_brief(
+            run_id=resolved_run_id,
+            turn_id=resolved_turn_id,
+            reason=reason,
+        )
+        settlement = self._continuity_ledger_instance().build_turn_settlement(brief)
+        return {
+            "stance": str(brief.stance or "idle").strip() or "idle",
+            "stance_detail": str(brief.stance_detail or "").strip(),
+            "settlement": str(settlement.settlement_state or "settled").strip() or "settled",
+            "settlement_detail": str(settlement.settlement_detail or "").strip(),
+            "counts": {
+                "current": len(brief.current),
+                "ongoing": len(brief.ongoing),
+                "commitments": len(brief.commitments),
+                "unresolved": len(brief.unresolved),
+                "blockers": len(brief.blockers),
+                "constraints": len(brief.constraints),
+                "recently_closed": len(brief.recently_closed),
+            },
+        }
 
     @staticmethod
     def _format_continuity_debug_items(items: tuple[Any, ...], *, max_items: int = 3) -> str:
