@@ -156,6 +156,7 @@ from motion import (
     gesture_speaking_settle,
 )
 from motion.gesture_library import DEFAULT_GESTURES
+from services import tool_runtime
 from services.profile_manager import ProfileManager
 from services.reflection_manager import ReflectionManager
 from services.memory_manager import (
@@ -1291,6 +1292,7 @@ class RealtimeAPI:
             on_assistant_message_item=self._on_assistant_output_item_added,
             on_arguments_done=self.handle_function_call,
         )
+        self._register_runtime_diagnostics_provider()
         self._configure_event_router()
 
     def _configure_event_router(self) -> None:
@@ -3445,6 +3447,11 @@ class RealtimeAPI:
 
     def _ensure_startup_injection_timeout_task(self) -> None:
         self._injection_bus_instance().ensure_startup_injection_timeout_task()
+
+    def _register_runtime_diagnostics_provider(self) -> None:
+        """Expose the existing runtime diagnostics bundle after init dependencies are ready."""
+
+        tool_runtime.set_runtime_diagnostics_provider(self.get_session_health)
 
     def get_session_health(self) -> dict[str, Any]:
         injection_ready_result = self.is_ready_for_injections(with_reason=True)

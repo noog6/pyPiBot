@@ -334,6 +334,20 @@ governance:
       side_effects: "NONE"
       sensitivity: "LOW"
       default_confirmation: "NEVER"
+    read_runtime_diagnostics:
+      tier: 0
+      reversible: true
+      cost_hint: "cheap"
+      safety_tags: ["diagnostics", "runtime"]
+      confirm_required: false
+      confirm_reason: "read-only runtime diagnostics query"
+      confirm_prompt: null
+      cooldown_seconds: 0
+      dry_run_supported: true
+      governance_tier: "SAFE"
+      side_effects: "NONE"
+      sensitivity: "LOW"
+      default_confirmation: "NEVER"
     read_imu_data:
       tier: 0
       reversible: true
