@@ -38,7 +38,11 @@ def test_action_request_creates_commitment() -> None:
     brief = ledger.build_brief("run-1", "turn-1", "action")
     assert brief.stance == "assisting_execution"
     assert brief.commitments[0].summary == "Look at the window and tell me what you see."
+    assert brief.commitments[0].detail == "origin=user_request"
     assert brief.unresolved[0].summary == "tell me what you see."
+    assert brief.unresolved[0].detail == "opened_by=transcript_final"
+    assert brief.current[0].kind == "commitment"
+    assert brief.stance_detail == "origin=user_request"
 
 
 def test_transcript_final_uses_tool_waiting_stance_only_when_needed() -> None:
@@ -68,7 +72,10 @@ def test_tool_start_adds_blocker() -> None:
     brief = ledger.build_brief("run-1", "turn-1", "tool_started")
     assert brief.stance == "awaiting_tool"
     assert brief.blockers[0].summary == "Waiting for tool result: gesture_look_center"
+    assert brief.blockers[0].detail == "tool=gesture_look_center call_id=call-1"
     assert brief.commitments[0].summary == "Look at the center of the room."
+    assert brief.current[0].kind == "blocker"
+    assert brief.stance_detail == "tool=gesture_look_center call_id=call-1"
 
 
 def test_tool_result_resolves_blocker() -> None:
@@ -89,6 +96,7 @@ def test_tool_result_resolves_blocker() -> None:
     brief = ledger.build_brief("run-1", "turn-1", "tool_result")
     assert brief.blockers == ()
     assert brief.recently_closed[0].summary == "Waiting for tool result: gesture_look_center"
+    assert brief.recently_closed[0].detail == "tool=gesture_look_center call_id=call-1"
     assert brief.commitments[0].status == "active"
 
 
@@ -146,8 +154,31 @@ def test_build_continuity_brief_returns_compact_structured_output() -> None:
     assert brief.run_id == "run-7"
     assert brief.turn_id == "turn-9"
     assert brief.generated_reason == "projection"
+    assert brief.current[0].kind == "blocker"
     assert len(brief.ongoing) <= 3
     assert len(brief.blockers) <= 3
+    assert len(brief.current) <= 3
+
+
+def test_realtime_api_get_continuity_brief_is_observational() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._continuity_ledger = ContinuityLedger()
+    api._response_in_flight = False
+
+    api._apply_continuity_event(
+        "transcript_final",
+        text="Look at the whiteboard and tell me whether it changed.",
+        source="input_audio_transcription",
+    )
+
+    brief = api.get_continuity_brief("run-3", "turn-8", reason="inspection")
+    assert isinstance(brief, ContinuityBrief)
+    assert brief.run_id == "run-3"
+    assert brief.turn_id == "turn-8"
+    assert brief.generated_reason == "inspection"
+    assert brief.current[0].kind == "commitment"
+    assert brief.unresolved[0].detail == "opened_by=transcript_final"
+    assert api._response_in_flight is False
 
 
 def test_continuity_does_not_invent_authority_or_mutate_unrelated_runtime_state() -> None:

@@ -73,6 +73,7 @@ class ContinuityItem:
     status: ContinuityStatus
     priority: ContinuityPriority
     source: str
+    detail: str = ""
     expires_after_turns: int | None = None
 
 
@@ -87,7 +88,9 @@ class ContinuityBrief:
     blockers: tuple[ContinuityItem, ...] = ()
     constraints: tuple[ContinuityItem, ...] = ()
     recently_closed: tuple[ContinuityItem, ...] = ()
+    current: tuple[ContinuityItem, ...] = ()
     generated_reason: str = ""
+    stance_detail: str = ""
 
 
 class ContinuityLedger:
@@ -124,26 +127,42 @@ class ContinuityLedger:
         )
 
     def build_brief(self, run_id: str, turn_id: str, reason: str) -> ContinuityBrief:
+        ongoing = self._bucket("ongoing", {"active", "pending"})
+        unresolved = self._bucket("unresolved", {"active", "pending", "blocked"})
+        commitments = self._bucket("commitment", {"active", "pending", "blocked"})
+        blockers = self._bucket("blocker", {"active", "pending", "blocked"})
+        constraints = self._bucket("constraint", {"active", "pending", "blocked"})
+        recently_closed = self._bucket("recently_closed", {"resolved"})
+        current = self._current_projection(ongoing, unresolved, commitments, blockers, constraints)
         brief = ContinuityBrief(
             run_id=run_id,
             turn_id=turn_id,
             stance=self._stance,
-            ongoing=self._bucket("ongoing", {"active", "pending"}),
-            unresolved=self._bucket("unresolved", {"active", "pending", "blocked"}),
-            commitments=self._bucket("commitment", {"active", "pending", "blocked"}),
-            blockers=self._bucket("blocker", {"active", "pending", "blocked"}),
-            constraints=self._bucket("constraint", {"active", "pending", "blocked"}),
-            recently_closed=self._bucket("recently_closed", {"resolved"}),
+            ongoing=ongoing,
+            unresolved=unresolved,
+            commitments=commitments,
+            blockers=blockers,
+            constraints=constraints,
+            recently_closed=recently_closed,
+            current=current,
             generated_reason=str(reason or "").strip(),
+            stance_detail=self._stance_detail(
+                stance=self._stance,
+                current=current,
+                blockers=blockers,
+                unresolved=unresolved,
+                commitments=commitments,
+            ),
         )
         logger.info(
-            "continuity_brief_built run_id=%s turn_id=%s stance=%s ongoing=%s blockers=%s commitments=%s closed=%s reason=%s",
+            "continuity_brief_built run_id=%s turn_id=%s stance=%s ongoing=%s blockers=%s commitments=%s current=%s closed=%s reason=%s",
             run_id,
             turn_id,
             brief.stance,
             len(brief.ongoing),
             len(brief.blockers),
             len(brief.commitments),
+            len(brief.current),
             len(brief.recently_closed),
             brief.generated_reason or "none",
         )
@@ -173,6 +192,7 @@ class ContinuityLedger:
                 status="active",
                 priority=self._priority_for_text(transcript),
                 source=source,
+                detail="origin=user_transcript",
                 expires_after_turns=4,
             )
         )
@@ -185,6 +205,7 @@ class ContinuityLedger:
                     status="pending",
                     priority=self._priority_for_text(transcript),
                     source=source,
+                    detail="origin=user_request",
                     expires_after_turns=4,
                 )
             )
@@ -199,6 +220,7 @@ class ContinuityLedger:
                     status="pending",
                     priority="medium",
                     source=source,
+                    detail="opened_by=transcript_final",
                     expires_after_turns=4,
                 )
             )
@@ -217,6 +239,7 @@ class ContinuityLedger:
                 status="blocked",
                 priority="medium",
                 source="tool_call_started",
+                detail=f"tool={tool_name} call_id={call_id}",
                 expires_after_turns=2,
             )
         )
@@ -230,6 +253,7 @@ class ContinuityLedger:
                     status="active",
                     priority="medium",
                     source="tool_call_started",
+                    detail=f"origin=tool_followthrough tool={tool_name} call_id={call_id}",
                     expires_after_turns=4,
                 )
             )
@@ -307,6 +331,36 @@ class ContinuityLedger:
         ranked = [item for item in self._items.values() if item.kind == kind and item.status in statuses]
         ranked.sort(key=lambda item: (self._priority_rank(item.priority), item.id))
         return tuple(ranked[:_MAX_ITEMS_PER_BUCKET])
+
+    def _current_projection(
+        self,
+        ongoing: tuple[ContinuityItem, ...],
+        unresolved: tuple[ContinuityItem, ...],
+        commitments: tuple[ContinuityItem, ...],
+        blockers: tuple[ContinuityItem, ...],
+        constraints: tuple[ContinuityItem, ...],
+    ) -> tuple[ContinuityItem, ...]:
+        current = [*blockers, *commitments, *unresolved, *ongoing, *constraints]
+        return tuple(current[:_MAX_ITEMS_PER_BUCKET])
+
+    @staticmethod
+    def _stance_detail(
+        *,
+        stance: ContinuityStance,
+        current: tuple[ContinuityItem, ...],
+        blockers: tuple[ContinuityItem, ...],
+        unresolved: tuple[ContinuityItem, ...],
+        commitments: tuple[ContinuityItem, ...],
+    ) -> str:
+        if stance == "awaiting_tool" and blockers:
+            return blockers[0].detail or blockers[0].summary
+        if stance == "awaiting_user" and unresolved:
+            return unresolved[0].detail or unresolved[0].summary
+        if stance == "assisting_execution" and commitments:
+            return commitments[0].detail or commitments[0].summary
+        if stance == "idle" and current:
+            return f"current={current[0].kind}:{current[0].status}"
+        return ""
 
     def _set_item(self, item: ContinuityItem) -> None:
         self._items[item.id] = item
