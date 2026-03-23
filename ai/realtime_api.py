@@ -4240,6 +4240,41 @@ class RealtimeAPI:
         """Read-only continuity inspection seam for diagnostics and tests."""
         return self.build_continuity_brief(run_id=run_id, turn_id=turn_id, reason=reason)
 
+    @staticmethod
+    def _format_continuity_debug_items(items: tuple[Any, ...], *, max_items: int = 3) -> str:
+        if not items:
+            return "-"
+        segments: list[str] = []
+        for item in items[:max_items]:
+            kind = str(getattr(item, "kind", "") or "?").strip()
+            status = str(getattr(item, "status", "") or "?").strip()
+            summary = ContinuityLedger._trim_text(str(getattr(item, "summary", "") or "").strip(), 48)
+            detail = ContinuityLedger._trim_text(str(getattr(item, "detail", "") or "").strip(), 32)
+            segment = f"{kind}/{status}:{summary or '-'}"
+            if detail:
+                segment = f"{segment} [{detail}]"
+            segments.append(segment)
+        return " | ".join(segments)
+
+    def get_continuity_debug_summary(
+        self,
+        run_id: str,
+        turn_id: str,
+        reason: str = "inspection",
+    ) -> str:
+        """Return a compact read-only continuity summary for diagnostics/tests."""
+        brief = self.get_continuity_brief(run_id=run_id, turn_id=turn_id, reason=reason)
+        stance = str(brief.stance or "idle").strip() or "idle"
+        stance_detail = str(brief.stance_detail or "-").strip() or "-"
+        current = self._format_continuity_debug_items(brief.current)
+        recently_closed = self._format_continuity_debug_items(brief.recently_closed)
+        return (
+            f"stance={stance}; "
+            f"stance_detail={stance_detail}; "
+            f"current=[{current}]; "
+            f"recently_closed=[{recently_closed}]"
+        )
+
     def _record_user_input(self, text: str, *, source: str) -> None:
         clean_text = text.strip()
         if not clean_text:
