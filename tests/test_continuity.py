@@ -19,6 +19,196 @@ from ai.continuity import (
 from ai.realtime_api import RealtimeAPI
 
 
+
+
+def test_simple_single_step_request_does_not_create_compound_state() -> None:
+    ledger = ContinuityLedger()
+
+    ledger.update_from_event(
+        "transcript_final",
+        text="Look at the window.",
+        source="input_audio_transcription",
+    )
+
+    brief = ledger.build_brief("run-single", "turn-1", "single_step")
+    assert brief.commitments[0].summary == "Look at the window."
+    assert brief.compound_request is None
+
+
+
+
+def test_compound_parser_keeps_action_plus_report_as_small_chain() -> None:
+    ledger = ContinuityLedger()
+
+    ledger.update_from_event(
+        "transcript_final",
+        text="Look right and tell me what you see.",
+        source="input_audio_transcription",
+    )
+
+    brief = ledger.build_brief("run-chain", "turn-1", "small_chain")
+    assert brief.compound_request is not None
+    assert [step.kind for step in brief.compound_request.steps] == ["gesture", "report"]
+    assert [step.summary for step in brief.compound_request.steps] == [
+        "Look right.",
+        "tell me what you see.",
+    ]
+
+
+def test_compound_parser_preserves_order_for_comma_then_chain() -> None:
+    ledger = ContinuityLedger()
+
+    ledger.update_from_event(
+        "transcript_final",
+        text="Look right, check diagnostics, then report done.",
+        source="input_audio_transcription",
+    )
+
+    brief = ledger.build_brief("run-order", "turn-1", "comma_then_chain")
+    assert brief.compound_request is not None
+    assert [step.kind for step in brief.compound_request.steps] == ["gesture", "diagnostics", "report"]
+    assert [step.summary for step in brief.compound_request.steps] == [
+        "Look right.",
+        "check diagnostics.",
+        "report done.",
+    ]
+
+
+def test_compound_parser_does_not_oversplit_ordinary_phrasing() -> None:
+    ledger = ContinuityLedger()
+
+    ledger.update_from_event(
+        "transcript_final",
+        text="Look at the window and the door.",
+        source="input_audio_transcription",
+    )
+
+    brief = ledger.build_brief("run-nosplit", "turn-1", "ordinary_phrase")
+    assert brief.compound_request is None
+    assert brief.commitments[0].summary == "Look at the window and the door."
+def test_compound_request_creates_bounded_ordered_substeps() -> None:
+    ledger = ContinuityLedger()
+
+    ledger.update_from_event(
+        "transcript_final",
+        text=(
+            "Look right, check diagnostics silently, look left, check diagnostics silently, "
+            "center, check diagnostics, then report done."
+        ),
+        source="input_audio_transcription",
+    )
+
+    brief = ledger.build_brief("run-compound", "turn-1", "compound_steps")
+
+    assert brief.compound_request is not None
+    compound = brief.compound_request
+    assert compound.summary.startswith("Look right")
+    assert len(compound.steps) == 7
+    assert [step.kind for step in compound.steps] == [
+        "gesture",
+        "diagnostics",
+        "gesture",
+        "diagnostics",
+        "gesture",
+        "diagnostics",
+        "report",
+    ]
+    assert compound.active_step_index == 0
+    assert compound.completed_step_ids == ()
+    assert compound.steps[0].status == "active"
+    assert compound.steps[1].status == "pending"
+    assert compound.next_pending_step_id == "step_2"
+    assert compound.final_followup_pending is True
+
+
+def test_compound_tool_progress_updates_matching_step_only() -> None:
+    ledger = ContinuityLedger()
+    ledger.update_from_event(
+        "transcript_final",
+        text="Look right, check diagnostics silently, then report done.",
+        source="input_audio_transcription",
+    )
+
+    ledger.update_from_event(
+        "tool_call_started",
+        tool_name="gesture_look_right",
+        call_id="call-1",
+        commitment_summary="Look right, check diagnostics silently, then report done.",
+    )
+    during_call = ledger.build_brief("run-progress", "turn-1", "tool_start")
+    assert during_call.compound_request is not None
+    assert [step.status for step in during_call.compound_request.steps] == ["active", "pending", "pending"]
+
+    ledger.update_from_event(
+        "tool_result_received",
+        tool_name="gesture_look_right",
+        call_id="call-1",
+    )
+
+    after_result = ledger.build_brief("run-progress", "turn-1", "tool_result")
+    assert after_result.compound_request is not None
+    assert [step.status for step in after_result.compound_request.steps] == ["completed", "active", "pending"]
+    assert after_result.compound_request.recent_completed_step_id == "step_1"
+    assert after_result.compound_request.next_pending_step_id == "step_3"
+
+
+def test_compound_final_followup_stays_pending_until_explicitly_closed() -> None:
+    ledger = ContinuityLedger()
+    ledger.update_from_event(
+        "transcript_final",
+        text="Look right, check diagnostics, then report done.",
+        source="input_audio_transcription",
+    )
+    ledger.update_from_event(
+        "tool_result_received",
+        tool_name="gesture_look_right",
+        call_id="call-2",
+    )
+    ledger.update_from_event(
+        "tool_result_received",
+        tool_name="read_runtime_diagnostics",
+        call_id="call-3",
+    )
+
+    before_followup = ledger.build_brief("run-followup", "turn-1", "before_followup_close")
+    assert before_followup.compound_request is not None
+    assert before_followup.compound_request.final_followup_pending is True
+    assert before_followup.compound_request.steps[2].status == "pending"
+
+    ledger.update_from_event("response_done", close_unresolved="true")
+
+    after_followup = ledger.build_brief("run-followup", "turn-1", "after_followup_close")
+    assert after_followup.compound_request is None
+
+
+def test_compound_observability_does_not_mutate_runtime_authority_state() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._continuity_ledger = ContinuityLedger()
+    api._response_in_flight = True
+    api.function_call = {"name": "gesture_look_right"}
+    api._active_response_origin = "server_auto"
+
+    api._apply_continuity_event(
+        "transcript_final",
+        text="Look right, check diagnostics, then report done.",
+        source="input_audio_transcription",
+    )
+
+    before_items = dict(api._continuity_ledger._items)
+    before_compound = api._continuity_ledger._compound_state
+    brief = api.get_continuity_brief("run-observe", "turn-1", reason="observational_only")
+    diagnostics = api.get_continuity_diagnostics("run-observe", "turn-1", reason="observational_only")
+    after_items = dict(api._continuity_ledger._items)
+    after_compound = api._continuity_ledger._compound_state
+
+    assert brief.compound_request is not None
+    assert diagnostics["compound"]["substeps_total"] == 3
+    assert diagnostics["compound"]["final_followup_pending"] is True
+    assert before_items == after_items
+    assert before_compound == after_compound
+    assert api._response_in_flight is True
+    assert api.function_call == {"name": "gesture_look_right"}
+    assert api._active_response_origin == "server_auto"
 def test_transcript_final_creates_simple_ongoing_item() -> None:
     ledger = ContinuityLedger()
 
@@ -571,7 +761,8 @@ def test_realtime_api_continuity_debug_summary_is_read_only_and_deterministic() 
     assert settlement.has_unresolved is True
     assert settlement.has_blockers is False
     assert settlement.has_recently_closed is True
-    assert summary.startswith("stance=idle | detail=current=commitment:active | settlement=unresolved_followup | settlement_detail=opened_by=transcript_final | current=[")
+    assert summary.startswith("stance=idle | detail=current=commitment:active | settlement=unresolved_followup | settlement_detail=opened_by=transcript_final | compound=[")
+    assert "followup_pending=True" in summary
     assert "current=[commitment/active:" in summary
     assert "[origin=tool_followthrough tool=…]" in summary
     assert "unresolved/pending:" in summary
@@ -650,6 +841,7 @@ def test_realtime_api_continuity_debug_summary_exposes_assisting_query_stance() 
     assert "settlement=active_items_only |" in summary
     assert "settlement_detail=origin=user_transcript |" in summary
     assert "current=[ongoing/active:Do you know what your battery voltage is at?" in summary
+    assert "compound=[-]" in summary
     assert "recently_closed=[-]" in summary
 
 
