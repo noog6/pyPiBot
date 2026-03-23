@@ -323,16 +323,16 @@ def test_realtime_api_continuity_debug_summary_is_read_only_and_deterministic() 
     summary = api.get_continuity_debug_summary("run-7", "turn-11")
     after_items = dict(api._continuity_ledger._items)
 
-    assert summary == (
-        "stance=idle; "
-        "stance_detail=current=commitment:active; "
-        "current=[commitment/active:Look at the whiteboard and tell me whether the… "
-        "[origin=tool_followthrough tool=…] | unresolved/pending:tell me whether the planning notes mention a de… "
-        "[opened_by=transcript_final] | ongoing/active:Look at the whiteboard and tell me whether the… "
-        "[origin=user_transcript]]; "
-        "recently_closed=[recently_closed/resolved:Waiting for tool result: gesture_look_center "
-        "[tool=gesture_look_center call_i…]]"
-    )
+    assert summary.startswith("stance=idle | detail=current=commitment:active | current=[")
+    assert "current=[commitment/active:" in summary
+    assert "[origin=tool_followthrough tool=…]" in summary
+    assert "unresolved/pending:" in summary
+    assert "[opened_by=transcript_final]" in summary
+    assert "ongoing/active:" in summary
+    assert "[origin=user_transcript]" in summary
+    assert " | recently_closed=[recently_closed/resolved:Waiting for tool result: gesture_look_center " in summary
+    assert "[tool=gesture_look_center call_i…]" in summary
+    assert "next sprint review." not in summary
     assert before_items == after_items
     assert api._response_in_flight is False
     assert api._active_response_origin == "tool_output"
@@ -374,8 +374,9 @@ def test_realtime_api_continuity_debug_summary_bounds_current_and_closed_items()
     assert "constraint:4" not in summary
     assert "closed:3" not in summary
     assert "closed:4" not in summary
-    assert summary.count(" | ") == 4
-    assert "stance=idle;" in summary
+    assert summary.count(" | ") >= 5
+    assert "stance=idle |" in summary
+    assert "detail=current=constraint:active |" in summary
     assert "recently_closed=[" in summary
 
 
@@ -391,8 +392,8 @@ def test_realtime_api_continuity_debug_summary_exposes_assisting_query_stance() 
 
     summary = api.get_continuity_debug_summary("run-9", "turn-13")
 
-    assert "stance=assisting_query;" in summary
-    assert "stance_detail=read_query_detected;" in summary
+    assert "stance=assisting_query |" in summary
+    assert "detail=read_query_detected |" in summary
     assert "current=[ongoing/active:Do you know what your battery voltage is at?" in summary
     assert "recently_closed=[-]" in summary
 

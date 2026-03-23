@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 import types
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ if "audioop" not in sys.modules:
     sys.modules["audioop"] = types.ModuleType("audioop")
 
 from interaction import InteractionState
+from ai.continuity import ContinuityLedger
 from ai.orchestration import OrchestrationPhase
 from ai.terminal_deliverable_arbitration import TerminalDeliverableDecision
 from ai.realtime_api import RealtimeAPI
@@ -99,6 +101,13 @@ def _make_api() -> RealtimeAPI:
     api._terminal_response_text = RealtimeAPI._terminal_response_text.__get__(api, RealtimeAPI)
     api._clear_terminal_response_text = RealtimeAPI._clear_terminal_response_text.__get__(api, RealtimeAPI)
     api._response_done_deliverable_arbitration = RealtimeAPI._response_done_deliverable_arbitration.__get__(api, RealtimeAPI)
+    api._continuity_ledger = ContinuityLedger()
+    api._continuity_debug_summary_on_turn_close = False
+    api._continuity_turn_close_debug_logged = set()
+    api._apply_continuity_event = RealtimeAPI._apply_continuity_event.__get__(api, RealtimeAPI)
+    api.get_continuity_brief = RealtimeAPI.get_continuity_brief.__get__(api, RealtimeAPI)
+    api.get_continuity_debug_summary = RealtimeAPI.get_continuity_debug_summary.__get__(api, RealtimeAPI)
+    api._maybe_log_continuity_debug_summary_on_turn_close = RealtimeAPI._maybe_log_continuity_debug_summary_on_turn_close.__get__(api, RealtimeAPI)
     return api
 
 
@@ -1709,3 +1718,87 @@ def test_handle_response_done_trace_summary_stays_execution_scoped_when_terminal
     assert trace.semantic_owner_observation.decision.native_reason_code == "terminal_not_selected"
     assert summary is not None
     assert summary.semantic_owner_summary == "semantic owner remained execution-scoped pending terminal selection"
+
+
+def test_handle_response_done_does_not_log_continuity_summary_when_disabled(caplog) -> None:
+    api = _make_api()
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    api._apply_continuity_event(
+        "transcript_final",
+        text="Do you know what your battery voltage is at?",
+        source="input_audio_transcription",
+    )
+
+    with caplog.at_level(logging.INFO):
+        asyncio.run(api.handle_response_done({"type": "response.done"}))
+
+    assert "CONTINUITY SUMMARY |" not in caplog.text
+
+
+def test_handle_response_done_logs_continuity_summary_once_when_enabled() -> None:
+    api = _make_api()
+    api._continuity_debug_summary_on_turn_close = True
+    api.function_call = {"name": "gesture_look_center"}
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    api._apply_continuity_event(
+        "transcript_final",
+        text="Do you know what your battery voltage is at?",
+        source="input_audio_transcription",
+    )
+
+    with patch("ai.realtime_api.logger.info") as info_log:
+        asyncio.run(api.handle_response_done({"type": "response.done"}))
+
+    continuity_calls = [call for call in info_log.call_args_list if call.args and call.args[0] == "CONTINUITY SUMMARY | run=%s turn=%s | %s"]
+    assert len(continuity_calls) == 1
+    assert continuity_calls[0].args[1] == "run-test"
+    assert continuity_calls[0].args[2] == "turn_1"
+    assert "stance=" in continuity_calls[0].args[3]
+    assert api._response_in_flight is False
+    assert api.function_call == {"name": "gesture_look_center"}
+
+
+def test_continuity_summary_turn_close_logger_deduplicates_same_turn() -> None:
+    api = _make_api()
+    api._continuity_debug_summary_on_turn_close = True
+    api._apply_continuity_event(
+        "transcript_final",
+        text="Do you know what your battery voltage is at?",
+        source="input_audio_transcription",
+    )
+
+    with patch("ai.realtime_api.logger.info") as info_log:
+        api._maybe_log_continuity_debug_summary_on_turn_close(
+            run_id="run-test",
+            turn_id="turn_1",
+            reason="turn_terminal_close",
+        )
+        api._maybe_log_continuity_debug_summary_on_turn_close(
+            run_id="run-test",
+            turn_id="turn_1",
+            reason="turn_terminal_close",
+        )
+
+    continuity_calls = [call for call in info_log.call_args_list if call.args and call.args[0] == "CONTINUITY SUMMARY | run=%s turn=%s | %s"]
+    assert len(continuity_calls) == 1
+    assert continuity_calls[0].args[1:] == (
+        "run-test",
+        "turn_1",
+        "stance=assisting_query | detail=read_query_detected | current=[ongoing/active:Do you know what your battery voltage is at? [origin=user_transcript]] | recently_closed=[-]",
+    )

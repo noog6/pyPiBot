@@ -212,6 +212,12 @@ class ConfigController:
         ]
         research_cfg["firecrawl"] = firecrawl_cfg
 
+        continuity_cfg = dict(normalized.get("continuity") or {})
+        continuity_cfg["debug_summary_on_turn_close"] = bool(
+            continuity_cfg.get("debug_summary_on_turn_close", False)
+        )
+        normalized["continuity"] = continuity_cfg
+
         budget_cfg = dict(research_cfg.get("budget") or {})
         budget_cfg["daily_limit"] = int(budget_cfg.get("daily_limit", 50))
         # Deprecated legacy key retained in normalized config for backward compatibility.

@@ -64,6 +64,9 @@ memory_hydration:
   startup_digest_max_items: 2
   startup_digest_max_chars: 280
 
+continuity:
+  debug_summary_on_turn_close: false
+
 # Turn-time memory retrieval and context injection
 memory_retrieval:
   enabled: true

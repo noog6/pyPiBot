@@ -196,3 +196,15 @@ def test_initialize_session_uses_configured_model_in_session_update(monkeypatch)
     asyncio.run(api.initialize_session(object()))
 
     assert sent_payloads[0]["session"]["model"] == "gpt-realtime-preview"
+
+
+def test_config_controller_sets_continuity_turn_close_summary_default_false(tmp_path: Path, monkeypatch) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "default.yaml").write_text("assistant_name: Theo\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    _reset_singletons()
+
+    continuity_cfg = ConfigController.get_instance().get_config()["continuity"]
+
+    assert continuity_cfg["debug_summary_on_turn_close"] is False

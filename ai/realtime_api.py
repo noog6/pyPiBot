@@ -756,7 +756,12 @@ class RealtimeAPI:
         self._speaking_started = False
         self._embodiment_policy = EmbodimentPolicy()
         self._attention_continuity = AttentionContinuity(hold_window_s=1.25)
+        continuity_cfg = config.get("continuity") or {}
+        self._continuity_debug_summary_on_turn_close = bool(
+            continuity_cfg.get("debug_summary_on_turn_close", False)
+        )
         self._continuity_ledger = ContinuityLedger()
+        self._continuity_turn_close_debug_logged: set[tuple[str, str]] = set()
         self._gesture_last_fired: dict[str, float] = {}
         self._last_gesture_time = 0.0
         self._last_interaction_state = self.state_manager.state
@@ -4269,11 +4274,40 @@ class RealtimeAPI:
         current = self._format_continuity_debug_items(brief.current)
         recently_closed = self._format_continuity_debug_items(brief.recently_closed)
         return (
-            f"stance={stance}; "
-            f"stance_detail={stance_detail}; "
-            f"current=[{current}]; "
+            f"stance={stance} | "
+            f"detail={stance_detail} | "
+            f"current=[{current}] | "
             f"recently_closed=[{recently_closed}]"
         )
+
+    def _maybe_log_continuity_debug_summary_on_turn_close(
+        self,
+        *,
+        run_id: str | None,
+        turn_id: str | None,
+        reason: str = "turn_terminal_close",
+    ) -> None:
+        if not bool(getattr(self, "_continuity_debug_summary_on_turn_close", False)):
+            return
+        run_key = str(run_id or "").strip()
+        turn_key = str(turn_id or "").strip()
+        if not run_key or not turn_key:
+            return
+        emitted = getattr(self, "_continuity_turn_close_debug_logged", None)
+        if not isinstance(emitted, set):
+            emitted = set()
+            self._continuity_turn_close_debug_logged = emitted
+        marker = (run_key, turn_key)
+        if marker in emitted:
+            return
+        summary = self.get_continuity_debug_summary(run_key, turn_key, reason=reason)
+        logger.info(
+            "CONTINUITY SUMMARY | run=%s turn=%s | %s",
+            run_key,
+            turn_key,
+            summary,
+        )
+        emitted.add(marker)
 
     def _record_user_input(self, text: str, *, source: str) -> None:
         clean_text = text.strip()
