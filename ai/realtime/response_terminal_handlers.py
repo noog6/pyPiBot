@@ -680,6 +680,22 @@ class ResponseTerminalHandlers:
                 str(active_response_origin_before_clear or "").strip() or "unknown",
                 str(active_response_id_before_clear or "").strip() or "none",
             )
+        continuity_close_allowed = not (
+            provisional_server_auto_close_deferred or exact_phrase_close_deferred or is_empty_done
+        )
+        continuity_origin = str(active_response_origin_before_clear or "").strip().lower()
+        continuity_close_commitment = continuity_close_allowed and continuity_origin == "tool_output"
+        continuity_close_unresolved = continuity_close_commitment and not obligation_open
+        api._apply_continuity_event(
+            "response_done",
+            turn_id=turn_id,
+            response_id=active_response_id_before_clear,
+            origin=active_response_origin_before_clear,
+            keep_ongoing="true" if provisional_server_auto_close_deferred or exact_phrase_close_deferred else "",
+            close_ongoing="true" if continuity_close_allowed else "",
+            close_commitment="true" if continuity_close_commitment else "",
+            close_unresolved="true" if continuity_close_unresolved else "",
+        )
         await api._maybe_schedule_empty_response_retry(
             websocket=api.websocket,
             turn_id=turn_id,

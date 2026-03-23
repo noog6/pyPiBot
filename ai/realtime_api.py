@@ -99,6 +99,7 @@ from ai.terminal_deliverable_arbitration import (
     arbitrate_terminal_deliverable_selection,
 )
 from ai.attention_continuity import AttentionContinuity, AttentionSnapshot
+from ai.continuity import ContinuityBrief, ContinuityLedger
 from ai.semantic_owner_arbitration import SemanticOwnerDecision, decide_semantic_owner
 from ai.embodiment_policy import (
     EMBODIMENT_PRIORITY_ALLOW,
@@ -755,6 +756,7 @@ class RealtimeAPI:
         self._speaking_started = False
         self._embodiment_policy = EmbodimentPolicy()
         self._attention_continuity = AttentionContinuity(hold_window_s=1.25)
+        self._continuity_ledger = ContinuityLedger()
         self._gesture_last_fired: dict[str, float] = {}
         self._last_gesture_time = 0.0
         self._last_interaction_state = self.state_manager.state
@@ -4220,6 +4222,19 @@ class RealtimeAPI:
     def _handle_state_earcon(self, state: InteractionState) -> None:
         """Hook for earcon cues on state transitions."""
         logger.debug("Earcon cue for state: %s", state.value)
+
+    def _continuity_ledger_instance(self) -> ContinuityLedger:
+        ledger = getattr(self, "_continuity_ledger", None)
+        if ledger is None:
+            ledger = ContinuityLedger()
+            self._continuity_ledger = ledger
+        return ledger
+
+    def _apply_continuity_event(self, event_type: str, **payload: Any) -> None:
+        self._continuity_ledger_instance().update_from_event(event_type, **payload)
+
+    def build_continuity_brief(self, run_id: str, turn_id: str, reason: str) -> ContinuityBrief:
+        return self._continuity_ledger_instance().build_brief(run_id=run_id, turn_id=turn_id, reason=reason)
 
     def _record_user_input(self, text: str, *, source: str) -> None:
         clean_text = text.strip()
@@ -15975,6 +15990,12 @@ class RealtimeAPI:
             else:
                 self._cancel_micro_ack(turn_id=resolved_turn_id, reason="upgrade_selected")
             self._record_user_input(transcript, source="input_audio_transcription")
+            self._apply_continuity_event(
+                "transcript_final",
+                text=transcript,
+                source="input_audio_transcription",
+                turn_id=resolved_turn_id,
+            )
             if await self._maybe_handle_approval_response(transcript, websocket):
                 return
             if await self._handle_stop_word(
@@ -16719,6 +16740,15 @@ class RealtimeAPI:
                     OrchestrationPhase.ACT,
                     reason=f"function_call {function_name}",
                 )
+                self._apply_continuity_event(
+                    "tool_call_started",
+                    tool_name=function_name,
+                    call_id=call_id,
+                    commitment_summary=self._continuity_ledger_instance().commitment_summary_for_tool(
+                        function_name,
+                        self._last_user_input_text,
+                    ),
+                )
                 await self._execute_action(
                     action,
                     staging,
@@ -17042,6 +17072,11 @@ class RealtimeAPI:
                 self._mark_tool_followup_timing(
                     turn_id=self._current_turn_id_or_unknown(),
                     marker="tool_result_received",
+                    call_id=call_id,
+                )
+                self._apply_continuity_event(
+                    "tool_result_received",
+                    tool_name=function_name,
                     call_id=call_id,
                 )
             except Exception as exc:
