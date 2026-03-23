@@ -787,6 +787,11 @@ class ResponseTerminalHandlers:
                 api._recover_confirmation_guard_microphone("response_done")
         api._response_create_queue_drain_source = "response_done"
         await api._drain_response_create_queue()
+        api._maybe_log_continuity_debug_summary_on_turn_close(
+            run_id=api._current_run_id(),
+            turn_id=turn_id,
+            reason="turn_terminal_close",
+        )
         if api._pending_image_stimulus and not api._pending_image_flush_after_playback:
             await api._flush_pending_image_stimulus("response done")
 
