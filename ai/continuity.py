@@ -100,9 +100,16 @@ _SILENT_RE = re.compile(r"\bsilently\b", re.IGNORECASE)
 _DIAGNOSTIC_STEP_RE = re.compile(r"\b(?:check|run|read|query)\b.*\b(?:diagnostic|diagnostics|status|battery|temperature|pressure|environment)\b", re.IGNORECASE)
 _REPORT_STEP_RE = re.compile(r"\b(?:tell me|let me know|report back|report|say)\b", re.IGNORECASE)
 _OBSERVATION_STEP_RE = re.compile(r"\b(?:observe|describe|identify|what do you see|what(?:'s| is) in|do you see|can you see)\b", re.IGNORECASE)
-_GESTURE_STEP_RE = re.compile(r"\b(?:look|move|center|turn|rotate|point|go to|navigate)\b", re.IGNORECASE)
+_GESTURE_STEP_RE = re.compile(
+    r"\b(?:look|move|center|turn|rotate|point|go to|navigate|back to center|return to center)\b",
+    re.IGNORECASE,
+)
 _VISUAL_REPORT_IMPLICIT_OBSERVATION_RE = re.compile(
     r"\b(?:tell me|let me know)\b.*\bwhat you see\b",
+    re.IGNORECASE,
+)
+_REQUEST_INTENT_RE = re.compile(
+    r"\b(?:please|can you|could you|would you|will you|tell me|let me know|show me)\b",
     re.IGNORECASE,
 )
 
@@ -485,7 +492,14 @@ class ContinuityLedger:
 
         is_action_request = self._is_action_request(transcript)
         followup_summary = self._extract_followup_summary(transcript, requires_action=is_action_request)
-        self._compound_state = self._derive_compound_state(transcript, source=source, unresolved_summary=followup_summary)
+        if self._is_compound_request_candidate(transcript, is_action_request=is_action_request):
+            self._compound_state = self._derive_compound_state(
+                transcript,
+                source=source,
+                unresolved_summary=followup_summary,
+            )
+        else:
+            self._compound_state = None
 
         self._set_item(
             ContinuityItem(
@@ -914,6 +928,24 @@ class ContinuityLedger:
             return "recovering_context"
         return "idle"
 
+    def _is_compound_request_candidate(self, text: str, *, is_action_request: bool) -> bool:
+        if is_action_request:
+            return True
+        if self._is_observation_request(text):
+            return True
+        if self._is_query_request(text):
+            return True
+        if self._tool_needed_by_transcript(text):
+            return True
+        if self._is_explicit_followthrough_request(text):
+            return True
+        return False
+
+    def _is_explicit_followthrough_request(self, text: str) -> bool:
+        if _FOLLOWUP_ONLY_PREFIX_RE.search(text):
+            return True
+        return bool(_REQUEST_INTENT_RE.search(text))
+
     def _derive_compound_state(
         self,
         transcript: str,
@@ -937,7 +969,17 @@ class ContinuityLedger:
             )
             if step is None:
                 continue
+            if (
+                not steps
+                and step.kind == "followup"
+                and len(clauses) > 1
+                and not self._is_explicit_followthrough_request(clause)
+            ):
+                continue
             followup_recorded = followup_recorded or step.kind == "report"
+            normalized_index = len(steps)
+            if normalized_index != idx:
+                step = replace(step, step_id=f"step_{normalized_index + 1}", status="active" if normalized_index == 0 else "pending")
             steps.append(step)
         if len(steps) <= 1:
             return None
@@ -1026,7 +1068,10 @@ class ContinuityLedger:
 
     def _classify_compound_step_kind(self, clause: str, *, unresolved_summary: str | None) -> CompoundStepKind:
         lowered = clause.lower().strip()
-        if unresolved_summary and (lowered in unresolved_summary.lower() or _FOLLOWUP_ONLY_PREFIX_RE.search(clause)):
+        unresolved_match = False
+        if unresolved_summary:
+            unresolved_match = lowered == unresolved_summary.lower().strip()
+        if unresolved_match or _FOLLOWUP_ONLY_PREFIX_RE.search(clause):
             return "report"
         if _DIAGNOSTIC_STEP_RE.search(clause):
             return "diagnostics"

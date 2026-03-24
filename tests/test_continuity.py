@@ -56,6 +56,37 @@ def test_compound_parser_keeps_action_plus_report_as_small_chain() -> None:
     assert [step.implicit_observation_required for step in brief.compound_request.steps] == [False, True]
 
 
+def test_compound_parser_captures_go_back_to_center_followed_by_visual_followup() -> None:
+    ledger = ContinuityLedger()
+
+    ledger.update_from_event(
+        "transcript_final",
+        text="Hey Theo, can you go back to center and then tell me what you see me holding in my hand?",
+        source="input_audio_transcription",
+    )
+
+    brief = ledger.build_brief("run-center-chain", "turn-1", "center_then_report")
+    assert brief.compound_request is not None
+    assert [step.kind for step in brief.compound_request.steps] == ["gesture", "report"]
+    assert [step.summary for step in brief.compound_request.steps] == [
+        "can you go back to center.",
+        "tell me what you see me holding in my hand?",
+    ]
+
+
+def test_compound_parser_ignores_plain_declarative_description() -> None:
+    ledger = ContinuityLedger()
+
+    ledger.update_from_event(
+        "transcript_final",
+        text="It's a blue cordless drill, and it's got a little light on the front.",
+        source="input_audio_transcription",
+    )
+
+    brief = ledger.build_brief("run-declarative", "turn-1", "description_only")
+    assert brief.compound_request is None
+
+
 def test_compound_visual_report_marks_implicit_observation_in_diagnostics() -> None:
     api = RealtimeAPI.__new__(RealtimeAPI)
     api._continuity_ledger = ContinuityLedger()
