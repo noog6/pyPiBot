@@ -53,6 +53,29 @@ def test_compound_parser_keeps_action_plus_report_as_small_chain() -> None:
         "Look right.",
         "tell me what you see.",
     ]
+    assert [step.implicit_observation_required for step in brief.compound_request.steps] == [False, True]
+
+
+def test_compound_visual_report_marks_implicit_observation_in_diagnostics() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._continuity_ledger = ContinuityLedger()
+
+    api._apply_continuity_event(
+        "transcript_final",
+        text="Look right and let me know what you see.",
+        source="input_audio_transcription",
+    )
+
+    brief = api.get_continuity_brief("run-visual", "turn-1", reason="visual_report")
+    diagnostics = api.get_continuity_diagnostics("run-visual", "turn-1", reason="visual_report")
+    summary = api.get_continuity_debug_summary("run-visual", "turn-1", reason="visual_report")
+
+    assert brief.compound_request is not None
+    assert len(brief.compound_request.steps) == 2
+    assert brief.compound_request.steps[1].kind == "report"
+    assert brief.compound_request.steps[1].implicit_observation_required is True
+    assert diagnostics["compound"]["implicit_observation_substeps"] == ("let me know what you see.",)
+    assert "implicit_obs=1" in summary
 
 
 def test_compound_parser_preserves_order_for_comma_then_chain() -> None:
@@ -72,6 +95,7 @@ def test_compound_parser_preserves_order_for_comma_then_chain() -> None:
         "check diagnostics.",
         "report done.",
     ]
+    assert [step.implicit_observation_required for step in brief.compound_request.steps] == [False, False, False]
 
 
 def test_compound_parser_does_not_oversplit_ordinary_phrasing() -> None:
