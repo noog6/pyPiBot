@@ -101,6 +101,10 @@ _DIAGNOSTIC_STEP_RE = re.compile(r"\b(?:check|run|read|query)\b.*\b(?:diagnostic
 _REPORT_STEP_RE = re.compile(r"\b(?:tell me|let me know|report back|report|say)\b", re.IGNORECASE)
 _OBSERVATION_STEP_RE = re.compile(r"\b(?:observe|describe|identify|what do you see|what(?:'s| is) in|do you see|can you see)\b", re.IGNORECASE)
 _GESTURE_STEP_RE = re.compile(r"\b(?:look|move|center|turn|rotate|point|go to|navigate)\b", re.IGNORECASE)
+_VISUAL_REPORT_IMPLICIT_OBSERVATION_RE = re.compile(
+    r"\b(?:tell me|let me know)\b.*\bwhat you see\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -122,6 +126,7 @@ class CompoundContinuityStep:
     summary: str
     status: CompoundStepStatus
     source_detail: str = ""
+    implicit_observation_required: bool = False
 
 
 @dataclass(frozen=True)
@@ -330,7 +335,7 @@ class ContinuityLedger:
         compound_signature = ()
         if brief.compound_request is not None:
             compound_signature = tuple(
-                f"{step.step_id}:{step.kind}:{step.status}:{self._trim_text(step.summary, 32)}"
+                f"{step.step_id}:{step.kind}:{step.status}:{int(step.implicit_observation_required)}:{self._trim_text(step.summary, 32)}"
                 for step in brief.compound_request.steps
             ) + (
                 f"active={brief.compound_request.active_step_index}",
@@ -807,6 +812,7 @@ class ContinuityLedger:
                     "status": step.status,
                     "summary": self._trim_text(step.summary, 48),
                     "source_detail": self._trim_text(step.source_detail, 32),
+                    "implicit_observation_required": step.implicit_observation_required,
                 }
                 for step in state.steps[:_MAX_COMPOUND_STEPS]
             ),
@@ -927,6 +933,7 @@ class ContinuityLedger:
                 source=source,
                 unresolved_summary=unresolved_summary,
                 followup_recorded=followup_recorded,
+                prior_steps=tuple(steps),
             )
             if step is None:
                 continue
@@ -983,6 +990,7 @@ class ContinuityLedger:
         source: str,
         unresolved_summary: str | None,
         followup_recorded: bool,
+        prior_steps: tuple[CompoundContinuityStep, ...],
     ) -> CompoundContinuityStep | None:
         normalized = clause.strip()
         if not normalized:
@@ -996,7 +1004,25 @@ class ContinuityLedger:
             summary=normalized if normalized.endswith((".", "?")) else f"{normalized}.",
             status="active" if step_index == 0 else "pending",
             source_detail=f"origin={source}",
+            implicit_observation_required=self._implicit_observation_required(
+                clause=normalized,
+                kind=kind,
+                prior_steps=prior_steps,
+            ),
         )
+
+    def _implicit_observation_required(
+        self,
+        *,
+        clause: str,
+        kind: CompoundStepKind,
+        prior_steps: tuple[CompoundContinuityStep, ...],
+    ) -> bool:
+        if kind != "report":
+            return False
+        if not _VISUAL_REPORT_IMPLICIT_OBSERVATION_RE.search(clause):
+            return False
+        return any(step.kind == "gesture" for step in prior_steps)
 
     def _classify_compound_step_kind(self, clause: str, *, unresolved_summary: str | None) -> CompoundStepKind:
         lowered = clause.lower().strip()

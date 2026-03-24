@@ -4304,6 +4304,11 @@ class RealtimeAPI:
                 "active_substep": str(getattr(active_step, "summary", "") or "").strip() or None,
                 "next_substep": str(getattr(next_step, "summary", "") or "").strip() or None,
                 "final_followup_pending": bool(brief.compound_request.final_followup_pending),
+                "implicit_observation_substeps": tuple(
+                    str(step.summary or "").strip()
+                    for step in brief.compound_request.steps
+                    if bool(getattr(step, "implicit_observation_required", False))
+                ),
             }
         return diagnostics
 
@@ -4350,7 +4355,8 @@ class RealtimeAPI:
                 f"active={ContinuityLedger._trim_text(str(getattr(active_step, 'summary', '') or '').strip(), 32) or '-'} "
                 f"recent={ContinuityLedger._trim_text(str(getattr(recent_step, 'summary', '') or '').strip(), 32) or '-'} "
                 f"next={ContinuityLedger._trim_text(str(getattr(next_step, 'summary', '') or '').strip(), 32) or '-'} "
-                f"followup_pending={brief.compound_request.final_followup_pending}"
+                f"followup_pending={brief.compound_request.final_followup_pending} "
+                f"implicit_obs={sum(1 for step in brief.compound_request.steps if bool(getattr(step, 'implicit_observation_required', False)))}"
             )
         return (
             f"stance={stance} | "
