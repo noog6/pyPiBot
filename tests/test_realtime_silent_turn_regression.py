@@ -276,6 +276,47 @@ def test_tool_output_partial_transcript_delta_prevents_empty_silent_turn_false_p
     assert state.deliverable_class == "final"
 
 
+def test_tool_output_terminal_text_before_done_prevents_empty_silent_turn_false_positive() -> None:
+    api = _make_api()
+    turn_id = "turn_tool_terminal_text"
+    input_event_key = "tool:call_terminal_text"
+    response_id = "resp_tool_terminal_text_1"
+    api._current_response_turn_id = turn_id
+    api._current_input_event_key = input_event_key
+    api._active_input_event_key_by_turn_id[turn_id] = input_event_key
+
+    api._track_outgoing_event(
+        {
+            "type": "response.create",
+            "response": {
+                "metadata": {
+                    "origin": "tool_output",
+                    "turn_id": turn_id,
+                    "input_event_key": input_event_key,
+                    "tool_followup": "true",
+                    "tool_followup_release": "true",
+                    "tool_call_id": "call_terminal_text",
+                }
+            },
+        },
+        origin="tool_output",
+    )
+
+    asyncio.run(api.handle_event({"type": "response.created", "response": {"id": response_id}}, websocket=None))
+    api._record_terminal_response_text(response_id=response_id, text="Terminal transcript text evidence.")
+
+    canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+    assert api._is_empty_response_done(canonical_key=canonical_key) is False
+
+    silent_before_done = api._silent_turn_incident_count
+    asyncio.run(api.handle_event({"type": "response.done", "response": {"id": response_id}}, websocket=None))
+
+    assert api._silent_turn_incident_count == silent_before_done
+    selection = getattr(api, "_terminal_deliverable_selection_by_response_id", {}).get(response_id, {})
+    assert selection.get("selected") is True
+    assert selection.get("reason") == "normal"
+
+
 def test_blank_partial_output_delta_does_not_mark_deliverable_observed() -> None:
     api = _make_api()
     turn_id = "turn_blank_delta"
