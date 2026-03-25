@@ -238,6 +238,7 @@ class ContinuityLedger:
         self._stance: ContinuityStance = "idle"
         self._items: dict[str, ContinuityItem] = {}
         self._compound_state: CompoundContinuityState | None = None
+        self._compound_owner_turn_id: str | None = None
         self._brief_log_cooldown_s = max(0.0, float(brief_log_cooldown_s))
         self._time_source = time_source
         self._last_brief_log_fingerprint: ContinuityBriefLogFingerprint | None = None
@@ -513,9 +514,11 @@ class ContinuityLedger:
     def _apply_transcript_final(self, payload: dict[str, object]) -> None:
         transcript = self._clean_text(payload.get("text"))
         source = self._clean_text(payload.get("source")) or "transcript_final"
+        owner_turn_id = self._clean_text(payload.get("turn_id"))
         if not transcript:
             self._stance = "recovering_context"
             self._compound_state = None
+            self._compound_owner_turn_id = None
             return
 
         is_action_request = self._is_action_request(transcript)
@@ -526,8 +529,10 @@ class ContinuityLedger:
                 source=source,
                 unresolved_summary=followup_summary,
             )
+            self._compound_owner_turn_id = owner_turn_id or None
         else:
             self._compound_state = None
+            self._compound_owner_turn_id = None
 
         self._set_item(
             ContinuityItem(
@@ -550,7 +555,7 @@ class ContinuityLedger:
                     status="pending",
                     priority=self._priority_for_text(transcript),
                     source=source,
-                    detail="origin=user_request",
+                    detail=self._append_owner_turn_detail("origin=user_request", owner_turn_id=owner_turn_id),
                     expires_after_turns=4,
                 )
             )
@@ -576,6 +581,9 @@ class ContinuityLedger:
     def _apply_tool_call_started(self, payload: dict[str, object]) -> None:
         tool_name = self._clean_text(payload.get("tool_name")) or "tool"
         call_id = self._clean_text(payload.get("call_id")) or tool_name
+        owner_turn_id = self._clean_text(payload.get("turn_id"))
+        allow_rebind = self._as_bool(payload.get("allow_cross_turn_rebind"))
+        rebind_reason = self._clean_text(payload.get("cross_turn_rebind_reason")) or "unspecified"
         self._set_item(
             ContinuityItem(
                 id=f"blocker:tool:{call_id}",
@@ -589,7 +597,14 @@ class ContinuityLedger:
             )
         )
         commitment_summary = self._clean_text(payload.get("commitment_summary"))
-        if commitment_summary:
+        commitment_owner = self._owner_turn_id_for_item_id("commitment:current")
+        can_update_commitment = (
+            not commitment_owner
+            or not owner_turn_id
+            or commitment_owner == owner_turn_id
+            or allow_rebind
+        )
+        if commitment_summary and can_update_commitment:
             self._set_item(
                 ContinuityItem(
                     id="commitment:current",
@@ -598,16 +613,33 @@ class ContinuityLedger:
                     status="active",
                     priority="medium",
                     source="tool_call_started",
-                    detail=f"origin=tool_followthrough tool={tool_name} call_id={call_id}",
+                    detail=self._append_owner_turn_detail(
+                        f"origin=tool_followthrough tool={tool_name} call_id={call_id}",
+                        owner_turn_id=owner_turn_id,
+                    ),
                     expires_after_turns=4,
                 )
             )
-        self._advance_compound_state_on_tool_start(tool_name=tool_name)
+        elif commitment_summary and not can_update_commitment:
+            logger.info(
+                "continuity_commitment_owner_mismatch event=tool_call_started owner_turn_id=%s incoming_turn_id=%s action=preserve_existing reason=owner_turn_mismatch",
+                commitment_owner or "",
+                owner_turn_id or "",
+            )
+        self._advance_compound_state_on_tool_start(
+            tool_name=tool_name,
+            turn_id=owner_turn_id,
+            allow_cross_turn_rebind=allow_rebind,
+            rebind_reason=rebind_reason,
+        )
         self._stance = "awaiting_tool"
 
     def _apply_tool_result_received(self, payload: dict[str, object]) -> None:
         call_id = self._clean_text(payload.get("call_id"))
         tool_name = self._clean_text(payload.get("tool_name"))
+        owner_turn_id = self._clean_text(payload.get("turn_id"))
+        allow_rebind = self._as_bool(payload.get("allow_cross_turn_rebind"))
+        rebind_reason = self._clean_text(payload.get("cross_turn_rebind_reason")) or "unspecified"
         if call_id:
             blocker_id = f"blocker:tool:{call_id}"
             blocker = self._items.get(blocker_id)
@@ -628,7 +660,12 @@ class ContinuityLedger:
                     source="tool_result_received",
                 )
             )
-        self._advance_compound_state_on_tool_result(tool_name=tool_name)
+        self._advance_compound_state_on_tool_result(
+            tool_name=tool_name,
+            turn_id=owner_turn_id,
+            allow_cross_turn_rebind=allow_rebind,
+            rebind_reason=rebind_reason,
+        )
         self._stance = "idle"
 
     def _apply_response_done(self, payload: dict[str, object]) -> None:
@@ -636,6 +673,9 @@ class ContinuityLedger:
         close_commitment = self._as_bool(payload.get("close_commitment"))
         close_unresolved = self._as_bool(payload.get("close_unresolved"))
         keep_ongoing = self._as_bool(payload.get("keep_ongoing"))
+        owner_turn_id = self._clean_text(payload.get("turn_id"))
+        allow_rebind = self._as_bool(payload.get("allow_cross_turn_rebind"))
+        rebind_reason = self._clean_text(payload.get("cross_turn_rebind_reason")) or "unspecified"
 
         if close_unresolved and "question:followup" in self._items:
             self._close_item("question:followup")
@@ -650,12 +690,29 @@ class ContinuityLedger:
         self._advance_compound_state_on_response_done(
             close_commitment=close_commitment,
             close_unresolved=close_unresolved,
+            turn_id=owner_turn_id,
+            allow_cross_turn_rebind=allow_rebind,
+            rebind_reason=rebind_reason,
         )
         self._stance = "idle" if close_ongoing or close_commitment or close_unresolved else "awaiting_user"
 
-    def _advance_compound_state_on_tool_start(self, *, tool_name: str) -> None:
+    def _advance_compound_state_on_tool_start(
+        self,
+        *,
+        tool_name: str,
+        turn_id: str,
+        allow_cross_turn_rebind: bool,
+        rebind_reason: str,
+    ) -> None:
         state = self._compound_state
         if state is None:
+            return
+        if not self._ensure_compound_owner(
+            turn_id=turn_id,
+            allow_cross_turn_rebind=allow_cross_turn_rebind,
+            reason=rebind_reason,
+            event_type="tool_call_started",
+        ):
             return
         active_idx = state.active_step_index
         normalized_tool = tool_name.lower()
@@ -674,9 +731,23 @@ class ContinuityLedger:
         if step.kind == "diagnostics" or normalized_tool.startswith(_TOOL_COMMITMENT_PREFIXES):
             self._compound_state = self._replace_compound_step_status(state, idx, "active")
 
-    def _advance_compound_state_on_tool_result(self, *, tool_name: str) -> None:
+    def _advance_compound_state_on_tool_result(
+        self,
+        *,
+        tool_name: str,
+        turn_id: str,
+        allow_cross_turn_rebind: bool,
+        rebind_reason: str,
+    ) -> None:
         state = self._compound_state
         if state is None:
+            return
+        if not self._ensure_compound_owner(
+            turn_id=turn_id,
+            allow_cross_turn_rebind=allow_cross_turn_rebind,
+            reason=rebind_reason,
+            event_type="tool_result_received",
+        ):
             return
         idx = state.active_step_index
         if idx is None:
@@ -692,9 +763,24 @@ class ContinuityLedger:
         if clear_match:
             self._compound_state = self._replace_compound_step_status(state, idx, "completed")
 
-    def _advance_compound_state_on_response_done(self, *, close_commitment: bool, close_unresolved: bool) -> None:
+    def _advance_compound_state_on_response_done(
+        self,
+        *,
+        close_commitment: bool,
+        close_unresolved: bool,
+        turn_id: str,
+        allow_cross_turn_rebind: bool,
+        rebind_reason: str,
+    ) -> None:
         state = self._compound_state
         if state is None:
+            return
+        if not self._ensure_compound_owner(
+            turn_id=turn_id,
+            allow_cross_turn_rebind=allow_cross_turn_rebind,
+            reason=rebind_reason,
+            event_type="response_done",
+        ):
             return
         updated = state
         if close_commitment:
@@ -714,6 +800,57 @@ class ContinuityLedger:
             if idx is not None:
                 updated = self._replace_compound_step_status(updated, idx, "completed")
         self._compound_state = None if self._compound_state_resolved(updated) else updated
+        if self._compound_state is None:
+            self._compound_owner_turn_id = None
+
+    def _ensure_compound_owner(
+        self,
+        *,
+        turn_id: str,
+        allow_cross_turn_rebind: bool,
+        reason: str,
+        event_type: str,
+    ) -> bool:
+        owner_turn_id = str(self._compound_owner_turn_id or "").strip()
+        incoming_turn_id = str(turn_id or "").strip()
+        if not owner_turn_id or not incoming_turn_id or owner_turn_id == incoming_turn_id:
+            return True
+        if allow_cross_turn_rebind:
+            logger.info(
+                "continuity_compound_owner_rebound event=%s old_owner_turn_id=%s new_owner_turn_id=%s reason=%s",
+                event_type,
+                owner_turn_id,
+                incoming_turn_id,
+                reason or "unspecified",
+            )
+            self._compound_owner_turn_id = incoming_turn_id
+            return True
+        logger.info(
+            "continuity_compound_owner_mismatch event=%s owner_turn_id=%s incoming_turn_id=%s action=blocked reason=owner_turn_mismatch",
+            event_type,
+            owner_turn_id,
+            incoming_turn_id,
+        )
+        return False
+
+    def _append_owner_turn_detail(self, detail: str, *, owner_turn_id: str) -> str:
+        normalized_detail = self._clean_text(detail)
+        normalized_owner = self._clean_text(owner_turn_id)
+        if not normalized_owner:
+            return normalized_detail
+        if "owner_turn_id=" in normalized_detail:
+            return normalized_detail
+        return f"{normalized_detail} owner_turn_id={normalized_owner}".strip()
+
+    def _owner_turn_id_for_item_id(self, item_id: str) -> str:
+        item = self._items.get(item_id)
+        if item is None:
+            return ""
+        detail = str(getattr(item, "detail", "") or "")
+        match = re.search(r"\bowner_turn_id=([^\s]+)", detail)
+        if match is None:
+            return ""
+        return self._clean_text(match.group(1))
 
     def _replace_compound_step_status(
         self,
