@@ -2163,6 +2163,112 @@ def test_chained_tool_output_semantic_owner_reuses_selected_parent_lineage() -> 
     assert decision.reason_code == "parent_promoted_from_tool_output"
 
 
+def test_chained_tool_followup_parent_key_prefers_non_tool_trace_parent_after_bridged_empty_step() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+
+    turn_id = "turn_semantic_chain_bridge"
+    parent_input_event_key = "item_semantic_chain_bridge_parent"
+    parent_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    api._current_response_turn_id = turn_id
+    api._active_input_event_key_by_turn_id[turn_id] = parent_input_event_key
+    api._active_server_auto_input_event_key = parent_input_event_key
+    api._active_response_origin = "server_auto"
+    api._active_response_id = "resp-semantic-chain-bridge-parent"
+    api._active_response_input_event_key = parent_input_event_key
+    api._active_response_canonical_key = parent_canonical_key
+    api._response_in_flight = True
+    api.response_in_progress = True
+    api._canonical_response_state_mutate(
+        canonical_key=parent_canonical_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "created", True),
+            setattr(record, "origin", "server_auto"),
+            setattr(record, "response_id", "resp-semantic-chain-bridge-parent"),
+        ),
+    )
+    api._record_response_trace_context(
+        "resp-semantic-chain-bridge-parent",
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        canonical_key=parent_canonical_key,
+        origin="server_auto",
+    )
+    api._record_pending_server_auto_response(
+        turn_id=turn_id,
+        response_id="resp-semantic-chain-bridge-parent",
+        canonical_key=parent_canonical_key,
+    )
+
+    async def _run() -> None:
+        first_event, first_canonical_key = api._build_tool_followup_response_create_event(call_id="call_bridge_first")
+        await api._send_response_create(ws, first_event, origin="tool_output")
+        await api.handle_response_done({"type": "response.done", "response": {"id": "resp-semantic-chain-bridge-parent"}})
+        await api._handle_response_created_event(
+            {
+                "type": "response.created",
+                "response": {
+                    "id": "resp-semantic-chain-bridge-first",
+                    "metadata": {
+                        "turn_id": turn_id,
+                        "input_event_key": "tool:call_bridge_first",
+                        "tool_followup": "true",
+                        "tool_followup_release": "true",
+                        "tool_call_id": "call_bridge_first",
+                        "parent_turn_id": turn_id,
+                        "parent_input_event_key": parent_input_event_key,
+                    },
+                },
+            },
+            ws,
+        )
+        await api.handle_response_done(
+            {"type": "response.done", "response": {"id": "resp-semantic-chain-bridge-first"}}
+        )
+
+        second_event, _ = api._build_tool_followup_response_create_event(call_id="call_bridge_second")
+        second_metadata = second_event["response"]["metadata"]
+        assert second_metadata.get("parent_input_event_key") == parent_input_event_key
+        await api._send_response_create(ws, second_event, origin="tool_output")
+        await api._handle_response_created_event(
+            {
+                "type": "response.created",
+                "response": {
+                    "id": "resp-semantic-chain-bridge-second",
+                    "metadata": {
+                        "turn_id": turn_id,
+                        "input_event_key": "tool:call_bridge_second",
+                        "tool_followup": "true",
+                        "tool_call_id": "call_bridge_second",
+                        "parent_turn_id": turn_id,
+                        "parent_input_event_key": parent_input_event_key,
+                    },
+                },
+            },
+            ws,
+        )
+        api._record_terminal_response_text(
+            response_id="resp-semantic-chain-bridge-second",
+            text="Final report with substantive deliverable.",
+        )
+        await api.handle_response_done(
+            {"type": "response.done", "response": {"id": "resp-semantic-chain-bridge-second"}}
+        )
+
+        selection = api._terminal_deliverable_selection_store().get("resp-semantic-chain-bridge-second")
+        assert isinstance(selection, dict)
+        assert selection.get("selected") is True
+        assert selection.get("reason") == "normal"
+        assert selection.get("semantic_owner_canonical_key") == parent_canonical_key
+        assert first_canonical_key != parent_canonical_key
+
+    asyncio.run(_run())
+
+
 def test_parent_semantic_promotion_requires_terminal_text_evidence() -> None:
     api = _make_api_stub()
     _wire_runtime(api)

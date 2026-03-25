@@ -8427,6 +8427,13 @@ class RealtimeAPI:
         if parent_input_event_key and not parent_input_event_key.startswith("tool:"):
             return parent_input_event_key
 
+        active_response_id = str(getattr(self, "_active_response_id", "") or "").strip()
+        if active_response_id:
+            trace_context = self._response_trace_by_id().get(active_response_id, {})
+            trace_parent_input_event_key = str(trace_context.get("parent_input_event_key") or "").strip()
+            if trace_parent_input_event_key and not trace_parent_input_event_key.startswith("tool:"):
+                return trace_parent_input_event_key
+
         active_response_turn_id = str(getattr(self, "_current_response_turn_id", "") or "").strip()
         active_response_input_event_key = str(getattr(self, "_active_response_input_event_key", "") or "").strip()
         if (
@@ -8435,6 +8442,19 @@ class RealtimeAPI:
             and not active_response_input_event_key.startswith("tool:")
         ):
             return active_response_input_event_key
+
+        if parent_input_event_key and parent_input_event_key.startswith("tool:"):
+            tool_parent_canonical_key = self._canonical_utterance_key(
+                turn_id=turn_id,
+                input_event_key=parent_input_event_key,
+            )
+            tool_parent_state = self._canonical_response_state(tool_parent_canonical_key)
+            tool_parent_response_id = str(getattr(tool_parent_state, "response_id", "") or "").strip()
+            if tool_parent_response_id:
+                tool_parent_trace_context = self._response_trace_by_id().get(tool_parent_response_id, {})
+                trace_parent_input_event_key = str(tool_parent_trace_context.get("parent_input_event_key") or "").strip()
+                if trace_parent_input_event_key and not trace_parent_input_event_key.startswith("tool:"):
+                    return trace_parent_input_event_key
 
         return parent_input_event_key
 
