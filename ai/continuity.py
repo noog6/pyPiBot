@@ -95,10 +95,17 @@ _FOLLOW_UP_PATTERNS = (
     re.compile(r"\b(what\b.*\?)", re.IGNORECASE),
 )
 _COMPOUND_SPLIT_RE = re.compile(r"\s*(?:,|;|\band then\b|\bthen\b)\s*", re.IGNORECASE)
-_FOLLOWUP_ONLY_PREFIX_RE = re.compile(r"^(?:then\s+)?(?:tell me|let me know|report back|report|say)\b", re.IGNORECASE)
+_STRUCTURED_SAY_PATTERN = r"say\s+(?:whether|what|if|when|where)\b"
+_FOLLOWUP_ONLY_PREFIX_RE = re.compile(
+    rf"^(?:then\s+)?(?:tell me|let me know|report back|report|{_STRUCTURED_SAY_PATTERN})",
+    re.IGNORECASE,
+)
 _SILENT_RE = re.compile(r"\bsilently\b", re.IGNORECASE)
 _DIAGNOSTIC_STEP_RE = re.compile(r"\b(?:check|run|read|query)\b.*\b(?:diagnostic|diagnostics|status|battery|temperature|pressure|environment)\b", re.IGNORECASE)
-_REPORT_STEP_RE = re.compile(r"\b(?:tell me|let me know|report back|report|say)\b", re.IGNORECASE)
+_REPORT_STEP_RE = re.compile(
+    rf"\b(?:tell me|let me know|report back|report|{_STRUCTURED_SAY_PATTERN})",
+    re.IGNORECASE,
+)
 _OBSERVATION_STEP_RE = re.compile(r"\b(?:observe|describe|identify|what do you see|what(?:'s| is) in|do you see|can you see)\b", re.IGNORECASE)
 _GESTURE_STEP_RE = re.compile(
     r"\b(?:look|move|center|turn|rotate|point|go to|navigate|back to center|return to center)\b",
@@ -125,6 +132,7 @@ _REPORT_AUDITORY_CUE_TOKENS = ("hear", "sound", "audio", "noise", "listening")
 _REPORT_DESCRIBE_CUES = ("describe", "what do you see", "what you see", "what's there", "what is there")
 _REPORT_IDENTIFY_CUES = ("identify", "what is it", "what's that", "what am i holding", "what i'm holding", "in my hand")
 _REPORT_VERIFY_CUES = ("whether", "can you see", "do you see", "can you hear", "do you hear", "is it", "are you")
+_STRUCTURED_SAY_RE = re.compile(rf"\b{_STRUCTURED_SAY_PATTERN}", re.IGNORECASE)
 _REQUEST_INTENT_RE = re.compile(
     r"\b(?:please|can you|could you|would you|will you|tell me|let me know|show me)\b",
     re.IGNORECASE,
@@ -1095,7 +1103,8 @@ class ContinuityLedger:
         normalized = f" {normalized_clause} "
         status_only = self._is_status_only_report_clause(normalized_clause)
         has_gesture_context = any(step.kind == "gesture" for step in prior_steps)
-        has_report_verb = any(token in normalized for token in ("tell me", "let me know", "report", "say", "describe", "identify", "verify"))
+        has_structured_say = bool(_STRUCTURED_SAY_RE.search(normalized_clause))
+        has_report_verb = any(token in normalized for token in ("tell me", "let me know", "report", "describe", "identify", "verify")) or has_structured_say
         has_visual_cue = any(token in normalized for token in _REPORT_VISUAL_CUE_TOKENS)
         has_auditory_cue = any(token in normalized for token in _REPORT_AUDITORY_CUE_TOKENS)
 

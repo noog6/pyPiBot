@@ -161,6 +161,53 @@ def test_compound_parser_status_report_remains_non_perception() -> None:
     assert brief.compound_request.steps[1].implicit_observation_required is False
 
 
+@pytest.mark.parametrize(
+    ("text", "expected_kind"),
+    [
+        ("Look right and say hi.", "gesture"),
+        ("Turn left and say hello.", "gesture"),
+        ("Go back to center and say something.", "gesture"),
+    ],
+)
+def test_compound_parser_bare_say_followups_do_not_become_report_steps(text: str, expected_kind: str) -> None:
+    ledger = ContinuityLedger()
+
+    ledger.update_from_event(
+        "transcript_final",
+        text=text,
+        source="input_audio_transcription",
+    )
+
+    brief = ledger.build_brief("run-bare-say", "turn-1", "bare_say_followup")
+    assert brief.compound_request is None
+    assert brief.commitments[0].summary == text
+    assert ledger._classify_compound_step_kind(text.split(" and ", 1)[1], unresolved_summary=None) != "report"
+    assert ledger._classify_compound_step_kind(text.split(" and ", 1)[0], unresolved_summary=None) == expected_kind
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Look right and say what you see.",
+        "Look right and say whether you can see it.",
+        "Look right and tell me what you see.",
+        "Look right, check diagnostics, then report done.",
+    ],
+)
+def test_compound_parser_structured_report_followups_remain_supported(text: str) -> None:
+    ledger = ContinuityLedger()
+
+    ledger.update_from_event(
+        "transcript_final",
+        text=text,
+        source="input_audio_transcription",
+    )
+
+    brief = ledger.build_brief("run-structured-report", "turn-1", "structured_report_followup")
+    assert brief.compound_request is not None
+    assert any(step.kind == "report" for step in brief.compound_request.steps)
+
+
 def test_report_semantics_classifier_marks_auditory_verify() -> None:
     ledger = ContinuityLedger()
     traits = ledger._classify_report_semantics(
