@@ -9214,7 +9214,11 @@ class RealtimeAPI:
             ),
             transcript_final_seen=transcript_final_seen,
             turn_has_pending_tool_followup=self._turn_has_pending_tool_followup(turn_id=turn_id),
-            followthrough_chain_remaining=self._turn_followthrough_chain_remaining(turn_id=turn_id),
+            followthrough_chain_remaining=self._response_done_followthrough_chain_remaining(
+                turn_id=turn_id,
+                origin=normalized_origin,
+                response_id=response_id,
+            ),
             exact_phrase_obligation_open=self._turn_contract_exact_phrase_open(
                 turn_id=turn_id,
                 response_id=response_id,
@@ -9231,6 +9235,27 @@ class RealtimeAPI:
                 str(response_id or "").strip() or "none",
             )
         return decision
+
+    def _response_done_followthrough_chain_remaining(
+        self,
+        *,
+        turn_id: str,
+        origin: str,
+        response_id: str | None,
+    ) -> bool:
+        current_turn_followthrough = self._turn_followthrough_chain_remaining(turn_id=turn_id)
+        if current_turn_followthrough:
+            return True
+        if str(origin or "").strip().lower() != "tool_output":
+            return False
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            return False
+        trace_context = self._response_trace_by_id().get(normalized_response_id, {})
+        parent_turn_id = str(trace_context.get("parent_turn_id") or "").strip()
+        if not parent_turn_id or parent_turn_id == str(turn_id or "").strip():
+            return False
+        return self._turn_followthrough_chain_remaining(turn_id=parent_turn_id)
 
     def _turn_followthrough_chain_remaining(self, *, turn_id: str) -> bool:
         normalized_turn_id = str(turn_id or "").strip()
