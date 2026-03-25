@@ -444,6 +444,88 @@ def test_compound_chain_closes_only_after_last_non_report_step_then_report() -> 
     assert after_final_report_done.compound_request is None
 
 
+def test_compound_followthrough_does_not_cross_turn_without_explicit_rebind() -> None:
+    ledger = ContinuityLedger()
+    ledger.update_from_event(
+        "transcript_final",
+        text="Look right, check diagnostics, look left, then return to center and report done.",
+        source="input_audio_transcription",
+        turn_id="turn_2",
+    )
+    ledger.update_from_event(
+        "tool_result_received",
+        tool_name="gesture_look_right",
+        call_id="call-1",
+        turn_id="turn_2",
+    )
+
+    before_cross_turn = ledger.build_brief("run-owner", "turn_2", "before_cross_turn")
+    assert before_cross_turn.compound_request is not None
+    assert [step.status for step in before_cross_turn.compound_request.steps][:4] == [
+        "completed",
+        "active",
+        "pending",
+        "pending",
+    ]
+
+    ledger.update_from_event(
+        "tool_call_started",
+        tool_name="gesture_look_left",
+        call_id="call-2",
+        turn_id="turn_4",
+        commitment_summary="Did you get stuck?",
+    )
+    ledger.update_from_event(
+        "tool_result_received",
+        tool_name="gesture_look_left",
+        call_id="call-2",
+        turn_id="turn_4",
+    )
+
+    after_cross_turn = ledger.build_brief("run-owner", "turn_4", "after_cross_turn")
+    assert after_cross_turn.compound_request is not None
+    assert [step.status for step in after_cross_turn.compound_request.steps][:4] == [
+        "completed",
+        "active",
+        "pending",
+        "pending",
+    ]
+    assert after_cross_turn.commitments[0].summary != "Did you get stuck?"
+
+
+def test_compound_followthrough_can_rebind_cross_turn_with_explicit_reason() -> None:
+    ledger = ContinuityLedger()
+    ledger.update_from_event(
+        "transcript_final",
+        text="Look right, check diagnostics, look left, then return to center and report done.",
+        source="input_audio_transcription",
+        turn_id="turn_2",
+    )
+    ledger.update_from_event(
+        "tool_result_received",
+        tool_name="gesture_look_right",
+        call_id="call-1",
+        turn_id="turn_2",
+    )
+    ledger.update_from_event(
+        "tool_result_received",
+        tool_name="read_runtime_diagnostics",
+        call_id="call-2",
+        turn_id="turn_4",
+        allow_cross_turn_rebind=True,
+        cross_turn_rebind_reason="followup_adopted_after_user_ping",
+    )
+
+    after_rebind = ledger.build_brief("run-owner", "turn_4", "after_rebind")
+    assert after_rebind.compound_request is not None
+    assert [step.status for step in after_rebind.compound_request.steps][:4] == [
+        "completed",
+        "completed",
+        "active",
+        "pending",
+    ]
+
+
 def test_compound_observability_does_not_mutate_runtime_authority_state() -> None:
     api = RealtimeAPI.__new__(RealtimeAPI)
     api._continuity_ledger = ContinuityLedger()
