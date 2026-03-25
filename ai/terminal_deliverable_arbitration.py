@@ -20,6 +20,7 @@ def arbitrate_terminal_deliverable_selection(
     origin: str,
     active_response_was_provisional: bool,
     response_done_is_empty: bool,
+    interrupted_pre_evidence_defer: bool,
     transcript_final_seen: bool,
     turn_has_pending_tool_followup: bool,
     exact_phrase_obligation_open: bool,
@@ -41,6 +42,12 @@ def arbitrate_terminal_deliverable_selection(
             selected=False,
             reason_code="micro_ack_non_deliverable",
             selected_candidate_id="micro_ack_non_deliverable",
+        )
+    if normalized_origin == "tool_output" and interrupted_pre_evidence_defer:
+        return TerminalDeliverableDecision(
+            selected=False,
+            reason_code="interrupted_pre_evidence_deferred",
+            selected_candidate_id="interrupted_pre_evidence_deferred",
         )
     if normalized_origin == "tool_output" and response_done_is_empty:
         return TerminalDeliverableDecision(
