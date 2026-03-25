@@ -122,6 +122,10 @@ from ai.tool_followup_arbitration import (
     ToolFollowupDecisionAction,
     decide_tool_followup_arbitration,
 )
+from ai.interruption_recovery import (
+    InterruptedToolOutputResolution,
+    decide_interrupted_tool_output_resolution,
+)
 from ai.reflection import ReflectionCoordinator, ReflectionContext
 from ai.stimuli_coordinator import StimuliCoordinator
 from ai.governance import (
@@ -3077,6 +3081,7 @@ class RealtimeAPI:
             "turn_id": str(getattr(self, "_current_response_turn_id", "") or "").strip() or self._current_turn_id_or_unknown(),
             "input_event_key": str(getattr(self, "_active_response_input_event_key", "") or "").strip(),
             "resolution": "pending",
+            "resume_scheduled": False,
             "reason": str(reason or "").strip() or "unknown",
             "interruption_turn_id": str(interruption_turn_id or "").strip() or "turn-unknown",
         }
@@ -3127,6 +3132,9 @@ class RealtimeAPI:
                 continue
             if str(candidate.get("resolution") or "").strip().lower() != "pending":
                 continue
+            candidate_interruption_turn_id = str(candidate.get("interruption_turn_id") or "").strip() or "turn-unknown"
+            if candidate_interruption_turn_id != normalized_turn_id:
+                continue
             candidate["resolution"] = normalized_resolution
             candidate["resolved_by_turn_id"] = normalized_turn_id
             updated += 1
@@ -3139,6 +3147,152 @@ class RealtimeAPI:
                 normalized_turn_id,
             )
         return updated
+
+    def _pending_interrupted_tool_output_candidates_for_turn(self, *, interruption_turn_id: str) -> list[dict[str, str]]:
+        registry = getattr(self, "_interrupted_tool_output_candidates_by_response_id", None)
+        if not isinstance(registry, dict) or not registry:
+            return []
+        normalized_turn_id = str(interruption_turn_id or "").strip() or "turn-unknown"
+        pending: list[dict[str, str]] = []
+        for response_id, candidate in registry.items():
+            if not isinstance(candidate, dict):
+                continue
+            if str(candidate.get("resolution") or "").strip().lower() != "pending":
+                continue
+            candidate_interruption_turn_id = str(candidate.get("interruption_turn_id") or "").strip() or "turn-unknown"
+            if candidate_interruption_turn_id != normalized_turn_id:
+                continue
+            pending.append(
+                {
+                    "response_id": str(response_id or "").strip(),
+                    "canonical_key": str(candidate.get("canonical_key") or "").strip(),
+                    "turn_id": str(candidate.get("turn_id") or "").strip(),
+                    "input_event_key": str(candidate.get("input_event_key") or "").strip(),
+                }
+            )
+        return pending
+
+    async def _resume_interrupted_tool_output_candidates_after_noise(
+        self,
+        *,
+        websocket: Any,
+        interruption_turn_id: str,
+        candidates: list[dict[str, str]],
+    ) -> int:
+        resumed = 0
+        registry = getattr(self, "_interrupted_tool_output_candidates_by_response_id", None)
+        for candidate in candidates:
+            response_id = str(candidate.get("response_id") or "").strip()
+            candidate_state = registry.get(response_id) if isinstance(registry, dict) else None
+            if isinstance(candidate_state, dict):
+                if bool(candidate_state.get("resume_scheduled")):
+                    continue
+                candidate_resolution = str(candidate_state.get("resolution") or "").strip().lower()
+                if candidate_resolution == "interruption_superseded_by_new_turn":
+                    continue
+            call_id = self._tool_call_id_from_input_event_key(candidate.get("input_event_key"))
+            if not call_id:
+                continue
+            resume_event, canonical_key = self._build_tool_followup_response_create_event(call_id=call_id)
+            response_payload = resume_event.setdefault("response", {})
+            if not isinstance(response_payload, dict):
+                response_payload = {}
+                resume_event["response"] = response_payload
+            metadata = response_payload.setdefault("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+                response_payload["metadata"] = metadata
+            source_turn_id = str(candidate.get("turn_id") or "").strip() or self._current_turn_id_or_unknown()
+            source_input_event_key = str(candidate.get("input_event_key") or "").strip() or "tool:unknown"
+            metadata["turn_id"] = source_turn_id
+            metadata["parent_turn_id"] = source_turn_id
+            metadata["input_event_key"] = f"{source_input_event_key}:resume_after_noise"
+            metadata["explicit_multipart"] = "true"
+            metadata["consumes_canonical_slot"] = "false"
+            metadata["interruption_recovery"] = "resume_after_noise"
+            self._set_tool_followup_state(
+                canonical_key=canonical_key,
+                state="scheduled_release",
+                reason="interruption_resume_after_noise",
+            )
+            if isinstance(candidate_state, dict):
+                candidate_state["resume_scheduled"] = True
+            sent = await self._send_response_create(
+                websocket,
+                resume_event,
+                origin="tool_output",
+                record_ai_call=True,
+            )
+            if sent:
+                resumed += 1
+        logger.info(
+            "tool_output_interruption_resume run_id=%s interruption_turn_id=%s resumed_count=%s",
+            self._current_run_id() or "",
+            str(interruption_turn_id or "").strip() or "turn-unknown",
+            resumed,
+        )
+        return resumed
+
+    def _prune_interrupted_tool_output_candidates(self, *, interruption_turn_id: str) -> int:
+        registry = getattr(self, "_interrupted_tool_output_candidates_by_response_id", None)
+        if not isinstance(registry, dict) or not registry:
+            return 0
+        normalized_turn_id = str(interruption_turn_id or "").strip() or "turn-unknown"
+        removed = 0
+        stale_response_ids: list[str] = []
+        for response_id, candidate in registry.items():
+            if not isinstance(candidate, dict):
+                continue
+            candidate_turn_id = str(candidate.get("interruption_turn_id") or "").strip() or "turn-unknown"
+            if candidate_turn_id != normalized_turn_id:
+                continue
+            if str(candidate.get("resolution") or "").strip().lower() == "pending":
+                continue
+            stale_response_ids.append(str(response_id or "").strip())
+        for response_id in stale_response_ids:
+            if response_id in registry:
+                registry.pop(response_id, None)
+                removed += 1
+        if removed:
+            logger.info(
+                "tool_output_interruption_candidate_pruned run_id=%s interruption_turn_id=%s removed=%s",
+                self._current_run_id() or "",
+                normalized_turn_id,
+                removed,
+            )
+        return removed
+
+    def _apply_interrupted_tool_output_transcript_resolution(
+        self,
+        *,
+        interruption_turn_id: str,
+        resolution: InterruptedToolOutputResolution | None,
+        candidates: list[dict[str, str]],
+    ) -> None:
+        if resolution is InterruptedToolOutputResolution.SUPERSEDED_BY_NEW_TURN:
+            self._resolve_interrupted_tool_output_candidates(
+                interruption_turn_id=interruption_turn_id,
+                resolution="interruption_superseded_by_new_turn",
+            )
+            for candidate in candidates:
+                candidate_canonical_key = str(candidate.get("canonical_key") or "").strip()
+                if candidate_canonical_key:
+                    self._set_tool_followup_state(
+                        canonical_key=candidate_canonical_key,
+                        state="dropped",
+                        reason="interruption_superseded_by_new_turn",
+                    )
+            return
+        if resolution is InterruptedToolOutputResolution.MERGED_INTO_FOLLOWUP:
+            self._resolve_interrupted_tool_output_candidates(
+                interruption_turn_id=interruption_turn_id,
+                resolution="interruption_merged_into_followup",
+            )
+            return
+        self._resolve_interrupted_tool_output_candidates(
+            interruption_turn_id=interruption_turn_id,
+            resolution="real_user_turn",
+        )
 
     def _log_turn_conversation_efficiency(
         self,
@@ -16165,11 +16319,44 @@ class RealtimeAPI:
             snapshot=trust_snapshot,
         )
         transcript_word_count = int(trust_snapshot.get("word_count") or 0)
-        if not transcript or transcript_word_count <= 0:
-            self._resolve_interrupted_tool_output_candidates(
-                interruption_turn_id=resolved_turn_id,
-                resolution="noise_empty_transcript",
+        interruption_candidates = self._pending_interrupted_tool_output_candidates_for_turn(
+            interruption_turn_id=resolved_turn_id,
+        )
+        interruption_resolution: InterruptedToolOutputResolution | None = None
+        if interruption_candidates:
+            interruption_resolution = decide_interrupted_tool_output_resolution(
+                transcript=transcript or "",
+                transcript_word_count=transcript_word_count,
             )
+        if not transcript or transcript_word_count <= 0:
+            if interruption_resolution is InterruptedToolOutputResolution.RESUME_AFTER_NOISE:
+                self._resolve_interrupted_tool_output_candidates(
+                    interruption_turn_id=resolved_turn_id,
+                    resolution="interruption_resume_after_noise",
+                )
+                resumed_count = await self._resume_interrupted_tool_output_candidates_after_noise(
+                    websocket=websocket,
+                    interruption_turn_id=resolved_turn_id,
+                    candidates=interruption_candidates,
+                )
+                if resumed_count > 0:
+                    self._cancel_micro_ack(turn_id=resolved_turn_id, reason="interruption_resume_after_noise")
+                    self._clear_response_obligation(
+                        turn_id=resolved_turn_id,
+                        input_event_key=input_event_key,
+                        reason="interruption_resume_after_noise",
+                        origin="input_audio_transcription",
+                    )
+                    self._mark_transcript_response_outcome(
+                        input_event_key=input_event_key,
+                        turn_id=resolved_turn_id,
+                        outcome="response_scheduled",
+                        reason="interruption_resume_after_noise",
+                        details=f"resumed_candidates={resumed_count}",
+                    )
+                    self._prune_interrupted_tool_output_candidates(interruption_turn_id=resolved_turn_id)
+                    return
+                self._prune_interrupted_tool_output_candidates(interruption_turn_id=resolved_turn_id)
             self._cancel_micro_ack(turn_id=resolved_turn_id, reason="transcript_completed_empty")
             summary_canonical_key = self._canonical_utterance_key(
                 turn_id=resolved_turn_id,
@@ -16251,10 +16438,12 @@ class RealtimeAPI:
                 reason="transcript_final",
             )
         if transcript:
-            self._resolve_interrupted_tool_output_candidates(
+            self._apply_interrupted_tool_output_transcript_resolution(
                 interruption_turn_id=resolved_turn_id,
-                resolution="real_user_turn",
+                resolution=interruption_resolution,
+                candidates=interruption_candidates,
             )
+            self._prune_interrupted_tool_output_candidates(interruption_turn_id=resolved_turn_id)
             transcript_upgrade_candidate = bool(
                 pending_server_auto is not None
                 and pending_server_auto_key
