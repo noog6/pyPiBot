@@ -64,7 +64,7 @@ def test_compound_parser_captures_go_back_to_center_followed_by_visual_followup(
 
     ledger.update_from_event(
         "transcript_final",
-        text="Hey Theo, can you go back to center and then tell me what you see me holding in my hand?",
+        text="Hey Theo, can you go back to center and then tell me what I'm holding in my hand?",
         source="input_audio_transcription",
     )
 
@@ -73,7 +73,7 @@ def test_compound_parser_captures_go_back_to_center_followed_by_visual_followup(
     assert [step.kind for step in brief.compound_request.steps] == ["gesture", "report"]
     assert [step.summary for step in brief.compound_request.steps] == [
         "can you go back to center.",
-        "tell me what you see me holding in my hand?",
+        "tell me what I'm holding in my hand?",
     ]
     assert brief.compound_request.steps[1].requires_perception is True
     assert brief.compound_request.steps[1].perception_mode == "visual"
@@ -119,6 +119,7 @@ def test_compound_visual_report_marks_implicit_observation_in_diagnostics() -> N
     assert diagnostics["compound"]["report_traits"] == (("step_2", "describe", "visual", True),)
     assert "implicit_obs=1" in summary
     assert "perception_required=1" in summary
+    assert "report_traits=step_2:describe/visual/1" in summary
 
 
 def test_compound_parser_preserves_order_for_comma_then_chain() -> None:
@@ -141,6 +142,36 @@ def test_compound_parser_preserves_order_for_comma_then_chain() -> None:
     assert [step.implicit_observation_required for step in brief.compound_request.steps] == [False, False, False]
     assert brief.compound_request.steps[2].requires_perception is False
     assert brief.compound_request.steps[2].report_intent == "status"
+
+
+def test_compound_parser_status_report_remains_non_perception() -> None:
+    ledger = ContinuityLedger()
+
+    ledger.update_from_event(
+        "transcript_final",
+        text="Look right and report done.",
+        source="input_audio_transcription",
+    )
+
+    brief = ledger.build_brief("run-status-report", "turn-1", "report_done")
+    assert brief.compound_request is not None
+    assert [step.kind for step in brief.compound_request.steps] == ["gesture", "report"]
+    assert brief.compound_request.steps[1].requires_perception is False
+    assert brief.compound_request.steps[1].report_intent == "status"
+    assert brief.compound_request.steps[1].implicit_observation_required is False
+
+
+def test_report_semantics_classifier_marks_auditory_verify() -> None:
+    ledger = ContinuityLedger()
+    traits = ledger._classify_report_semantics(
+        clause="report whether you can hear me now",
+        kind="report",
+        prior_steps=(),
+    )
+
+    assert traits["requires_perception"] is True
+    assert traits["perception_mode"] == "auditory"
+    assert traits["report_intent"] == "verify"
 
 
 def test_followup_only_status_phrase_stays_non_perception_report() -> None:
