@@ -108,6 +108,25 @@ _VISUAL_REPORT_IMPLICIT_OBSERVATION_RE = re.compile(
     r"\b(?:tell me|let me know)\b.*\bwhat you see\b",
     re.IGNORECASE,
 )
+_REPORT_STATUS_TOKENS = ("done", "finished", "ready", "centered", "complete", "completed", "settled")
+_REPORT_VISUAL_CUE_TOKENS = (
+    "see",
+    "holding",
+    "in my hand",
+    "object",
+    "desk",
+    "table",
+    "room",
+    "in front of you",
+    "image",
+    "photo",
+    "camera",
+    "scene",
+    "it",
+    "this",
+    "that",
+)
+_REPORT_AUDITORY_CUE_TOKENS = ("hear", "sound", "audio", "noise", "listening")
 _REQUEST_INTENT_RE = re.compile(
     r"\b(?:please|can you|could you|would you|will you|tell me|let me know|show me)\b",
     re.IGNORECASE,
@@ -133,6 +152,9 @@ class CompoundContinuityStep:
     summary: str
     status: CompoundStepStatus
     source_detail: str = ""
+    requires_perception: bool = False
+    perception_mode: Literal["visual", "auditory", "external_unknown", ""] = ""
+    report_intent: Literal["describe", "identify", "verify", "status", ""] = ""
     implicit_observation_required: bool = False
 
 
@@ -342,7 +364,7 @@ class ContinuityLedger:
         compound_signature = ()
         if brief.compound_request is not None:
             compound_signature = tuple(
-                f"{step.step_id}:{step.kind}:{step.status}:{int(step.implicit_observation_required)}:{self._trim_text(step.summary, 32)}"
+                f"{step.step_id}:{step.kind}:{step.status}:{int(step.requires_perception)}:{step.perception_mode}:{step.report_intent}:{self._trim_text(step.summary, 32)}"
                 for step in brief.compound_request.steps
             ) + (
                 f"active={brief.compound_request.active_step_index}",
@@ -826,6 +848,9 @@ class ContinuityLedger:
                     "status": step.status,
                     "summary": self._trim_text(step.summary, 48),
                     "source_detail": self._trim_text(step.source_detail, 32),
+                    "requires_perception": step.requires_perception,
+                    "perception_mode": step.perception_mode,
+                    "report_intent": step.report_intent,
                     "implicit_observation_required": step.implicit_observation_required,
                 }
                 for step in state.steps[:_MAX_COMPOUND_STEPS]
@@ -1040,31 +1065,81 @@ class ContinuityLedger:
         kind = self._classify_compound_step_kind(normalized, unresolved_summary=unresolved_summary)
         if kind == "report" and followup_recorded:
             return None
+        report_traits = self._classify_report_semantics(
+            clause=normalized,
+            kind=kind,
+            prior_steps=prior_steps,
+        )
         return CompoundContinuityStep(
             step_id=f"step_{step_index + 1}",
             kind=kind,
             summary=normalized if normalized.endswith((".", "?")) else f"{normalized}.",
             status="active" if step_index == 0 else "pending",
             source_detail=f"origin={source}",
-            implicit_observation_required=self._implicit_observation_required(
-                clause=normalized,
-                kind=kind,
-                prior_steps=prior_steps,
-            ),
+            requires_perception=bool(report_traits["requires_perception"]),
+            perception_mode=report_traits["perception_mode"],
+            report_intent=report_traits["report_intent"],
+            implicit_observation_required=bool(report_traits["requires_perception"])
+            and report_traits["perception_mode"] == "visual",
         )
 
-    def _implicit_observation_required(
+    def _classify_report_semantics(
         self,
         *,
         clause: str,
         kind: CompoundStepKind,
         prior_steps: tuple[CompoundContinuityStep, ...],
-    ) -> bool:
+    ) -> dict[str, str | bool]:
         if kind != "report":
-            return False
-        if not _VISUAL_REPORT_IMPLICIT_OBSERVATION_RE.search(clause):
-            return False
-        return any(step.kind == "gesture" for step in prior_steps)
+            return {"requires_perception": False, "perception_mode": "", "report_intent": ""}
+
+        normalized = f" {clause.lower().strip()} "
+        status_only = any(f" {token} " in normalized for token in _REPORT_STATUS_TOKENS)
+        has_gesture_context = any(step.kind == "gesture" for step in prior_steps)
+        has_report_verb = any(token in normalized for token in ("tell me", "let me know", "report", "say", "describe", "identify", "verify"))
+        has_visual_cue = any(token in normalized for token in _REPORT_VISUAL_CUE_TOKENS)
+        has_auditory_cue = any(token in normalized for token in _REPORT_AUDITORY_CUE_TOKENS)
+        asks_visual_check = "can you see" in normalized or "do you see" in normalized or "what do you see" in normalized
+
+        report_intent: Literal["describe", "identify", "verify", "status", ""] = ""
+        if (
+            "identify" in normalized
+            or "what i'm holding" in normalized
+            or "what i am holding" in normalized
+            or ("holding" in normalized and "hand" in normalized)
+        ):
+            report_intent = "identify"
+        elif "describe" in normalized or "what do you see" in normalized:
+            report_intent = "describe"
+        elif "whether" in normalized or "verify" in normalized or asks_visual_check:
+            report_intent = "verify"
+        elif status_only:
+            report_intent = "status"
+
+        requires_perception = False
+        perception_mode: Literal["visual", "auditory", "external_unknown", ""] = ""
+        if not status_only and has_report_verb and (has_visual_cue or asks_visual_check):
+            requires_perception = True
+            perception_mode = "visual"
+        elif not status_only and has_report_verb and has_auditory_cue:
+            requires_perception = True
+            perception_mode = "auditory"
+        elif not status_only and has_report_verb and has_gesture_context and ("whether" in normalized or "what" in normalized):
+            requires_perception = True
+            perception_mode = "external_unknown"
+
+        if report_intent == "" and has_report_verb and not requires_perception:
+            report_intent = "status"
+        if _VISUAL_REPORT_IMPLICIT_OBSERVATION_RE.search(clause) and has_gesture_context:
+            requires_perception = True
+            perception_mode = "visual"
+            if report_intent == "":
+                report_intent = "describe"
+        return {
+            "requires_perception": requires_perception,
+            "perception_mode": perception_mode,
+            "report_intent": report_intent,
+        }
 
     def _classify_compound_step_kind(self, clause: str, *, unresolved_summary: str | None) -> CompoundStepKind:
         lowered = clause.lower().strip()

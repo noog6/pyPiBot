@@ -4309,6 +4309,21 @@ class RealtimeAPI:
                     for step in brief.compound_request.steps
                     if bool(getattr(step, "implicit_observation_required", False))
                 ),
+                "perception_required_substeps": tuple(
+                    str(step.summary or "").strip()
+                    for step in brief.compound_request.steps
+                    if bool(getattr(step, "requires_perception", False))
+                ),
+                "report_traits": tuple(
+                    (
+                        str(step.step_id or "").strip(),
+                        str(getattr(step, "report_intent", "") or "").strip(),
+                        str(getattr(step, "perception_mode", "") or "").strip(),
+                        bool(getattr(step, "requires_perception", False)),
+                    )
+                    for step in brief.compound_request.steps
+                    if str(getattr(step, "kind", "")).strip() == "report"
+                ),
             }
         return diagnostics
 
@@ -4356,7 +4371,8 @@ class RealtimeAPI:
                 f"recent={ContinuityLedger._trim_text(str(getattr(recent_step, 'summary', '') or '').strip(), 32) or '-'} "
                 f"next={ContinuityLedger._trim_text(str(getattr(next_step, 'summary', '') or '').strip(), 32) or '-'} "
                 f"followup_pending={brief.compound_request.final_followup_pending} "
-                f"implicit_obs={sum(1 for step in brief.compound_request.steps if bool(getattr(step, 'implicit_observation_required', False)))}"
+                f"implicit_obs={sum(1 for step in brief.compound_request.steps if bool(getattr(step, 'implicit_observation_required', False)))} "
+                f"perception_required={sum(1 for step in brief.compound_request.steps if bool(getattr(step, 'requires_perception', False)))}"
             )
         return (
             f"stance={stance} | "
