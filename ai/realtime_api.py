@@ -4365,6 +4365,13 @@ class RealtimeAPI:
                 active_step = brief.compound_request.steps[brief.compound_request.active_step_index]
             next_step = next((step for step in brief.compound_request.steps if step.step_id == brief.compound_request.next_pending_step_id), None)
             recent_step = next((step for step in brief.compound_request.steps if step.step_id == brief.compound_request.recent_completed_step_id), None)
+            report_traits = ",".join(
+                f"{str(step.step_id or '').strip()}:{str(getattr(step, 'report_intent', '') or '').strip() or '-'}"
+                f"/{str(getattr(step, 'perception_mode', '') or '').strip() or '-'}"
+                f"/{'1' if bool(getattr(step, 'requires_perception', False)) else '0'}"
+                for step in brief.compound_request.steps
+                if str(getattr(step, "kind", "")).strip() == "report"
+            ) or "-"
             compound_summary = (
                 f"total={len(brief.compound_request.steps)} completed={len(brief.compound_request.completed_step_ids)} "
                 f"active={ContinuityLedger._trim_text(str(getattr(active_step, 'summary', '') or '').strip(), 32) or '-'} "
@@ -4372,7 +4379,8 @@ class RealtimeAPI:
                 f"next={ContinuityLedger._trim_text(str(getattr(next_step, 'summary', '') or '').strip(), 32) or '-'} "
                 f"followup_pending={brief.compound_request.final_followup_pending} "
                 f"implicit_obs={sum(1 for step in brief.compound_request.steps if bool(getattr(step, 'implicit_observation_required', False)))} "
-                f"perception_required={sum(1 for step in brief.compound_request.steps if bool(getattr(step, 'requires_perception', False)))}"
+                f"perception_required={sum(1 for step in brief.compound_request.steps if bool(getattr(step, 'requires_perception', False)))} "
+                f"report_traits={report_traits}"
             )
         return (
             f"stance={stance} | "

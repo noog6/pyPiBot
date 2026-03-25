@@ -104,29 +104,27 @@ _GESTURE_STEP_RE = re.compile(
     r"\b(?:look|move|center|turn|rotate|point|go to|navigate|back to center|return to center)\b",
     re.IGNORECASE,
 )
-_VISUAL_REPORT_IMPLICIT_OBSERVATION_RE = re.compile(
-    r"\b(?:tell me|let me know)\b.*\bwhat you see\b",
-    re.IGNORECASE,
-)
 _REPORT_STATUS_TOKENS = ("done", "finished", "ready", "centered", "complete", "completed", "settled")
 _REPORT_VISUAL_CUE_TOKENS = (
     "see",
+    "look",
+    "what do you see",
+    "what is it",
+    "what's that",
     "holding",
+    "what am i holding",
+    "what i'm holding",
     "in my hand",
     "object",
-    "desk",
-    "table",
-    "room",
-    "in front of you",
     "image",
     "photo",
     "camera",
     "scene",
-    "it",
-    "this",
-    "that",
 )
 _REPORT_AUDITORY_CUE_TOKENS = ("hear", "sound", "audio", "noise", "listening")
+_REPORT_DESCRIBE_CUES = ("describe", "what do you see", "what you see", "what's there", "what is there")
+_REPORT_IDENTIFY_CUES = ("identify", "what is it", "what's that", "what am i holding", "what i'm holding", "in my hand")
+_REPORT_VERIFY_CUES = ("whether", "can you see", "do you see", "can you hear", "do you hear", "is it", "are you")
 _REQUEST_INTENT_RE = re.compile(
     r"\b(?:please|can you|could you|would you|will you|tell me|let me know|show me)\b",
     re.IGNORECASE,
@@ -1099,42 +1097,31 @@ class ContinuityLedger:
         has_report_verb = any(token in normalized for token in ("tell me", "let me know", "report", "say", "describe", "identify", "verify"))
         has_visual_cue = any(token in normalized for token in _REPORT_VISUAL_CUE_TOKENS)
         has_auditory_cue = any(token in normalized for token in _REPORT_AUDITORY_CUE_TOKENS)
-        asks_visual_check = "can you see" in normalized or "do you see" in normalized or "what do you see" in normalized
 
         report_intent: Literal["describe", "identify", "verify", "status", ""] = ""
-        if (
-            "identify" in normalized
-            or "what i'm holding" in normalized
-            or "what i am holding" in normalized
-            or ("holding" in normalized and "hand" in normalized)
-        ):
+        if any(token in normalized for token in _REPORT_IDENTIFY_CUES):
             report_intent = "identify"
-        elif "describe" in normalized or "what do you see" in normalized:
+        elif any(token in normalized for token in _REPORT_DESCRIBE_CUES):
             report_intent = "describe"
-        elif "whether" in normalized or "verify" in normalized or asks_visual_check:
+        elif "verify" in normalized or any(token in normalized for token in _REPORT_VERIFY_CUES):
             report_intent = "verify"
         elif status_only:
             report_intent = "status"
 
         requires_perception = False
         perception_mode: Literal["visual", "auditory", "external_unknown", ""] = ""
-        if not status_only and has_report_verb and (has_visual_cue or asks_visual_check):
-            requires_perception = True
-            perception_mode = "visual"
-        elif not status_only and has_report_verb and has_auditory_cue:
+        if not status_only and has_report_verb and has_auditory_cue:
             requires_perception = True
             perception_mode = "auditory"
+        elif not status_only and has_report_verb and has_visual_cue:
+            requires_perception = True
+            perception_mode = "visual"
         elif not status_only and has_report_verb and has_gesture_context and ("whether" in normalized or "what" in normalized):
             requires_perception = True
             perception_mode = "external_unknown"
 
         if report_intent == "" and has_report_verb and not requires_perception:
             report_intent = "status"
-        if _VISUAL_REPORT_IMPLICIT_OBSERVATION_RE.search(clause) and has_gesture_context:
-            requires_perception = True
-            perception_mode = "visual"
-            if report_intent == "":
-                report_intent = "describe"
         return {
             "requires_perception": requires_perception,
             "perception_mode": perception_mode,
