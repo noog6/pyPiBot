@@ -2470,3 +2470,95 @@ def test_non_descriptive_turn_allows_confirmation_style_tool_output_terminal_sel
 
     assert selected is True
     assert reason == "normal"
+
+
+def test_response_done_empty_tool_output_bridges_from_current_turn_followthrough_without_parent_lookup() -> None:
+    api = _make_api()
+    turn_id = "turn_2"
+    response_id = "resp_tool_middle"
+    tool_input_event_key = "tool:call_middle"
+    checked_turns: list[str] = []
+
+    def _followthrough(*, turn_id: str) -> bool:
+        checked_turns.append(turn_id)
+        return turn_id == "turn_2"
+
+    api._turn_followthrough_chain_remaining = _followthrough
+    api._turn_has_pending_tool_followup = lambda **_kwargs: False
+    api._is_empty_response_done = lambda **_kwargs: True
+    api._record_response_trace_context(
+        response_id,
+        turn_id=turn_id,
+        input_event_key=tool_input_event_key,
+        origin="tool_output",
+        parent_turn_id="turn_1",
+        parent_input_event_key="item_parent",
+    )
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id=turn_id,
+        origin="tool_output",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_input_event_key),
+        transcript_final_seen=True,
+        input_event_key=tool_input_event_key,
+        response_id=response_id,
+    )
+
+    assert selected is False
+    assert reason == "tool_followup_precedence"
+    assert checked_turns == ["turn_2"]
+
+
+def test_response_done_empty_tool_output_bridges_from_parent_turn_followthrough_when_current_turn_is_empty() -> None:
+    api = _make_api()
+    response_id = "resp_tool_parent"
+    checked_turns: list[str] = []
+
+    def _followthrough(*, turn_id: str) -> bool:
+        checked_turns.append(turn_id)
+        return turn_id == "turn_1"
+
+    api._turn_followthrough_chain_remaining = _followthrough
+    api._turn_has_pending_tool_followup = lambda **_kwargs: False
+    api._is_empty_response_done = lambda **_kwargs: True
+    api._record_response_trace_context(
+        response_id,
+        turn_id="turn_2",
+        input_event_key="tool:call_middle",
+        origin="tool_output",
+        parent_turn_id="turn_1",
+        parent_input_event_key="item_parent",
+    )
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id="turn_2",
+        origin="tool_output",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id="turn_2", input_event_key="tool:call_middle"),
+        transcript_final_seen=True,
+        input_event_key="tool:call_middle",
+        response_id=response_id,
+    )
+
+    assert selected is False
+    assert reason == "tool_followup_precedence"
+    assert checked_turns == ["turn_2", "turn_1"]
+
+
+def test_turn_followthrough_chain_remaining_ignores_generic_commitment_without_followthrough_or_final_pending() -> None:
+    api = _make_api()
+
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
+        compound_request=types.SimpleNamespace(final_followup_pending=False)
+    )
+    api._continuity_ledger = types.SimpleNamespace(
+        build_turn_settlement=lambda _brief: types.SimpleNamespace(
+            settlement_state="active_items_only",
+            has_commitments=True,
+        )
+    )
+
+    assert api._turn_followthrough_chain_remaining(turn_id="turn_2") is False
