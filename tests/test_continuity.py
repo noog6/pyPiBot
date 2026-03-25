@@ -174,6 +174,42 @@ def test_report_semantics_classifier_marks_auditory_verify() -> None:
     assert traits["report_intent"] == "verify"
 
 
+def test_report_semantics_status_helper_keeps_centered_perception_dependent() -> None:
+    ledger = ContinuityLedger()
+    traits = ledger._classify_report_semantics(
+        clause="tell me what you see when you're centered on the object",
+        kind="report",
+        prior_steps=(),
+    )
+
+    assert traits["requires_perception"] is True
+    assert traits["perception_mode"] == "visual"
+    assert traits["report_intent"] == "describe"
+
+
+def test_report_semantics_status_helper_keeps_holding_perception_dependent() -> None:
+    ledger = ContinuityLedger()
+    traits = ledger._classify_report_semantics(
+        clause="tell me what i'm holding in my hand",
+        kind="report",
+        prior_steps=(),
+    )
+
+    assert traits["requires_perception"] is True
+    assert traits["perception_mode"] == "visual"
+    assert traits["report_intent"] == "identify"
+
+
+def test_status_only_helper_negative_for_perception_clause() -> None:
+    ledger = ContinuityLedger()
+    assert ledger._is_status_only_report_clause("tell me what you see when you're centered on the object") is False
+
+
+def test_status_only_helper_positive_for_explicit_centered_clause() -> None:
+    ledger = ContinuityLedger()
+    assert ledger._is_status_only_report_clause("let me know once you're centered") is True
+
+
 def test_followup_only_status_phrase_stays_non_perception_report() -> None:
     ledger = ContinuityLedger()
 

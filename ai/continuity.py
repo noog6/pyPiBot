@@ -1091,8 +1091,9 @@ class ContinuityLedger:
         if kind != "report":
             return {"requires_perception": False, "perception_mode": "", "report_intent": ""}
 
-        normalized = f" {clause.lower().strip()} "
-        status_only = any(f" {token} " in normalized for token in _REPORT_STATUS_TOKENS)
+        normalized_clause = clause.lower().strip()
+        normalized = f" {normalized_clause} "
+        status_only = self._is_status_only_report_clause(normalized_clause)
         has_gesture_context = any(step.kind == "gesture" for step in prior_steps)
         has_report_verb = any(token in normalized for token in ("tell me", "let me know", "report", "say", "describe", "identify", "verify"))
         has_visual_cue = any(token in normalized for token in _REPORT_VISUAL_CUE_TOKENS)
@@ -1127,6 +1128,28 @@ class ContinuityLedger:
             "perception_mode": perception_mode,
             "report_intent": report_intent,
         }
+
+    def _is_status_only_report_clause(self, normalized_clause: str) -> bool:
+        cleaned = normalized_clause.strip(" .?!")
+        if not cleaned:
+            return False
+        normalized = f" {cleaned} "
+        if any(token in normalized for token in _REPORT_IDENTIFY_CUES):
+            return False
+        if any(token in normalized for token in _REPORT_DESCRIBE_CUES):
+            return False
+        if any(token in normalized for token in _REPORT_VERIFY_CUES):
+            return False
+        status_terms = "|".join(re.escape(token) for token in _REPORT_STATUS_TOKENS)
+        direct_status = re.fullmatch(
+            rf"(?:report|say)\s+(?:(?:that|when|once)\s+)?(?:(?:it is|it's|you're|you are)\s+)?(?:{status_terms})",
+            cleaned,
+        )
+        notify_status = re.fullmatch(
+            rf"(?:tell me|let me know|report)\s+(?:when|once)\s+(?:(?:it is|it's|you're|you are)\s+)?(?:{status_terms})",
+            cleaned,
+        )
+        return bool(direct_status or notify_status)
 
     def _classify_compound_step_kind(self, clause: str, *, unresolved_summary: str | None) -> CompoundStepKind:
         lowered = clause.lower().strip()
