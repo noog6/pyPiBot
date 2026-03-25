@@ -379,6 +379,71 @@ def test_compound_final_followup_stays_pending_until_explicitly_closed() -> None
     assert after_followup.compound_request is None
 
 
+def test_compound_response_done_does_not_complete_report_before_prior_non_report_step() -> None:
+    ledger = ContinuityLedger()
+    ledger.update_from_event(
+        "transcript_final",
+        text="Look right, check diagnostics, look left, go back to center, then tell me what you saw.",
+        source="input_audio_transcription",
+    )
+    ledger.update_from_event("tool_result_received", tool_name="gesture_look_right", call_id="call-1")
+    ledger.update_from_event("tool_result_received", tool_name="read_runtime_diagnostics", call_id="call-2")
+    ledger.update_from_event("tool_result_received", tool_name="gesture_look_left", call_id="call-3")
+
+    before_done = ledger.build_brief("run-order", "turn-1", "before_intermediate_done")
+    assert before_done.compound_request is not None
+    assert [step.status for step in before_done.compound_request.steps] == [
+        "completed",
+        "completed",
+        "completed",
+        "active",
+        "pending",
+    ]
+    assert before_done.compound_request.final_followup_pending is True
+
+    ledger.update_from_event("response_done", close_unresolved="true")
+
+    after_intermediate_done = ledger.build_brief("run-order", "turn-1", "after_intermediate_done")
+    assert after_intermediate_done.compound_request is not None
+    assert [step.status for step in after_intermediate_done.compound_request.steps] == [
+        "completed",
+        "completed",
+        "completed",
+        "active",
+        "pending",
+    ]
+    assert after_intermediate_done.compound_request.final_followup_pending is True
+
+
+def test_compound_chain_closes_only_after_last_non_report_step_then_report() -> None:
+    ledger = ContinuityLedger()
+    ledger.update_from_event(
+        "transcript_final",
+        text="Look right, check diagnostics, look left, go back to center, then tell me what you saw.",
+        source="input_audio_transcription",
+    )
+    ledger.update_from_event("tool_result_received", tool_name="gesture_look_right", call_id="call-1")
+    ledger.update_from_event("tool_result_received", tool_name="read_runtime_diagnostics", call_id="call-2")
+    ledger.update_from_event("tool_result_received", tool_name="gesture_look_left", call_id="call-3")
+    ledger.update_from_event("response_done", close_unresolved="true")
+    ledger.update_from_event("tool_result_received", tool_name="gesture_look_center", call_id="call-4")
+
+    before_final_report_done = ledger.build_brief("run-order", "turn-1", "before_final_report_done")
+    assert before_final_report_done.compound_request is not None
+    assert [step.status for step in before_final_report_done.compound_request.steps] == [
+        "completed",
+        "completed",
+        "completed",
+        "completed",
+        "pending",
+    ]
+    assert before_final_report_done.compound_request.final_followup_pending is True
+
+    ledger.update_from_event("response_done", close_unresolved="true")
+    after_final_report_done = ledger.build_brief("run-order", "turn-1", "after_final_report_done")
+    assert after_final_report_done.compound_request is None
+
+
 def test_compound_observability_does_not_mutate_runtime_authority_state() -> None:
     api = RealtimeAPI.__new__(RealtimeAPI)
     api._continuity_ledger = ContinuityLedger()

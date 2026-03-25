@@ -705,7 +705,11 @@ class ContinuityLedger:
                 step = updated.steps[idx]
                 if step.kind != "report":
                     updated = self._replace_compound_step_status(updated, idx, "completed")
-        if close_unresolved and updated.final_followup_pending:
+        if (
+            close_unresolved
+            and updated.final_followup_pending
+            and not self._has_open_non_report_steps(updated)
+        ):
             idx = self._first_pending_step_index(updated, kinds={"report"})
             if idx is not None:
                 updated = self._replace_compound_step_status(updated, idx, "completed")
@@ -755,6 +759,9 @@ class ContinuityLedger:
 
     def _compound_state_resolved(self, state: CompoundContinuityState) -> bool:
         return bool(state.steps) and all(step.status == "completed" for step in state.steps)
+
+    def _has_open_non_report_steps(self, state: CompoundContinuityState) -> bool:
+        return any(step.kind != "report" and step.status != "completed" for step in state.steps)
 
     def _first_pending_step_index(
         self,
