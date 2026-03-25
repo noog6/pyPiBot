@@ -1109,6 +1109,7 @@ class RealtimeAPI:
         self._response_delivery_ledger: dict[str, str] = {}
         self._response_id_by_canonical_key: dict[str, str] = {}
         self._canonical_response_state_by_key: dict[str, CanonicalResponseState] = {}
+        self._interrupted_tool_output_candidates_by_response_id: dict[str, dict[str, str]] = {}
         self._canonical_response_lifecycle_state: dict[str, dict[str, bool]] = {}
         self._lifecycle_canonical_timeline: dict[str, deque[str]] = {}
         self._interaction_lifecycle_controller = InteractionLifecycleController()
@@ -3041,6 +3042,103 @@ class RealtimeAPI:
             self._silent_turn_incident_count,
             marker_suffix,
         )
+
+    def _active_response_has_first_user_evidence(self, *, response_id: str | None, canonical_key: str | None) -> bool:
+        normalized_response_id = str(response_id or "").strip()
+        if normalized_response_id and bool(self._terminal_response_text(normalized_response_id)):
+            return True
+        normalized_canonical_key = str(canonical_key or "").strip()
+        if not normalized_canonical_key:
+            return False
+        state = self._canonical_response_state(normalized_canonical_key)
+        deliverable_class = str(getattr(state, "deliverable_class", "") or "").strip().lower()
+        return bool(getattr(state, "audio_started", False)) or bool(getattr(state, "deliverable_observed", False)) or deliverable_class in {"progress", "final"}
+
+    def _mark_active_tool_output_interrupted_before_first_evidence(
+        self,
+        *,
+        reason: str,
+        interruption_turn_id: str,
+    ) -> bool:
+        response_id = str(getattr(self, "_active_response_id", "") or "").strip()
+        canonical_key = str(getattr(self, "_active_response_canonical_key", "") or "").strip()
+        origin = str(getattr(self, "_active_response_origin", "") or "").strip().lower()
+        if not response_id or origin != "tool_output":
+            return False
+        if self._active_response_has_first_user_evidence(response_id=response_id, canonical_key=canonical_key):
+            return False
+        registry = getattr(self, "_interrupted_tool_output_candidates_by_response_id", None)
+        if not isinstance(registry, dict):
+            registry = {}
+            self._interrupted_tool_output_candidates_by_response_id = registry
+        registry[response_id] = {
+            "response_id": response_id,
+            "canonical_key": canonical_key,
+            "turn_id": str(getattr(self, "_current_response_turn_id", "") or "").strip() or self._current_turn_id_or_unknown(),
+            "input_event_key": str(getattr(self, "_active_response_input_event_key", "") or "").strip(),
+            "resolution": "pending",
+            "reason": str(reason or "").strip() or "unknown",
+            "interruption_turn_id": str(interruption_turn_id or "").strip() or "turn-unknown",
+        }
+        logger.info(
+            "tool_output_interruption_candidate run_id=%s response_id=%s canonical_key=%s turn_id=%s reason=%s",
+            self._current_run_id() or "",
+            response_id,
+            canonical_key or "unknown",
+            registry[response_id]["turn_id"],
+            registry[response_id]["reason"],
+        )
+        return True
+
+    def _is_interrupted_tool_output_candidate(
+        self,
+        *,
+        response_id: str | None,
+        canonical_key: str | None = None,
+    ) -> bool:
+        normalized_response_id = str(response_id or "").strip()
+        registry = getattr(self, "_interrupted_tool_output_candidates_by_response_id", None)
+        if not normalized_response_id or not isinstance(registry, dict):
+            return False
+        candidate = registry.get(normalized_response_id)
+        if not isinstance(candidate, dict):
+            return False
+        if str(candidate.get("resolution") or "").strip().lower() != "pending":
+            return False
+        normalized_canonical_key = str(canonical_key or "").strip()
+        if normalized_canonical_key and normalized_canonical_key != str(candidate.get("canonical_key") or "").strip():
+            return False
+        return True
+
+    def _resolve_interrupted_tool_output_candidates(
+        self,
+        *,
+        interruption_turn_id: str,
+        resolution: str,
+    ) -> int:
+        registry = getattr(self, "_interrupted_tool_output_candidates_by_response_id", None)
+        if not isinstance(registry, dict) or not registry:
+            return 0
+        normalized_resolution = str(resolution or "").strip().lower() or "unknown"
+        normalized_turn_id = str(interruption_turn_id or "").strip() or "turn-unknown"
+        updated = 0
+        for response_id, candidate in registry.items():
+            if not isinstance(candidate, dict):
+                continue
+            if str(candidate.get("resolution") or "").strip().lower() != "pending":
+                continue
+            candidate["resolution"] = normalized_resolution
+            candidate["resolved_by_turn_id"] = normalized_turn_id
+            updated += 1
+            logger.info(
+                "tool_output_interruption_candidate_resolved run_id=%s response_id=%s canonical_key=%s resolution=%s turn_id=%s",
+                self._current_run_id() or "",
+                response_id,
+                str(candidate.get("canonical_key") or "").strip() or "unknown",
+                normalized_resolution,
+                normalized_turn_id,
+            )
+        return updated
 
     def _log_turn_conversation_efficiency(
         self,
@@ -8936,6 +9034,10 @@ class RealtimeAPI:
             origin=normalized_origin,
             active_response_was_provisional=active_response_was_provisional,
             response_done_is_empty=self._is_empty_response_done(canonical_key=done_canonical_key),
+            interrupted_pre_evidence_defer=self._is_interrupted_tool_output_candidate(
+                response_id=response_id,
+                canonical_key=done_canonical_key,
+            ),
             transcript_final_seen=transcript_final_seen,
             turn_has_pending_tool_followup=self._turn_has_pending_tool_followup(turn_id=turn_id),
             exact_phrase_obligation_open=self._turn_contract_exact_phrase_open(
@@ -16064,6 +16166,10 @@ class RealtimeAPI:
         )
         transcript_word_count = int(trust_snapshot.get("word_count") or 0)
         if not transcript or transcript_word_count <= 0:
+            self._resolve_interrupted_tool_output_candidates(
+                interruption_turn_id=resolved_turn_id,
+                resolution="noise_empty_transcript",
+            )
             self._cancel_micro_ack(turn_id=resolved_turn_id, reason="transcript_completed_empty")
             summary_canonical_key = self._canonical_utterance_key(
                 turn_id=resolved_turn_id,
@@ -16145,6 +16251,10 @@ class RealtimeAPI:
                 reason="transcript_final",
             )
         if transcript:
+            self._resolve_interrupted_tool_output_candidates(
+                interruption_turn_id=resolved_turn_id,
+                resolution="real_user_turn",
+            )
             transcript_upgrade_candidate = bool(
                 pending_server_auto is not None
                 and pending_server_auto_key

@@ -52,6 +52,10 @@ class InputAudioEventHandlers:
 
             manager.cancel_all(reason="speech_active")
         if talk_over_active:
+            deferred_tool_output = self._api._mark_active_tool_output_interrupted_before_first_evidence(
+                reason="speech_started_talk_over",
+                interruption_turn_id=self._api._current_turn_id_or_unknown(),
+            )
             self._api._clear_all_pending_response_creates(reason="talk_over_abort")
             turn_id = self._api._current_turn_id_or_unknown()
             input_event_key = str(getattr(self._api, "_current_input_event_key", "") or "").strip()
@@ -60,7 +64,7 @@ class InputAudioEventHandlers:
                 input_event_key=input_event_key,
                 reason="talk_over_abort",
             )
-            if bool(getattr(self._api, "_response_in_flight", False)):
+            if bool(getattr(self._api, "_response_in_flight", False)) and not deferred_tool_output:
                 cancel_event = {"type": "response.cancel"}
                 log_ws_event("Outgoing", cancel_event)
                 self._api._track_outgoing_event(cancel_event, origin="talk_over_abort")
@@ -69,6 +73,13 @@ class InputAudioEventHandlers:
                     await transport.send_json(websocket, cancel_event)
                 except Exception as exc:
                     logger.debug("talk_over_abort_cancel_failed turn_id=%s error=%s", turn_id, exc)
+            elif deferred_tool_output:
+                logger.info(
+                    "talk_over_abort_deferred run_id=%s turn_id=%s response_id=%s reason=tool_output_pre_evidence_interruption",
+                    self._api._current_run_id() or "",
+                    turn_id,
+                    str(getattr(self._api, "_active_response_id", "") or "").strip() or "none",
+                )
         self._api._utterance_counter += 1
         next_turn_id = self._api._next_response_turn_id()
         with self._api._utterance_context_scope(

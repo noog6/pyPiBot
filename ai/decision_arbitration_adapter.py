@@ -103,6 +103,7 @@ NormalizedCandidateId: TypeAlias = Literal[
     "cancelled",
     "micro_ack_non_deliverable",
     "empty_tool_followup_non_deliverable",
+    "interrupted_pre_evidence_deferred",
     "provisional_empty_non_deliverable",
     "provisional_server_auto_awaiting_transcript_final",
     "tool_followup_precedence",
@@ -495,6 +496,7 @@ def _terminal_selection_candidate_id(selection_reason: str, *, selected: bool) -
         "cancelled": "cancelled",
         "micro_ack_non_deliverable": "micro_ack_non_deliverable",
         "empty_tool_followup_non_deliverable": "empty_tool_followup_non_deliverable",
+        "interrupted_pre_evidence_deferred": "interrupted_pre_evidence_deferred",
         "provisional_empty_non_deliverable": "provisional_empty_non_deliverable",
         "provisional_server_auto_awaiting_transcript_final": "provisional_server_auto_awaiting_transcript_final",
         "tool_followup_precedence": "tool_followup_precedence",
@@ -521,6 +523,8 @@ def _terminal_selection_deliverable_status(
         return "final_observed", tuple(warnings)
     if normalized_reason in {"micro_ack_non_deliverable", "empty_tool_followup_non_deliverable", "provisional_empty_non_deliverable", "tool_output_descriptive_gesture_only", "cancelled"}:
         return "non_deliverable", tuple(warnings)
+    if normalized_reason in {"interrupted_pre_evidence_deferred"}:
+        return "blocked_terminal", tuple(warnings)
     if normalized_reason in {"provisional_server_auto_awaiting_transcript_final"}:
         return "provisional_only", tuple(warnings)
     if normalized_reason in {"exact_phrase_obligation_open", "tool_followup_precedence"}:
@@ -1606,6 +1610,7 @@ def _normalize_selected_candidate_id(candidate_id: str) -> NormalizedCandidateId
         "cancelled",
         "micro_ack_non_deliverable",
         "empty_tool_followup_non_deliverable",
+        "interrupted_pre_evidence_deferred",
         "provisional_empty_non_deliverable",
         "provisional_server_auto_awaiting_transcript_final",
         "tool_followup_precedence",

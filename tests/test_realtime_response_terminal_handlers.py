@@ -55,6 +55,7 @@ def _make_api() -> RealtimeAPI:
     api._active_response_consumes_canonical_slot = True
     api._response_done_serial = 0
     api.response_in_progress = True
+    api._interrupted_tool_output_candidates_by_response_id = {}
     api._apply_terminal_deliverable_selection = lambda **_kwargs: None
     api._reconcile_terminal_substantive_response = lambda **_kwargs: None
     api._response_in_flight = True
@@ -85,6 +86,7 @@ def _make_api() -> RealtimeAPI:
     api._is_gesture_only_tool_output_text = lambda _text: False
     api._mark_provisional_response_completed_empty = lambda **_kwargs: None
     api._record_silent_turn_incident = lambda **_kwargs: None
+    api._is_interrupted_tool_output_candidate = RealtimeAPI._is_interrupted_tool_output_candidate.__get__(api, RealtimeAPI)
     api._emit_preference_recall_skip_trace_if_needed = lambda **_kwargs: None
     api._log_turn_conversation_efficiency = lambda **_kwargs: None
     api._confirmation_hold_components = lambda: (False, False, None, False)
@@ -666,6 +668,51 @@ def test_handle_response_done_records_silent_incident_for_non_provisional_empty(
 
     record_silent.assert_called_once()
     mark_completed.assert_not_called()
+
+
+def test_handle_response_done_defers_interrupted_tool_output_empty_without_silent_incident() -> None:
+    api = _make_api()
+    api._active_response_origin = "tool_output"
+    api._active_response_id = "resp_tool_interrupt_1"
+    api._active_response_canonical_key = "turn_1::tool:call_interrupt"
+    api._active_response_input_event_key = "tool:call_interrupt"
+    api._is_empty_response_done = lambda **_kwargs: True
+    api._is_provisional_response = lambda **_kwargs: False
+    api._interrupted_tool_output_candidates_by_response_id = {
+        "resp_tool_interrupt_1": {
+            "response_id": "resp_tool_interrupt_1",
+            "canonical_key": "turn_1::tool:call_interrupt",
+            "resolution": "pending",
+        }
+    }
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    record_silent = Mock()
+    api._record_silent_turn_incident = record_silent
+
+    apply_selection = Mock()
+    api._apply_terminal_deliverable_selection = apply_selection
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_tool_interrupt_1"}}))
+
+    record_silent.assert_not_called()
+    api._maybe_schedule_empty_response_retry.assert_not_awaited()
+    apply_selection.assert_called_once_with(
+        canonical_key="turn_1::tool:call_interrupt",
+        semantic_owner_canonical_key="turn_1::tool:call_interrupt",
+        response_id="resp_tool_interrupt_1",
+        turn_id="turn_1",
+        input_event_key="tool:call_interrupt",
+        selected=False,
+        selection_reason="interrupted_pre_evidence_deferred",
+    )
 
 
 def test_handle_response_done_downgrades_empty_tool_followup_terminal_selection() -> None:

@@ -690,9 +690,24 @@ class ResponseTerminalHandlers:
             and str(active_response_origin_before_clear or "").strip().lower() == "tool_output"
             and pending_tool_followup_after_release
         )
+        interrupted_tool_output_candidate = (
+            is_empty_done
+            and api._is_interrupted_tool_output_candidate(
+                response_id=active_response_id_before_clear,
+                canonical_key=done_canonical_key,
+            )
+        )
         if suppress_empty_tool_followup_silent_incident:
             logger.info(
                 "tool_followup_empty_bridge run_id=%s turn_id=%s response_id=%s canonical_key=%s action=suppress_silent_incident reason=pending_followup_after_release",
+                api._current_run_id() or "",
+                turn_id,
+                str(active_response_id_before_clear or "none"),
+                done_canonical_key,
+            )
+        elif interrupted_tool_output_candidate:
+            logger.info(
+                "tool_output_interruption_recovery run_id=%s turn_id=%s response_id=%s canonical_key=%s action=defer_candidate reason=interrupted_pre_evidence",
                 api._current_run_id() or "",
                 turn_id,
                 str(active_response_id_before_clear or "none"),
@@ -718,6 +733,8 @@ class ResponseTerminalHandlers:
         continuity_close_allowed = not (
             provisional_server_auto_close_deferred or exact_phrase_close_deferred or is_empty_done
         )
+        if interrupted_tool_output_candidate:
+            continuity_close_allowed = False
         continuity_origin = str(active_response_origin_before_clear or "").strip().lower()
         continuity_close_commitment = continuity_close_allowed and continuity_origin == "tool_output"
         continuity_close_unresolved = continuity_close_commitment and not obligation_open
@@ -727,19 +744,27 @@ class ResponseTerminalHandlers:
             turn_id=turn_id,
             response_id=active_response_id_before_clear,
             origin=active_response_origin_before_clear,
-            keep_ongoing="true" if provisional_server_auto_close_deferred or exact_phrase_close_deferred else "",
+            keep_ongoing="true" if provisional_server_auto_close_deferred or exact_phrase_close_deferred or interrupted_tool_output_candidate else "",
             close_ongoing="true" if continuity_close_allowed else "",
             close_commitment="true" if continuity_close_commitment else "",
             close_unresolved="true" if continuity_close_unresolved else "",
         )
-        await api._maybe_schedule_empty_response_retry(
-            websocket=api.websocket,
-            turn_id=turn_id,
-            canonical_key=done_canonical_key,
-            input_event_key=done_input_event_key,
-            origin=active_response_origin_before_clear,
-            delivery_state_before_done=delivery_state_before_done,
-        )
+        if interrupted_tool_output_candidate:
+            logger.info(
+                "empty_response_retry_skipped reason=interrupted_tool_output_candidate run_id=%s turn_id=%s response_id=%s",
+                api._current_run_id() or "",
+                turn_id,
+                str(active_response_id_before_clear or "none"),
+            )
+        else:
+            await api._maybe_schedule_empty_response_retry(
+                websocket=api.websocket,
+                turn_id=turn_id,
+                canonical_key=done_canonical_key,
+                input_event_key=done_input_event_key,
+                origin=active_response_origin_before_clear,
+                delivery_state_before_done=delivery_state_before_done,
+            )
         api._clear_terminal_response_text(response_id=active_response_id)
         if event:
             api._last_response_metadata = {

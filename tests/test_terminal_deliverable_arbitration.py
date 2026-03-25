@@ -18,6 +18,7 @@ def _decide(**overrides: object) -> TerminalDeliverableDecision:
         "origin": "assistant_message",
         "active_response_was_provisional": False,
         "response_done_is_empty": False,
+        "interrupted_pre_evidence_defer": False,
         "transcript_final_seen": True,
         "turn_has_pending_tool_followup": False,
         "exact_phrase_obligation_open": False,
@@ -110,4 +111,18 @@ def test_terminal_deliverable_arbitration_covers_cancelled_and_other_non_deliver
         False,
         "provisional_empty_non_deliverable",
         "provisional_empty_non_deliverable",
+    )
+
+
+def test_terminal_deliverable_arbitration_prefers_explicit_interrupted_pre_evidence_reason() -> None:
+    decision = _decide(
+        origin="tool_output",
+        response_done_is_empty=True,
+        interrupted_pre_evidence_defer=True,
+    )
+
+    assert decision == TerminalDeliverableDecision(
+        False,
+        "interrupted_pre_evidence_deferred",
+        "interrupted_pre_evidence_deferred",
     )
