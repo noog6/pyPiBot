@@ -885,6 +885,98 @@ def test_handle_response_done_bridges_followthrough_chain_without_pending_follow
     api._maybe_schedule_empty_response_retry.assert_not_awaited()
 
 
+
+def test_handle_response_done_followthrough_bridge_does_not_suppress_later_final_tool_report() -> None:
+    api = _make_api()
+    api._active_response_origin = "tool_output"
+    api._active_response_input_event_key = "tool:call_middle"
+    api._active_response_canonical_key = "turn_1::tool:call_middle"
+    api._active_response_id = "resp_tool_middle"
+    api._active_input_event_key_for_turn = lambda _turn_id: str(api._active_response_input_event_key or "")
+    api._response_trace_by_id = lambda: {
+        "resp_tool_middle": {
+            "turn_id": "turn_1",
+            "input_event_key": "tool:call_middle",
+            "canonical_key": "turn_1::tool:call_middle",
+            "origin": "tool_output",
+        },
+        "resp_tool_final": {
+            "turn_id": "turn_1",
+            "input_event_key": "tool:call_final",
+            "canonical_key": "turn_1::tool:call_final",
+            "origin": "tool_output",
+            "parent_turn_id": "turn_1",
+            "parent_input_event_key": "item_parent",
+        },
+    }
+    api._stale_response_context = lambda _response_id: {}
+    api._is_empty_response_done = lambda *, canonical_key: canonical_key == "turn_1::tool:call_middle"
+    api._turn_has_pending_tool_followup = lambda **_kwargs: False
+    api._turn_followthrough_chain_remaining = lambda **_kwargs: api._active_response_id == "resp_tool_middle"
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    api._release_blocked_tool_followups_for_response_done = lambda **_kwargs: None
+    api._maybe_recover_mic_after_response_done = Mock(return_value=False)
+    api._semantic_owner_decision_for_response = Mock(
+        side_effect=[
+            SimpleNamespace(
+                semantic_owner_canonical_key="turn_1::tool:call_middle",
+                parent_turn_id="turn_1",
+                parent_input_event_key="item_parent",
+                selected_candidate_id="semantic_owner_execution",
+                reason_code="terminal_not_selected",
+            ),
+            SimpleNamespace(
+                semantic_owner_canonical_key="turn_1::item_parent",
+                parent_turn_id="turn_1",
+                parent_input_event_key="item_parent",
+                selected_candidate_id="semantic_owner_parent",
+                reason_code="parent_promoted_from_tool_output",
+            ),
+        ]
+    )
+
+    continuity_events: list[dict[str, str]] = []
+    apply_continuity = api._apply_continuity_event
+
+    def _capture_continuity(event_type: str, **payload: str) -> None:
+        if event_type == "response_done":
+            continuity_events.append(payload)
+        apply_continuity(event_type, **payload)
+
+    api._apply_continuity_event = _capture_continuity
+    apply_selection = Mock()
+    api._apply_terminal_deliverable_selection = apply_selection
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_tool_middle"}}))
+
+    api._set_active_response_state(
+        response_id="resp_tool_final",
+        origin="tool_output",
+        input_event_key="tool:call_final",
+        canonical_key="turn_1::tool:call_final",
+    )
+    api._terminal_response_text_by_response_id = {"resp_tool_final": "Here is the final report."}
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_tool_final"}}))
+
+    assert [call.kwargs["selection_reason"] for call in apply_selection.call_args_list] == [
+        "tool_followup_precedence",
+        "normal",
+    ]
+    assert [call.kwargs["selected"] for call in apply_selection.call_args_list] == [False, True]
+    assert apply_selection.call_args_list[1].kwargs["semantic_owner_canonical_key"] == "turn_1::item_parent"
+    assert continuity_events[0]["keep_ongoing"] == "true"
+    assert continuity_events[0]["close_ongoing"] == ""
+    assert continuity_events[1]["keep_ongoing"] == ""
+    assert continuity_events[1]["close_ongoing"] == "true"
+
 def test_handle_response_done_defers_mic_recovery_until_after_chained_tool_followups_drain() -> None:
     api = _make_api()
     api._active_response_origin = "tool_output"
