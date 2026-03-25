@@ -857,6 +857,34 @@ def test_handle_response_done_suppresses_empty_tool_followup_silent_incident_whe
     api._maybe_recover_mic_after_response_done.assert_not_called()
 
 
+def test_handle_response_done_bridges_followthrough_chain_without_pending_followup_state() -> None:
+    api = _make_api()
+    api._active_response_origin = "tool_output"
+    api._active_response_input_event_key = "tool:call_middle"
+    api._active_response_canonical_key = "turn_1::tool:call_middle"
+    api._active_response_id = "resp_tool_middle"
+    api._is_empty_response_done = lambda **_kwargs: True
+    api._turn_has_pending_tool_followup = lambda **_kwargs: False
+    api._turn_followthrough_chain_remaining = lambda **_kwargs: True
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    api._release_blocked_tool_followups_for_response_done = lambda **_kwargs: None
+    record_silent = Mock()
+    api._record_silent_turn_incident = record_silent
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_tool_middle"}}))
+
+    record_silent.assert_not_called()
+    api._maybe_schedule_empty_response_retry.assert_not_awaited()
+
+
 def test_handle_response_done_defers_mic_recovery_until_after_chained_tool_followups_drain() -> None:
     api = _make_api()
     api._active_response_origin = "tool_output"

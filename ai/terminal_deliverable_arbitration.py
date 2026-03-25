@@ -23,6 +23,7 @@ def arbitrate_terminal_deliverable_selection(
     interrupted_pre_evidence_defer: bool,
     transcript_final_seen: bool,
     turn_has_pending_tool_followup: bool,
+    followthrough_chain_remaining: bool,
     exact_phrase_obligation_open: bool,
     descriptive_turn: bool,
     tool_output_gesture_only: bool,
@@ -48,6 +49,16 @@ def arbitrate_terminal_deliverable_selection(
             selected=False,
             reason_code="interrupted_pre_evidence_deferred",
             selected_candidate_id="interrupted_pre_evidence_deferred",
+        )
+    if (
+        normalized_origin == "tool_output"
+        and response_done_is_empty
+        and (turn_has_pending_tool_followup or followthrough_chain_remaining)
+    ):
+        return TerminalDeliverableDecision(
+            selected=False,
+            reason_code="tool_followup_precedence",
+            selected_candidate_id="tool_followup_precedence",
         )
     if normalized_origin == "tool_output" and response_done_is_empty:
         return TerminalDeliverableDecision(

@@ -9194,6 +9194,7 @@ class RealtimeAPI:
             ),
             transcript_final_seen=transcript_final_seen,
             turn_has_pending_tool_followup=self._turn_has_pending_tool_followup(turn_id=turn_id),
+            followthrough_chain_remaining=self._turn_followthrough_chain_remaining(turn_id=turn_id),
             exact_phrase_obligation_open=self._turn_contract_exact_phrase_open(
                 turn_id=turn_id,
                 response_id=response_id,
@@ -9210,6 +9211,24 @@ class RealtimeAPI:
                 str(response_id or "").strip() or "none",
             )
         return decision
+
+    def _turn_followthrough_chain_remaining(self, *, turn_id: str) -> bool:
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return False
+        run_id = str(self._current_run_id() or "").strip()
+        if not run_id:
+            return False
+        brief = self.get_continuity_brief(
+            run_id=run_id,
+            turn_id=normalized_turn_id,
+            reason="response_done_followthrough_guard",
+        )
+        settlement = self._continuity_ledger_instance().build_turn_settlement(brief)
+        if str(getattr(settlement, "settlement_state", "") or "").strip().lower() == "followthrough_remaining":
+            return True
+        compound_state = getattr(brief, "compound_request", None)
+        return bool(getattr(compound_state, "final_followup_pending", False))
 
     def _resolve_parent_trace_context(
         self,

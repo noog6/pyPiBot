@@ -21,6 +21,7 @@ def _decide(**overrides: object) -> TerminalDeliverableDecision:
         "interrupted_pre_evidence_defer": False,
         "transcript_final_seen": True,
         "turn_has_pending_tool_followup": False,
+        "followthrough_chain_remaining": False,
         "exact_phrase_obligation_open": False,
         "descriptive_turn": False,
         "tool_output_gesture_only": False,
@@ -125,4 +126,18 @@ def test_terminal_deliverable_arbitration_prefers_explicit_interrupted_pre_evide
         False,
         "interrupted_pre_evidence_deferred",
         "interrupted_pre_evidence_deferred",
+    )
+
+
+def test_terminal_deliverable_arbitration_bridges_empty_tool_output_when_followthrough_remains() -> None:
+    decision = _decide(
+        origin="tool_output",
+        response_done_is_empty=True,
+        followthrough_chain_remaining=True,
+    )
+
+    assert decision == TerminalDeliverableDecision(
+        False,
+        "tool_followup_precedence",
+        "tool_followup_precedence",
     )

@@ -690,6 +690,11 @@ class ResponseTerminalHandlers:
             and str(active_response_origin_before_clear or "").strip().lower() == "tool_output"
             and pending_tool_followup_after_release
         )
+        followthrough_chain_bridge = (
+            is_empty_done
+            and str(active_response_origin_before_clear or "").strip().lower() == "tool_output"
+            and selection_reason == "tool_followup_precedence"
+        )
         interrupted_tool_output_candidate = (
             is_empty_done
             and api._is_interrupted_tool_output_candidate(
@@ -700,6 +705,14 @@ class ResponseTerminalHandlers:
         if suppress_empty_tool_followup_silent_incident:
             logger.info(
                 "tool_followup_empty_bridge run_id=%s turn_id=%s response_id=%s canonical_key=%s action=suppress_silent_incident reason=pending_followup_after_release",
+                api._current_run_id() or "",
+                turn_id,
+                str(active_response_id_before_clear or "none"),
+                done_canonical_key,
+            )
+        elif followthrough_chain_bridge:
+            logger.info(
+                "tool_followup_empty_bridge run_id=%s turn_id=%s response_id=%s canonical_key=%s action=suppress_silent_incident reason=followthrough_chain_remaining",
                 api._current_run_id() or "",
                 turn_id,
                 str(active_response_id_before_clear or "none"),
@@ -744,14 +757,15 @@ class ResponseTerminalHandlers:
             turn_id=turn_id,
             response_id=active_response_id_before_clear,
             origin=active_response_origin_before_clear,
-            keep_ongoing="true" if provisional_server_auto_close_deferred or exact_phrase_close_deferred or interrupted_tool_output_candidate else "",
+            keep_ongoing="true" if provisional_server_auto_close_deferred or exact_phrase_close_deferred or interrupted_tool_output_candidate or followthrough_chain_bridge else "",
             close_ongoing="true" if continuity_close_allowed else "",
             close_commitment="true" if continuity_close_commitment else "",
             close_unresolved="true" if continuity_close_unresolved else "",
         )
-        if interrupted_tool_output_candidate:
+        if interrupted_tool_output_candidate or followthrough_chain_bridge:
             logger.info(
-                "empty_response_retry_skipped reason=interrupted_tool_output_candidate run_id=%s turn_id=%s response_id=%s",
+                "empty_response_retry_skipped reason=%s run_id=%s turn_id=%s response_id=%s",
+                "interrupted_tool_output_candidate" if interrupted_tool_output_candidate else "followthrough_chain_remaining",
                 api._current_run_id() or "",
                 turn_id,
                 str(active_response_id_before_clear or "none"),
