@@ -54,6 +54,9 @@ def test_compound_parser_keeps_action_plus_report_as_small_chain() -> None:
         "tell me what you see.",
     ]
     assert [step.implicit_observation_required for step in brief.compound_request.steps] == [False, True]
+    assert brief.compound_request.steps[1].requires_perception is True
+    assert brief.compound_request.steps[1].perception_mode == "visual"
+    assert brief.compound_request.steps[1].report_intent == "describe"
 
 
 def test_compound_parser_captures_go_back_to_center_followed_by_visual_followup() -> None:
@@ -72,6 +75,9 @@ def test_compound_parser_captures_go_back_to_center_followed_by_visual_followup(
         "can you go back to center.",
         "tell me what you see me holding in my hand?",
     ]
+    assert brief.compound_request.steps[1].requires_perception is True
+    assert brief.compound_request.steps[1].perception_mode == "visual"
+    assert brief.compound_request.steps[1].report_intent == "identify"
 
 
 def test_compound_parser_ignores_plain_declarative_description() -> None:
@@ -105,8 +111,14 @@ def test_compound_visual_report_marks_implicit_observation_in_diagnostics() -> N
     assert len(brief.compound_request.steps) == 2
     assert brief.compound_request.steps[1].kind == "report"
     assert brief.compound_request.steps[1].implicit_observation_required is True
+    assert brief.compound_request.steps[1].requires_perception is True
+    assert brief.compound_request.steps[1].perception_mode == "visual"
+    assert brief.compound_request.steps[1].report_intent == "describe"
     assert diagnostics["compound"]["implicit_observation_substeps"] == ("let me know what you see.",)
+    assert diagnostics["compound"]["perception_required_substeps"] == ("let me know what you see.",)
+    assert diagnostics["compound"]["report_traits"] == (("step_2", "describe", "visual", True),)
     assert "implicit_obs=1" in summary
+    assert "perception_required=1" in summary
 
 
 def test_compound_parser_preserves_order_for_comma_then_chain() -> None:
@@ -127,6 +139,23 @@ def test_compound_parser_preserves_order_for_comma_then_chain() -> None:
         "report done.",
     ]
     assert [step.implicit_observation_required for step in brief.compound_request.steps] == [False, False, False]
+    assert brief.compound_request.steps[2].requires_perception is False
+    assert brief.compound_request.steps[2].report_intent == "status"
+
+
+def test_followup_only_status_phrase_stays_non_perception_report() -> None:
+    ledger = ContinuityLedger()
+
+    ledger.update_from_event(
+        "transcript_final",
+        text="Tell me when you're centered.",
+        source="input_audio_transcription",
+    )
+
+    brief = ledger.build_brief("run-status", "turn-1", "followup_status")
+    assert brief.compound_request is None
+    assert brief.stance == "idle"
+    assert brief.ongoing[0].summary == "Tell me when you're centered."
 
 
 def test_compound_parser_does_not_oversplit_ordinary_phrasing() -> None:
