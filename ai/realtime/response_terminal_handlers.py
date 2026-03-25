@@ -647,7 +647,6 @@ class ResponseTerminalHandlers:
                 "Skipping IDLE transition for response.done while still listening; deferring until speech stop."
             )
         logger.info("Received response.done event.")
-        api._clear_terminal_response_text(response_id=active_response_id)
         if str(active_response_origin_before_clear or "").strip().lower() == "prompt":
             startup_terminal_state = "completed"
             startup_terminal_reason = "response_done"
@@ -663,7 +662,29 @@ class ResponseTerminalHandlers:
             )
         api._emit_utterance_info_summary(anchor="response.done")
         api._prune_curiosity_surface_candidates(completed_turn_id=turn_id)
+        response_state = api._canonical_response_state(done_canonical_key)
+        audio_delta_seen = bool(getattr(response_state, "audio_started", False))
+        if not audio_delta_seen:
+            try:
+                audio_delta_seen = bool(api._canonical_first_audio_started(done_canonical_key))
+            except AttributeError:
+                audio_delta_seen = False
+        deliverable_observed = bool(getattr(response_state, "deliverable_observed", False))
+        assistant_reply_present = bool(str(api._assistant_reply_text_for_response(active_response_id_before_clear) or "").strip())
+        terminal_response_text_present = bool(str(api._terminal_response_text(active_response_id_before_clear) or "").strip())
         is_empty_done = api._is_empty_response_done(canonical_key=done_canonical_key)
+        logger.debug(
+            "response_done_empty_evidence run_id=%s turn_id=%s response_id=%s canonical_key=%s assistant_reply_present=%s terminal_response_text_present=%s audio_delta_seen=%s deliverable_observed=%s final_is_empty_done=%s",
+            api._current_run_id() or "",
+            turn_id,
+            str(active_response_id_before_clear or "none"),
+            done_canonical_key,
+            str(assistant_reply_present).lower(),
+            str(terminal_response_text_present).lower(),
+            str(audio_delta_seen).lower(),
+            str(deliverable_observed).lower(),
+            str(is_empty_done).lower(),
+        )
         suppress_empty_tool_followup_silent_incident = (
             is_empty_done
             and str(active_response_origin_before_clear or "").strip().lower() == "tool_output"
@@ -719,6 +740,7 @@ class ResponseTerminalHandlers:
             origin=active_response_origin_before_clear,
             delivery_state_before_done=delivery_state_before_done,
         )
+        api._clear_terminal_response_text(response_id=active_response_id)
         if event:
             api._last_response_metadata = {
                 "event_type": event.get("type"),

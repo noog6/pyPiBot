@@ -531,6 +531,15 @@ def test_handle_response_done_releases_blocked_followups_after_terminal_selectio
     asyncio.run(api.handle_response_done({"type": "response.done"}))
 
     assert call_order.index("decision") < call_order.index("apply") < call_order.index("release")
+    api._apply_terminal_deliverable_selection.assert_called_once_with(
+        canonical_key="turn_1::input_evt_1",
+        semantic_owner_canonical_key="turn_1::input_evt_1",
+        response_id="resp_1",
+        turn_id="turn_1",
+        input_event_key="input_evt_1",
+        selected=True,
+        selection_reason="normal",
+    )
     api._release_blocked_tool_followups_for_response_done.assert_called_once_with(response_id="resp_1")
 
 def test_handle_response_done_marks_micro_ack_as_non_deliverable() -> None:
@@ -712,6 +721,65 @@ def test_handle_response_done_downgrades_empty_tool_followup_terminal_selection(
         "false",
         "empty_tool_followup_non_deliverable",
     )
+
+
+def test_handle_response_done_keeps_terminal_text_evidence_for_tool_followup_arbitration() -> None:
+    api = _make_api()
+    api._active_response_origin = "tool_output"
+    api._active_response_input_event_key = "tool:call_text_1"
+    api._active_response_canonical_key = "turn_1::tool:call_text_1"
+    api._active_response_id = "resp_tool_text_1"
+    api._active_input_event_key_for_turn = lambda _turn_id: "item_parent"
+    api._canonical_first_audio_started = lambda _canonical_key: False
+    api._assistant_reply_by_response_id = {}
+    api._record_terminal_response_text(response_id="resp_tool_text_1", text="Tool follow-up summary.")
+    api._is_empty_response_done = RealtimeAPI._is_empty_response_done.__get__(api, RealtimeAPI)
+    api._canonical_response_state_mutate(
+        canonical_key="turn_1::tool:call_text_1",
+        turn_id="turn_1",
+        input_event_key="tool:call_text_1",
+        mutator=lambda record: (
+            setattr(record, "response_id", "resp_tool_text_1"),
+            setattr(record, "origin", "tool_output"),
+            setattr(record, "deliverable_observed", False),
+            setattr(record, "deliverable_class", "unknown"),
+            setattr(record, "audio_started", False),
+        ),
+    )
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    apply_selection = Mock()
+    record_silent = Mock()
+    api._apply_terminal_deliverable_selection = apply_selection
+    api._record_silent_turn_incident = record_silent
+
+    with patch("ai.realtime.response_terminal_handlers.logger.info") as info_log:
+        asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_tool_text_1"}}))
+
+    apply_selection.assert_called_once_with(
+        canonical_key="turn_1::tool:call_text_1",
+        semantic_owner_canonical_key="turn_1::tool:call_text_1",
+        response_id="resp_tool_text_1",
+        turn_id="turn_1",
+        input_event_key="tool:call_text_1",
+        selected=True,
+        selection_reason="normal",
+    )
+    record_silent.assert_not_called()
+    info_log.assert_any_call(
+        "deliverable_selected response_id=%s selected=%s reason=%s",
+        "resp_tool_text_1",
+        "true",
+        "normal",
+    )
+    assert "resp_tool_text_1" not in api._terminal_response_text_store()
 
 
 def test_handle_response_done_suppresses_empty_tool_followup_silent_incident_when_chain_continues() -> None:
