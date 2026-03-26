@@ -108,7 +108,7 @@ _REPORT_STEP_RE = re.compile(
 )
 _OBSERVATION_STEP_RE = re.compile(r"\b(?:observe|describe|identify|what do you see|what(?:'s| is) in|do you see|can you see)\b", re.IGNORECASE)
 _GESTURE_STEP_RE = re.compile(
-    r"\b(?:look|move|center|turn|rotate|point|go to|navigate|back to center|return to center)\b",
+    r"\b(?:look(?:ing)?|move|center|turn(?:ing)?|rotate|point(?:ing)?|go to|navigate|back to center|return to center|come back to center)\b",
     re.IGNORECASE,
 )
 _REPORT_STATUS_TOKENS = ("done", "finished", "ready", "centered", "complete", "completed", "settled")
@@ -137,6 +137,12 @@ _REQUEST_INTENT_RE = re.compile(
     r"\b(?:please|can you|could you|would you|will you|tell me|let me know|show me)\b",
     re.IGNORECASE,
 )
+_GESTURE_DIRECTION_CENTER_RE = re.compile(
+    r"\b(?:center|centre|middle|straight ahead|back to center|return to center|come back to center)\b",
+    re.IGNORECASE,
+)
+_GESTURE_DIRECTION_LEFT_RE = re.compile(r"\bleft\b", re.IGNORECASE)
+_GESTURE_DIRECTION_RIGHT_RE = re.compile(r"\bright\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -756,9 +762,14 @@ class ContinuityLedger:
                 return
         step = state.steps[idx]
         normalized_tool = tool_name.lower()
+        gesture_direction_match = self._gesture_direction_matches_step(step.summary, normalized_tool)
         clear_match = (
             step.kind == "diagnostics"
-            or (step.kind == "gesture" and normalized_tool.startswith(_TOOL_COMMITMENT_PREFIXES))
+            or (
+                step.kind == "gesture"
+                and normalized_tool.startswith(_TOOL_COMMITMENT_PREFIXES)
+                and gesture_direction_match
+            )
         )
         if clear_match:
             self._compound_state = self._replace_compound_step_status(state, idx, "completed")
@@ -1320,3 +1331,30 @@ class ContinuityLedger:
         if _GESTURE_STEP_RE.search(clause):
             return "gesture"
         return "followup"
+
+    def _gesture_direction_matches_step(self, step_summary: str, tool_name: str) -> bool:
+        expected = self._gesture_direction_from_text(step_summary)
+        actual = self._gesture_direction_from_tool_name(tool_name)
+        if expected == "" or actual == "":
+            return True
+        return expected == actual
+
+    def _gesture_direction_from_text(self, text: str) -> str:
+        normalized = text.lower().strip()
+        if _GESTURE_DIRECTION_CENTER_RE.search(normalized):
+            return "center"
+        if _GESTURE_DIRECTION_LEFT_RE.search(normalized):
+            return "left"
+        if _GESTURE_DIRECTION_RIGHT_RE.search(normalized):
+            return "right"
+        return ""
+
+    def _gesture_direction_from_tool_name(self, tool_name: str) -> str:
+        normalized = tool_name.lower().strip()
+        if "center" in normalized or "centre" in normalized:
+            return "center"
+        if "left" in normalized:
+            return "left"
+        if "right" in normalized:
+            return "right"
+        return ""
