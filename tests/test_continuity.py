@@ -186,6 +186,43 @@ def test_compound_parser_preserves_order_for_comma_then_chain() -> None:
     assert brief.compound_request.steps[2].report_intent == "status"
 
 
+def test_compound_parser_classifies_diagnostic_reading_chain_between_gestures_and_report() -> None:
+    ledger = ContinuityLedger()
+
+    ledger.update_from_event(
+        "transcript_final",
+        text=(
+            "look right and then take a diagnostic reading and then come back to center "
+            "and tell me what that diagnostic says"
+        ),
+        source="input_audio_transcription",
+    )
+
+    brief = ledger.build_brief("run-diagnostic-reading-chain", "turn-1", "diagnostic_reading_chain")
+    assert brief.compound_request is not None
+    assert [step.kind for step in brief.compound_request.steps] == ["gesture", "diagnostics", "gesture", "report"]
+    assert [step.summary for step in brief.compound_request.steps] == [
+        "look right.",
+        "take a diagnostic reading.",
+        "come back to center.",
+        "tell me what that diagnostic says.",
+    ]
+
+
+@pytest.mark.parametrize(
+    "clause",
+    [
+        "take a diagnostic reading",
+        "get a diagnostic reading",
+        "do a diagnostic check",
+        "run diagnostics",
+    ],
+)
+def test_compound_step_classifier_marks_diagnostic_phrase_family(clause: str) -> None:
+    ledger = ContinuityLedger()
+    assert ledger._classify_compound_step_kind(clause, unresolved_summary=None) == "diagnostics"
+
+
 def test_compound_parser_status_report_remains_non_perception() -> None:
     ledger = ContinuityLedger()
 

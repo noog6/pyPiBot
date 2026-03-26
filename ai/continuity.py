@@ -101,7 +101,14 @@ _FOLLOWUP_ONLY_PREFIX_RE = re.compile(
     re.IGNORECASE,
 )
 _SILENT_RE = re.compile(r"\bsilently\b", re.IGNORECASE)
-_DIAGNOSTIC_STEP_RE = re.compile(r"\b(?:check|run|read|query)\b.*\b(?:diagnostic|diagnostics|status|battery|temperature|pressure|environment)\b", re.IGNORECASE)
+_DIAGNOSTIC_STEP_RE = re.compile(
+    r"\b(?:"
+    r"(?:check|run|read|query)\b.*\b(?:diagnostic|diagnostics|status|battery|temperature|pressure|environment)\b"
+    r"|"
+    r"(?:take|get|do)\b.*\bdiagnostic(?:s)?\b.*\b(?:reading|check)\b"
+    r")",
+    re.IGNORECASE,
+)
 _REPORT_STEP_RE = re.compile(
     rf"\b(?:tell me|let me know|report back|report|{_STRUCTURED_SAY_PATTERN})",
     re.IGNORECASE,
