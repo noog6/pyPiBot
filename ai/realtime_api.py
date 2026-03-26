@@ -10039,8 +10039,24 @@ class RealtimeAPI:
                 continue
             if str(state.turn_id or "").strip() != normalized_turn_id:
                 continue
-            if str(getattr(state, "deliverable_class", "unknown") or "unknown").strip().lower() == "final":
-                return True
+            if str(getattr(state, "deliverable_class", "unknown") or "unknown").strip().lower() != "final":
+                continue
+            response_id = str(getattr(state, "response_id", "") or "").strip()
+            if response_id:
+                response_status = self._response_status(response_id)
+                if (
+                    response_status == "cancelled"
+                    and self._is_provisional_response(response_id=response_id)
+                    and not self._selected_response_has_substantive_evidence(response_id=response_id)
+                ):
+                    logger.debug(
+                        "turn_final_deliverable_ignored_cancelled_provisional run_id=%s turn_id=%s response_id=%s reason=no_substantive_evidence",
+                        self._current_run_id() or "",
+                        normalized_turn_id,
+                        response_id,
+                    )
+                    continue
+            return True
         return False
 
     def _assistant_message_same_turn_owner_reason(
