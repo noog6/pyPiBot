@@ -271,8 +271,25 @@ async def _suppress_preference_recall_server_auto_response(controller, websocket
         if str(getattr(controller, "_active_response_origin", "")).strip().lower() != "server_auto":
             return
         active_key = str(getattr(controller, "_active_server_auto_input_event_key", "") or "").strip()
+        active_turn_id = str(getattr(controller, "_current_response_turn_id", "") or "").strip()
         if input_event_key and active_key and active_key != input_event_key:
-            return
+            if active_turn_id and active_turn_id != turn_id:
+                logger.debug(
+                    "response_cancel_skipped run_id=%s turn_id=%s reason=active_turn_mismatch active_turn_id=%s active_input_event_key=%s recall_input_event_key=%s",
+                    controller._current_run_id() or "",
+                    turn_id,
+                    active_turn_id,
+                    active_key,
+                    input_event_key,
+                )
+                return
+            logger.debug(
+                "response_cancel_same_turn_input_mismatch run_id=%s turn_id=%s active_input_event_key=%s recall_input_event_key=%s",
+                controller._current_run_id() or "",
+                turn_id,
+                active_key,
+                input_event_key,
+            )
         if not bool(getattr(controller, "_response_in_flight", False)):
             return
         active_response_id = str(getattr(controller, "_active_response_id", "") or "").strip()
