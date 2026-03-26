@@ -1,212 +1,157 @@
-# Theo Cognitive Stack Roadmap
+# Theo Cognitive Stack (Code-Aligned)
 
-## Purpose
+Purpose: map Theo's **current** cognitive/behavioral stack to real code seams so future work lands in the right layer.
 
-This document captures Theo's current architectural plateau, the next major
-layers to build, and long-horizon direction. It is intended to guide both human
-maintainers and coding agents so work lands in the right conceptual layer.
+## You are here (March 2026)
 
-## You Are Here
+Theo is no longer at a "continuity missing" stage.
 
-Theo has moved from repeated runtime break/fix work to a more stable realtime
-foundation.
+- Runtime/lifecycle determinism is the stabilized base.
+- Response-create, terminal-deliverable, semantic-owner, and tool-followup arbitration seams are now implemented.
+- Continuity exists as a deterministic bookkeeping layer (not a planner).
+- Perception/memory is partial: useful retrieval and intent shaping are present, but still heuristic-heavy.
+- Higher-order cognition (global planner, long-horizon policy, cost/energy optimizer) is still backlog.
 
-- **Physical Platform**: real and operational.
-- **Runtime / Nervous System**: meaningfully stabilized (response lifecycle,
-  transcript-final upgrade paths, tool follow-up release points, health snapshot
-  semantics, shutdown behavior, and single-flight arbitration).
-- **Perception & Memory Interfaces**: partially working, still rough and in need
-  of stricter signal discipline.
-- **Decision Arbitration and above**: mostly frontier and emerging
-  architecture.
+## Current stack reconstruction
 
-> **You are here:** stable runtime base with partial perception/memory,
-> entering explicit behavior-architecture buildout and preparing to formalize
-> decision arbitration.
+### Layer 0 — Physical + motion substrate (**implemented / stable enough**)
 
-## Cognitive Stack (Layer View)
+**Owns:** hardware I/O, gesture execution primitives.
 
-```mermaid
-flowchart TB
-    P[Physical Platform\nStatus: Stable]
-    R[Runtime / Nervous System\nStatus: Stabilized]
-    M[Perception & Memory Interfaces\nStatus: Partial]
-    D[Decision Arbitration Layer\nStatus: Emerging]
-    C[Presence / Continuity Layer\nStatus: Missing]
-    Q[Curiosity / Relevance Filter\nStatus: Missing]
-    E[Cost / Energy Awareness\nStatus: Missing]
-    G[Governance Spine\nStatus: Partial / Formalizing]
-    H[Character / Persona Layer\nStatus: Future]
-    X[Multi-Agent / Ecosystem Layer\nStatus: Long Horizon]
+**Anchors:** `motion/*`, `services/tool_runtime.py`, gesture tools in `ai/tools.py`.
 
-    P --> R --> M --> D --> C --> Q --> E --> G --> H --> X
+**Notes:** Motion/gesture behavior is exposed through deterministic tool calls; this is an execution substrate, not cognition.
 
-    YH[[YOU ARE HERE]]
-    YH -.-> R
-YH -.-> M
-YH -.-> D
-```
+---
 
-## Current Module Anchors
+### Layer 1 — Runtime / Nervous System (**implemented / plateau**)
 
-### Embodiment Layer Status (Realtime presence seam)
+**Owns:** realtime transport, response lifecycle, queue/single-flight behavior, cancellation/replace, shutdown/task hygiene.
 
-- `ai/embodiment_policy.py` is the deterministic embodiment policy seam (Phase A complete).
-- `ai/attention_continuity.py` is a minimal continuity helper (Phase B introduced) that keeps listening attention alive through short ASR/transcript-final churn windows.
-- This layer is **not** a gaze planner, camera tracker, or second runtime state machine.
+**Anchors:** `ai/realtime_api.py`, `ai/realtime/response_create_runtime.py`, `ai/realtime/lifecycle_state.py`, `ai/realtime/shutdown.py`.
 
-- **Runtime / Nervous System** → `ai/realtime_api.py`,
-  `ai/realtime/response_create_runtime.py`.
-  Changes that belong here are lifecycle/transport determinism fixes (cancel/
-  replace sequencing, single-flight/idempotency, release boundaries, and
-  shutdown semantics); changes that do not belong here are policy decisions
-  about *what* Theo should do.
-- **Perception / Memory Interfaces** → `services/memory_manager.py`, memory
-  retrieval hooks in `ai/tools.py`.
-  Changes that belong here are retrieval relevance, recall quality, and context
-  signal shaping; changes that do not belong here are response arbitration
-  policy or transport state-machine control.
-- **Decision Arbitration (emerging)** → `ai/interaction_lifecycle_policy.py`
-  plus response-create arbitration paths.
-  Changes that belong here are explicit choice logic for do-now vs defer vs
-  refuse and conflict resolution among candidates; changes that do not belong
-  here are low-level queueing/idempotency mechanics or broad permission policy.
-  Response-path arbitration around `response.create` is now more explicitly
-  formed as a seam-local decision surface, while broader multi-class
-  arbitration remains future work.
-- **Governance Spine** → `ai/governance.py`.
-  Changes that belong here are risk-tier gating, confirmation requirements, and
-  fail-closed policy boundaries; changes that do not belong here are memory
-  quality tuning or realtime lifecycle orchestration.
+**Now true in code:**
+- `response.create` attempts are normalized into explicit outcome actions (`SEND`, `SCHEDULE`, `BLOCK`, `DROP`).
+- Single-flight and canonical-key guards are enforced before create/send.
+- Server-auto/provisional paths are handled as first-class lifecycle cases.
 
-## Fast Layer Triage Matrix
+**Boundary:** do not add "what should Theo do" policy here unless it is lifecycle safety/determinism.
 
-| Question being answered | Owning layer | Example code anchor |
+---
+
+### Layer 2 — Perception + memory interface (**implemented, partial quality frontier**)
+
+**Owns:** memory-intent classification, retrieval query shaping, per-turn memory brief construction, preference/topic recall hooks.
+
+**Anchors:** `ai/realtime/memory_runtime.py`, `services/memory_manager.py`, `ai/realtime/preference_recall_runtime.py`, memory-facing helpers in `ai/tools.py`.
+
+**Now true in code:**
+- Memory intent is explicitly typed (`preference_recall`, `topic_recall`, `general_memory`).
+- Retrieval includes lexical/semantic hybrid diagnostics and readiness/fallback paths.
+- Preference recall can suppress server-auto responses and force same-turn context injection.
+
+**Partial/in-progress:** quality and signal discipline are still heuristic-driven (pattern sets, thresholds, readiness canary behavior).
+
+---
+
+### Layer 3 — Turn arbitration seams (**implemented, still expanding**)
+
+**Owns:** per-turn decision surfaces that decide which candidate path wins.
+
+**Anchors:**
+- `ai/interaction_lifecycle_policy.py` (response-create + server-auto-created gating)
+- `ai/realtime/response_create_runtime.py` (candidate construction + execution decision)
+- `ai/terminal_deliverable_arbitration.py` (terminal deliverable selection)
+- `ai/semantic_owner_arbitration.py` (semantic owner reassignment)
+- `ai/tool_followup_arbitration.py` (release/hold/suppress followups)
+- `ai/decision_arbitration_adapter.py` (normalized observational diagnostics)
+
+**Now true in code:**
+- Arbitration is not a single monolith; it is seam-local and deterministic by policy domain.
+- Terminal reconciliation handles provisional/server-auto and transcript-final upgrade behavior.
+- Tool follow-up release is policy-driven (`RELEASE`, `HOLD`, `SUPPRESS`) with parent coverage semantics.
+- Semantic owner can be reassigned from tool-output lineage to parent canonical turn when conditions match.
+- `decision_arbitration_adapter` remains observational-only normalization/diagnostics and is not a runtime authority seam.
+
+**Partial/in-progress:** this is still mostly turn-local arbitration; cross-turn/global goal arbitration is not implemented.
+
+---
+
+### Layer 4 — Continuity + stance bookkeeping (**implemented, intentionally narrow**)
+
+**Owns:** short-horizon continuity ledger state and classification for diagnostics/context.
+
+**Anchors:** `ai/continuity.py`, use-sites in `ai/realtime_api.py`.
+
+**Now true in code:**
+- Continuity has explicit item kinds/status/priority and stance labels.
+- Compound-step requests and turn-settlement classification are modeled.
+- Module contract explicitly states bookkeeping-only: not an authority for arbitration/scheduling.
+
+**Boundary:** continuity must not silently become a hidden planner or execution controller.
+
+---
+
+### Layer 5 — Governance spine (**implemented, partial formalization**)
+
+**Owns:** tool risk tiers, confirmation requirements, idempotency key normalization, cooldown/budget/autonomy-window policy.
+
+**Anchors:** `ai/governance.py`, shared decision envelope in `ai/governance_spine.py`, confirmation runtime in `ai/realtime/confirmation_runtime.py`.
+
+**Now true in code:**
+- Governance decisions are normalized (`approved`, `needs_confirmation`, `denied` semantics).
+- Tool argument normalization/idempotency keying is explicit.
+- Confirmation reminders/guard rails are runtime-integrated.
+
+**Partial/in-progress:** cross-subsystem governance priority remains seam-local metadata (per `governance_spine`) unless a dedicated global arbitration seam is added.
+
+---
+
+### Layer 6 — Conversational pacing + embodiment cues (**implemented, bounded behavior layer**)
+
+**Owns:** micro-ack pacing and deterministic embodiment cue policy.
+
+**Anchors:** `ai/micro_ack_manager.py`, `ai/embodiment_policy.py`, `ai/attention_continuity.py`, integration in `ai/realtime_api.py`.
+
+**Now true in code:**
+- Micro-acks are rate-limited, deduped, category/channel gated, and suppressible when followup/near-ready conditions apply.
+- Embodiment policy maps interaction state + attention snapshot to governed cue actions.
+- Attention continuity provides a short ASR churn hold window; it is not a second runtime machine.
+
+**Boundary:** these cues are expression/pacing aids, not substitutes for terminal deliverables.
+
+---
+
+### Layers not yet implemented as full architecture
+
+- Global multi-turn planner / explicit long-horizon goals.
+- Cost/energy-aware action optimizer spanning model/tool/hardware budgets.
+- Persona/character control as a first-class module with drift metrics.
+- Multi-agent ecosystem coordination.
+
+## Current status map
+
+| Area | Status | What to assume |
 | --- | --- | --- |
-| Is this signal/context worth using, and how should it be grounded? | Perception & Memory Interfaces | `services/memory_manager.py` |
-| Do we respond now/later/never? | Decision Arbitration Layer | `ai/interaction_lifecycle_policy.py` |
-| May this tool execute under risk/cost policy? | Governance Spine | `ai/governance.py` |
-| Can transport/lifecycle safely carry out action? | Runtime / Nervous System | `ai/realtime_api.py` |
-| How should Theo express this consistently without drifting? | Character / Persona Layer | prompt/session persona config (future character module) |
+| Runtime lifecycle determinism | Stable plateau | Preserve semantics; avoid opportunistic rewrites. |
+| Response/terminal/followup arbitration | Implemented, expanding | Extend seam-locally with explicit reason codes. |
+| Perception/memory | Partial | Improve relevance/discipline before adding broad new policy. |
+| Continuity ledger | Implemented narrow | Use as context/diagnostic signal, not control authority. |
+| Governance | Implemented partial | Keep fail-closed and confirmation semantics explicit. |
+| Higher cognition (planner/cost/persona/ecosystem) | Aspirational/backlog | Do not imply these are already present. |
 
-> **Anti-pattern:** Do not move governance or cognitive policy checks into lifecycle scheduling code except for deterministic safety interlocks.
+## Anti-patterns and boundaries
 
-## Layer-by-Layer Guidance
+- Do not collapse arbitration, governance, and runtime queueing into one module.
+- Do not treat continuity settlement as execution authority.
+- Do not bypass terminal-deliverable arbitration with "helpful" direct response writes.
+- Do not let micro-acks or gesture-only tool outputs count as final user deliverables.
+- Do not hide policy changes in transport/lifecycle plumbing without explicit arbitration/governance seams.
 
-### 1) Physical Platform
-- **What it is:** hardware substrate (Pi, sensors, actuation, audio stack).
-- **Unlocks:** embodied operation and observability.
-- **Why it matters:** all higher capabilities depend on reliable I/O and power.
-- **Status:** **stable**.
+## Guidance for future Codex passes
 
-### 2) Runtime / Nervous System
-- **What it is:** lifecycle transport and control plumbing (realtime loop,
-  cancel/replace semantics, scheduling/release boundaries, shutdown behavior,
-  single-flight/idempotency guards).
-- **Unlocks:** deterministic, debuggable execution.
-- **Why it matters:** this is the safety rail for all upper-layer cognition.
-- **Status:** **meaningfully stabilized**; preserve this plateau.
-
-### 3) Perception & Memory Interfaces
-- **What it is:** context intake, memory retrieval and preference recall,
-  grounding quality controls.
-- **Unlocks:** continuity and context-aware behavior.
-- **Why it matters:** better signal quality is a prerequisite for good
-  arbitration.
-- **Status:** **partial**.
-
-### 4) Decision Arbitration Layer
-- **What it is:** explicit policy for selecting what to do now vs later vs never,
-  including conflict resolution among candidate actions.
-- **Unlocks:** coherent behavior instead of opportunistic or locally emergent responses.
-- **Why it matters:** this is the next critical architecture frontier.
-- **Status:** **emerging / next primary build target**.
-  Response-path arbitration is now partially explicit; broader arbitration
-  structure is still frontier work.
-
-### 5) Presence / Continuity Layer
-- **What it is:** durable short/medium-horizon continuity of goals,
-  commitments, unresolved threads, and situational stance across turns/runs.
-- **Unlocks:** consistent conversational and operational presence.
-- **Why it matters:** avoids "reset every turn" behavior.
-- **Status:** **missing (mid-horizon)**.
-
-### 6) Curiosity / Relevance Filter
-- **What it is:** attention strategy that prefers high-value signals and suppresses
-  noise.
-- **Unlocks:** better focus and less context bleed.
-- **Why it matters:** improves grounding and reduces wasted work.
-- **Status:** **missing (mid-horizon)**.
-
-### 7) Cost / Energy Awareness
-- **What it is:** explicit budget and energy tradeoff logic (latency, API spend,
-  battery, tool cost).
-- **Unlocks:** durable autonomy under constraints.
-- **Why it matters:** prevents expensive/fragile behavior loops.
-- **Status:** **missing (mid-horizon)**.
-
-### 8) Governance Spine
-- **What it is:** policy boundaries for permissions, risk tiers, confirmation
-  behavior, and fail-closed controls.
-- **Unlocks:** safe execution and accountable escalation behavior.
-- **Why it matters:** keeps autonomy bounded and auditable.
-- **Status:** **partial; formal boundary work needed**.
-
-### 9) Character / Persona Layer
-- **What it is:** explicit voice/behavior shaping with drift controls.
-- **Unlocks:** coherent long-term identity expression.
-- **Why it matters:** persona should be managed intentionally, not as prompt
-  side effects.
-- **Status:** **future**.
-
-### 10) Multi-Agent / Ecosystem Layer
-- **What it is:** Theo-to-Theo or Theo-to-service coordination and shared intent.
-- **Unlocks:** collaborative distributed behavior.
-- **Why it matters:** expands capabilities beyond a single runtime instance.
-- **Status:** **long horizon**.
-
-## Roadmap by Horizon
-
-### Near Horizon (protect base + prepare arbitration)
-- Preserve runtime stability and deterministic lifecycle semantics.
-- Strengthen perception/memory discipline and retrieval relevance.
-- Investigate and formalize decision arbitration surfaces.
-- Reduce weak grounding and opportunistic context bleed.
-- Improve noisy low-value signal handling.
-- Document and normalize current arbitration behavior before large refactors.
-
-### Mid Horizon (build missing cognitive layers)
-- Build an explicit decision arbitration layer.
-- Add a presence/continuity layer.
-- Add curiosity/relevance filtering.
-- Add cost/energy awareness.
-- Clarify governance boundaries versus runtime safeguards.
-
-### Long Horizon (ecosystem evolution)
-- Add character/persona drift controls.
-- Enable richer autonomous behavior under explicit policy boundaries.
-- Improve local/cloud balancing.
-- Support robot-to-robot and ecosystem coordination.
-
-## Development Directive (Architectural Law)
-
-1. Preserve runtime stability.
-2. Build upward from stable layers.
-3. Do not bury cognitive policy inside transport/lifecycle plumbing.
-4. Distinguish runtime safeguards from arbitration from governance.
-5. Prefer explicit layer ownership over scattered feature flags.
-
-## How Agents Should Use This Roadmap
-
-When working in Theo:
-
-1. **Classify the request by layer first** (runtime, perception/memory,
-   arbitration, governance, persona, ecosystem).
-2. **Place logic in the owning layer**, not in lower-level plumbing for
-   convenience.
-3. **Only touch runtime plumbing** (e.g., `ai/realtime_api.py` lifecycle paths)
-   when the issue is genuinely lifecycle/transport determinism.
-4. **Separate bug-fix work from new-layer development** in proposals and commits.
-5. **Preserve deterministic runtime behavior** while evolving higher-order
-   cognition.
-6. **Do not confuse** single-flight/idempotency, scheduling/queueing, arbitration, and governance; these are related but not interchangeable.
+1. Classify change by owning layer first.
+2. If touching response paths, state which seam is authoritative (`response_create`, terminal selection, semantic owner, tool-followup, governance).
+3. Preserve deterministic reason codes and observability payloads when evolving behavior.
+4. Mark docs and commit/PR notes with: `Owning layer: <layer name>`.
+5. When uncertain, treat code + logs as source of truth and downgrade stale roadmap language.
