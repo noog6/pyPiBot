@@ -256,6 +256,11 @@ _MEMORY_USAGE_INJECTION_ORDER: tuple[str, ...] = (
     "preference_context",
     "startup_digest",
 )
+_AUTO_MEMORY_REPEAT_WINDOW_S = 15 * 60.0
+_AUTO_MEMORY_REPEAT_THRESHOLD = 2
+_AUTO_MEMORY_REPEAT_HISTORY_MAX_ENTRIES = 256
+_AUTO_MEMORY_REPEAT_MIN_CONFIDENCE_FLOOR = 0.55
+_AUTO_MEMORY_REPEAT_MIN_CONFIDENCE_DELTA = 0.20
 _DESCRIPTIVE_TURN_REQUEST_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bwhat\s+(?:is|s)\s+(?:it|this|that)\b", re.IGNORECASE),
     re.compile(r"\bwhat\s+do\s+you\s+see\b", re.IGNORECASE),
@@ -853,6 +858,31 @@ class RealtimeAPI:
             memory_cfg.get("require_confirmation_for_auto_memory", False)
         )
         self._auto_memory_min_confidence = float(memory_cfg.get("auto_memory_min_confidence", 0.75))
+        self._auto_memory_repeat_window_s = float(
+            memory_cfg.get("auto_memory_repeat_window_s", _AUTO_MEMORY_REPEAT_WINDOW_S)
+        )
+        self._auto_memory_repeat_threshold = int(
+            memory_cfg.get("auto_memory_repeat_threshold", _AUTO_MEMORY_REPEAT_THRESHOLD)
+        )
+        self._auto_memory_repeat_min_confidence_floor = float(
+            memory_cfg.get(
+                "auto_memory_repeat_min_confidence_floor",
+                _AUTO_MEMORY_REPEAT_MIN_CONFIDENCE_FLOOR,
+            )
+        )
+        self._auto_memory_repeat_min_confidence_delta = float(
+            memory_cfg.get(
+                "auto_memory_repeat_min_confidence_delta",
+                _AUTO_MEMORY_REPEAT_MIN_CONFIDENCE_DELTA,
+            )
+        )
+        self._auto_memory_candidate_history_max_entries = int(
+            memory_cfg.get(
+                "auto_memory_repeat_history_max_entries",
+                _AUTO_MEMORY_REPEAT_HISTORY_MAX_ENTRIES,
+            )
+        )
+        self._auto_memory_candidate_history: dict[str, dict[str, float | int]] = {}
         ops_cfg = config.get("ops") or {}
         budgets_cfg = ops_cfg.get("budgets") or {}
         self._ai_call_budget = RollingWindowBudget(
@@ -15053,7 +15083,137 @@ class RealtimeAPI:
         )
         return text in low_signal_patterns
 
-    def _should_store_auto_memory(self, *, confidence: float, content: str) -> bool:
+    def _normalize_auto_memory_candidate(self, *, content: str, tags: list[str] | None = None) -> str:
+        # Intentionally lexical normalization only (seam-local + deterministic).
+        # Limitation accepted for v1: paraphrases like "quiet coffee shops" vs
+        # "calm cafés" will usually not match the same candidate fingerprint.
+        normalized_content = re.sub(r"\s+", " ", content.strip().lower())
+        normalized_tags = tuple(
+            sorted(
+                str(tag).strip().lower()
+                for tag in (tags or [])
+                if isinstance(tag, str) and str(tag).strip()
+            )
+        )
+        if normalized_tags:
+            return f"{normalized_content}|tags:{','.join(normalized_tags)}"
+        return normalized_content
+
+    def _fingerprint_auto_memory_candidate(self, *, normalized_candidate: str) -> str:
+        return hashlib.sha1(normalized_candidate.encode("utf-8")).hexdigest()[:16]
+
+    def _prune_auto_memory_candidate_history(self, *, now: float) -> None:
+        history = getattr(self, "_auto_memory_candidate_history", None)
+        if not isinstance(history, dict):
+            self._auto_memory_candidate_history = {}
+            return
+        window_s = max(1.0, float(getattr(self, "_auto_memory_repeat_window_s", _AUTO_MEMORY_REPEAT_WINDOW_S)))
+        stale_cutoff = now - window_s
+        stale_fingerprints = [
+            fingerprint
+            for fingerprint, entry in history.items()
+            if not isinstance(entry, dict) or float(entry.get("last_seen", 0.0) or 0.0) < stale_cutoff
+        ]
+        for fingerprint in stale_fingerprints:
+            history.pop(fingerprint, None)
+
+        max_entries = max(
+            1,
+            int(
+                getattr(
+                    self,
+                    "_auto_memory_candidate_history_max_entries",
+                    _AUTO_MEMORY_REPEAT_HISTORY_MAX_ENTRIES,
+                )
+                or _AUTO_MEMORY_REPEAT_HISTORY_MAX_ENTRIES
+            ),
+        )
+        if len(history) <= max_entries:
+            return
+        overflow = len(history) - max_entries
+        eviction_order = sorted(
+            history.items(),
+            key=lambda item: (
+                float(item[1].get("last_seen", 0.0) or 0.0) if isinstance(item[1], dict) else 0.0,
+                float(item[1].get("first_seen", 0.0) or 0.0) if isinstance(item[1], dict) else 0.0,
+                item[0],
+            ),
+        )
+        for fingerprint, _entry in eviction_order[:overflow]:
+            history.pop(fingerprint, None)
+
+    def _observe_auto_memory_candidate(
+        self,
+        *,
+        confidence: float,
+        content: str,
+        tags: list[str] | None = None,
+    ) -> tuple[str, int, bool]:
+        normalized_candidate = self._normalize_auto_memory_candidate(content=content, tags=tags)
+        fingerprint = self._fingerprint_auto_memory_candidate(normalized_candidate=normalized_candidate)
+        now = time.monotonic()
+        history = getattr(self, "_auto_memory_candidate_history", None)
+        if not isinstance(history, dict):
+            history = {}
+            self._auto_memory_candidate_history = history
+        self._prune_auto_memory_candidate_history(now=now)
+
+        run_id = self._current_run_id() or "run-unknown"
+        turn_id = self._current_turn_id_or_unknown()
+        logger.debug(
+            "auto_memory_candidate_observed run_id=%s turn_id=%s source=auto_reflection candidate_fingerprint=%s confidence=%.2f",
+            run_id,
+            turn_id,
+            fingerprint,
+            confidence,
+        )
+
+        window_s = max(1.0, float(getattr(self, "_auto_memory_repeat_window_s", _AUTO_MEMORY_REPEAT_WINDOW_S)))
+        entry = history.get(fingerprint)
+        within_window = False
+        repeat_count = 1
+        if isinstance(entry, dict):
+            last_seen = float(entry.get("last_seen", 0.0) or 0.0)
+            within_window = (now - last_seen) <= window_s
+            if within_window:
+                repeat_count = int(entry.get("count", 0) or 0) + 1
+            else:
+                repeat_count = 1
+        history[fingerprint] = {
+            "count": repeat_count,
+            "first_seen": float(entry.get("first_seen", now) if isinstance(entry, dict) and within_window else now),
+            "last_seen": now,
+        }
+        self._prune_auto_memory_candidate_history(now=now)
+        logger.debug(
+            "auto_memory_repetition_eval run_id=%s turn_id=%s source=auto_reflection candidate_fingerprint=%s confidence=%.2f repeat_count=%s within_window=%s",
+            run_id,
+            turn_id,
+            fingerprint,
+            confidence,
+            repeat_count,
+            str(within_window).lower(),
+        )
+        return fingerprint, repeat_count, within_window
+
+    def _should_store_auto_memory(
+        self,
+        *,
+        confidence: float,
+        content: str,
+        tags: list[str] | None = None,
+    ) -> bool:
+        # Repetition policy (pre-write gate only):
+        # 1) keep existing strong-confidence immediate allow path unchanged;
+        # 2) for lower-confidence candidates, require bounded recent repetition;
+        # 3) reject one-shot low-confidence proposals.
+        run_id = self._current_run_id() or "run-unknown"
+        turn_id = self._current_turn_id_or_unknown()
+        decision = "reject"
+        reason = "insufficient_confidence_and_not_repeated"
+        fingerprint = "unavailable"
+        repeat_count = 0
+        within_window = False
         if not getattr(self, "_auto_memory_enabled", False):
             logger.debug("Skipping auto-memory: disabled by config.")
             return False
@@ -15067,14 +15227,76 @@ class RealtimeAPI:
             logger.debug("Skipping auto-memory: candidate memory content too short.")
             return False
         threshold = float(getattr(self, "_auto_memory_min_confidence", 0.75))
-        if confidence < threshold:
+        repeat_threshold = max(2, int(getattr(self, "_auto_memory_repeat_threshold", _AUTO_MEMORY_REPEAT_THRESHOLD)))
+        repeat_min_floor = max(
+            0.0,
+            float(
+                getattr(
+                    self,
+                    "_auto_memory_repeat_min_confidence_floor",
+                    _AUTO_MEMORY_REPEAT_MIN_CONFIDENCE_FLOOR,
+                )
+            ),
+        )
+        repeat_min_delta = max(
+            0.0,
+            float(
+                getattr(
+                    self,
+                    "_auto_memory_repeat_min_confidence_delta",
+                    _AUTO_MEMORY_REPEAT_MIN_CONFIDENCE_DELTA,
+                )
+            ),
+        )
+        repeat_min_threshold = min(
+            threshold,
+            max(repeat_min_floor, threshold - repeat_min_delta),
+        )
+
+        if confidence >= threshold:
+            decision = "allow"
+            reason = "high_confidence"
             logger.debug(
-                "Skipping auto-memory: confidence %.2f below threshold %.2f.",
+                "auto_memory_capture_decision run_id=%s turn_id=%s source=auto_reflection candidate_fingerprint=%s confidence=%.2f repeat_count=%s within_window=%s decision=%s reason=%s",
+                run_id,
+                turn_id,
+                fingerprint,
                 confidence,
-                threshold,
+                repeat_count,
+                str(within_window).lower(),
+                decision,
+                reason,
             )
-            return False
-        return True
+            return True
+
+        try:
+            fingerprint, repeat_count, within_window = self._observe_auto_memory_candidate(
+                confidence=confidence,
+                content=content,
+                tags=tags,
+            )
+        except Exception as exc:  # noqa: BLE001 - fail-open safety for runtime tracking
+            logger.warning("auto_memory_candidate_tracking_failed run_id=%s turn_id=%s error=%s", run_id, turn_id, exc)
+            fingerprint = "tracking_error"
+            repeat_count = 0
+            within_window = False
+
+        if confidence >= repeat_min_threshold and repeat_count >= repeat_threshold:
+            decision = "allow"
+            reason = "repeated_candidate"
+
+        logger.debug(
+            "auto_memory_capture_decision run_id=%s turn_id=%s source=auto_reflection candidate_fingerprint=%s confidence=%.2f repeat_count=%s within_window=%s decision=%s reason=%s",
+            run_id,
+            turn_id,
+            fingerprint,
+            confidence,
+            repeat_count,
+            str(within_window).lower(),
+            decision,
+            reason,
+        )
+        return decision == "allow"
 
     async def _run_response_done_reflection(self, trigger: str) -> None:
         if not self.api_key:
@@ -15112,7 +15334,7 @@ class RealtimeAPI:
         if not isinstance(confidence, (int, float)):
             confidence = 0.0
         confidence = max(0.0, min(float(confidence), 1.0))
-        if not self._should_store_auto_memory(confidence=confidence, content=content):
+        if not self._should_store_auto_memory(confidence=confidence, content=content, tags=tags):
             return
         remember_func = function_map.get("remember_memory")
         if remember_func is None:

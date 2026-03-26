@@ -43,6 +43,8 @@ def _make_memory_manager(store: MemoryStore) -> MemoryManager:
 def _make_api_stub() -> RealtimeAPI:
     api = RealtimeAPI.__new__(RealtimeAPI)
     api.api_key = "test"
+    api._current_run_id = lambda: "run-test"
+    api._current_turn_id_or_unknown = lambda: "turn-test"
     api._allow_ai_call = lambda *args, **kwargs: True
     api._record_ai_call = lambda: None
     api._tool_call_records = []
@@ -54,6 +56,12 @@ def _make_api_stub() -> RealtimeAPI:
     api._auto_memory_enabled = True
     api._require_confirmation_for_auto_memory = False
     api._auto_memory_min_confidence = 0.75
+    api._auto_memory_repeat_min_confidence_floor = 0.55
+    api._auto_memory_repeat_min_confidence_delta = 0.20
+    api._auto_memory_repeat_threshold = 2
+    api._auto_memory_repeat_window_s = 30.0
+    api._auto_memory_candidate_history_max_entries = 3
+    api._auto_memory_candidate_history = {}
     return api
 
 
@@ -64,6 +72,105 @@ def test_auto_memory_guardrail_blocks_low_signal_or_low_confidence() -> None:
 
     api._last_user_input_text = "Please remember I like dark roast coffee in the morning."
     assert api._should_store_auto_memory(confidence=0.40, content="prefers dark roast") is False
+
+
+def test_auto_memory_single_shot_low_confidence_rejected() -> None:
+    api = _make_api_stub()
+
+    assert (
+        api._should_store_auto_memory(
+            confidence=0.62,
+            content="User prefers keyboard-only navigation in IDE workflows.",
+            tags=["workflow"],
+        )
+        is False
+    )
+
+
+def test_auto_memory_repeated_low_confidence_within_window_accepted() -> None:
+    api = _make_api_stub()
+
+    first = api._should_store_auto_memory(
+        confidence=0.62,
+        content="User prefers keyboard-only navigation in IDE workflows.",
+        tags=["workflow"],
+    )
+    second = api._should_store_auto_memory(
+        confidence=0.62,
+        content="  user prefers keyboard-only navigation in ide workflows.  ",
+        tags=["workflow"],
+    )
+
+    assert first is False
+    assert second is True
+
+
+def test_auto_memory_high_confidence_still_allows_immediately() -> None:
+    api = _make_api_stub()
+
+    assert (
+        api._should_store_auto_memory(
+            confidence=0.92,
+            content="User consistently prefers short, bulleted summaries.",
+            tags=["communication"],
+        )
+        is True
+    )
+
+
+def test_auto_memory_repetition_window_expiry_does_not_promote() -> None:
+    api = _make_api_stub()
+
+    assert (
+        api._should_store_auto_memory(
+            confidence=0.62,
+            content="User prefers concise diffs with explicit rationale.",
+            tags=["workflow"],
+        )
+        is False
+    )
+
+    fingerprint = api._fingerprint_auto_memory_candidate(
+        normalized_candidate=api._normalize_auto_memory_candidate(
+            content="User prefers concise diffs with explicit rationale.",
+            tags=["workflow"],
+        )
+    )
+    entry = api._auto_memory_candidate_history[fingerprint]
+    entry["last_seen"] = float(entry["last_seen"]) - (api._auto_memory_repeat_window_s + 1.0)
+
+    assert (
+        api._should_store_auto_memory(
+            confidence=0.62,
+            content="User prefers concise diffs with explicit rationale.",
+            tags=["workflow"],
+        )
+        is False
+    )
+
+
+def test_auto_memory_candidate_history_prunes_deterministically() -> None:
+    api = _make_api_stub()
+    api._auto_memory_repeat_window_s = 10_000.0
+    contents = [
+        "User likes dark mode themes.",
+        "User likes low-latency terminals.",
+        "User likes deterministic test fixtures.",
+        "User likes compact commit messages.",
+    ]
+
+    for content in contents:
+        api._should_store_auto_memory(confidence=0.62, content=content, tags=["pref"])
+
+    assert len(api._auto_memory_candidate_history) == api._auto_memory_candidate_history_max_entries
+    evicted = api._fingerprint_auto_memory_candidate(
+        normalized_candidate=api._normalize_auto_memory_candidate(content=contents[0], tags=["pref"])
+    )
+    retained = api._fingerprint_auto_memory_candidate(
+        normalized_candidate=api._normalize_auto_memory_candidate(content=contents[-1], tags=["pref"])
+    )
+    assert evicted not in api._auto_memory_candidate_history
+    assert retained in api._auto_memory_candidate_history
 
 
 def test_response_done_auto_memory_honors_confirmation_guardrail() -> None:
