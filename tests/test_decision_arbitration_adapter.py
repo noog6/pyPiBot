@@ -801,7 +801,7 @@ def test_turn_arbitration_diagnostics_reports_partial_trace_gaps() -> None:
     assert diagnostics.severity == "info"
 
 
-def test_turn_arbitration_diagnostics_reports_semantic_owner_divergence() -> None:
+def test_turn_arbitration_diagnostics_marks_parent_promotion_pending_without_followup_evidence() -> None:
     trace = merge_arbitration_observations_for_turn(
         terminal_selection_observation=build_terminal_selection_observation(
             run_id="run-diverge",
@@ -833,9 +833,62 @@ def test_turn_arbitration_diagnostics_reports_semantic_owner_divergence() -> Non
     diagnostics = trace.diagnostics
 
     assert diagnostics is not None
-    assert "semantic_owner_diverged" in diagnostics.diagnostic_codes
-    assert diagnostics.suspicious_mismatch_count == 1
-    assert diagnostics.severity == "warning"
+    assert "semantic_owner_parent_promotion_pending_followup_evidence" in diagnostics.diagnostic_codes
+    assert "semantic_owner_diverged" not in diagnostics.diagnostic_codes
+    assert diagnostics.suspicious_mismatch_count == 0
+    assert diagnostics.severity == "info"
+
+
+def test_turn_arbitration_diagnostics_keeps_parent_promotion_pending_until_released_followup_evidence_arrives() -> None:
+    trace = merge_arbitration_observations_for_turn(
+        terminal_selection_observation=build_terminal_selection_observation(
+            run_id="run-diverge-suppressed-followup",
+            turn_id="turn-diverge-suppressed-followup",
+            input_event_key="tool:call_diverge_suppressed",
+            canonical_key="turn-diverge-suppressed-followup::tool:call_diverge_suppressed",
+            origin="tool_output",
+            selected=True,
+            selection_reason="normal",
+            transcript_final_seen=False,
+            active_response_was_provisional=False,
+        ),
+        semantic_owner_observation=build_semantic_owner_observation(
+            run_id="run-diverge-suppressed-followup",
+            turn_id="turn-diverge-suppressed-followup",
+            input_event_key="tool:call_diverge_suppressed",
+            execution_canonical_key="turn-diverge-suppressed-followup::tool:call_diverge_suppressed",
+            semantic_owner_canonical_key="turn-diverge-suppressed-followup::item_parent",
+            origin="tool_output",
+            selected=True,
+            selection_reason="normal",
+            parent_turn_id="turn-diverge-suppressed-followup",
+            parent_input_event_key="item_parent",
+            native_reason_code="parent_promoted_from_tool_output",
+        ),
+        semantic_owner_canonical_key="turn-diverge-suppressed-followup::item_parent",
+        tool_followup_observation=build_tool_followup_observation(
+            run_id="run-diverge-suppressed-followup",
+            turn_id="turn-diverge-suppressed-followup",
+            input_event_key="tool:call_diverge_suppressed",
+            canonical_key="turn-diverge-suppressed-followup::tool:call_diverge_suppressed",
+            origin="tool_output",
+            parent_coverage_state="coverage_pending",
+            followup_outcome_posture="suppressed",
+            native_reason_code="coverage_pending",
+            native_outcome_action="DEFER",
+            followup_distinctness="unknown",
+            parent_canonical_key="turn-diverge-suppressed-followup::item_parent",
+            parent_semantic_owner_key="turn-diverge-suppressed-followup::item_parent",
+        ),
+    )
+
+    diagnostics = trace.diagnostics
+
+    assert diagnostics is not None
+    assert "semantic_owner_parent_promotion_pending_followup_evidence" in diagnostics.diagnostic_codes
+    assert "semantic_owner_diverged" not in diagnostics.diagnostic_codes
+    assert diagnostics.suspicious_mismatch_count == 0
+    assert diagnostics.severity == "info"
 
 
 def test_turn_review_summary_avoids_premature_divergence_for_tool_followup_precedence() -> None:
@@ -1056,7 +1109,7 @@ def test_turn_review_summary_reports_partial_trace_gap() -> None:
     assert "explainability gap:" not in summary.overall_summary
 
 
-def test_turn_review_summary_reports_suspicious_divergence_case() -> None:
+def test_turn_review_summary_treats_parent_promotion_without_followup_evidence_as_partial_expected() -> None:
     trace = merge_arbitration_observations_for_turn(
         terminal_selection_observation=build_terminal_selection_observation(
             run_id="run-review-diverge",
@@ -1087,11 +1140,12 @@ def test_turn_review_summary_reports_suspicious_divergence_case() -> None:
 
     summary = build_turn_review_summary(trace)
 
-    assert summary.review_bucket == "suspicious"
-    assert summary.review_priority == "high"
-    assert "semantic owner diverged from execution canonical" in summary.notable_mismatches
+    assert summary.review_bucket == "partial_expected"
+    assert summary.review_priority == "medium"
+    assert "semantic owner diverged from execution canonical" not in summary.notable_mismatches
+    assert summary.semantic_owner_summary == "semantic owner parent promotion pending tool-followup evidence"
     assert "no suspicious signals" not in summary.overall_summary
-    assert "suspicious signals require review" in summary.overall_summary
+    assert "expected gaps remain" in summary.overall_summary
     assert "suspicious signals:" not in summary.overall_summary
 
 
@@ -1174,6 +1228,57 @@ def test_turn_review_summary_downgrades_expected_tool_followup_parent_promotion_
     assert summary.semantic_owner_summary == "semantic owner promoted to parent after tool-output delivery"
     assert "semantic owner diverged from execution canonical" not in summary.notable_mismatches
     assert summary.review_bucket == "coherent"
+
+
+def test_turn_review_summary_keeps_semantic_owner_execution_scoped_until_parent_promotion_is_justified() -> None:
+    trace = merge_arbitration_observations_for_turn(
+        terminal_selection_observation=build_terminal_selection_observation(
+            run_id="run-review-followup-execution-owner",
+            turn_id="turn-review-followup-execution-owner",
+            input_event_key="tool:call_execution_owner",
+            canonical_key="turn-review-followup-execution-owner::tool:call_execution_owner",
+            origin="tool_output",
+            selected=True,
+            selection_reason="normal",
+            transcript_final_seen=False,
+            active_response_was_provisional=False,
+        ),
+        semantic_owner_observation=build_semantic_owner_observation(
+            run_id="run-review-followup-execution-owner",
+            turn_id="turn-review-followup-execution-owner",
+            input_event_key="tool:call_execution_owner",
+            execution_canonical_key="turn-review-followup-execution-owner::tool:call_execution_owner",
+            semantic_owner_canonical_key="turn-review-followup-execution-owner::tool:call_execution_owner",
+            origin="tool_output",
+            selected=True,
+            selection_reason="normal",
+            native_reason_code="normal",
+        ),
+        tool_followup_observation=build_tool_followup_observation(
+            run_id="run-review-followup-execution-owner",
+            turn_id="turn-review-followup-execution-owner",
+            input_event_key="tool:call_execution_owner",
+            canonical_key="turn-review-followup-execution-owner::tool:call_execution_owner",
+            origin="tool_output",
+            parent_coverage_state="uncovered",
+            followup_outcome_posture="released",
+            native_reason_code="released_for_followup_delivery",
+            native_outcome_action="SEND",
+            followup_distinctness="distinct",
+            parent_canonical_key="turn-review-followup-execution-owner::item_parent",
+            parent_semantic_owner_key="turn-review-followup-execution-owner::item_parent",
+        ),
+    )
+
+    summary = build_turn_review_summary(trace)
+    diagnostics = trace.diagnostics
+
+    assert diagnostics is not None
+    assert "semantic_owner_diverged" not in diagnostics.diagnostic_codes
+    assert "semantic_owner_parent_promotion_expected" not in diagnostics.diagnostic_codes
+    assert summary.semantic_owner_summary == "semantic owner stayed on execution canonical"
+    assert summary.review_bucket == "partial_expected"
+    assert "semantic owner diverged from execution canonical" not in summary.notable_mismatches
 
 
 def test_turn_review_summary_accepts_status_only_gesture_parent_promotion() -> None:
@@ -1717,6 +1822,8 @@ def test_turn_review_summary_distinguishes_selected_parent_that_is_not_coverage_
         summary.tool_followup_summary
         == "tool followup released (parent selected but not coverage-qualified; distinctness distinct)"
     )
+    assert summary.review_bucket == "needs_review"
+    assert "tool followup released despite parent final coverage" not in summary.suspicious_signals
 
 
 def test_turn_review_summary_uses_structured_uncovered_parent_state_without_special_reason() -> None:

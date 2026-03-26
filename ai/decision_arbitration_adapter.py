@@ -994,6 +994,8 @@ def build_turn_arbitration_diagnostics(trace: TurnArbitrationTrace) -> TurnArbit
     if semantic_owner is not None and _semantic_owner_has_explicit_parent_promotion(trace):
         if _semantic_owner_parent_promotion_is_expected(trace):
             diagnostic_codes.append("semantic_owner_parent_promotion_expected")
+        elif _semantic_owner_parent_promotion_is_pending(trace):
+            diagnostic_codes.append("semantic_owner_parent_promotion_pending_followup_evidence")
         else:
             diagnostic_codes.append("semantic_owner_diverged")
             suspicious_mismatch_count += 1
@@ -1146,6 +1148,28 @@ def _semantic_owner_parent_promotion_is_expected(trace: TurnArbitrationTrace) ->
     return False
 
 
+def _semantic_owner_parent_promotion_is_pending(trace: TurnArbitrationTrace) -> bool:
+    if not _semantic_owner_has_explicit_parent_promotion(trace):
+        return False
+    terminal_observation = trace.terminal_selection_observation
+    terminal = terminal_observation.decision if terminal_observation else None
+    if terminal is None:
+        return False
+    if terminal.selected_candidate_id != "terminal_selected":
+        return False
+    if str(terminal.native_reason_code or "").strip().lower() != "normal":
+        return False
+    if str(terminal_observation.context.origin or "").strip().lower() != "tool_output":
+        return False
+    promoted_parent_key = str(trace.semantic_owner_canonical_key or "").strip()
+    if not promoted_parent_key:
+        return False
+    return not any(
+        observation.decision.followup_outcome_posture == "released"
+        for observation in trace.tool_followup_observations
+    )
+
+
 def _review_bucket_for_trace(trace: TurnArbitrationTrace) -> TurnReviewBucket:
     diagnostics = trace.diagnostics
     if diagnostics is None:
@@ -1207,6 +1231,8 @@ def _semantic_owner_summary(trace: TurnArbitrationTrace) -> str:
         return "semantic owner seam missing"
     if _semantic_owner_parent_promotion_is_expected(trace):
         return "semantic owner promoted to parent after tool-output delivery"
+    if _semantic_owner_parent_promotion_is_pending(trace):
+        return "semantic owner parent promotion pending tool-followup evidence"
     if _semantic_owner_has_explicit_parent_promotion(trace):
         return "semantic owner diverged to parent"
     if decision.selected_candidate_id == "semantic_owner_execution":
