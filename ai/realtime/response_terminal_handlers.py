@@ -534,6 +534,17 @@ class ResponseTerminalHandlers:
             close_action,
             close_reason,
         )
+        terminal_assistant_text = str(api._terminal_response_text(active_response_id_before_clear) or "").strip()
+        if not terminal_assistant_text:
+            terminal_assistant_text = str(api._assistant_reply_text_for_response(active_response_id_before_clear) or "").strip()
+        api._finalize_memory_usage_audit(
+            turn_id=turn_id,
+            input_event_key=done_input_event_key or None,
+            selected_response_id=resolved_response_id or active_response_id_before_clear,
+            selected_canonical_key=semantic_owner_canonical_key or done_canonical_key,
+            close_reason=close_reason,
+            final_assistant_text=terminal_assistant_text or None,
+        )
         if selection_reason == "cancelled":
             api._log_cancelled_deliverable_once(
                 active_response_id,

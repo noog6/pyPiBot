@@ -375,3 +375,185 @@ def test_upgraded_server_auto_replacement_keeps_preference_context_for_final_res
     assert "Vim" in ws.events[0]["item"]["content"][0]["text"]
     assert ws.events[1]["response"]["metadata"]["canonical_key"] == canonical_key
     assert len([event for event in ws.events if event["type"] == "response.create"]) == 1
+
+
+def _capture_memory_audit_logs(monkeypatch) -> list[str]:
+    captured: list[str] = []
+
+    def _capture(message, *args, **kwargs) -> None:
+        rendered = message % args if args else str(message)
+        if "memory_usage_audit_" in rendered:
+            captured.append(rendered)
+
+    monkeypatch.setattr("ai.realtime_api.logger.debug", _capture)
+    return captured
+
+
+def test_memory_usage_audit_emits_for_turn_memory_brief_injection(monkeypatch) -> None:
+    api = _make_api_stub()
+    ws = _Ws()
+    logs = _capture_memory_audit_logs(monkeypatch)
+
+    asyncio.run(
+        api._send_response_create(
+            ws,
+            {"type": "response.create"},
+            origin="injection",
+            memory_brief_note="Turn memory brief: ...",
+        )
+    )
+
+    assert any("memory_usage_audit_started" in entry for entry in logs)
+    assert any("injection_types=turn_brief" in entry for entry in logs)
+
+
+def test_memory_usage_audit_emits_for_preference_context_injection(monkeypatch) -> None:
+    api = _make_api_stub()
+    ws = _Ws()
+    logs = _capture_memory_audit_logs(monkeypatch)
+    api._consume_pending_preference_memory_context_note = lambda *, turn_id, input_event_key: (
+        "Preference recall context for this SAME response: matched stored preference(s). Top recalled value: Vim"
+    )
+
+    asyncio.run(
+        api._send_response_create(
+            ws,
+            {"type": "response.create"},
+            origin="assistant_message",
+        )
+    )
+
+    assert any("memory_usage_audit_started" in entry for entry in logs)
+    assert any("injection_types=preference_context" in entry for entry in logs)
+
+
+def test_memory_usage_audit_finalizes_non_injected_turn(monkeypatch) -> None:
+    api = _make_api_stub()
+    logs = _capture_memory_audit_logs(monkeypatch)
+
+    api._finalize_memory_usage_audit(
+        turn_id="turn_no_memory",
+        input_event_key="item_no_memory",
+        selected_response_id="resp_1",
+        selected_canonical_key="turn_no_memory:item_no_memory",
+        close_reason="response_done_received",
+        final_assistant_text="Here is a direct answer.",
+    )
+
+    assert any("memory_usage_audit_finalized" in entry for entry in logs)
+    assert any("memory_injected=false" in entry for entry in logs)
+    assert any("memory_usage_outcome=none" in entry for entry in logs)
+
+
+def test_memory_usage_audit_detects_explicit_memory_wording_signal(monkeypatch) -> None:
+    api = _make_api_stub()
+    logs = _capture_memory_audit_logs(monkeypatch)
+    api._record_memory_usage_audit_injection(
+        turn_id="turn_signal",
+        input_event_key="item_signal",
+        injection_type="turn_brief",
+    )
+
+    api._finalize_memory_usage_audit(
+        turn_id="turn_signal",
+        input_event_key="item_signal",
+        selected_response_id="resp_signal",
+        selected_canonical_key="turn_signal:item_signal",
+        close_reason="response_done_received",
+        final_assistant_text="I remember you said Vim is your preference.",
+    )
+
+    assert any("memory_reference_marker_present=true" in entry for entry in logs)
+    assert any("memory_usage_outcome=injected_possible_signal" in entry for entry in logs)
+
+
+def test_memory_usage_audit_finalizes_without_explicit_memory_wording(monkeypatch) -> None:
+    api = _make_api_stub()
+    logs = _capture_memory_audit_logs(monkeypatch)
+    api._record_memory_usage_audit_injection(
+        turn_id="turn_no_marker",
+        input_event_key="item_no_marker",
+        injection_type="preference_context",
+    )
+
+    api._finalize_memory_usage_audit(
+        turn_id="turn_no_marker",
+        input_event_key="item_no_marker",
+        selected_response_id="resp_no_marker",
+        selected_canonical_key="turn_no_marker:item_no_marker",
+        close_reason="response_done_received",
+        final_assistant_text="Vim should work well for this workflow.",
+    )
+
+    assert any("memory_injected=true" in entry for entry in logs)
+    assert any("memory_reference_marker_present=false" in entry for entry in logs)
+    assert any("memory_usage_outcome=injected_no_signal" in entry for entry in logs)
+
+
+def test_memory_usage_audit_combines_turn_brief_and_preference_context_once(monkeypatch) -> None:
+    api = _make_api_stub()
+    logs = _capture_memory_audit_logs(monkeypatch)
+    turn_id = "turn_combo"
+    input_event_key = "item_combo"
+    turn_key = api._memory_usage_audit_turn_key(turn_id=turn_id, input_event_key=input_event_key)
+
+    api._record_memory_usage_audit_injection(
+        turn_id=turn_id,
+        input_event_key=input_event_key,
+        injection_type="turn_brief",
+    )
+    api._record_memory_usage_audit_injection(
+        turn_id=turn_id,
+        input_event_key=input_event_key,
+        injection_type="preference_context",
+    )
+    api._record_memory_usage_audit_injection(
+        turn_id=turn_id,
+        input_event_key=input_event_key,
+        injection_type="preference_context",
+    )
+
+    stored = api._memory_usage_audit_store()[turn_key]
+    assert stored["injection_types"] == ["turn_brief", "preference_context"]
+    assert len([entry for entry in logs if "memory_usage_audit_started" in entry]) == 1
+
+    api._finalize_memory_usage_audit(
+        turn_id=turn_id,
+        input_event_key=input_event_key,
+        selected_response_id="resp_combo",
+        selected_canonical_key=f"{turn_id}:{input_event_key}",
+        close_reason="response_done_received",
+        final_assistant_text="Done.",
+    )
+
+    assert turn_key not in api._memory_usage_audit_store()
+    assert any(
+        "memory_usage_audit_finalized" in entry
+        and "injection_types=turn_brief,preference_context" in entry
+        and "memory_injected=true" in entry
+        for entry in logs
+    )
+
+
+def test_initialize_session_startup_digest_memory_usage_audit_is_separate(monkeypatch) -> None:
+    api = _make_api_stub()
+    logs = _capture_memory_audit_logs(monkeypatch)
+    api.profile_manager = type("P", (), {"get_profile_context": lambda self: type("Ctx", (), {"to_instruction_block": lambda self: "profile"})()})()
+    api._vad_turn_detection = {
+        "profile": "default",
+        "threshold": 0.2,
+        "prefix_padding_ms": 500,
+        "silence_duration_ms": 900,
+        "create_response": True,
+        "interrupt_response": True,
+    }
+    api._build_startup_memory_digest_note = lambda: "Startup memory digest: ..."
+
+    ws = _Ws()
+    asyncio.run(api.initialize_session(ws))
+
+    assert any("memory_usage_audit_started" in entry for entry in logs)
+    assert any("telemetry_scope=startup" in entry for entry in logs)
+    assert any("injection_types=startup_digest" in entry for entry in logs)
+    assert any("memory_usage_audit_finalized" in entry for entry in logs)
+    assert any("close_reason=startup_digest_injected" in entry for entry in logs)

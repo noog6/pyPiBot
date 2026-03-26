@@ -242,6 +242,20 @@ _MEMORY_REASSURANCE_SUFFIX_PATTERNS = (
     re.compile(r"^would you like me to (?:save|remember|pin|rename|update) .*\?$", re.IGNORECASE),
 )
 _MEMORY_RECALL_CONCISE_FOLLOWUP = "Want me to save or update that memory?"
+_MEMORY_USAGE_SIGNAL_MARKERS: tuple[str, ...] = (
+    "you told me",
+    "you mentioned",
+    "you said",
+    "your preference",
+    "you prefer",
+    "from memory",
+    "i remember",
+)
+_MEMORY_USAGE_INJECTION_ORDER: tuple[str, ...] = (
+    "turn_brief",
+    "preference_context",
+    "startup_digest",
+)
 _DESCRIPTIVE_TURN_REQUEST_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bwhat\s+(?:is|s)\s+(?:it|this|that)\b", re.IGNORECASE),
     re.compile(r"\bwhat\s+do\s+you\s+see\b", re.IGNORECASE),
@@ -1139,6 +1153,7 @@ class RealtimeAPI:
             "input_event_key": None,
             "canonical_key": None,
         }
+        self._memory_usage_audit_by_turn_key: dict[str, dict[str, Any]] = {}
         self._response_gating_verdict_by_input_event_key: dict[str, ResponseGatingVerdict] = {}
         self._latest_partial_transcript_by_turn_id: dict[str, str] = {}
         self._server_auto_audio_waiters_by_turn_id: dict[str, asyncio.Event] = {}
@@ -11148,6 +11163,127 @@ class RealtimeAPI:
         run_id = getattr(storage_info, "run_id", None)
         return str(run_id) if run_id else None
 
+    def _memory_usage_audit_store(self) -> dict[str, dict[str, Any]]:
+        store = getattr(self, "_memory_usage_audit_by_turn_key", None)
+        if not isinstance(store, dict):
+            store = {}
+            self._memory_usage_audit_by_turn_key = store
+        return store
+
+    def _memory_usage_audit_turn_key(self, *, turn_id: str, input_event_key: str | None) -> str:
+        return self._canonical_utterance_key(
+            turn_id=str(turn_id or "").strip() or "turn-unknown",
+            input_event_key=str(input_event_key or "").strip() or "unknown",
+        )
+
+    def _assistant_text_has_memory_reference_marker(self, text: str | None) -> bool:
+        normalized = str(text or "").strip().lower()
+        if not normalized:
+            return False
+        return any(marker in normalized for marker in _MEMORY_USAGE_SIGNAL_MARKERS)
+
+    def _record_memory_usage_audit_injection(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str | None,
+        injection_type: str,
+        telemetry_scope: str = "turn",
+    ) -> None:
+        normalized_injection_type = str(injection_type or "").strip().lower()
+        if normalized_injection_type not in set(_MEMORY_USAGE_INJECTION_ORDER):
+            return
+        normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
+        normalized_input_event_key = str(input_event_key or "").strip()
+        turn_key = self._memory_usage_audit_turn_key(
+            turn_id=normalized_turn_id,
+            input_event_key=normalized_input_event_key,
+        )
+        store = self._memory_usage_audit_store()
+        record_created = turn_key not in store
+        record = store.setdefault(
+            turn_key,
+            {
+                "run_id": self._current_run_id() or "",
+                "turn_id": normalized_turn_id,
+                "input_event_key": normalized_input_event_key or None,
+                "telemetry_scope": telemetry_scope,
+                "injection_types": [],
+            },
+        )
+        injection_types = record.get("injection_types")
+        if not isinstance(injection_types, list):
+            injection_types = []
+            record["injection_types"] = injection_types
+        if normalized_injection_type not in injection_types:
+            injection_types.append(normalized_injection_type)
+        stable_types = [value for value in _MEMORY_USAGE_INJECTION_ORDER if value in injection_types]
+        record["injection_types"] = stable_types
+        if record_created:
+            logger.debug(
+                "memory_usage_audit_started run_id=%s turn_id=%s input_event_key=%s telemetry_scope=%s memory_injected=true injection_types=%s",
+                record.get("run_id") or "",
+                normalized_turn_id,
+                normalized_input_event_key or "unknown",
+                str(record.get("telemetry_scope") or "turn"),
+                ",".join(stable_types) or "none",
+            )
+
+    def _finalize_memory_usage_audit(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str | None,
+        selected_response_id: str | None,
+        selected_canonical_key: str | None,
+        close_reason: str | None,
+        final_assistant_text: str | None,
+        telemetry_scope: str = "turn",
+    ) -> None:
+        normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
+        normalized_input_event_key = str(input_event_key or "").strip()
+        turn_key = self._memory_usage_audit_turn_key(
+            turn_id=normalized_turn_id,
+            input_event_key=normalized_input_event_key,
+        )
+        store = self._memory_usage_audit_store()
+        record = store.pop(turn_key, None)
+        if not isinstance(record, dict):
+            record = {
+                "run_id": self._current_run_id() or "",
+                "turn_id": normalized_turn_id,
+                "input_event_key": normalized_input_event_key or None,
+                "telemetry_scope": telemetry_scope,
+                "injection_types": [],
+            }
+        injection_types_raw = record.get("injection_types")
+        if not isinstance(injection_types_raw, list):
+            injection_types_raw = []
+        stable_types = [value for value in _MEMORY_USAGE_INJECTION_ORDER if value in injection_types_raw]
+        memory_injected = bool(stable_types)
+        marker_present = self._assistant_text_has_memory_reference_marker(final_assistant_text)
+        if not memory_injected:
+            outcome = "none"
+        elif marker_present:
+            outcome = "injected_possible_signal"
+        else:
+            outcome = "injected_no_signal"
+        logger.debug(
+            "memory_usage_audit_finalized run_id=%s turn_id=%s input_event_key=%s telemetry_scope=%s memory_injected=%s injection_types=%s "
+            "memory_usage_outcome=%s memory_reference_marker_present=%s selected_response_id=%s selected_canonical_key=%s close_reason=%s",
+            str(record.get("run_id") or self._current_run_id() or ""),
+            normalized_turn_id,
+            normalized_input_event_key or "unknown",
+            telemetry_scope,
+            str(memory_injected).lower(),
+            ",".join(stable_types) or "none",
+            outcome,
+            str(marker_present).lower(),
+            str(selected_response_id or "").strip() or "none",
+            str(selected_canonical_key or "").strip() or "none",
+            str(close_reason or "").strip() or "none",
+        )
+
     def _redact_user_transcript_text(self, text: str) -> str:
         redacted = _EMAIL_REDACT_RE.sub("<redacted_email>", text)
         return _PHONE_REDACT_RE.sub("<redacted_phone>", redacted)
@@ -15244,7 +15380,22 @@ class RealtimeAPI:
         await transport.send_json(websocket, session_update)
         startup_digest_note = self._build_startup_memory_digest_note()
         if startup_digest_note:
+            self._record_memory_usage_audit_injection(
+                turn_id="startup",
+                input_event_key="startup_digest",
+                injection_type="startup_digest",
+                telemetry_scope="startup",
+            )
             await self._send_memory_brief_note(websocket, startup_digest_note)
+            self._finalize_memory_usage_audit(
+                turn_id="startup",
+                input_event_key="startup_digest",
+                selected_response_id=None,
+                selected_canonical_key=None,
+                close_reason="startup_digest_injected",
+                final_assistant_text=None,
+                telemetry_scope="startup",
+            )
 
     def _get_or_create_transport(self) -> RealtimeTransport:
         transport = getattr(self, "_transport", None)
