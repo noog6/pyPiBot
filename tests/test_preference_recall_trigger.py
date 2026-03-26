@@ -1201,6 +1201,33 @@ def test_preference_recall_cancels_only_matching_server_auto_response(monkeypatc
     assert "item-2" not in api._preference_recall_suppressed_input_event_keys
 
 
+def test_preference_recall_cancel_allows_same_turn_server_auto_key_mismatch() -> None:
+    api = _make_api_stub()
+    ws = _RecordingWs()
+    api._track_outgoing_event = lambda *_args, **_kwargs: None
+    api._clear_pending_response_contenders = lambda **_kwargs: None
+    api._drop_suppressed_scheduled_response_creates = lambda **_kwargs: None
+    api._log_response_site_debug = lambda **_kwargs: None
+    api._canonical_utterance_key = lambda *, turn_id, input_event_key: f"{turn_id}:{input_event_key}"
+    api._current_turn_id_or_unknown = lambda: "turn_42"
+    api._current_input_event_key = "item_final"
+    api._active_server_auto_input_event_key = "synthetic_server_auto_7"
+    api._current_response_turn_id = "turn_42"
+    api._active_response_origin = "server_auto"
+    api._active_response_id = "resp_42"
+    api._response_in_flight = True
+    api._get_or_create_transport = lambda: type(
+        "_Transport",
+        (),
+        {"send_json": staticmethod(lambda websocket, payload: websocket.send(json.dumps(payload)))},
+    )()
+
+    asyncio.run(api._suppress_preference_recall_server_auto_response(ws))
+
+    payloads = [json.loads(payload) for payload in ws.sent]
+    assert any(payload.get("type") == "response.cancel" and payload.get("response_id") == "resp_42" for payload in payloads)
+
+
 def test_server_auto_obligation_pre_audio_cancel_ignores_audio_delta(monkeypatch) -> None:
     api = _make_api_stub()
     ws = _RecordingWs()
