@@ -17,7 +17,6 @@ MEMORY_INTENT_MARKERS = (
     "memory",
     "memories",
     "recall",
-    "do you know",
     "what's my name",
     "what is my name",
     "my name",
@@ -50,6 +49,33 @@ PREFERENCE_MEMORY_DOMAINS = {
     "drink",
     "food",
 }
+
+_TOPIC_RECALL_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bremember\s+(?:about|of)\s+(?P<topic>[^?.!,;:]+)", re.IGNORECASE),
+    re.compile(r"\bwhat\s+do\s+you\s+remember\s+about\s+(?P<topic>[^?.!,;:]+)", re.IGNORECASE),
+    re.compile(r"\bwhat\s+did\s+i\s+say\s+about\s+(?P<topic>[^?.!,;:]+)", re.IGNORECASE),
+    re.compile(r"\bhave\s+i\s+mentioned\s+(?P<topic>[^?.!,;:]+?)\s+before\b", re.IGNORECASE),
+    re.compile(r"\bwhat\s+do\s+you\s+know\s+about\s+(?P<topic>[^?.!,;:]+)", re.IGNORECASE),
+    re.compile(r"\bremind\s+me\s+what\s+you\s+know\s+about\s+(?P<topic>[^?.!,;:]+)", re.IGNORECASE),
+)
+_PREFERENCE_DIRECT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bwhat(?:'s| is)\s+my\s+(?:usual|go-?to|preferred|favorite|favourite)\s+(?P<topic>[^?.!,;:]+)", re.IGNORECASE),
+    re.compile(r"\bwhat\s+do\s+i\s+prefer\s+for\s+(?P<topic>[^?.!,;:]+)", re.IGNORECASE),
+    re.compile(r"\bdo\s+you\s+remember\s+my\s+preference\s+for\s+(?P<topic>[^?.!,;:]+)", re.IGNORECASE),
+)
+_GENERAL_MEMORY_REQUEST_CUES: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bdo\s+you\s+remember\b", re.IGNORECASE),
+    re.compile(r"\bcan\s+you\s+remember\b", re.IGNORECASE),
+    re.compile(r"\bwhat\s+did\s+i\s+tell\s+you\b", re.IGNORECASE),
+    re.compile(r"\bwhat\s+did\s+i\s+say\b", re.IGNORECASE),
+    re.compile(r"\bwhat\s+do\s+you\s+remember\b", re.IGNORECASE),
+    re.compile(r"\bwhat(?:'s| is)\s+my\s+name\b", re.IGNORECASE),
+)
+_TOPIC_FRAGMENT_STRIP_PATTERN = re.compile(
+    r"\b(?:my|the|a|an|that|this|it|please|maybe|kindly)\b",
+    re.IGNORECASE,
+)
+_TOPIC_FRAGMENT_TOKEN_PATTERN = re.compile(r"[a-z0-9][a-z0-9_+-]*", re.IGNORECASE)
 
 
 class MemoryRuntimeAPI(Protocol):
@@ -84,22 +110,49 @@ class MemoryRuntime:
 
     api: MemoryRuntimeAPI
 
+    def _extract_topic_fragment(self, text: str) -> str:
+        normalized = " ".join((text or "").split())
+        if not normalized:
+            return ""
+        for pattern in _TOPIC_RECALL_PATTERNS + _PREFERENCE_DIRECT_PATTERNS:
+            match = pattern.search(normalized)
+            if not match:
+                continue
+            fragment = match.groupdict().get("topic", "")
+            fragment = re.split(r"[?.!,;:]", fragment, maxsplit=1)[0]
+            fragment = _TOPIC_FRAGMENT_STRIP_PATTERN.sub(" ", fragment)
+            topic_tokens: list[str] = []
+            for token in _TOPIC_FRAGMENT_TOKEN_PATTERN.findall(fragment):
+                lowered = token.lower().strip()
+                if lowered and lowered not in topic_tokens:
+                    topic_tokens.append(lowered)
+            if topic_tokens:
+                return " ".join(topic_tokens[:6])
+        return ""
+
     def classify_memory_intent(self, text: str) -> str:
         normalized = " ".join((text or "").lower().split())
         if not normalized:
             return "none"
+        has_topic_pattern = any(pattern.search(normalized) for pattern in _TOPIC_RECALL_PATTERNS)
+        has_preference_pattern = any(pattern.search(normalized) for pattern in _PREFERENCE_DIRECT_PATTERNS)
+        has_general_request_cue = any(pattern.search(normalized) for pattern in _GENERAL_MEMORY_REQUEST_CUES)
         if not any(marker in normalized for marker in MEMORY_INTENT_MARKERS):
-            return "none"
+            if not has_topic_pattern and not has_preference_pattern and not has_general_request_cue:
+                return "none"
 
         has_preference_marker = any(marker in normalized for marker in PREFERENCE_MEMORY_MARKERS)
         has_preference_domain = any(domain in normalized for domain in PREFERENCE_MEMORY_DOMAINS)
-        if has_preference_marker and has_preference_domain:
+        if has_preference_pattern or (has_preference_marker and has_preference_domain):
             return "preference_recall"
 
-        if "remember about" in normalized or "what do you remember" in normalized:
+        if has_topic_pattern:
             return "topic_recall"
 
-        return "general_memory"
+        if has_general_request_cue:
+            return "general_memory"
+
+        return "none"
 
     def is_memory_intent(self, text: str) -> bool:
         return self.classify_memory_intent(text) != "none"
@@ -107,16 +160,9 @@ class MemoryRuntime:
     def build_memory_retrieval_query(self, user_text: str, *, memory_intent_subtype: str) -> str:
         normalized = " ".join((user_text or "").split())
         if memory_intent_subtype == "topic_recall":
-            lowered = normalized.lower()
-            for marker in ("remember about", "remember of"):
-                if marker not in lowered:
-                    continue
-                topic_fragment = lowered.split(marker, 1)[1]
-                topic_fragment = re.split(r"[?.!,;:]", topic_fragment, maxsplit=1)[0]
-                topic_fragment = re.sub(r"\b(my|the|a|an)\b", " ", topic_fragment)
-                topic = " ".join(topic_fragment.split())
-                if topic:
-                    return topic
+            topic = self._extract_topic_fragment(normalized)
+            if topic:
+                return topic
         return normalized
 
     def should_skip_turn_memory_retrieval(self, user_text: str) -> bool:
