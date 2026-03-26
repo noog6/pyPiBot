@@ -89,6 +89,69 @@ def _topic_recall_bridge_hit(*, topic_query: str, memories: list[dict[str, Any]]
                 return True
         return False
 
+
+def _should_request_server_auto_takeover(
+    controller,
+    *,
+    resolved_turn_id: str,
+    input_event_key: str,
+    hit: bool,
+) -> bool:
+        if not hit:
+            return False
+        if str(getattr(controller, "_active_response_origin", "") or "").strip().lower() != "server_auto":
+            return False
+        if not bool(getattr(controller, "_response_in_flight", False)):
+            return False
+        active_response_id = str(getattr(controller, "_active_response_id", "") or "").strip()
+        if not active_response_id:
+            return False
+        is_provisional_response = getattr(controller, "_is_provisional_response", None)
+        if callable(is_provisional_response):
+            try:
+                if not bool(is_provisional_response(response_id=active_response_id)):
+                    return False
+            except Exception:
+                return False
+        active_turn_id = str(getattr(controller, "_current_response_turn_id", "") or "").strip()
+        if active_turn_id and active_turn_id != resolved_turn_id:
+            return False
+        transcript_input_event_key = str(input_event_key or "").strip()
+        active_input_event_key = str(getattr(controller, "_active_response_input_event_key", "") or "").strip() or str(
+            getattr(controller, "_active_server_auto_input_event_key", "") or ""
+        ).strip()
+        active_canonical_key = str(getattr(controller, "_active_response_canonical_key", "") or "").strip()
+        canonical_builder = getattr(controller, "_canonical_utterance_key", None)
+        transcript_canonical_key = ""
+        if callable(canonical_builder):
+            transcript_canonical_key = str(
+                canonical_builder(
+                    turn_id=resolved_turn_id,
+                    input_event_key=transcript_input_event_key,
+                )
+                or ""
+            ).strip()
+        if not active_canonical_key and callable(canonical_builder):
+            active_canonical_key = str(
+                canonical_builder(
+                    turn_id=resolved_turn_id,
+                    input_event_key=active_input_event_key,
+                )
+                or ""
+            ).strip()
+        pending_canonical_key = ""
+        pending_server_auto_for_turn = getattr(controller, "_pending_server_auto_response_for_turn", None)
+        if callable(pending_server_auto_for_turn):
+            pending_server_auto = pending_server_auto_for_turn(turn_id=resolved_turn_id)
+            pending_canonical_key = str(getattr(pending_server_auto, "canonical_key", "") or "").strip()
+        if transcript_input_event_key and active_input_event_key and transcript_input_event_key == active_input_event_key:
+            return True
+        if transcript_canonical_key and active_canonical_key and transcript_canonical_key == active_canonical_key:
+            return True
+        if transcript_canonical_key and pending_canonical_key and transcript_canonical_key == pending_canonical_key:
+            return True
+        return False
+
 async def _suppress_preference_recall_server_auto_response(controller, websocket: Any) -> None:
         turn_id = controller._current_turn_id_or_unknown()
         input_event_key = str(getattr(controller, "_current_input_event_key", "") or "").strip()
@@ -389,6 +452,13 @@ async def _analyze_preference_recall_intent(controller, text: str, *, source: st
             str(hit).lower(),
             str(recall_invoked).lower(),
         )
+        input_event_key = str(getattr(controller, "_current_input_event_key", "") or "").strip()
+        request_server_auto_takeover = _should_request_server_auto_takeover(
+            controller,
+            resolved_turn_id=resolved_turn_id,
+            input_event_key=input_event_key,
+            hit=hit,
+        )
         verdict = PerceptionMemoryVerdict(
             memory_intent=memory_intent_subtype != "none",
             memory_intent_subtype=memory_intent_subtype,
@@ -405,10 +475,13 @@ async def _analyze_preference_recall_intent(controller, text: str, *, source: st
                 if companion_gesture_tool
                 else None
             ),
-            runtime_request=None,
+            runtime_request={
+                "suppress_server_auto": request_server_auto_takeover,
+                "cancel_active_server_auto": request_server_auto_takeover,
+            },
         )
         logger.info(
-            "perception_memory_verdict run_id=%s turn_id=%s source=%s memory_intent=%s memory_intent_subtype=%s preference_recall_requested=%s companion_gesture_requested=%s runtime_request=%s",
+            "perception_memory_verdict run_id=%s turn_id=%s source=%s memory_intent=%s memory_intent_subtype=%s preference_recall_requested=%s companion_gesture_requested=%s runtime_request=%s takeover_requested=%s",
             controller._current_run_id() or "",
             resolved_turn_id,
             source,
@@ -417,6 +490,7 @@ async def _analyze_preference_recall_intent(controller, text: str, *, source: st
             str(bool(verdict.preference_recall_requested)).lower(),
             str(bool(verdict.companion_gesture_tool_request)).lower(),
             "present" if isinstance(verdict.runtime_request, dict) and verdict.runtime_request else "none",
+            str(request_server_auto_takeover).lower(),
         )
         return verdict
 
