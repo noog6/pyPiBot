@@ -22,7 +22,18 @@ memory:
   default_scope: "user_global"
   auto_memory_enabled: false
   require_confirmation_for_auto_memory: false
+  # Strong-confidence immediate admit threshold for auto_reflection durable writes.
   auto_memory_min_confidence: 0.75
+  # Repetition gate: minimum repeated observations required inside the recent window.
+  auto_memory_repeat_threshold: 2
+  # Repetition gate: bounded recent window (seconds) for counting repeats.
+  auto_memory_repeat_window_s: 900
+  # Repetition gate confidence floor formula:
+  # repeat_min_confidence = max(floor, auto_memory_min_confidence - delta)
+  auto_memory_repeat_min_confidence_floor: 0.55
+  auto_memory_repeat_min_confidence_delta: 0.20
+  # Maximum tracked candidate fingerprints for bounded in-memory repetition state.
+  auto_memory_repeat_history_max_entries: 256
   auto_pin_min_importance: 5
   auto_pin_requires_review: true
   recall_trace_enabled: false
