@@ -490,6 +490,89 @@ def test_compound_left_right_center_report_sequence_advances_in_order() -> None:
     assert after_center.compound_request.final_followup_pending is True
 
 
+def test_compound_parser_classifies_directional_fragments_as_gesture_steps() -> None:
+    ledger = ContinuityLedger()
+    ledger.update_from_event(
+        "transcript_final",
+        text="Look up and then down and then back to center.",
+        source="input_audio_transcription",
+    )
+
+    brief = ledger.build_brief("run-directional", "turn-1", "directional_fragments")
+    assert brief.compound_request is not None
+    assert [step.kind for step in brief.compound_request.steps] == ["gesture", "gesture", "gesture"]
+    assert [step.summary for step in brief.compound_request.steps] == [
+        "Look up.",
+        "down.",
+        "back to center.",
+    ]
+
+
+def test_compound_look_up_down_center_report_progression_stays_ordered() -> None:
+    ledger = ContinuityLedger()
+    ledger.update_from_event(
+        "transcript_final",
+        text="Can you look up and then down and then back to center, and then tell me what your voltage is?",
+        source="input_audio_transcription",
+    )
+
+    initial = ledger.build_brief("run-up-down", "turn-1", "initial")
+    assert initial.compound_request is not None
+    assert [step.kind for step in initial.compound_request.steps] == ["gesture", "gesture", "gesture", "report"]
+    assert [step.status for step in initial.compound_request.steps] == ["active", "pending", "pending", "pending"]
+    assert initial.compound_request.active_step_index == 0
+    assert initial.compound_request.next_pending_step_id == "step_2"
+
+    ledger.update_from_event("tool_result_received", tool_name="gesture_look_up", call_id="call-up")
+    after_up = ledger.build_brief("run-up-down", "turn-1", "after_up")
+    assert after_up.compound_request is not None
+    assert [step.status for step in after_up.compound_request.steps] == ["completed", "active", "pending", "pending"]
+    assert after_up.compound_request.active_step_index == 1
+    assert after_up.compound_request.next_pending_step_id == "step_3"
+
+    ledger.update_from_event("tool_call_started", tool_name="gesture_look_down", call_id="call-down")
+    during_down = ledger.build_brief("run-up-down", "turn-1", "during_down")
+    assert during_down.compound_request is not None
+    assert [step.status for step in during_down.compound_request.steps] == ["completed", "active", "pending", "pending"]
+    assert during_down.compound_request.active_step_index == 1
+    assert during_down.compound_request.next_pending_step_id == "step_3"
+
+    ledger.update_from_event("tool_result_received", tool_name="gesture_look_down", call_id="call-down")
+    after_down = ledger.build_brief("run-up-down", "turn-1", "after_down")
+    assert after_down.compound_request is not None
+    assert [step.status for step in after_down.compound_request.steps] == ["completed", "completed", "active", "pending"]
+    assert after_down.compound_request.active_step_index == 2
+    assert after_down.compound_request.next_pending_step_id == "step_4"
+
+
+def test_compound_look_left_right_progression_stays_ordered() -> None:
+    ledger = ContinuityLedger()
+    ledger.update_from_event(
+        "transcript_final",
+        text="Look left and then right.",
+        source="input_audio_transcription",
+    )
+
+    initial = ledger.build_brief("run-left-right", "turn-1", "initial")
+    assert initial.compound_request is not None
+    assert [step.kind for step in initial.compound_request.steps] == ["gesture", "gesture"]
+    assert [step.status for step in initial.compound_request.steps] == ["active", "pending"]
+
+    ledger.update_from_event("tool_result_received", tool_name="gesture_look_left", call_id="call-left")
+    after_left = ledger.build_brief("run-left-right", "turn-1", "after_left")
+    assert after_left.compound_request is not None
+    assert [step.status for step in after_left.compound_request.steps] == ["completed", "active"]
+    assert after_left.compound_request.active_step_index == 1
+    assert after_left.compound_request.next_pending_step_id is None
+
+    ledger.update_from_event("tool_result_received", tool_name="gesture_look_right", call_id="call-right")
+    after_right = ledger.build_brief("run-left-right", "turn-1", "after_right")
+    assert after_right.compound_request is not None
+    assert [step.status for step in after_right.compound_request.steps] == ["completed", "completed"]
+    assert after_right.compound_request.active_step_index is None
+    assert after_right.compound_request.next_pending_step_id is None
+
+
 def test_compound_final_followup_stays_pending_until_explicitly_closed() -> None:
     ledger = ContinuityLedger()
     ledger.update_from_event(

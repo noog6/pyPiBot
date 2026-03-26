@@ -108,7 +108,11 @@ _REPORT_STEP_RE = re.compile(
 )
 _OBSERVATION_STEP_RE = re.compile(r"\b(?:observe|describe|identify|what do you see|what(?:'s| is) in|do you see|can you see)\b", re.IGNORECASE)
 _GESTURE_STEP_RE = re.compile(
-    r"\b(?:look(?:ing)?|move|center|turn(?:ing)?|rotate|point(?:ing)?|go to|navigate|back to center|return to center|come back to center)\b",
+    r"\b(?:look(?:ing)?|move|center|turn(?:ing)?|rotate|point(?:ing)?|go to|navigate|back to center|return to center|come back to center|left|right|up|down)\b",
+    re.IGNORECASE,
+)
+_GESTURE_DIRECTION_ONLY_STEP_RE = re.compile(
+    r"^(?:to\s+the\s+)?(?:left|right|up|down|center|centre|middle)\.?$",
     re.IGNORECASE,
 )
 _REPORT_STATUS_TOKENS = ("done", "finished", "ready", "centered", "complete", "completed", "settled")
@@ -143,6 +147,8 @@ _GESTURE_DIRECTION_CENTER_RE = re.compile(
 )
 _GESTURE_DIRECTION_LEFT_RE = re.compile(r"\bleft\b", re.IGNORECASE)
 _GESTURE_DIRECTION_RIGHT_RE = re.compile(r"\bright\b", re.IGNORECASE)
+_GESTURE_DIRECTION_UP_RE = re.compile(r"\bup\b", re.IGNORECASE)
+_GESTURE_DIRECTION_DOWN_RE = re.compile(r"\bdown\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -727,6 +733,8 @@ class ContinuityLedger:
             if active_step.kind == "diagnostics" or (
                 active_step.kind == "gesture" and normalized_tool.startswith(_TOOL_COMMITMENT_PREFIXES)
             ):
+                return
+            if active_step.kind in {"followup", "observation"}:
                 return
         idx = self._first_pending_step_index(state)
         if idx is None:
@@ -1328,6 +1336,8 @@ class ContinuityLedger:
             return "report"
         if _OBSERVATION_STEP_RE.search(clause):
             return "observation"
+        if _GESTURE_DIRECTION_ONLY_STEP_RE.fullmatch(lowered.strip(" .?!")):
+            return "gesture"
         if _GESTURE_STEP_RE.search(clause):
             return "gesture"
         return "followup"
@@ -1347,6 +1357,10 @@ class ContinuityLedger:
             return "left"
         if _GESTURE_DIRECTION_RIGHT_RE.search(normalized):
             return "right"
+        if _GESTURE_DIRECTION_UP_RE.search(normalized):
+            return "up"
+        if _GESTURE_DIRECTION_DOWN_RE.search(normalized):
+            return "down"
         return ""
 
     def _gesture_direction_from_tool_name(self, tool_name: str) -> str:
@@ -1357,4 +1371,8 @@ class ContinuityLedger:
             return "left"
         if "right" in normalized:
             return "right"
+        if "up" in normalized:
+            return "up"
+        if "down" in normalized:
+            return "down"
         return ""
