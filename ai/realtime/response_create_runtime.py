@@ -1204,14 +1204,26 @@ class ResponseCreateRuntime:
             return False
 
         memory_note_to_send = memory_brief_note
+        memory_injection_types: list[str] = []
+        if memory_brief_note:
+            memory_injection_types.append("turn_brief")
         if not memory_note_to_send and hasattr(api, "_consume_pending_preference_memory_context_note"):
             memory_note_to_send = api._consume_pending_preference_memory_context_note(
                 turn_id=turn_id,
                 input_event_key=current_input_event_key,
             )
+            if memory_note_to_send:
+                memory_injection_types.append("preference_context")
         if memory_note_to_send:
             try:
                 await api._send_memory_brief_note(websocket, memory_note_to_send)
+                for injection_type in memory_injection_types:
+                    if hasattr(api, "_record_memory_usage_audit_injection"):
+                        api._record_memory_usage_audit_injection(
+                            turn_id=turn_id,
+                            input_event_key=current_input_event_key,
+                            injection_type=injection_type,
+                        )
             except Exception as exc:  # pragma: no cover - defensive fail-open
                 logger.warning("Memory brief injection skipped due to error: %s", exc)
 
