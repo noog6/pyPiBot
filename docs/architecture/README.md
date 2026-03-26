@@ -5,8 +5,9 @@ references.
 
 ## Cognitive stack roadmap
 
-- [Theo Cognitive Stack Roadmap](theo_cognitive_stack.md)
+- [Theo Cognitive Stack (Code-Aligned)](theo_cognitive_stack.md)
 - [Theo Curiosity Engine](curiosity_engine.md)
+- [Theo Conversation Stack Plateau](theo_conversation_stack_plateau.md)
 
 ## Runtime / lifecycle architecture references
 
