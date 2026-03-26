@@ -390,6 +390,33 @@ def test_preference_recall_query_builder_includes_editor_variants() -> None:
     assert "user preferred editor" in query
 
 
+def test_preference_recall_intent_matches_usually_use_paraphrase() -> None:
+    api = _make_api_stub()
+
+    matched, keywords = api._is_preference_recall_intent("Which editor do I usually use?")
+
+    assert matched is True
+    assert "editor" in keywords
+
+
+def test_preference_recall_intent_matches_normally_prefer_paraphrase() -> None:
+    api = _make_api_stub()
+
+    matched, keywords = api._is_preference_recall_intent("What editor do I normally prefer?")
+
+    assert matched is True
+    assert "editor" in keywords
+
+
+def test_preference_recall_intent_rejects_people_usually_use_prompt() -> None:
+    api = _make_api_stub()
+
+    matched, keywords = api._is_preference_recall_intent("What editor do people usually use?")
+
+    assert matched is False
+    assert keywords == []
+
+
 
 
 
