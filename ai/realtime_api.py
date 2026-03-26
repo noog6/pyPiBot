@@ -5203,15 +5203,89 @@ class RealtimeAPI:
         filtered_memories: list[dict[str, Any]] = []
         dropped_count = 0
         memories = self._preference_recall_memories_from_payload(payload)
+        trace = payload.get("trace") if isinstance(payload.get("trace"), dict) else {}
+        ranking_summary = trace.get("ranking_summary") if isinstance(trace.get("ranking_summary"), list) else []
+        selected_ranking_summary = [
+            item
+            for item in ranking_summary
+            if isinstance(item, dict) and bool(item.get("selected"))
+        ]
+        filtering_mode = "structured_trace" if selected_ranking_summary or ranking_summary else "fallback_text"
+        drop_reason_counts: dict[str, int] = {}
+        selected_ranking_by_memory_id: dict[str, dict[str, Any]] = {}
+        selected_ranking_duplicate_ids: set[str] = set()
+        ranking_by_memory_id: dict[str, dict[str, Any]] = {}
+        ranking_duplicate_ids: set[str] = set()
+
+        def _safe_float(value: Any) -> float:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return 0.0
+
+        def _normalize_memory_id(value: Any) -> str:
+            normalized = str(value or "").strip()
+            return normalized
+
+        def _record_id_index(
+            *,
+            rows: list[dict[str, Any]],
+            target: dict[str, dict[str, Any]],
+            duplicates: set[str],
+        ) -> None:
+            for row in rows:
+                memory_id = _normalize_memory_id(row.get("memory_id"))
+                if not memory_id:
+                    continue
+                if memory_id in target:
+                    duplicates.add(memory_id)
+                    continue
+                target[memory_id] = row
+
+        _record_id_index(
+            rows=selected_ranking_summary,
+            target=selected_ranking_by_memory_id,
+            duplicates=selected_ranking_duplicate_ids,
+        )
+        _record_id_index(
+            rows=[item for item in ranking_summary if isinstance(item, dict)],
+            target=ranking_by_memory_id,
+            duplicates=ranking_duplicate_ids,
+        )
 
         for idx, card in enumerate(cards):
             if not isinstance(card, dict):
                 continue
             why = str(card.get("why_relevant", ""))
-            semantic_match = re.search(r"semantic similarity=([0-9]*\.?[0-9]+)", why.lower())
-            lexical_match = re.search(r"lexical score=([0-9]*\.?[0-9]+)", why.lower())
-            semantic_score = float(semantic_match.group(1)) if semantic_match else 0.0
-            lexical_score = float(lexical_match.group(1)) if lexical_match else 0.0
+            ranking_item: dict[str, Any] | None = None
+            card_memory_id = _normalize_memory_id(card.get("memory_id"))
+
+            if (
+                card_memory_id
+                and card_memory_id not in selected_ranking_duplicate_ids
+                and card_memory_id in selected_ranking_by_memory_id
+            ):
+                ranking_item = selected_ranking_by_memory_id[card_memory_id]
+            elif card_memory_id and card_memory_id not in ranking_duplicate_ids and card_memory_id in ranking_by_memory_id:
+                ranking_item = ranking_by_memory_id[card_memory_id]
+            elif idx < len(selected_ranking_summary):
+                ranking_item = selected_ranking_summary[idx]
+            elif idx < len(ranking_summary) and isinstance(ranking_summary[idx], dict):
+                ranking_item = ranking_summary[idx]
+
+            semantic_score = 0.0
+            lexical_score = 0.0
+            selected_from_trace = False
+            if isinstance(ranking_item, dict):
+                semantic_score = _safe_float(ranking_item.get("score_semantic"))
+                lexical_score = _safe_float(ranking_item.get("score_lexical"))
+                selected_from_trace = bool(ranking_item.get("selected"))
+            elif filtering_mode == "fallback_text":
+                semantic_match = re.search(r"semantic similarity=([0-9]*\.?[0-9]+)", why.lower())
+                lexical_match = re.search(r"lexical score=([0-9]*\.?[0-9]+)", why.lower())
+                semantic_score = float(semantic_match.group(1)) if semantic_match else 0.0
+                lexical_score = float(lexical_match.group(1)) if lexical_match else 0.0
+
             memory_text = str(card.get("memory", ""))
             memory_tokens = set(self._extract_preference_keywords(memory_text))
             overlaps = bool(query_tokens and query_tokens.intersection(memory_tokens))
@@ -5219,6 +5293,7 @@ class RealtimeAPI:
                 overlaps
                 or semantic_score >= min_semantic
                 or lexical_score >= min_lexical
+                or selected_from_trace
                 or "lexical exact match" in why.lower()
             )
             if keep or allow_low_score_debug:
@@ -5227,16 +5302,32 @@ class RealtimeAPI:
                     filtered_memories.append(memories[idx])
             else:
                 dropped_count += 1
+                drop_reason = "below_threshold"
+                if filtering_mode == "fallback_text":
+                    drop_reason = "fallback_text_no_signal"
+                elif ranking_item is None:
+                    drop_reason = "missing_ranking_item"
+                drop_reason_counts[drop_reason] = drop_reason_counts.get(drop_reason, 0) + 1
 
         if dropped_count > 0:
             logger.debug(
-                "preference_recall_cards_filtered run_id=%s dropped=%s query=%s min_semantic=%.2f min_lexical=%.2f",
+                "preference_recall_cards_filtered run_id=%s dropped=%s query=%s min_semantic=%.2f min_lexical=%.2f filtering_mode=%s reasons=%s",
                 self._current_run_id() or "",
                 dropped_count,
                 query,
                 min_semantic,
                 min_lexical,
+                filtering_mode,
+                drop_reason_counts,
             )
+        logger.debug(
+            "preference_recall_filter_mode run_id=%s filtering_mode=%s cards_in=%s cards_kept=%s cards_dropped=%s",
+            self._current_run_id() or "",
+            filtering_mode,
+            len(cards),
+            len(filtered_cards),
+            dropped_count,
+        )
         filtered_payload = dict(payload)
         filtered_payload["memory_cards"] = filtered_cards
         filtered_payload["memories"] = filtered_memories

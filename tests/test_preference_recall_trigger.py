@@ -1771,3 +1771,201 @@ def test_resptrace_logs_for_scheduled_and_drained_response_create(monkeypatch) -
     assert "input_event_key=item-resptrace" in log_text
     assert "scheduled=true" in log_text
     assert "[RESPTRACE] queue_drain" in log_text
+
+
+def _bind_preference_filter(api: RealtimeAPI) -> None:
+    api._preference_recall_min_semantic_score = 0.15
+    api._preference_recall_min_lexical_score = 0.1
+    api._preference_recall_allow_low_score_debug = False
+    api._extract_preference_keywords = RealtimeAPI._extract_preference_keywords.__get__(api, RealtimeAPI)
+    api._preference_recall_memories_from_payload = RealtimeAPI._preference_recall_memories_from_payload.__get__(api, RealtimeAPI)
+    api._filter_preference_recall_payload_for_user = RealtimeAPI._filter_preference_recall_payload_for_user.__get__(api, RealtimeAPI)
+
+
+def test_preference_filter_uses_structured_scores_when_prose_drifts() -> None:
+    api = _make_api_stub()
+    _bind_preference_filter(api)
+    payload = {
+        "memories": [{"content": "User's preferred editor is Vim."}],
+        "memory_cards": [
+            {
+                "memory": "User's preferred editor is Vim.",
+                "why_relevant": "Wording changed and contains no score hints.",
+                "confidence": "Medium",
+            }
+        ],
+        "trace": {"ranking_summary": [{"selected": True, "score_semantic": 0.2, "score_lexical": 0.0}]},
+    }
+
+    filtered = api._filter_preference_recall_payload_for_user(payload, query="favorite drink")
+
+    assert len(filtered["memory_cards"]) == 1
+    assert len(filtered["memories"]) == 1
+
+
+def test_preference_filter_structured_scores_override_convincing_prose() -> None:
+    api = _make_api_stub()
+    _bind_preference_filter(api)
+    payload = {
+        "memories": [{"content": "User wears grey pants."}],
+        "memory_cards": [
+            {
+                "memory": "User wears grey pants.",
+                "why_relevant": "Sounds convincing but not actually preference-related.",
+                "confidence": "Low",
+            }
+        ],
+        "trace": {"ranking_summary": [{"selected": False, "score_semantic": 0.0, "score_lexical": 0.0}]},
+    }
+
+    filtered = api._filter_preference_recall_payload_for_user(payload, query="favorite drink")
+
+    assert filtered["memory_cards"] == []
+    assert filtered["memories"] == []
+
+
+def test_preference_filter_falls_back_to_text_scores_without_trace() -> None:
+    api = _make_api_stub()
+    _bind_preference_filter(api)
+    payload = {
+        "memories": [{"content": "User likes tea."}],
+        "memory_cards": [
+            {
+                "memory": "User likes tea.",
+                "why_relevant": "It matches your query. Evidence: semantic similarity=0.31.",
+                "confidence": "Low",
+            }
+        ],
+    }
+
+    filtered = api._filter_preference_recall_payload_for_user(payload, query="favorite drink")
+
+    assert len(filtered["memory_cards"]) == 1
+    assert len(filtered["memories"]) == 1
+
+
+def test_preference_filter_threshold_boundaries_are_inclusive() -> None:
+    api = _make_api_stub()
+    _bind_preference_filter(api)
+    payload = {
+        "memories": [
+            {"content": "User's preferred theme is dark."},
+            {"content": "User's preferred drink is tea."},
+        ],
+        "memory_cards": [
+            {"memory": "User's preferred theme is dark.", "why_relevant": "", "confidence": "Low"},
+            {"memory": "User's preferred drink is tea.", "why_relevant": "", "confidence": "Low"},
+        ],
+        "trace": {
+            "ranking_summary": [
+                {"selected": True, "score_semantic": 0.15, "score_lexical": 0.0},
+                {"selected": True, "score_semantic": 0.0, "score_lexical": 0.1},
+            ]
+        },
+    }
+
+    filtered = api._filter_preference_recall_payload_for_user(payload, query="preferred settings")
+
+    assert len(filtered["memory_cards"]) == 2
+    assert len(filtered["memories"]) == 2
+
+
+def test_preference_filter_joins_cards_to_selected_ranking_indices() -> None:
+    api = _make_api_stub()
+    _bind_preference_filter(api)
+    payload = {
+        "memories": [{"content": "User's preferred editor is Vim."}],
+        "memory_cards": [{"memory": "User's preferred editor is Vim.", "why_relevant": "", "confidence": "Low"}],
+        "trace": {
+            "ranking_summary": [
+                {"selected": False, "score_semantic": 0.0, "score_lexical": 0.0},
+                {"selected": True, "score_semantic": 0.22, "score_lexical": 0.0},
+            ]
+        },
+    }
+
+    filtered = api._filter_preference_recall_payload_for_user(payload, query="favorite editor")
+
+    assert len(filtered["memory_cards"]) == 1
+    assert len(filtered["memories"]) == 1
+
+
+def test_preference_filter_prefers_memory_id_join_when_unambiguous() -> None:
+    api = _make_api_stub()
+    _bind_preference_filter(api)
+    payload = {
+        "memories": [{"content": "User's preferred editor is Vim.", "memory_id": 42}],
+        "memory_cards": [
+            {
+                "memory": "User's preferred editor is Vim.",
+                "memory_id": "42",
+                "why_relevant": "Prose has no score hints.",
+                "confidence": "Low",
+            }
+        ],
+        "trace": {
+            "ranking_summary": [
+                {"memory_id": 41, "selected": True, "score_semantic": 0.0, "score_lexical": 0.0},
+                {"memory_id": 42, "selected": True, "score_semantic": 0.21, "score_lexical": 0.0},
+            ]
+        },
+    }
+
+    filtered = api._filter_preference_recall_payload_for_user(payload, query="favorite editor")
+
+    assert len(filtered["memory_cards"]) == 1
+    assert len(filtered["memories"]) == 1
+
+
+def test_preference_filter_ambiguous_memory_id_falls_back_to_selected_index() -> None:
+    api = _make_api_stub()
+    _bind_preference_filter(api)
+    payload = {
+        "memories": [{"content": "User's preferred editor is Vim.", "memory_id": 7}],
+        "memory_cards": [
+            {
+                "memory": "User's preferred editor is Vim.",
+                "memory_id": "7",
+                "why_relevant": "Prose has no score hints.",
+                "confidence": "Low",
+            }
+        ],
+        "trace": {
+            "ranking_summary": [
+                {"memory_id": 7, "selected": False, "score_semantic": 0.0, "score_lexical": 0.0},
+                {"memory_id": "7", "selected": False, "score_semantic": 0.23, "score_lexical": 0.0},
+            ]
+        },
+    }
+
+    filtered = api._filter_preference_recall_payload_for_user(payload, query="favorite drink")
+
+    assert filtered["memory_cards"] == []
+    assert filtered["memories"] == []
+
+
+def test_preference_filter_ambiguous_memory_id_fallback_can_still_keep_card() -> None:
+    api = _make_api_stub()
+    _bind_preference_filter(api)
+    payload = {
+        "memories": [{"content": "User likes tea.", "memory_id": 7}],
+        "memory_cards": [
+            {
+                "memory": "User likes tea.",
+                "memory_id": "7",
+                "why_relevant": "Prose has no score hints.",
+                "confidence": "Low",
+            }
+        ],
+        "trace": {
+            "ranking_summary": [
+                {"memory_id": 7, "selected": True, "score_semantic": 0.22, "score_lexical": 0.0},
+                {"memory_id": "7", "selected": True, "score_semantic": 0.0, "score_lexical": 0.0},
+            ]
+        },
+    }
+
+    filtered = api._filter_preference_recall_payload_for_user(payload, query="favorite editor")
+
+    assert len(filtered["memory_cards"]) == 1
+    assert len(filtered["memories"]) == 1
