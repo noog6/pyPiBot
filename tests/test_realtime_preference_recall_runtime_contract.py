@@ -12,6 +12,7 @@ if "audioop" not in sys.modules:
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
 
 import ai.tools as ai_tools
+from ai.realtime import preference_recall_runtime
 from ai.realtime_api import RealtimeAPI
 from ai.realtime.memory_runtime import PerceptionMemoryVerdict
 from services.memory_manager import MemoryManager, MemoryScope
@@ -1335,6 +1336,75 @@ def test_topic_recall_bridge_attaches_preference_context_for_value_lookup(monkey
     memory_context = captured_contexts[0]["memory_context"]
     assert memory_context["hit"] is True
     assert "favorite editor is Vim" in str(memory_context["prompt_note"])
+
+
+def test_topic_recall_bridge_hit_accepts_preference_tagged_topic_overlap_without_text_markers() -> None:
+    bridge_hit = preference_recall_runtime._topic_recall_bridge_hit(
+        topic_query="vim",
+        memories=[
+            {
+                "content": "I use Vim most days.",
+                "tags": ["preference", "editor"],
+            }
+        ],
+        cards=[],
+    )
+
+    assert bridge_hit is True
+
+
+def test_topic_recall_bridge_no_hit_for_topic_overlap_without_preference_marker_metadata() -> None:
+    bridge_hit = preference_recall_runtime._topic_recall_bridge_hit(
+        topic_query="vim",
+        memories=[
+            {
+                "content": "I use Vim most days.",
+                "tags": ["editor"],
+            }
+        ],
+        cards=[],
+    )
+
+    assert bridge_hit is False
+
+
+def test_topic_recall_bridge_attaches_context_from_preference_metadata_signal(monkeypatch) -> None:
+    api = _base_api()
+    api._is_preference_recall_intent = RealtimeAPI._is_preference_recall_intent.__get__(api, RealtimeAPI)
+    api._classify_memory_intent = RealtimeAPI._classify_memory_intent.__get__(api, RealtimeAPI)
+    api._get_memory_runtime = RealtimeAPI._get_memory_runtime.__get__(api, RealtimeAPI)
+    api._build_preference_recall_query = RealtimeAPI._build_preference_recall_query.__get__(api, RealtimeAPI)
+    api._mark_preference_recall_candidate = RealtimeAPI._mark_preference_recall_candidate.__get__(api, RealtimeAPI)
+    api._clear_preference_recall_candidate = RealtimeAPI._clear_preference_recall_candidate.__get__(api, RealtimeAPI)
+    api._current_input_event_key = "evt_bridge_metadata_hit"
+    api._preference_recall_followup_enabled = False
+    api._preference_recall_locked_input_event_keys = set()
+    captured_contexts: list[dict[str, object]] = []
+    api._set_pending_preference_memory_context = lambda **kwargs: captured_contexts.append(kwargs)
+    api.send_assistant_message = AsyncMock()
+
+    async def _fake_recall(**kwargs):
+        assert kwargs["query"] == "vim"
+        return {
+            "memories": [{"content": "I use Vim most days.", "tags": ["preference", "editor"]}],
+            "memory_cards": [],
+            "memory_cards_text": 'Relevant memory:\n- "I use Vim most days."',
+        }
+
+    monkeypatch.setitem(ai_tools.function_map, "recall_memories", _fake_recall)
+
+    handled = asyncio.run(
+        RealtimeAPI._maybe_handle_preference_recall_intent(
+            api,
+            "Tell me what you remember about Vim",
+            object(),
+            source="input_audio_transcription",
+        )
+    )
+
+    assert handled is False
+    assert captured_contexts
+    assert captured_contexts[0]["memory_context"]["hit"] is True
 
 
 def test_topic_recall_bridge_no_hit_for_non_preference_topic(monkeypatch) -> None:

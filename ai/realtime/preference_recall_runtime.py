@@ -72,6 +72,35 @@ def _topic_recall_bridge_hit(*, topic_query: str, memories: list[dict[str, Any]]
         if not topic_tokens:
             return False
 
+        def _metadata_tokens(payload: dict[str, Any]) -> list[str]:
+            metadata_tokens: list[str] = []
+            tags = payload.get("tags")
+            if isinstance(tags, (list, tuple, set)):
+                metadata_tokens.extend(str(tag or "").lower() for tag in tags)
+            metadata = payload.get("metadata")
+            if isinstance(metadata, dict):
+                nested_tags = metadata.get("tags")
+                if isinstance(nested_tags, (list, tuple, set)):
+                    metadata_tokens.extend(str(tag or "").lower() for tag in nested_tags)
+                for key in ("domain", "category", "type", "kind"):
+                    value = metadata.get(key)
+                    if value:
+                        metadata_tokens.append(str(value).lower())
+            for key in ("domain", "category", "type", "kind"):
+                value = payload.get(key)
+                if value:
+                    metadata_tokens.append(str(value).lower())
+            return metadata_tokens
+
+        def _metadata_preference_domain_hit(payload: dict[str, Any]) -> bool:
+            metadata_tokens = _metadata_tokens(payload)
+            if not metadata_tokens:
+                return False
+            metadata_blob = " ".join(metadata_tokens)
+            has_value_marker = any(marker in metadata_blob for marker in _PREFERENCE_VALUE_MARKERS)
+            has_domain_marker = any(domain in metadata_blob for domain in _PREFERENCE_VALUE_DOMAINS)
+            return has_value_marker and has_domain_marker
+
         def _matches(text: str) -> bool:
             normalized = " ".join(str(text or "").lower().split())
             if not normalized:
@@ -82,10 +111,18 @@ def _topic_recall_bridge_hit(*, topic_query: str, memories: list[dict[str, Any]]
             return has_value_marker and has_domain_marker and has_topic_token
 
         for memory in memories:
-            if _matches(str(memory.get("content", ""))):
+            memory_text = str(memory.get("content", ""))
+            if _matches(memory_text):
+                return True
+            normalized_text = " ".join(memory_text.lower().split())
+            if normalized_text and any(token in normalized_text for token in topic_tokens) and _metadata_preference_domain_hit(memory):
                 return True
         for card in cards:
-            if _matches(str(card.get("memory", ""))):
+            card_text = str(card.get("memory", ""))
+            if _matches(card_text):
+                return True
+            normalized_text = " ".join(card_text.lower().split())
+            if normalized_text and any(token in normalized_text for token in topic_tokens) and _metadata_preference_domain_hit(card):
                 return True
         return False
 
