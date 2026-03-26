@@ -64,6 +64,10 @@ def _make_memory_manager(store: MemoryStore) -> MemoryManager:
     return manager
 
 
+def _render_info_logs(mocked_info: Mock) -> str:
+    return "\n".join(str(call.args[0]) % call.args[1:] for call in mocked_info.call_args_list if call.args)
+
+
 def test_find_stop_word_delegates_to_runtime() -> None:
     api = _base_api()
     with patch("ai.realtime_api.preference_recall_runtime._find_stop_word", return_value="halt") as mocked:
@@ -213,7 +217,8 @@ def test_preference_recall_analysis_sets_server_auto_takeover_runtime_request_on
 
     monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "recall_memories", AsyncMock())
 
-    verdict = asyncio.run(api._analyze_preference_recall_intent("Which editor do I prefer?", source="input_audio_transcription"))
+    with patch("ai.realtime_api.preference_recall_runtime.logger.info") as mocked_info:
+        verdict = asyncio.run(api._analyze_preference_recall_intent("Which editor do I prefer?", source="input_audio_transcription"))
 
     assert verdict.preference_recall_requested is True
     assert verdict.preference_recall_context is not None
@@ -222,6 +227,7 @@ def test_preference_recall_analysis_sets_server_auto_takeover_runtime_request_on
         "suppress_server_auto": True,
         "cancel_active_server_auto": True,
     }
+    assert "takeover_allow_reason=ownership_match" in _render_info_logs(mocked_info)
 
 
 def test_preference_recall_analysis_does_not_request_takeover_without_same_turn_provisional_server_auto(monkeypatch) -> None:
@@ -253,7 +259,8 @@ def test_preference_recall_analysis_does_not_request_takeover_without_same_turn_
 
     monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "recall_memories", AsyncMock())
 
-    verdict = asyncio.run(api._analyze_preference_recall_intent("Which editor do I prefer?", source="input_audio_transcription"))
+    with patch("ai.realtime_api.preference_recall_runtime.logger.info") as mocked_info:
+        verdict = asyncio.run(api._analyze_preference_recall_intent("Which editor do I prefer?", source="input_audio_transcription"))
 
     assert verdict.preference_recall_requested is True
     assert bool(verdict.preference_recall_context.get("hit")) is True
@@ -261,6 +268,7 @@ def test_preference_recall_analysis_does_not_request_takeover_without_same_turn_
         "suppress_server_auto": False,
         "cancel_active_server_auto": False,
     }
+    assert "takeover_block_reason=not_provisional" in _render_info_logs(mocked_info)
 
 
 def test_preference_recall_analysis_does_not_request_takeover_for_same_turn_owner_mismatch(monkeypatch) -> None:
@@ -280,6 +288,48 @@ def test_preference_recall_analysis_does_not_request_takeover_for_same_turn_owne
     api._active_response_canonical_key = "turn_1:evt_other_owner"
     api._canonical_utterance_key = lambda *, turn_id, input_event_key: f"{turn_id}:{input_event_key}"
     api._is_provisional_response = Mock(return_value=True)
+    api._pending_server_auto_response_for_turn = lambda *, turn_id: None
+    api._run_preference_recall_with_fallbacks = AsyncMock(
+        return_value=(
+            {
+                "memories": [{"content": "User's favorite editor is Vim."}],
+                "memory_cards_text": "Relevant memory:\n- \"User's favorite editor is Vim.\"",
+            },
+            True,
+        )
+    )
+
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "recall_memories", AsyncMock())
+
+    with patch("ai.realtime_api.preference_recall_runtime.logger.info") as mocked_info:
+        verdict = asyncio.run(api._analyze_preference_recall_intent("Which editor do I prefer?", source="input_audio_transcription"))
+
+    assert verdict.preference_recall_requested is True
+    assert bool(verdict.preference_recall_context.get("hit")) is True
+    assert verdict.runtime_request == {
+        "suppress_server_auto": False,
+        "cancel_active_server_auto": False,
+    }
+    assert "takeover_block_reason=owner_mismatch" in _render_info_logs(mocked_info)
+
+
+def test_preference_recall_analysis_does_not_request_takeover_for_pending_owner_mismatch(monkeypatch) -> None:
+    api = _base_api()
+    api._current_input_event_key = "evt_transcript_final"
+    api._is_preference_recall_intent = Mock(return_value=(True, ["editor"]))
+    api._classify_memory_intent = Mock(return_value="preference_recall")
+    api._build_preference_recall_query = Mock(return_value="editor")
+    api._mark_preference_recall_candidate = Mock()
+    api._clear_preference_recall_candidate = Mock()
+    api._active_response_origin = "server_auto"
+    api._response_in_flight = True
+    api._active_response_id = "resp_provisional_pending_mismatch"
+    api._current_response_turn_id = "turn_1"
+    api._active_response_input_event_key = ""
+    api._active_server_auto_input_event_key = ""
+    api._active_response_canonical_key = ""
+    api._canonical_utterance_key = lambda *, turn_id, input_event_key: f"{turn_id}:{input_event_key}"
+    api._is_provisional_response = Mock(return_value=True)
     api._pending_server_auto_response_for_turn = lambda *, turn_id: SimpleNamespace(canonical_key="turn_1:evt_other_owner")
     api._run_preference_recall_with_fallbacks = AsyncMock(
         return_value=(
@@ -293,14 +343,91 @@ def test_preference_recall_analysis_does_not_request_takeover_for_same_turn_owne
 
     monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "recall_memories", AsyncMock())
 
-    verdict = asyncio.run(api._analyze_preference_recall_intent("Which editor do I prefer?", source="input_audio_transcription"))
+    with patch("ai.realtime_api.preference_recall_runtime.logger.info") as mocked_info:
+        verdict = asyncio.run(api._analyze_preference_recall_intent("Which editor do I prefer?", source="input_audio_transcription"))
 
-    assert verdict.preference_recall_requested is True
-    assert bool(verdict.preference_recall_context.get("hit")) is True
     assert verdict.runtime_request == {
         "suppress_server_auto": False,
         "cancel_active_server_auto": False,
     }
+    assert "takeover_block_reason=pending_owner_mismatch" in _render_info_logs(mocked_info)
+
+
+def test_preference_recall_analysis_does_not_request_takeover_without_active_response_id(monkeypatch) -> None:
+    api = _base_api()
+    api._current_input_event_key = "evt_runtime_missing_active_id"
+    api._is_preference_recall_intent = Mock(return_value=(True, ["editor"]))
+    api._classify_memory_intent = Mock(return_value="preference_recall")
+    api._build_preference_recall_query = Mock(return_value="editor")
+    api._mark_preference_recall_candidate = Mock()
+    api._clear_preference_recall_candidate = Mock()
+    api._active_response_origin = "server_auto"
+    api._response_in_flight = True
+    api._active_response_id = ""
+    api._current_response_turn_id = "turn_1"
+    api._active_response_input_event_key = "evt_runtime_missing_active_id"
+    api._active_server_auto_input_event_key = "evt_runtime_missing_active_id"
+    api._canonical_utterance_key = lambda *, turn_id, input_event_key: f"{turn_id}:{input_event_key}"
+    api._run_preference_recall_with_fallbacks = AsyncMock(
+        return_value=(
+            {
+                "memories": [{"content": "User's favorite editor is Vim."}],
+                "memory_cards_text": "Relevant memory:\n- \"User's favorite editor is Vim.\"",
+            },
+            True,
+        )
+    )
+
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "recall_memories", AsyncMock())
+
+    with patch("ai.realtime_api.preference_recall_runtime.logger.info") as mocked_info:
+        verdict = asyncio.run(api._analyze_preference_recall_intent("Which editor do I prefer?", source="input_audio_transcription"))
+
+    assert verdict.runtime_request == {
+        "suppress_server_auto": False,
+        "cancel_active_server_auto": False,
+    }
+    assert "takeover_block_reason=no_active_response_id" in _render_info_logs(mocked_info)
+
+
+def test_preference_recall_analysis_does_not_request_takeover_without_ownership_metadata(monkeypatch) -> None:
+    api = _base_api()
+    api._current_input_event_key = ""
+    api._is_preference_recall_intent = Mock(return_value=(True, ["editor"]))
+    api._classify_memory_intent = Mock(return_value="preference_recall")
+    api._build_preference_recall_query = Mock(return_value="editor")
+    api._mark_preference_recall_candidate = Mock()
+    api._clear_preference_recall_candidate = Mock()
+    api._active_response_origin = "server_auto"
+    api._response_in_flight = True
+    api._active_response_id = "resp_provisional"
+    api._current_response_turn_id = "turn_1"
+    api._active_response_input_event_key = ""
+    api._active_server_auto_input_event_key = ""
+    api._active_response_canonical_key = ""
+    api._canonical_utterance_key = lambda *, turn_id, input_event_key: ""
+    api._is_provisional_response = Mock(return_value=True)
+    api._pending_server_auto_response_for_turn = lambda *, turn_id: SimpleNamespace(canonical_key="")
+    api._run_preference_recall_with_fallbacks = AsyncMock(
+        return_value=(
+            {
+                "memories": [{"content": "User's favorite editor is Vim."}],
+                "memory_cards_text": "Relevant memory:\n- \"User's favorite editor is Vim.\"",
+            },
+            True,
+        )
+    )
+
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "recall_memories", AsyncMock())
+
+    with patch("ai.realtime_api.preference_recall_runtime.logger.info") as mocked_info:
+        verdict = asyncio.run(api._analyze_preference_recall_intent("Which editor do I prefer?", source="input_audio_transcription"))
+
+    assert verdict.runtime_request == {
+        "suppress_server_auto": False,
+        "cancel_active_server_auto": False,
+    }
+    assert "takeover_block_reason=missing_ownership_metadata" in _render_info_logs(mocked_info)
 
 
 def test_preference_recall_analysis_does_not_request_takeover_when_hit_false(monkeypatch) -> None:

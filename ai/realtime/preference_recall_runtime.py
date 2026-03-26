@@ -97,25 +97,41 @@ def _should_request_server_auto_takeover(
     input_event_key: str,
     hit: bool,
 ) -> bool:
+        should_request, _ = _evaluate_server_auto_takeover_request(
+            controller,
+            resolved_turn_id=resolved_turn_id,
+            input_event_key=input_event_key,
+            hit=hit,
+        )
+        return should_request
+
+
+def _evaluate_server_auto_takeover_request(
+    controller,
+    *,
+    resolved_turn_id: str,
+    input_event_key: str,
+    hit: bool,
+) -> tuple[bool, str]:
         if not hit:
-            return False
+            return False, "hit_false"
         if str(getattr(controller, "_active_response_origin", "") or "").strip().lower() != "server_auto":
-            return False
+            return False, "origin_not_server_auto"
         if not bool(getattr(controller, "_response_in_flight", False)):
-            return False
+            return False, "response_not_in_flight"
         active_response_id = str(getattr(controller, "_active_response_id", "") or "").strip()
         if not active_response_id:
-            return False
+            return False, "no_active_response_id"
         is_provisional_response = getattr(controller, "_is_provisional_response", None)
         if callable(is_provisional_response):
             try:
                 if not bool(is_provisional_response(response_id=active_response_id)):
-                    return False
+                    return False, "not_provisional"
             except Exception:
-                return False
+                return False, "not_provisional"
         active_turn_id = str(getattr(controller, "_current_response_turn_id", "") or "").strip()
         if active_turn_id and active_turn_id != resolved_turn_id:
-            return False
+            return False, "turn_mismatch"
         transcript_input_event_key = str(input_event_key or "").strip()
         active_input_event_key = str(getattr(controller, "_active_response_input_event_key", "") or "").strip() or str(
             getattr(controller, "_active_server_auto_input_event_key", "") or ""
@@ -145,12 +161,21 @@ def _should_request_server_auto_takeover(
             pending_server_auto = pending_server_auto_for_turn(turn_id=resolved_turn_id)
             pending_canonical_key = str(getattr(pending_server_auto, "canonical_key", "") or "").strip()
         if transcript_input_event_key and active_input_event_key and transcript_input_event_key == active_input_event_key:
-            return True
+            return True, "ownership_match"
         if transcript_canonical_key and active_canonical_key and transcript_canonical_key == active_canonical_key:
-            return True
+            return True, "ownership_match"
         if transcript_canonical_key and pending_canonical_key and transcript_canonical_key == pending_canonical_key:
-            return True
-        return False
+            return True, "ownership_match"
+        has_comparable_active_ownership_metadata = bool(
+            (transcript_input_event_key and active_input_event_key)
+            or (transcript_canonical_key and active_canonical_key)
+        )
+        has_comparable_pending_ownership_metadata = bool(transcript_canonical_key and pending_canonical_key)
+        if not has_comparable_active_ownership_metadata and not has_comparable_pending_ownership_metadata:
+            return False, "missing_ownership_metadata"
+        if has_comparable_pending_ownership_metadata and transcript_canonical_key != pending_canonical_key:
+            return False, "pending_owner_mismatch"
+        return False, "owner_mismatch"
 
 async def _suppress_preference_recall_server_auto_response(controller, websocket: Any) -> None:
         turn_id = controller._current_turn_id_or_unknown()
@@ -453,7 +478,7 @@ async def _analyze_preference_recall_intent(controller, text: str, *, source: st
             str(recall_invoked).lower(),
         )
         input_event_key = str(getattr(controller, "_current_input_event_key", "") or "").strip()
-        request_server_auto_takeover = _should_request_server_auto_takeover(
+        request_server_auto_takeover, takeover_reason = _evaluate_server_auto_takeover_request(
             controller,
             resolved_turn_id=resolved_turn_id,
             input_event_key=input_event_key,
@@ -480,8 +505,12 @@ async def _analyze_preference_recall_intent(controller, text: str, *, source: st
                 "cancel_active_server_auto": request_server_auto_takeover,
             },
         )
-        logger.info(
-            "perception_memory_verdict run_id=%s turn_id=%s source=%s memory_intent=%s memory_intent_subtype=%s preference_recall_requested=%s companion_gesture_requested=%s runtime_request=%s takeover_requested=%s",
+        verdict_log = (
+            "perception_memory_verdict run_id=%s turn_id=%s source=%s memory_intent=%s "
+            "memory_intent_subtype=%s preference_recall_requested=%s companion_gesture_requested=%s "
+            "runtime_request=%s takeover_requested=%s"
+        )
+        verdict_args: list[Any] = [
             controller._current_run_id() or "",
             resolved_turn_id,
             source,
@@ -491,7 +520,14 @@ async def _analyze_preference_recall_intent(controller, text: str, *, source: st
             str(bool(verdict.companion_gesture_tool_request)).lower(),
             "present" if isinstance(verdict.runtime_request, dict) and verdict.runtime_request else "none",
             str(request_server_auto_takeover).lower(),
-        )
+        ]
+        if hit and request_server_auto_takeover:
+            verdict_log += " takeover_allow_reason=%s"
+            verdict_args.append("ownership_match")
+        elif hit and not request_server_auto_takeover:
+            verdict_log += " takeover_block_reason=%s"
+            verdict_args.append(takeover_reason)
+        logger.info(verdict_log, *verdict_args)
         return verdict
 
 
