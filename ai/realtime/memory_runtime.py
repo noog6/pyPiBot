@@ -62,6 +62,14 @@ _PREFERENCE_DIRECT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bwhat(?:'s| is)\s+my\s+(?:usual|go-?to|preferred|favorite|favourite)\s+(?P<topic>[^?.!,;:]+)", re.IGNORECASE),
     re.compile(r"\bwhat\s+do\s+i\s+prefer\s+for\s+(?P<topic>[^?.!,;:]+)", re.IGNORECASE),
     re.compile(r"\bdo\s+you\s+remember\s+my\s+preference\s+for\s+(?P<topic>[^?.!,;:]+)", re.IGNORECASE),
+    re.compile(
+        r"\b(?:which|what)\s+(?P<topic>editor|ide|tool|workflow|language|theme|music|drink|food)\s+do\s+i\s+(?:usually|normally)\s+use\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:which|what)\s+(?P<topic>editor|ide|tool|workflow|language|theme|music|drink|food)\s+do\s+i\s+(?:usually|normally)\s+prefer\b",
+        re.IGNORECASE,
+    ),
 )
 _GENERAL_MEMORY_REQUEST_CUES: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bdo\s+you\s+remember\b", re.IGNORECASE),
