@@ -10766,6 +10766,8 @@ class RealtimeAPI:
                         str(bool(memory_context.get("hit"))).lower(),
                         memory_context.get("returned_count", 0),
                     )
+                if bool(runtime_request.get("suppress_server_auto")) or bool(runtime_request.get("cancel_active_server_auto")):
+                    await self._suppress_preference_recall_server_auto_response(websocket)
             finally:
                 if input_event_key:
                     locked_input_event_keys.discard(input_event_key)
