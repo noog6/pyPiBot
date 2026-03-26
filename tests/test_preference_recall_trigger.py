@@ -1330,6 +1330,114 @@ def test_verify_clarify_cancelled_server_auto_does_not_block_clarify_creation(mo
         for entry in info_logs
     )
 
+
+def test_verify_clarify_cancellation_allows_replacement_send_without_watchdog_fallback(monkeypatch) -> None:
+    api = _make_api_stub()
+    ws = _RecordingWs()
+    info_logs: list[str] = []
+
+    api.websocket = ws
+    api._asr_verify_on_risk_enabled = True
+    api._asr_clarify_asked_input_event_keys = set()
+    api._asr_clarify_count_by_turn = {}
+    api._asr_verify_max_clarify_per_turn = 2
+    api._asr_verify_short_utterance_ms = 300
+    api._asr_verify_min_confidence = 0.6
+    api._transcript_response_watchdog_timeout_s = 0.2
+    api._transcript_response_watchdog_tasks = {}
+    api._transcript_response_outcome_logged_keys = set()
+    api._cancelled_response_ids = set()
+    api._cancelled_response_timing_by_id = {}
+    api._stale_response_drop_window_by_id = {}
+    api._response_status_by_id = {"resp-server-auto": "active"}
+    api._pending_server_auto_response_by_turn_id = {
+        "turn-v": PendingServerAutoResponse(
+            turn_id="turn-v",
+            response_id="resp-server-auto",
+            canonical_key="run-test:turn-v:evt-v",
+            created_at_ms=1,
+            active=True,
+        )
+    }
+    api._provisional_response_ids = {"resp-server-auto"}
+    api._canonical_response_state_store()["run-test:turn-v:evt-v"] = realtime_api.CanonicalResponseState(
+        turn_id="turn-v",
+        input_event_key="evt-v",
+        response_id="resp-server-auto",
+        created=True,
+        done=True,
+        deliverable_observed=True,
+        deliverable_class="final",
+    )
+    api._terminal_response_text_by_response_id = {}
+    api._response_in_flight = True
+    api.response_in_progress = True
+    api._active_response_id = "resp-server-auto"
+    api._active_response_origin = "server_auto"
+    api._active_response_input_event_key = "evt-v"
+    api._active_response_canonical_key = "run-test:turn-v:evt-v"
+    api._active_server_auto_input_event_key = "evt-v"
+    api._record_cancel_issued_timing = lambda *_args, **_kwargs: None
+
+    async def _false(*_args, **_kwargs) -> bool:
+        return False
+
+    api._maybe_handle_confirmation_decision_timeout = _false
+    api._maybe_handle_approval_response = _false
+    api._handle_stop_word = _false
+    api._maybe_handle_research_permission_response = _false
+    api._maybe_handle_research_budget_response = _false
+    api._maybe_apply_late_confirmation_decision = _false
+    api._maybe_process_research_intent = _false
+    api._maybe_handle_preference_recall_intent = _false
+    api._has_active_confirmation_token = lambda: False
+    api._is_awaiting_confirmation_phase = lambda: False
+    api._is_user_approved_interrupt_response = lambda _response: False
+    api._log_user_transcript = lambda *_args, **_kwargs: None
+    api._record_user_input = lambda *_args, **_kwargs: None
+    api._track_outgoing_event = lambda *_args, **_kwargs: None
+
+    class _Transport:
+        async def send_json(self, _ws, event):
+            await _ws.send(json.dumps(event))
+
+    api._get_or_create_transport = lambda: _Transport()
+
+    monkeypatch.setattr(logger, "info", lambda msg, *args, **kwargs: info_logs.append(msg % args if args else msg))
+
+    async def _run() -> None:
+        api._start_transcript_response_watchdog(turn_id="turn-v", input_event_key="evt-v:clarify")
+        clarified = await api._maybe_verify_on_risk_clarify(
+            transcript="what color pants am i wearing",
+            websocket=ws,
+            turn_id="turn-v",
+            input_event_key="evt-v",
+            snapshot={"run_id": "run-test", "asr_confidence": 0.9},
+        )
+        assert clarified is True
+        await api.handle_event({"type": "response.created", "response": {"id": "resp-clarify"}}, ws)
+        await asyncio.sleep(0.3)
+
+    asyncio.run(_run())
+
+    sent_payloads = [json.loads(payload) for payload in ws.sent]
+    assert any(payload.get("type") == "response.cancel" for payload in sent_payloads)
+    assert any(payload.get("type") == "response.create" for payload in sent_payloads)
+    assert any("clarification_response_selected" in entry for entry in info_logs)
+    assert not any(
+        "response_not_scheduled" in entry
+        and "reason=same_turn_already_owned" in entry
+        and "origin=assistant_message" in entry
+        for entry in info_logs
+    )
+    assert not any(
+        "response_not_scheduled" in entry
+        and "reason=timeout" in entry
+        and "response.created missing before timeout" in entry
+        for entry in info_logs
+    )
+
+
 def test_transcript_watchdog_logs_when_response_not_scheduled(monkeypatch) -> None:
     api = _make_api_stub()
     ws = _RecordingWs()

@@ -1426,6 +1426,44 @@ def test_response_path_candidate_envelope_preserves_same_turn_owner_drop() -> No
     assert decision.selected_candidate_id == "same_turn_owner"
 
 
+def test_turn_has_final_deliverable_ignores_cancelled_provisional_without_evidence() -> None:
+    api = _make_api()
+    canonical_key = "run-395:turn_1:item_1"
+    api._canonical_response_state_store()[canonical_key] = CanonicalResponseState(
+        turn_id="turn_1",
+        input_event_key="item_1",
+        response_id="resp-provisional",
+        created=True,
+        done=True,
+        deliverable_observed=True,
+        deliverable_class="final",
+    )
+    api._provisional_response_ids = {"resp-provisional"}
+    api._response_status_by_id = {"resp-provisional": "cancelled"}
+    api._terminal_response_text_by_response_id = {}
+
+    assert api._turn_has_final_deliverable(turn_id="turn_1") is False
+
+
+def test_turn_has_final_deliverable_keeps_cancelled_provisional_with_evidence() -> None:
+    api = _make_api()
+    canonical_key = "run-395:turn_1:item_1"
+    api._canonical_response_state_store()[canonical_key] = CanonicalResponseState(
+        turn_id="turn_1",
+        input_event_key="item_1",
+        response_id="resp-provisional",
+        created=True,
+        done=True,
+        deliverable_observed=True,
+        deliverable_class="final",
+    )
+    api._provisional_response_ids = {"resp-provisional"}
+    api._response_status_by_id = {"resp-provisional": "cancelled"}
+    api._terminal_response_text_by_response_id = {"resp-provisional": "Here is the answer."}
+
+    assert api._turn_has_final_deliverable(turn_id="turn_1") is True
+
+
 def test_response_path_candidate_envelope_preserves_lineage_and_terminal_precedence() -> None:
     api = _make_api()
     runtime = api._response_create_runtime
