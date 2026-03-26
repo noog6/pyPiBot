@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
+import shutil
+import socket
 import subprocess
 from collections.abc import Callable
 from typing import Any
@@ -51,11 +54,225 @@ def read_runtime_diagnostics() -> dict[str, Any]:
         }
     payload = provider()
     if isinstance(payload, dict):
-        return payload
+        diagnostics = dict(payload)
+        diagnostics["host_status"] = _collect_host_status()
+        return diagnostics
     return {
         "status": "unavailable",
         "message": "Runtime diagnostics provider returned an unexpected payload.",
     }
+
+
+def _collect_host_status() -> dict[str, Any]:
+    wifi_ssid, wifi_reason = _read_wifi_ssid()
+    primary_ip, ip_reason = _read_primary_ip()
+    uptime_pretty, uptime_reason = _read_uptime_pretty()
+    load_average, load_reason = _read_load_average()
+
+    status: dict[str, Any] = {
+        "wifi_ssid": wifi_ssid,
+        "primary_ip": primary_ip,
+        "uptime_pretty": uptime_pretty,
+        "load_average": load_average,
+        "memory": _read_memory_snapshot(),
+        "disk_root": _read_root_disk_snapshot(),
+    }
+    if wifi_ssid == "unknown" and wifi_reason:
+        status["wifi_ssid_reason"] = wifi_reason
+    if primary_ip == "unknown" and ip_reason:
+        status["primary_ip_reason"] = ip_reason
+    if uptime_pretty == "unknown" and uptime_reason:
+        status["uptime_pretty_reason"] = uptime_reason
+    if any(value == "unknown" for value in load_average.values()) and load_reason:
+        status["load_average_reason"] = load_reason
+    return status
+
+
+def _read_wifi_ssid() -> tuple[str, str | None]:
+    ssid = _run_command(("iwgetid", "-r"))
+    if ssid:
+        return ssid, None
+
+    nmcli_output = _run_command(("nmcli", "-t", "-f", "active,ssid", "dev", "wifi"))
+    if nmcli_output:
+        for line in nmcli_output.splitlines():
+            if line.startswith("yes:"):
+                active_ssid = line.partition(":")[2].strip()
+                if active_ssid:
+                    return active_ssid, None
+    return "unknown", "wireless_ssid_unavailable"
+
+
+def _read_primary_ip() -> tuple[str, str | None]:
+    route_probe = _run_command(("ip", "route", "get", "1.1.1.1"))
+    if route_probe:
+        route_match = re.search(r"\bsrc\s+(\S+)", route_probe)
+        if route_match:
+            return route_match.group(1), None
+
+    # Route-resolution trick via UDP socket connect; no shell command execution.
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            ip = sock.getsockname()[0]
+            if ip:
+                return ip, None
+    except OSError:
+        pass
+
+    hostname_ips = _run_command(("hostname", "-I"))
+    if hostname_ips:
+        first_ip = hostname_ips.split()[0].strip()
+        if first_ip:
+            return first_ip, None
+    return "unknown", "primary_ip_unavailable"
+
+
+def _read_uptime_pretty() -> tuple[str, str | None]:
+    uptime_pretty = _run_command(("uptime", "-p"))
+    if uptime_pretty:
+        return uptime_pretty, None
+    try:
+        with open("/proc/uptime", encoding="utf-8") as uptime_file:
+            uptime_seconds = int(float(uptime_file.read().split()[0]))
+    except (OSError, ValueError, IndexError):
+        return "unknown", "uptime_unavailable"
+    return _format_uptime_from_seconds(uptime_seconds), None
+
+
+def _read_load_average() -> tuple[dict[str, float | str], str | None]:
+    try:
+        load_1m, load_5m, load_15m = os.getloadavg()
+        return {
+            "1m": round(load_1m, 2),
+            "5m": round(load_5m, 2),
+            "15m": round(load_15m, 2),
+        }, None
+    except OSError:
+        pass
+    try:
+        with open("/proc/loadavg", encoding="utf-8") as loadavg_file:
+            values = loadavg_file.read().split()[:3]
+        if len(values) == 3:
+            return {
+                "1m": round(float(values[0]), 2),
+                "5m": round(float(values[1]), 2),
+                "15m": round(float(values[2]), 2),
+            }, None
+    except (OSError, ValueError):
+        pass
+    unknown_load = {"1m": "unknown", "5m": "unknown", "15m": "unknown"}
+    return unknown_load, "load_average_unavailable"
+
+
+def _read_memory_snapshot() -> dict[str, str]:
+    meminfo = _read_meminfo()
+    if meminfo is None:
+        return {
+            "ram_total": "unknown",
+            "ram_used": "unknown",
+            "ram_available": "unknown",
+            "swap_total": "unknown",
+            "swap_used": "unknown",
+        }
+    ram_total = meminfo.get("MemTotal", 0)
+    ram_available = meminfo.get("MemAvailable", 0)
+    swap_total = meminfo.get("SwapTotal", 0)
+    swap_free = meminfo.get("SwapFree", 0)
+    ram_used = max(ram_total - ram_available, 0)
+    swap_used = max(swap_total - swap_free, 0)
+    return {
+        "ram_total": _format_bytes(ram_total),
+        "ram_used": _format_bytes(ram_used),
+        "ram_available": _format_bytes(ram_available),
+        "swap_total": _format_bytes(swap_total),
+        "swap_used": _format_bytes(swap_used),
+    }
+
+
+def _read_root_disk_snapshot() -> dict[str, str]:
+    try:
+        total, used, free = shutil.disk_usage("/")
+    except OSError:
+        return {
+            "mount": "/",
+            "total": "unknown",
+            "used": "unknown",
+            "available": "unknown",
+            "percent_used": "unknown",
+        }
+    percent_used = int(round((used / total) * 100)) if total > 0 else 0
+    return {
+        "mount": "/",
+        "total": _format_bytes(total),
+        "used": _format_bytes(used),
+        "available": _format_bytes(free),
+        "percent_used": f"{percent_used}%",
+    }
+
+
+def _run_command(args: tuple[str, ...]) -> str | None:
+    try:
+        result = subprocess.run(
+            args,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
+def _read_meminfo() -> dict[str, int] | None:
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as meminfo_file:
+            lines = meminfo_file.read().splitlines()
+    except OSError:
+        return None
+    values: dict[str, int] = {}
+    for line in lines:
+        key, _, rest = line.partition(":")
+        if not rest:
+            continue
+        amount_text = rest.strip().split()[0]
+        try:
+            amount_kib = int(amount_text)
+        except ValueError:
+            continue
+        values[key] = amount_kib * 1024
+    required = {"MemTotal", "MemAvailable", "SwapTotal", "SwapFree"}
+    if not required.issubset(values):
+        return None
+    return values
+
+
+def _format_uptime_from_seconds(total_seconds: int) -> str:
+    minutes = total_seconds // 60
+    days, rem_minutes = divmod(minutes, 24 * 60)
+    hours, mins = divmod(rem_minutes, 60)
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days} day" + ("" if days == 1 else "s"))
+    if hours:
+        parts.append(f"{hours} hour" + ("" if hours == 1 else "s"))
+    if mins or not parts:
+        parts.append(f"{mins} minute" + ("" if mins == 1 else "s"))
+    return "up " + ", ".join(parts)
+
+
+def _format_bytes(value: int) -> str:
+    units = ("B", "KB", "MB", "GB", "TB")
+    size = float(max(value, 0))
+    unit_index = 0
+    while size >= 1024 and unit_index < len(units) - 1:
+        size /= 1024
+        unit_index += 1
+    if unit_index == 0 or size >= 10:
+        return f"{int(round(size))} {units[unit_index]}"
+    return f"{size:.1f} {units[unit_index]}"
 
 
 _LOOK_CENTER_PAN_DEGREES = 0.0
