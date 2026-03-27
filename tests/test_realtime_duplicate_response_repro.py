@@ -5201,6 +5201,300 @@ def test_create_seam_parent_coverage_emits_single_info_source_of_truth(monkeypat
     assert any("create_seam_parent_coverage_eval" in entry for entry in captured_info)
 
 
+def test_tool_followup_parent_coverage_verdict_parity_between_create_and_response_done_release(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_cov_parity"
+    parent_input_event_key = "item_parent_cov_parity"
+    parent_response_id = "resp-parent-cov-parity"
+    parent_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "assistant_message"),
+            setattr(record, "response_id", parent_response_id),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "final"),
+            setattr(record, "done", True),
+        ),
+    )
+
+    coverage_calls = 0
+    original_parent_coverage_state = api._parent_response_coverage_state
+
+    def _counted_parent_coverage_state(*args, **kwargs):
+        nonlocal coverage_calls
+        coverage_calls += 1
+        return original_parent_coverage_state(*args, **kwargs)
+
+    observation_reasons: list[tuple[str, str, str]] = []
+    original_record_observation = api._record_tool_followup_observation
+
+    def _capture_observation(*args, **kwargs):
+        observation_reasons.append(
+            (
+                str(kwargs.get("authority_seam") or ""),
+                str(kwargs.get("native_reason_code") or ""),
+                str(kwargs.get("native_outcome_action") or ""),
+            )
+        )
+        return original_record_observation(*args, **kwargs)
+
+    monkeypatch.setattr(api, "_parent_response_coverage_state", _counted_parent_coverage_state)
+    monkeypatch.setattr(api, "_record_tool_followup_observation", _capture_observation)
+
+    create_event, create_canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_cov_parity_create",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+    create_metadata = ((create_event.get("response") or {}).get("metadata") or {})
+    create_metadata["turn_id"] = turn_id
+    create_metadata["parent_turn_id"] = turn_id
+    create_metadata["parent_input_event_key"] = parent_input_event_key
+    create_metadata["blocked_by_response_id"] = parent_response_id
+
+    should_drop = api._should_drop_tool_followup_at_create_seam(
+        turn_id=turn_id,
+        response_metadata=create_metadata,
+        canonical_key=create_canonical_key,
+        drain_trigger="test",
+    )
+    assert should_drop is True
+
+    release_event, _release_canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_cov_parity_release",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+    release_metadata = ((release_event.get("response") or {}).get("metadata") or {})
+    release_metadata["turn_id"] = turn_id
+    release_metadata["parent_turn_id"] = turn_id
+    release_metadata["parent_input_event_key"] = parent_input_event_key
+    release_metadata["blocked_by_response_id"] = parent_response_id
+    release_input_event_key = str(release_metadata.get("input_event_key") or "")
+    release_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=release_input_event_key)
+    api._response_create_queue.append({"event": release_event, "origin": "tool_output", "turn_id": turn_id})
+    api._set_tool_followup_state(
+        canonical_key=release_canonical_key,
+        state="blocked_active_response",
+        reason="test_seed_blocked",
+    )
+
+    api._release_blocked_tool_followups_for_response_done(response_id=parent_response_id)
+    assert release_metadata.get("tool_followup_release") != "true"
+
+    assert coverage_calls >= 2
+    assert (
+        "ai.realtime_api._should_drop_tool_followup_at_create_seam",
+        "parent_covered_tool_result",
+        "DROP",
+    ) in observation_reasons
+    assert (
+        "ai.realtime_api._release_blocked_tool_followups_for_response_done",
+        "parent_covered_tool_result",
+        "DROP",
+    ) in observation_reasons
+
+
+def test_tool_followup_parent_coverage_verdict_parity_hold_between_create_and_response_done_release(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_cov_parity_hold"
+    parent_input_event_key = "synthetic_server_auto_hold"
+    parent_response_id = "resp-parent-cov-parity-hold"
+    parent_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "server_auto"),
+            setattr(record, "response_id", parent_response_id),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "unknown"),
+            setattr(record, "done", True),
+        ),
+    )
+    api._is_provisional_response = lambda **kwargs: kwargs.get("response_id") == parent_response_id
+    api._active_input_event_key_for_turn = lambda _turn_id: parent_input_event_key
+
+    observations: list[dict[str, str]] = []
+    original_record_observation = api._record_tool_followup_observation
+
+    def _capture_observation(*args, **kwargs):
+        observations.append(
+            {
+                "authority_seam": str(kwargs.get("authority_seam") or ""),
+                "native_reason_code": str(kwargs.get("native_reason_code") or ""),
+                "native_outcome_action": str(kwargs.get("native_outcome_action") or ""),
+                "parent_coverage_state": str(kwargs.get("parent_coverage_state") or ""),
+                "followup_outcome_posture": str(kwargs.get("followup_outcome_posture") or ""),
+            }
+        )
+        return original_record_observation(*args, **kwargs)
+
+    monkeypatch.setattr(api, "_record_tool_followup_observation", _capture_observation)
+
+    create_event, create_canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_cov_parity_hold_create",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+    create_metadata = ((create_event.get("response") or {}).get("metadata") or {})
+    create_metadata["turn_id"] = turn_id
+    create_metadata["parent_turn_id"] = turn_id
+    create_metadata["parent_input_event_key"] = parent_input_event_key
+    create_metadata["blocked_by_response_id"] = parent_response_id
+
+    should_drop = api._should_drop_tool_followup_at_create_seam(
+        turn_id=turn_id,
+        response_metadata=create_metadata,
+        canonical_key=create_canonical_key,
+        drain_trigger="test",
+    )
+    assert should_drop is False
+
+    release_event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_cov_parity_hold_release",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+    release_metadata = ((release_event.get("response") or {}).get("metadata") or {})
+    release_metadata["turn_id"] = turn_id
+    release_metadata["parent_turn_id"] = turn_id
+    release_metadata["parent_input_event_key"] = parent_input_event_key
+    release_metadata["blocked_by_response_id"] = parent_response_id
+    release_input_event_key = str(release_metadata.get("input_event_key") or "")
+    release_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=release_input_event_key)
+    api._response_create_queue.append({"event": release_event, "origin": "tool_output", "turn_id": turn_id})
+    api._set_tool_followup_state(
+        canonical_key=release_canonical_key,
+        state="blocked_active_response",
+        reason="test_seed_blocked",
+    )
+
+    api._release_blocked_tool_followups_for_response_done(response_id=parent_response_id)
+    assert release_metadata.get("tool_followup_release") != "true"
+    assert api._tool_followup_state(canonical_key=release_canonical_key) == "blocked_active_response"
+
+    create_observation = next(
+        obs for obs in observations if obs["authority_seam"] == "ai.realtime_api._should_drop_tool_followup_at_create_seam"
+    )
+    release_observation = next(
+        obs for obs in observations if obs["authority_seam"] == "ai.realtime_api._release_blocked_tool_followups_for_response_done"
+    )
+    assert create_observation["native_outcome_action"] == "HOLD"
+    assert create_observation["followup_outcome_posture"] == "pending"
+    assert release_observation["native_outcome_action"] == "HOLD"
+    assert release_observation["followup_outcome_posture"] == "pending"
+    assert create_observation["native_reason_code"] == release_observation["native_reason_code"] == "parent_deliverable_pending"
+    assert create_observation["parent_coverage_state"] == release_observation["parent_coverage_state"] == "coverage_pending"
+
+
+def test_tool_followup_parent_coverage_verdict_parity_release_between_create_and_response_done_release(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_cov_parity_release"
+    parent_input_event_key = "item_parent_cov_parity_release"
+    parent_response_id = "resp-parent-cov-parity-release"
+    parent_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "assistant_message"),
+            setattr(record, "response_id", parent_response_id),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "unknown"),
+            setattr(record, "done", True),
+        ),
+    )
+
+    observations: list[dict[str, str]] = []
+    original_record_observation = api._record_tool_followup_observation
+
+    def _capture_observation(*args, **kwargs):
+        observations.append(
+            {
+                "authority_seam": str(kwargs.get("authority_seam") or ""),
+                "native_reason_code": str(kwargs.get("native_reason_code") or ""),
+                "native_outcome_action": str(kwargs.get("native_outcome_action") or ""),
+                "parent_coverage_state": str(kwargs.get("parent_coverage_state") or ""),
+                "followup_outcome_posture": str(kwargs.get("followup_outcome_posture") or ""),
+            }
+        )
+        return original_record_observation(*args, **kwargs)
+
+    monkeypatch.setattr(api, "_record_tool_followup_observation", _capture_observation)
+
+    create_event, create_canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_cov_parity_release_create",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+    create_metadata = ((create_event.get("response") or {}).get("metadata") or {})
+    create_metadata["turn_id"] = turn_id
+    create_metadata["parent_turn_id"] = turn_id
+    create_metadata["parent_input_event_key"] = parent_input_event_key
+    create_metadata["blocked_by_response_id"] = parent_response_id
+    api._set_tool_followup_state(
+        canonical_key=create_canonical_key,
+        state="scheduled_release",
+        reason="test_seed_scheduled",
+    )
+
+    should_drop = api._should_drop_tool_followup_at_create_seam(
+        turn_id=turn_id,
+        response_metadata=create_metadata,
+        canonical_key=create_canonical_key,
+        drain_trigger="test",
+    )
+    assert should_drop is False
+
+    release_event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_cov_parity_release_release",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+    release_metadata = ((release_event.get("response") or {}).get("metadata") or {})
+    release_metadata["turn_id"] = turn_id
+    release_metadata["parent_turn_id"] = turn_id
+    release_metadata["parent_input_event_key"] = parent_input_event_key
+    release_metadata["blocked_by_response_id"] = parent_response_id
+    release_input_event_key = str(release_metadata.get("input_event_key") or "")
+    release_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=release_input_event_key)
+    api._response_create_queue.append({"event": release_event, "origin": "tool_output", "turn_id": turn_id})
+    api._set_tool_followup_state(
+        canonical_key=release_canonical_key,
+        state="blocked_active_response",
+        reason="test_seed_blocked",
+    )
+
+    api._release_blocked_tool_followups_for_response_done(response_id=parent_response_id)
+    assert release_metadata.get("tool_followup_release") == "true"
+    assert api._tool_followup_state(canonical_key=release_canonical_key) == "scheduled_release"
+
+    create_observation = next(
+        obs for obs in observations if obs["authority_seam"] == "ai.realtime_api._should_drop_tool_followup_at_create_seam"
+    )
+    release_observation = next(
+        obs for obs in observations if obs["authority_seam"] == "ai.realtime_api._release_blocked_tool_followups_for_response_done"
+    )
+    assert create_observation["native_outcome_action"] == "RELEASE"
+    assert create_observation["followup_outcome_posture"] == "released"
+    assert release_observation["native_outcome_action"] == "RELEASE"
+    assert release_observation["followup_outcome_posture"] == "released"
+    assert create_observation["native_reason_code"] == release_observation["native_reason_code"] == "parent_not_coverage_qualified"
+    assert create_observation["parent_coverage_state"] == release_observation["parent_coverage_state"] == "uncovered"
+
+
 
 def test_dropped_tool_followup_lineage_blocks_assistant_message_create(monkeypatch) -> None:
     api = _make_api_stub()
