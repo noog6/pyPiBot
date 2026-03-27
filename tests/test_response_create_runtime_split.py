@@ -502,6 +502,102 @@ def test_response_create_parity_across_direct_schedule_and_drain_evaluation() ->
             assert api._pending_response_create is None
 
 
+def test_post_decision_finalizer_returns_same_tool_followup_deliverable_drop_for_send_and_schedule() -> None:
+    api = _make_api_stub()
+    runtime = api._response_create_runtime
+    api._tool_followup_state_by_canonical_key = {}
+    api._should_suppress_tool_followup_after_turn_deliverable = lambda **_kwargs: True
+    event = {
+        "type": "response.create",
+        "response": {
+            "metadata": {
+                "turn_id": "turn_finalizer_parent",
+                "input_event_key": "item_finalizer_tool",
+                "parent_turn_id": "turn_finalizer_parent",
+                "parent_input_event_key": "item_parent",
+                "tool_followup": "true",
+                "tool_call_id": "call-finalizer",
+            }
+        },
+    }
+    snapshot = runtime.prepare_response_create_snapshot(
+        response_create_event=event,
+        origin="tool_output",
+        utterance_context=None,
+        memory_brief_note=None,
+        now=1.0,
+    )
+    selected = runtime._build_execution_decision(
+        action=ResponseCreateOutcomeAction.SCHEDULE,
+        reason_code="active_response",
+        explanation="queued while response active",
+        selected_candidate_id="active_response",
+    )
+
+    finalized_send = runtime._finalize_response_create_execution_decision(
+        prepared_snapshot=snapshot,
+        decision=selected,
+        execution_path="send",
+    )
+    finalized_schedule = runtime._finalize_response_create_execution_decision(
+        prepared_snapshot=snapshot,
+        decision=selected,
+        execution_path="schedule",
+    )
+
+    assert finalized_send.action is ResponseCreateOutcomeAction.DROP
+    assert finalized_send.reason_code == "tool_followup_final_deliverable_already_sent"
+    assert finalized_schedule.action is ResponseCreateOutcomeAction.DROP
+    assert finalized_schedule.reason_code == finalized_send.reason_code
+
+
+def test_post_decision_finalizer_returns_same_existing_state_drop_for_send_and_schedule() -> None:
+    api = _make_api_stub()
+    runtime = api._response_create_runtime
+    canonical_key = api._canonical_utterance_key(turn_id="turn_finalizer_existing", input_event_key="item_finalizer_existing")
+    api._tool_followup_state_by_canonical_key = {canonical_key: "created"}
+    event = {
+        "type": "response.create",
+        "response": {
+            "metadata": {
+                "turn_id": "turn_finalizer_existing",
+                "input_event_key": "item_finalizer_existing",
+                "tool_followup": "true",
+                "tool_call_id": "call-existing",
+            }
+        },
+    }
+    snapshot = runtime.prepare_response_create_snapshot(
+        response_create_event=event,
+        origin="tool_output",
+        utterance_context=None,
+        memory_brief_note=None,
+        now=1.0,
+    )
+    selected = runtime._build_execution_decision(
+        action=ResponseCreateOutcomeAction.SCHEDULE,
+        reason_code="active_response",
+        explanation="queued while response active",
+        selected_candidate_id="active_response",
+    )
+
+    finalized_send = runtime._finalize_response_create_execution_decision(
+        prepared_snapshot=snapshot,
+        decision=selected,
+        execution_path="send",
+    )
+    finalized_schedule = runtime._finalize_response_create_execution_decision(
+        prepared_snapshot=snapshot,
+        decision=selected,
+        execution_path="schedule",
+    )
+
+    assert finalized_send.action is ResponseCreateOutcomeAction.DROP
+    assert finalized_send.reason_code == "already_created"
+    assert finalized_schedule.action is ResponseCreateOutcomeAction.DROP
+    assert finalized_schedule.reason_code == finalized_send.reason_code
+
+
 def test_tool_followup_final_deliverable_drop_logs_outcome_and_leaves_no_zombie_retry(monkeypatch) -> None:
     api = _make_api_stub()
     api._tool_followup_state_by_canonical_key = {}
