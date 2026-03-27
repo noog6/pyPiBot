@@ -421,6 +421,19 @@ class PendingMicroAckMarker:
     reason: str
 
 
+@dataclass(frozen=True)
+class ToolFollowupArbitrationArtifact:
+    decision: ToolFollowupArbitrationDecision
+    parent_entry: tuple[str, CanonicalResponseState] | None
+    parent_covered: bool
+    coverage_source: str
+    deliverable_observed: bool
+    deliverable_class: str
+    terminal_selected: bool
+    terminal_reason: str
+    classification_pending: bool
+
+
 class ServerAutoArbitrationOutcome(str, Enum):
     ALLOW = "allow"
     CANCEL_PRE_AUDIO = "cancel_pre_audio"
@@ -9008,33 +9021,9 @@ class RealtimeAPI:
         tool_call_id = str(response_metadata.get("tool_call_id") or "").strip()
         resolved_parent_response_id = "none"
         resolved_parent_canonical_key = "none"
-        parent_covered = False
         if state_entry:
             resolved_parent_canonical_key = state_entry[0]
             resolved_parent_response_id = str(state_entry[1].response_id or "").strip() or "none"
-            parent_origin = str(state_entry[1].origin or "").strip().lower()
-            if parent_origin not in {"micro_ack", "tool_output"} and bool(state_entry[1].done):
-                parent_covered, coverage_source, deliverable_observed, deliverable_class, terminal_selected, terminal_reason = self._parent_response_coverage_state(
-                    parent_state=state_entry[1],
-                    parent_canonical_key=state_entry[0],
-                )
-                logger.debug(
-                    "parent_coverage_source_of_truth run_id=%s parent_response_id=%s covered=%s source=%s coverage_gap=%s canonical_observed=%s canonical_class=%s terminal_selected=%s terminal_reason=%s",
-                    self._current_run_id() or "",
-                    resolved_parent_response_id,
-                    str(parent_covered).lower(),
-                    coverage_source,
-                    self._parent_coverage_gap_reason(
-                        covered=parent_covered,
-                        terminal_selected=terminal_selected,
-                        terminal_reason=terminal_reason,
-                        coverage_source=coverage_source,
-                    ),
-                    str(deliverable_observed).lower(),
-                    deliverable_class or "unknown",
-                    str(terminal_selected).lower(),
-                    terminal_reason,
-                )
         self._log_info_once(
             family="tool_followup_parent_resolution",
             signature=(
@@ -9046,10 +9035,9 @@ class RealtimeAPI:
                 resolved_parent_response_id,
                 resolved_parent_canonical_key,
                 resolved_from,
-                str(parent_covered).lower(),
             ),
             message=(
-                "tool_followup_parent_resolution run_id=%s turn_id=%s tool_call_id=%s parent_input_event_key=%s blocked_by_response_id=%s resolved_parent_response_id=%s resolved_parent_canonical_key=%s resolved_from=%s parent_covered=%s"
+                "tool_followup_parent_resolution run_id=%s turn_id=%s tool_call_id=%s parent_input_event_key=%s blocked_by_response_id=%s resolved_parent_response_id=%s resolved_parent_canonical_key=%s resolved_from=%s"
             ),
             args=(
                 self._current_run_id() or "",
@@ -9060,17 +9048,16 @@ class RealtimeAPI:
                 resolved_parent_response_id,
                 resolved_parent_canonical_key,
                 resolved_from,
-                str(parent_covered).lower(),
             ),
         )
         return state_entry
 
-    def _decide_tool_followup_arbitration(
+    def _tool_followup_arbitration_artifact(
         self,
         *,
         response_metadata: dict[str, Any],
         blocked_by_response_id: str | None,
-    ) -> tuple[ToolFollowupArbitrationDecision, tuple[str, CanonicalResponseState] | None]:
+    ) -> ToolFollowupArbitrationArtifact:
         suppressible = str(response_metadata.get("tool_followup_suppress_if_parent_covered", "")).strip().lower() in {"true", "1", "yes"}
         tool_name = str(response_metadata.get("tool_name") or "").strip().lower()
         has_distinct_info = str(response_metadata.get("tool_result_has_distinct_info", "")).strip().lower() in {"true", "1", "yes"}
@@ -9083,6 +9070,7 @@ class RealtimeAPI:
         parent_done = bool(getattr(parent_state, "done", False))
         parent_covered = False
         coverage_source = "none"
+        deliverable_observed = False
         deliverable_class = "unknown"
         terminal_selected = False
         terminal_reason = ""
@@ -9091,7 +9079,7 @@ class RealtimeAPI:
             (
                 parent_covered,
                 coverage_source,
-                _deliverable_observed,
+                deliverable_observed,
                 deliverable_class,
                 terminal_selected,
                 terminal_reason,
@@ -9111,7 +9099,7 @@ class RealtimeAPI:
                     terminal_reason=terminal_reason,
                     coverage_source=coverage_source,
                 ),
-                str(_deliverable_observed).lower(),
+                str(deliverable_observed).lower(),
                 deliverable_class or "unknown",
                 str(terminal_selected).lower(),
                 terminal_reason,
@@ -9169,7 +9157,29 @@ class RealtimeAPI:
             terminal_reason=terminal_reason,
             classification_pending=classification_pending,
         )
-        return decision, state_entry
+        return ToolFollowupArbitrationArtifact(
+            decision=decision,
+            parent_entry=state_entry,
+            parent_covered=parent_covered,
+            coverage_source=coverage_source,
+            deliverable_observed=deliverable_observed,
+            deliverable_class=deliverable_class,
+            terminal_selected=terminal_selected,
+            terminal_reason=terminal_reason,
+            classification_pending=classification_pending,
+        )
+
+    def _decide_tool_followup_arbitration(
+        self,
+        *,
+        response_metadata: dict[str, Any],
+        blocked_by_response_id: str | None,
+    ) -> tuple[ToolFollowupArbitrationDecision, tuple[str, CanonicalResponseState] | None]:
+        artifact = self._tool_followup_arbitration_artifact(
+            response_metadata=response_metadata,
+            blocked_by_response_id=blocked_by_response_id,
+        )
+        return artifact.decision, artifact.parent_entry
 
     def _should_suppress_queued_tool_followup_release(
         self,
@@ -9195,46 +9205,44 @@ class RealtimeAPI:
         if not is_tool_followup:
             return False
         blocked_by_response_id = str(response_metadata.get("blocked_by_response_id") or "").strip()
-        decision, parent_entry = self._decide_tool_followup_arbitration(
+        artifact = self._tool_followup_arbitration_artifact(
             response_metadata=response_metadata,
             blocked_by_response_id=blocked_by_response_id or None,
         )
+        decision = artifact.decision
+        parent_entry = artifact.parent_entry
         should_drop = decision.should_suppress
         reason = decision.reason_code
         parent_state = parent_entry[1] if parent_entry else None
         canonical_deliverable_state = "none"
         terminal_deliverable_state = "none"
-        coverage_source = "none"
+        coverage_source = artifact.coverage_source
         if parent_state is not None:
-            parent_covered, coverage_source, deliverable_observed, deliverable_class, terminal_selected, terminal_reason = self._parent_response_coverage_state(
-                parent_state=parent_state,
-                parent_canonical_key=parent_entry[0],
-            )
             canonical_deliverable_state = (
                 f"done={str(bool(getattr(parent_state, 'done', False))).lower()},"
-                f"deliverable_observed={str(deliverable_observed).lower()},"
-                f"deliverable_class={deliverable_class or 'unknown'}"
+                f"deliverable_observed={str(artifact.deliverable_observed).lower()},"
+                f"deliverable_class={artifact.deliverable_class or 'unknown'}"
             )
             terminal_deliverable_state = (
-                f"selected={str(terminal_selected).lower()},"
-                f"reason={terminal_reason}"
+                f"selected={str(artifact.terminal_selected).lower()},"
+                f"reason={artifact.terminal_reason}"
             )
             logger.info(
                 "parent_coverage_source_of_truth run_id=%s parent_response_id=%s covered=%s source=%s coverage_gap=%s canonical_observed=%s canonical_class=%s terminal_selected=%s terminal_reason=%s",
                 self._current_run_id() or "",
                 str(getattr(parent_state, "response_id", "") or "").strip() or "none",
-                str(parent_covered).lower(),
+                str(artifact.parent_covered).lower(),
                 coverage_source,
                 self._parent_coverage_gap_reason(
-                    covered=parent_covered,
-                    terminal_selected=terminal_selected,
-                    terminal_reason=terminal_reason,
+                    covered=artifact.parent_covered,
+                    terminal_selected=artifact.terminal_selected,
+                    terminal_reason=artifact.terminal_reason,
                     coverage_source=coverage_source,
                 ),
-                str(deliverable_observed).lower(),
-                deliverable_class or "unknown",
-                str(terminal_selected).lower(),
-                terminal_reason,
+                str(artifact.deliverable_observed).lower(),
+                artifact.deliverable_class or "unknown",
+                str(artifact.terminal_selected).lower(),
+                artifact.terminal_reason,
             )
         logger.info(
             "create_seam_parent_coverage_eval run_id=%s turn_id=%s canonical_key=%s tool_call_id=%s drop_decision=%s reason=%s resolved_parent_response_id=%s resolved_parent_origin=%s resolved_parent_canonical_deliverable_state=%s resolved_parent_terminal_deliverable_state=%s coverage_source=%s",
@@ -10230,10 +10238,12 @@ class RealtimeAPI:
                 continue
             if self._tool_followup_state(canonical_key=canonical_key) != "blocked_active_response":
                 continue
-            decision, parent_entry = self._decide_tool_followup_arbitration(
+            artifact = self._tool_followup_arbitration_artifact(
                 response_metadata=response_metadata,
                 blocked_by_response_id=normalized_response_id,
             )
+            decision = artifact.decision
+            parent_entry = artifact.parent_entry
             should_drop = decision.should_suppress
             reason = decision.reason_code
             parent_state = parent_entry[1] if parent_entry else None
