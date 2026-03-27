@@ -16,7 +16,11 @@ from ai.decision_arbitration_adapter import (
     summarize_turn_arbitration_for_review,
     summarize_turn_arbitration_trace,
 )
-from ai.interaction_lifecycle_policy import ResponseCreateDecision, ResponseCreateDecisionAction
+from ai.interaction_lifecycle_policy import ResponseCreateDecision
+from ai.response_create_arbitration import (
+    ResponseCreateArbitrationDecision,
+    decide_response_create_arbitration,
+)
 from ai.realtime.types import PendingResponseCreate
 from core.logging import logger, log_ws_event
 from interaction import InteractionState
@@ -101,28 +105,9 @@ class ResponseCreateExecutionDecision:
     should_log_arbitration: bool = True
 
 
-@dataclass(frozen=True)
-class ResponsePathCandidate:
-    """Explicit response-path contender formed before runtime execution."""
-
-    candidate_id: str
-    action: ResponseCreateOutcomeAction
-    reason_code: str
-    explanation: str
-    priority: int
-    queue_reason: str | None = None
-    blocked_by_terminal_state: bool = False
-    should_log_arbitration: bool = True
-
-
 @dataclass
 class ResponseCreateRuntime:
     api: ResponseCreateRuntimeAPI
-
-    _RESPONSE_PATH_PRIORITY_LINEAGE_BLOCK = 300
-    _RESPONSE_PATH_PRIORITY_TERMINAL_BLOCK = 290
-    _RESPONSE_PATH_PRIORITY_SAME_TURN_OWNER_DROP = 280
-    _RESPONSE_PATH_PRIORITY_LIFECYCLE = 100
 
     def _apply_memory_intent_instruction_guardrail(
         self,
@@ -205,91 +190,19 @@ class ResponseCreateRuntime:
             should_log_arbitration=should_log_arbitration,
         )
 
-    def _candidate_to_execution_decision(
+    def _arbitration_decision_to_execution_decision(
         self,
-        candidate: ResponsePathCandidate,
+        decision: ResponseCreateArbitrationDecision,
     ) -> ResponseCreateExecutionDecision:
         return self._build_execution_decision(
-            action=candidate.action,
-            reason_code=candidate.reason_code,
-            explanation=candidate.explanation,
-            selected_candidate_id=candidate.candidate_id,
-            queue_reason=candidate.queue_reason,
-            blocked_by_terminal_state=candidate.blocked_by_terminal_state,
-            should_log_arbitration=candidate.should_log_arbitration,
+            action=ResponseCreateOutcomeAction(decision.action),
+            reason_code=decision.reason_code,
+            explanation=decision.explanation,
+            selected_candidate_id=decision.selected_candidate_id,
+            queue_reason=decision.queue_reason,
+            blocked_by_terminal_state=decision.blocked_by_terminal_state,
+            should_log_arbitration=decision.should_log_arbitration,
         )
-
-    def _select_response_path_candidate(
-        self,
-        candidates: list[ResponsePathCandidate],
-    ) -> ResponsePathCandidate:
-        return sorted(
-            candidates,
-            key=lambda candidate: (-int(candidate.priority), str(candidate.candidate_id or "")),
-        )[0]
-
-    def _build_response_path_candidates(
-        self,
-        *,
-        prepared_snapshot: ResponseCreatePreparedSnapshot,
-        lifecycle_decision: ResponseCreateDecision | None,
-    ) -> list[ResponsePathCandidate]:
-        candidates: list[ResponsePathCandidate] = []
-        if not prepared_snapshot.lineage_allowed:
-            candidates.append(
-                ResponsePathCandidate(
-                    candidate_id="tool_lineage_guard",
-                    action=ResponseCreateOutcomeAction.BLOCK,
-                    reason_code=prepared_snapshot.lineage_reason or "lineage_blocked",
-                    explanation="Tool lineage guard blocked response.create.",
-                    priority=self._RESPONSE_PATH_PRIORITY_LINEAGE_BLOCK,
-                    should_log_arbitration=False,
-                )
-            )
-        if prepared_snapshot.terminal_state_blocked:
-            candidates.append(
-                ResponsePathCandidate(
-                    candidate_id="canonical_terminal_state",
-                    action=ResponseCreateOutcomeAction.BLOCK,
-                    reason_code="canonical_terminal_state",
-                    explanation="Canonical turn is already terminal.",
-                    priority=self._RESPONSE_PATH_PRIORITY_TERMINAL_BLOCK,
-                    blocked_by_terminal_state=True,
-                    should_log_arbitration=False,
-                )
-            )
-        if prepared_snapshot.same_turn_owner_present:
-            candidates.append(
-                ResponsePathCandidate(
-                    candidate_id="same_turn_owner",
-                    action=ResponseCreateOutcomeAction.DROP,
-                    reason_code="same_turn_already_owned",
-                    explanation=f"Assistant message suppressed by same-turn owner: {prepared_snapshot.same_turn_owner_reason}.",
-                    priority=self._RESPONSE_PATH_PRIORITY_SAME_TURN_OWNER_DROP,
-                )
-            )
-        if lifecycle_decision is not None:
-            lifecycle_action = ResponseCreateOutcomeAction.SEND
-            lifecycle_explanation = "Response.create allowed for immediate send."
-            lifecycle_queue_reason: str | None = None
-            if lifecycle_decision.action is ResponseCreateDecisionAction.SCHEDULE:
-                lifecycle_action = ResponseCreateOutcomeAction.SCHEDULE
-                lifecycle_explanation = f"Response.create deferred: {lifecycle_decision.reason_code}."
-                lifecycle_queue_reason = lifecycle_decision.queue_reason
-            elif lifecycle_decision.action is ResponseCreateDecisionAction.BLOCK:
-                lifecycle_action = ResponseCreateOutcomeAction.BLOCK
-                lifecycle_explanation = f"Response.create blocked: {lifecycle_decision.reason_code}."
-            candidates.append(
-                ResponsePathCandidate(
-                    candidate_id=lifecycle_decision.selected_candidate_id,
-                    action=lifecycle_action,
-                    reason_code=lifecycle_decision.reason_code,
-                    explanation=lifecycle_explanation,
-                    priority=self._RESPONSE_PATH_PRIORITY_LIFECYCLE,
-                    queue_reason=lifecycle_queue_reason,
-                )
-            )
-        return candidates
 
     def _normalize_execution_decision(
         self,
@@ -599,14 +512,13 @@ class ResponseCreateRuntime:
             normalized_origin=prepared_snapshot.normalized_origin,
             awaiting_transcript_final=prepared_snapshot.awaiting_transcript_final,
         )
-        response_path_candidates = self._build_response_path_candidates(
+        arbitration_decision = decide_response_create_arbitration(
             prepared_snapshot=prepared_snapshot,
             lifecycle_decision=policy_decision,
         )
-        selected_candidate = self._select_response_path_candidate(response_path_candidates)
         return self._normalize_execution_decision(
             prepared_snapshot=prepared_snapshot,
-            decision=self._candidate_to_execution_decision(selected_candidate),
+            decision=self._arbitration_decision_to_execution_decision(arbitration_decision),
         ), policy_decision
 
     def decide_response_create_action(

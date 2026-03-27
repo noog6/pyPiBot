@@ -478,7 +478,7 @@ class TurnArbitrationReviewSummary:
         }
 
 
-_AUTHORITY_SEAM = "ai.realtime.response_create_runtime"
+_AUTHORITY_SEAM = "ai.response_create_arbitration.decide_response_create_arbitration"
 _POLICY_DOMAIN = "response_create"
 
 

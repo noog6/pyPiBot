@@ -233,7 +233,8 @@ def test_manual_lifecycle_shape_can_be_normalized() -> None:
         canonical_audio_started=False,
     )
 
-    assert observation.context.authority_retained_by == "ai.realtime.response_create_runtime"
+    assert observation.context.authority_retained_by == "ai.response_create_arbitration.decide_response_create_arbitration"
+    assert observation.decision.authority_retained_by == "ai.response_create_arbitration.decide_response_create_arbitration"
     assert observation.decision.observational_only is True
 
 
