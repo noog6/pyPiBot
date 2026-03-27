@@ -410,6 +410,61 @@ def test_preference_recall_reentry_followup_is_single_flight_per_turn_input() ->
     api._send_response_create.assert_awaited_once()
 
 
+def test_preference_recall_reentry_key_released_after_terminal_close() -> None:
+    api = _build_api_stub()
+    api._peek_pending_preference_memory_context_payload = lambda **_kwargs: {
+        "hit": True,
+        "returned_count": 1,
+        "prompt_note": "Preference recall context.",
+    }
+    api._pending_server_auto_response_by_turn_id["turn_2"] = PendingServerAutoResponse(
+        turn_id="turn_2",
+        response_id="resp-server-auto",
+        canonical_key="run-464:turn_2:item_abc",
+        created_at_ms=1,
+        active=True,
+    )
+    api._send_response_create = AsyncMock(return_value=True)
+    canonical_key = api._canonical_utterance_key(turn_id="turn_2", input_event_key="item_abc")
+
+    first = asyncio.run(
+        api._ensure_preference_recall_reentry_on_transcript_final(
+            websocket=object(),
+            turn_id="turn_2",
+            input_event_key="item_abc",
+            memory_intent_subtype="preference_recall",
+        )
+    )
+    duplicate_same_turn = asyncio.run(
+        api._ensure_preference_recall_reentry_on_transcript_final(
+            websocket=object(),
+            turn_id="turn_2",
+            input_event_key="item_abc",
+            memory_intent_subtype="preference_recall",
+        )
+    )
+
+    released = api._release_preference_recall_reentry_for_canonical_key(
+        canonical_key=canonical_key,
+        reason="test_terminal_close",
+    )
+    after_release = asyncio.run(
+        api._ensure_preference_recall_reentry_on_transcript_final(
+            websocket=object(),
+            turn_id="turn_2",
+            input_event_key="item_abc",
+            memory_intent_subtype="preference_recall",
+        )
+    )
+
+    assert first is True
+    assert duplicate_same_turn is True
+    assert released is True
+    assert after_release is True
+    assert canonical_key in api._preference_recall_reentry_requested_keys
+    assert api._send_response_create.await_count == 2
+
+
 def test_transcript_upgrade_memory_intent_adds_observation_exclusion_guardrail() -> None:
     api = _build_api_stub()
     api._response_create_debug_trace = False

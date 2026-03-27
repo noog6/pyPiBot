@@ -851,6 +851,13 @@ class ResponseTerminalHandlers:
                 str(active_response_id_before_clear or "none"),
             )
             return
+        # Intentional: response.done and response.completed both attempt release.
+        # The release helper is idempotent, and dual seam coverage avoids misses
+        # when providers emit one terminal event but not the other.
+        api._release_preference_recall_reentry_for_canonical_key(
+            canonical_key=resolved_canonical_key,
+            reason="response_done_terminal_close",
+        )
         if not transition.allow_response_transition:
             logger.info(
                 "Confirmation state is holding phase progression; skipping REFLECT transition "
@@ -1033,6 +1040,12 @@ class ResponseTerminalHandlers:
                 OrchestrationPhase.IDLE,
                 reason="reflection enqueued",
             )
+        # Intentional duplicate with response.done path (idempotent helper).
+        # Keep this seam-local release to cover completed-only terminal traces.
+        api._release_preference_recall_reentry_for_canonical_key(
+            canonical_key=done_canonical_key,
+            reason="response_completed_terminal_close",
+        )
         api._response_create_queue_drain_source = "active_cleared"
         await api._drain_response_create_queue(source_trigger="active_cleared")
         if api._pending_image_stimulus and not api._pending_image_flush_after_playback:
