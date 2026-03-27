@@ -7,7 +7,7 @@ from copy import deepcopy
 from collections import deque
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from ai.decision_arbitration_adapter import (
     build_response_create_observation,
@@ -227,19 +227,24 @@ class ResponseCreateRuntime:
             should_log_arbitration=decision.should_log_arbitration,
         )
 
-    def _schedule_path_admission_override(
+    def _finalize_response_create_execution_decision(
         self,
         *,
         prepared_snapshot: ResponseCreatePreparedSnapshot,
         decision: ResponseCreateExecutionDecision,
+        execution_path: Literal["send", "schedule"],
     ) -> ResponseCreateExecutionDecision:
-        """Apply queue-admission-only guards after core arbitration.
+        """Apply shared post-decision enforcement/finalization after arbitration.
 
-        These are intentionally path-local because they manage queue ownership /
-        side effects (mainly tool-followup suppression), not the core shared
-        response.create arbitration outcome.
+        This preserves the selected arbitration winner/reason when possible while
+        enforcing shared tool-followup safety/suppression checks consistently for
+        both immediate send and queued schedule processing.
         """
-        if decision.action is not ResponseCreateOutcomeAction.SCHEDULE:
+        decision = self._normalize_execution_decision(
+            prepared_snapshot=prepared_snapshot,
+            decision=decision,
+        )
+        if decision.action not in {ResponseCreateOutcomeAction.SEND, ResponseCreateOutcomeAction.SCHEDULE}:
             return decision
         api = self.api
         if not prepared_snapshot.tool_followup:
@@ -257,6 +262,22 @@ class ResponseCreateRuntime:
                 selected_candidate_id="tool_followup_final_deliverable",
             )
         current_state = self.api._tool_followup_state(canonical_key=prepared_snapshot.canonical_key)
+        if execution_path == "send":
+            if prepared_snapshot.tool_followup_release and current_state in {
+                "scheduled",
+                "scheduled_release",
+                "blocked_active_response",
+                "released_on_response_done",
+            }:
+                return decision
+            if current_state != "new":
+                return self._build_execution_decision(
+                    action=ResponseCreateOutcomeAction.DROP,
+                    reason_code=f"already_{current_state}",
+                    explanation=f"Tool followup dropped because it was already {current_state}.",
+                    selected_candidate_id="tool_followup_existing_state",
+                )
+            return decision
         if current_state in {"creating", "created", "done", "dropped", "scheduled", "blocked_active_response", "released_on_response_done"}:
             return self._build_execution_decision(
                 action=ResponseCreateOutcomeAction.DROP,
@@ -601,9 +622,10 @@ class ResponseCreateRuntime:
         canonical_key = prepared_snapshot.canonical_key
         normalized_origin = prepared_snapshot.normalized_origin
         response_metadata = prepared_snapshot.response_metadata
-        decision = self._schedule_path_admission_override(
+        decision = self._finalize_response_create_execution_decision(
             prepared_snapshot=prepared_snapshot,
             decision=decision,
+            execution_path="schedule",
         )
         if emit_outcome_log:
             self._log_response_create_outcome(snapshot=prepared_snapshot, decision=decision)
@@ -625,22 +647,6 @@ class ResponseCreateRuntime:
             return False
         tool_followup = str(response_metadata.get("tool_followup", "")).strip().lower() in {"true", "1", "yes"}
         tool_call_id = str(response_metadata.get("tool_call_id") or "").strip()
-        if tool_followup:
-            current_state = api._tool_followup_state(canonical_key=canonical_key)
-            if current_state in {"creating", "created", "done", "dropped"}:
-                logger.info(
-                    "tool_followup_arbitration outcome=deny reason=already_%s call_id=%s canonical_key=%s",
-                    current_state,
-                    tool_call_id or "unknown",
-                    canonical_key,
-                )
-                logger.info(
-                    "tool_followup_create_suppressed canonical_key=%s reason=already_%s prior_state=%s",
-                    canonical_key,
-                    current_state,
-                    current_state,
-                )
-                return False
         consumes_canonical_slot = api._response_consumes_canonical_slot(response_metadata)
         explicit_multipart = api._response_is_explicit_multipart(response_metadata)
         transcript_upgrade_replacement = str(response_metadata.get("transcript_upgrade_replacement", "")).strip().lower() in {"true", "1", "yes"}
@@ -868,6 +874,11 @@ class ResponseCreateRuntime:
             utterance_context=utterance_context,
             memory_brief_note=memory_brief_note,
         )
+        decision = self._finalize_response_create_execution_decision(
+            prepared_snapshot=prepared_snapshot,
+            decision=decision,
+            execution_path="send",
+        )
         turn_id = prepared_snapshot.turn_id
         current_input_event_key = prepared_snapshot.input_event_key
         canonical_key = prepared_snapshot.canonical_key
@@ -939,60 +950,6 @@ class ResponseCreateRuntime:
                 "pref_recall_excluded canonical_key=%s reason=missing_prompt_note",
                 canonical_key,
             )
-
-        if prepared_snapshot.tool_followup:
-            parent_turn_id = str(response_metadata.get("parent_turn_id") or turn_id or "").strip() or turn_id
-            parent_input_event_key = str(response_metadata.get("parent_input_event_key") or "").strip() or None
-            if hasattr(api, "_should_suppress_tool_followup_after_turn_deliverable") and api._should_suppress_tool_followup_after_turn_deliverable(
-                turn_id=parent_turn_id,
-                parent_input_event_key=parent_input_event_key,
-            ):
-                logger.info(
-                    "tool_followup_create_suppressed canonical_key=%s reason=final_deliverable_already_sent parent_turn_id=%s",
-                    canonical_key,
-                    parent_turn_id,
-                )
-                api._set_tool_followup_state(
-                    canonical_key=canonical_key,
-                    state="dropped",
-                    reason="final_deliverable_already_sent",
-                )
-                self._log_response_create_outcome(
-                    snapshot=prepared_snapshot,
-                    decision=self._build_execution_decision(
-                        action=ResponseCreateOutcomeAction.DROP,
-                        reason_code="tool_followup_final_deliverable_already_sent",
-                        explanation="Tool followup dropped because the parent turn already has a final deliverable.",
-                        selected_candidate_id="tool_followup_final_deliverable",
-                    ),
-                )
-                return False
-            if prepared_snapshot.tool_followup_release and prepared_snapshot.tool_followup_state in {"scheduled", "scheduled_release", "blocked_active_response", "released_on_response_done"}:
-                pass
-            elif prepared_snapshot.tool_followup_state != "new":
-                deny_reason = f"already_{prepared_snapshot.tool_followup_state}"
-                logger.info(
-                    "tool_followup_arbitration outcome=deny reason=%s call_id=%s canonical_key=%s",
-                    deny_reason,
-                    prepared_snapshot.tool_call_id or "unknown",
-                    canonical_key,
-                )
-                logger.info(
-                    "tool_followup_create_suppressed canonical_key=%s reason=%s prior_state=%s",
-                    canonical_key,
-                    deny_reason,
-                    prepared_snapshot.tool_followup_state,
-                )
-                self._log_response_create_outcome(
-                    snapshot=prepared_snapshot,
-                    decision=self._build_execution_decision(
-                        action=ResponseCreateOutcomeAction.DROP,
-                        reason_code=deny_reason,
-                        explanation=f"Tool followup dropped because it was already {prepared_snapshot.tool_followup_state}.",
-                        selected_candidate_id="tool_followup_existing_state",
-                    ),
-                )
-                return False
 
         self._log_response_create_outcome(snapshot=prepared_snapshot, decision=decision)
         if decision.should_log_arbitration:
