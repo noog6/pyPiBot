@@ -16,6 +16,7 @@ os.environ.setdefault("OPENAI_API_KEY", "test-key")
 from ai.realtime.response_create_runtime import ResponseCreateOutcomeAction, ResponseCreateRuntime
 from ai.realtime.transport import RealtimeTransport
 from ai.realtime_api import RealtimeAPI
+from ai.interaction_lifecycle_policy import ResponseCreateDecision, ResponseCreateDecisionAction
 from core.logging import logger
 
 
@@ -317,6 +318,35 @@ def test_response_create_arbitration_blocks_already_delivered_and_already_create
 
     assert created_decision.action is ResponseCreateOutcomeAction.BLOCK
     assert created_decision.reason_code == "canonical_response_already_created"
+
+
+def test_already_done_reason_normalization_stays_in_runtime_layer() -> None:
+    api = _make_api_stub()
+    runtime = api._response_create_runtime
+    turn_id = "turn_already_done"
+    input_event_key = "item_already_done"
+    api._set_response_delivery_state(turn_id=turn_id, input_event_key=input_event_key, state="delivered")
+    event = {"type": "response.create", "response": {"metadata": {"turn_id": turn_id, "input_event_key": input_event_key}}}
+    snapshot = runtime.prepare_response_create_snapshot(
+        response_create_event=event,
+        origin="assistant_message",
+        utterance_context=None,
+        memory_brief_note=None,
+        now=1.0,
+    )
+    api._lifecycle_policy = lambda: types.SimpleNamespace(
+        decide_response_create=lambda **_kwargs: ResponseCreateDecision(
+            action=ResponseCreateDecisionAction.BLOCK,
+            reason_code="already_done",
+            selected_candidate_id="already_delivered",
+        )
+    )
+
+    decision = runtime.decide_response_create_action(snapshot)
+
+    assert decision.action is ResponseCreateOutcomeAction.BLOCK
+    assert decision.reason_code == "already_delivered"
+    assert decision.selected_candidate_id == "already_delivered"
 
 
 def test_response_create_arbitration_drops_same_turn_owned_assistant_message() -> None:
