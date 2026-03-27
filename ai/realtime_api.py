@@ -16791,6 +16791,93 @@ class RealtimeAPI:
         )
         return True
 
+    async def _ensure_preference_recall_reentry_on_transcript_final(
+        self,
+        *,
+        websocket: Any,
+        turn_id: str,
+        input_event_key: str,
+        memory_intent_subtype: str,
+    ) -> bool:
+        reentry_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+        reentry_store = getattr(self, "_preference_recall_reentry_requested_keys", None)
+        if not isinstance(reentry_store, set):
+            reentry_store = set()
+            self._preference_recall_reentry_requested_keys = reentry_store
+        if reentry_key in reentry_store:
+            logger.debug(
+                "pref_recall_reentry_skipped run_id=%s turn_id=%s input_event_key=%s reason=already_requested",
+                self._current_run_id() or "",
+                turn_id,
+                input_event_key or "unknown",
+            )
+            return True
+
+        pref_payload = self._peek_pending_preference_memory_context_payload(
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+        )
+        if not isinstance(pref_payload, dict):
+            return False
+        reentry_store.add(reentry_key)
+
+        pending = self._pending_server_auto_response_for_turn(turn_id=turn_id)
+        can_replace = self.should_cancel_and_replace(
+            server_auto_state=pending,
+            transcript_final_state={
+                "turn_id": turn_id,
+                "input_event_key": input_event_key,
+            },
+            pref_ctx_state=pref_payload,
+        )
+        if can_replace and await self._cancel_and_replace_pending_server_auto_on_transcript_final(
+            websocket=websocket,
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            origin_label="upgraded_response",
+            memory_intent_subtype=memory_intent_subtype,
+        ):
+            logger.info(
+                "pref_recall_reentry_scheduled run_id=%s turn_id=%s input_event_key=%s mode=cancel_and_replace",
+                self._current_run_id() or "",
+                turn_id,
+                input_event_key or "unknown",
+            )
+            return True
+
+        followup_event = {"type": "response.create", "response": {"metadata": {}}}
+        metadata = followup_event["response"]["metadata"]
+        metadata["turn_id"] = str(turn_id or "").strip() or "turn-unknown"
+        metadata["input_event_key"] = str(input_event_key or "").strip()
+        metadata["safety_override"] = "true"
+        metadata["explicit_multipart"] = "true"
+        metadata["consumes_canonical_slot"] = "false"
+        metadata["preference_recall_followup"] = "true"
+        metadata["trigger"] = "preference_recall"
+        normalized_memory_intent_subtype = str(memory_intent_subtype or "none").strip().lower() or "none"
+        if normalized_memory_intent_subtype != "none":
+            metadata["memory_intent_subtype"] = normalized_memory_intent_subtype
+        sent = await self._send_response_create(
+            websocket,
+            followup_event,
+            origin="preference_recall_followup",
+            utterance_context=UtteranceContext(
+                turn_id=turn_id,
+                input_event_key=input_event_key,
+                canonical_key=self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key),
+                utterance_seq=self._current_utterance_seq(),
+            ),
+            record_ai_call=True,
+        )
+        logger.info(
+            "pref_recall_reentry_scheduled run_id=%s turn_id=%s input_event_key=%s mode=%s",
+            self._current_run_id() or "",
+            turn_id,
+            input_event_key or "unknown",
+            "followup_response_create" if sent else "followup_blocked",
+        )
+        return bool(sent)
+
     async def _handle_input_audio_transcription_completed_event(
         self,
         event: dict[str, Any],
@@ -17154,6 +17241,22 @@ class RealtimeAPI:
                 source="input_audio_transcription",
             ):
                 return
+            pref_recall_context_pending = (
+                isinstance(perception_memory_verdict, PerceptionMemoryVerdict)
+                and bool(perception_memory_verdict.preference_recall_requested)
+                and self._has_pending_preference_memory_context(
+                    turn_id=resolved_turn_id,
+                    input_event_key=input_event_key,
+                )
+            )
+            if decision_path != "upgraded_response" and pref_recall_context_pending:
+                if await self._ensure_preference_recall_reentry_on_transcript_final(
+                    websocket=websocket,
+                    turn_id=resolved_turn_id,
+                    input_event_key=input_event_key,
+                    memory_intent_subtype=memory_intent_subtype,
+                ):
+                    return
             if decision_path == "upgraded_response":
                 pending = self._pending_server_auto_response_for_turn(turn_id=resolved_turn_id)
                 replacement_canonical_key = self._canonical_utterance_key(

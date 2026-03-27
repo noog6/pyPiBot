@@ -270,6 +270,146 @@ def test_transcript_final_upgrade_preserved_when_perception_memory_verdict_is_no
     )
 
 
+def test_transcript_final_preference_recall_reenters_response_create_seam_without_upgrade() -> None:
+    api = _build_api_stub()
+    api._extract_transcript = lambda event: str(event.get("transcript") or "")
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._log_user_transcript = lambda *_args, **_kwargs: None
+    api._attention_on_transcript_finalized = lambda: None
+    api._resolve_input_event_key = lambda event: str(event.get("item_id") or "item_abc")
+    api._current_turn_id_or_unknown = lambda: "turn_2"
+    api._utterance_context_scope = lambda **kwargs: nullcontext(
+        SimpleNamespace(
+            turn_id=str(kwargs.get("turn_id") or "turn_2"),
+            input_event_key=str(kwargs.get("input_event_key") or "item_abc"),
+        )
+    )
+    api._active_input_event_key_by_turn_id = {}
+    api._rebind_active_response_correlation_key = lambda **_kwargs: None
+    api._clear_stale_pending_server_auto_for_turn = lambda **_kwargs: None
+    api._invalidate_provisional_tool_followups_for_turn = lambda **_kwargs: None
+    api._invalidate_superseded_empty_retry_lineage_for_turn = lambda **_kwargs: None
+    api._response_trace_by_id = lambda: {}
+    api._classify_memory_intent = lambda _text: "preference_recall"
+    api._set_response_obligation = lambda **_kwargs: None
+    api._summary_response_created_seen_for_canonical = lambda **_kwargs: True
+    api._response_delivery_state = lambda **_kwargs: "pending"
+    api._pending_server_auto_input_event_keys = deque(maxlen=64)
+    api._active_server_auto_input_event_key = None
+    api._active_response_origin = "unknown"
+    api._start_transcript_response_watchdog = lambda **_kwargs: None
+    api._turn_diagnostic_timestamps = {}
+    api._signal_server_auto_transcript_final = lambda **_kwargs: None
+    api._latest_partial_transcript_by_turn_id = {}
+    api._has_active_confirmation_token = lambda: False
+    api._is_awaiting_confirmation_phase = lambda: False
+    api._active_utterance = None
+    api._log_utterance_trust_snapshot = lambda **_kwargs: {"word_count": 6}
+    api._evaluate_curiosity_from_trust_snapshot = lambda **_kwargs: None
+    api._pending_interrupted_tool_output_candidates_for_turn = lambda **_kwargs: []
+    api._maybe_verify_on_risk_clarify = AsyncMock(return_value=False)
+    api._set_response_gating_verdict = lambda **_kwargs: None
+    api._rebind_pending_micro_ack_after_transcript_final = lambda **_kwargs: None
+    api._maybe_schedule_micro_ack = lambda **_kwargs: None
+    api._record_user_input = lambda *_args, **_kwargs: None
+    api._apply_continuity_event = lambda *_args, **_kwargs: None
+    api._maybe_handle_approval_response = AsyncMock(return_value=False)
+    api._handle_stop_word = AsyncMock(return_value=False)
+    api._maybe_handle_research_permission_response = AsyncMock(return_value=False)
+    api._maybe_handle_research_budget_response = AsyncMock(return_value=False)
+    api._maybe_apply_late_confirmation_decision = AsyncMock(return_value=False)
+    api._maybe_process_research_intent = AsyncMock(return_value=False)
+    api._peek_pending_preference_memory_context_payload = lambda **_kwargs: {
+        "hit": True,
+        "returned_count": 1,
+        "prompt_note": "Preference recall context for this SAME response.",
+    }
+    api._has_pending_preference_memory_context = lambda **_kwargs: True
+    api._pending_server_auto_response_by_turn_id["turn_2"] = PendingServerAutoResponse(
+        turn_id="turn_2",
+        response_id="resp-server-auto",
+        canonical_key="run-464:turn_2:item_abc",
+        created_at_ms=1,
+        active=True,
+    )
+    api._analyze_preference_recall_intent = AsyncMock(
+        return_value=PerceptionMemoryVerdict(
+            preference_recall_requested=True,
+            preference_recall_context={
+                "hit": True,
+                "returned_count": 1,
+                "prompt_note": "Preference recall context for this SAME response.",
+            },
+            runtime_request={},
+            memory_intent=True,
+            memory_intent_subtype="preference_recall",
+        )
+    )
+    api._apply_perception_memory_verdict = AsyncMock(return_value=False)
+    api._cancel_and_replace_pending_server_auto_on_transcript_final = AsyncMock(return_value=False)
+    api._current_utterance_seq = lambda: 4
+    api._send_response_create = AsyncMock(return_value=True)
+
+    asyncio.run(
+        api._handle_input_audio_transcription_completed_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "item_abc",
+                "transcript": "What editor do I prefer?",
+            },
+            object(),
+        )
+    )
+
+    api._send_response_create.assert_awaited_once()
+    call_kwargs = api._send_response_create.await_args.kwargs
+    followup_event = api._send_response_create.await_args.args[1]
+    assert call_kwargs["origin"] == "preference_recall_followup"
+    assert followup_event["response"]["metadata"]["preference_recall_followup"] == "true"
+    assert followup_event["response"]["metadata"]["trigger"] == "preference_recall"
+    assert followup_event["response"]["metadata"]["explicit_multipart"] == "true"
+    assert followup_event["response"]["metadata"]["consumes_canonical_slot"] == "false"
+    api._cancel_and_replace_pending_server_auto_on_transcript_final.assert_not_awaited()
+
+
+def test_preference_recall_reentry_followup_is_single_flight_per_turn_input() -> None:
+    api = _build_api_stub()
+    api._peek_pending_preference_memory_context_payload = lambda **_kwargs: {
+        "hit": True,
+        "returned_count": 1,
+        "prompt_note": "Preference recall context.",
+    }
+    api._pending_server_auto_response_by_turn_id["turn_2"] = PendingServerAutoResponse(
+        turn_id="turn_2",
+        response_id="resp-server-auto",
+        canonical_key="run-464:turn_2:item_abc",
+        created_at_ms=1,
+        active=True,
+    )
+    api._send_response_create = AsyncMock(return_value=True)
+
+    first = asyncio.run(
+        api._ensure_preference_recall_reentry_on_transcript_final(
+            websocket=object(),
+            turn_id="turn_2",
+            input_event_key="item_abc",
+            memory_intent_subtype="preference_recall",
+        )
+    )
+    second = asyncio.run(
+        api._ensure_preference_recall_reentry_on_transcript_final(
+            websocket=object(),
+            turn_id="turn_2",
+            input_event_key="item_abc",
+            memory_intent_subtype="preference_recall",
+        )
+    )
+
+    assert first is True
+    assert second is True
+    api._send_response_create.assert_awaited_once()
+
+
 def test_transcript_upgrade_memory_intent_adds_observation_exclusion_guardrail() -> None:
     api = _build_api_stub()
     api._response_create_debug_trace = False
