@@ -537,6 +537,31 @@ class ResponseTerminalHandlers:
         terminal_assistant_text = str(api._terminal_response_text(active_response_id_before_clear) or "").strip()
         if not terminal_assistant_text:
             terminal_assistant_text = str(api._assistant_reply_text_for_response(active_response_id_before_clear) or "").strip()
+        memory_usage_store = api._memory_usage_audit_store()
+        turn_memory_usage = (
+            memory_usage_store.get(api._memory_usage_audit_turn_key(turn_id=turn_id, input_event_key=done_input_event_key or None), {})
+            if isinstance(memory_usage_store, dict)
+            else {}
+        )
+        injection_types = turn_memory_usage.get("injection_types") if isinstance(turn_memory_usage, dict) else []
+        if not isinstance(injection_types, list):
+            injection_types = []
+        logger.info(
+            "terminal_answer_context_audit run_id=%s turn_id=%s input_event_key=%s response_id=%s canonical_key=%s origin=%s selected=%s selection_reason=%s close_action=%s close_reason=%s pref_context_injected=%s injection_types=%s terminal_text_present=%s",
+            api._current_run_id() or "",
+            turn_id,
+            done_input_event_key or "unknown",
+            str(resolved_response_id or active_response_id_before_clear or "").strip() or "none",
+            semantic_owner_canonical_key or done_canonical_key,
+            str(active_response_origin_before_clear or "unknown"),
+            str(selected).lower(),
+            selection_reason,
+            close_action,
+            close_reason,
+            str("preference_context" in injection_types).lower(),
+            ",".join(str(value) for value in injection_types) if injection_types else "none",
+            str(bool(terminal_assistant_text)).lower(),
+        )
         api._finalize_memory_usage_audit(
             turn_id=turn_id,
             input_event_key=done_input_event_key or None,

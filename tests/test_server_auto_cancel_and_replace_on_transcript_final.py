@@ -146,6 +146,50 @@ def test_cancel_and_replace_server_auto_on_transcript_final_tags_memory_intent_s
     assert metadata["memory_intent_subtype"] == "general_memory"
 
 
+def test_should_cancel_and_replace_allows_preference_hit_takeover_after_audio_started() -> None:
+    api = _build_api_stub()
+    pending = PendingServerAutoResponse(
+        turn_id="turn_2",
+        response_id="resp-server-auto",
+        canonical_key="run-464:turn_2:synthetic_server_auto_1",
+        created_at_ms=1,
+        active=True,
+    )
+
+    should_replace = api.should_cancel_and_replace(
+        server_auto_state=pending,
+        transcript_final_state={
+            "turn_id": "turn_2",
+            "input_event_key": "item_abc",
+        },
+        pref_ctx_state={"hit": True, "returned_count": 1},
+    )
+
+    assert should_replace is True
+
+
+def test_should_cancel_and_replace_keeps_audio_started_server_auto_without_preference_hit() -> None:
+    api = _build_api_stub()
+    pending = PendingServerAutoResponse(
+        turn_id="turn_2",
+        response_id="resp-server-auto",
+        canonical_key="run-464:turn_2:synthetic_server_auto_1",
+        created_at_ms=1,
+        active=True,
+    )
+
+    should_replace = api.should_cancel_and_replace(
+        server_auto_state=pending,
+        transcript_final_state={
+            "turn_id": "turn_2",
+            "input_event_key": "item_abc",
+        },
+        pref_ctx_state={"hit": False, "returned_count": 0},
+    )
+
+    assert should_replace is False
+
+
 def test_transcript_final_upgrade_preserved_when_perception_memory_verdict_is_noop() -> None:
     api = _build_api_stub()
     api._extract_transcript = lambda event: str(event.get("transcript") or "")
