@@ -1224,6 +1224,8 @@ class ResponseCreateRuntime:
                 )
             )
         )
+        if pref_context_injected and "preference_context" not in memory_injection_types:
+            memory_injection_types.append("preference_context")
         if memory_note_to_send:
             if pref_context_injected:
                 logger.info(
