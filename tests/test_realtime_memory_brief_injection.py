@@ -427,6 +427,35 @@ def test_memory_usage_audit_emits_for_preference_context_injection(monkeypatch) 
     assert any("injection_types=preference_context" in entry for entry in logs)
 
 
+def test_memory_usage_audit_marks_preference_backed_turn_brief_with_preference_context(monkeypatch) -> None:
+    api = _make_api_stub()
+    ws = _Ws()
+    _capture_memory_audit_logs(monkeypatch)
+    note_text = (
+        "Preference recall context for this SAME response: matched stored preference(s). Top recalled value: Vim"
+    )
+    api._peek_pending_preference_memory_context_payload = lambda *, turn_id, input_event_key: {
+        "prompt_note": note_text,
+        "hit": True,
+    }
+
+    asyncio.run(
+        api._send_response_create(
+            ws,
+            {
+                "type": "response.create",
+                "response": {"metadata": {"turn_id": "turn_pref", "input_event_key": "item_pref"}},
+            },
+            origin="upgraded_response",
+            memory_brief_note=note_text,
+        )
+    )
+
+    turn_key = api._memory_usage_audit_turn_key(turn_id="turn_pref", input_event_key="item_pref")
+    stored = api._memory_usage_audit_store()[turn_key]
+    assert stored["injection_types"] == ["turn_brief", "preference_context"]
+
+
 def test_memory_usage_audit_finalizes_non_injected_turn(monkeypatch) -> None:
     api = _make_api_stub()
     logs = _capture_memory_audit_logs(monkeypatch)

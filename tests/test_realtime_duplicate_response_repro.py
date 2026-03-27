@@ -290,6 +290,104 @@ def _prime_response_done_api(
     return canonical_key
 
 
+def _capture_terminal_audit_logs(monkeypatch) -> list[str]:
+    captured: list[str] = []
+
+    def _capture(message, *args, **kwargs) -> None:
+        rendered = message % args if args else str(message)
+        if "terminal_answer_context_audit" in rendered:
+            captured.append(rendered)
+
+    monkeypatch.setattr("ai.realtime.response_terminal_handlers.logger.info", _capture)
+    return captured
+
+
+def test_terminal_answer_context_audit_treats_preference_backed_turn_brief_as_pref_injected(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    logs = _capture_terminal_audit_logs(monkeypatch)
+    turn_id = "turn_pref_audit"
+    input_event_key = "item_pref_audit"
+    response_id = "resp_pref_audit"
+    _prime_response_done_api(
+        api,
+        turn_id=turn_id,
+        input_event_key=input_event_key,
+        response_id=response_id,
+        origin="upgraded_response",
+    )
+    turn_key = api._memory_usage_audit_turn_key(turn_id=turn_id, input_event_key=input_event_key)
+    api._memory_usage_audit_store()[turn_key] = {
+        "run_id": "run-405-repro",
+        "turn_id": turn_id,
+        "input_event_key": input_event_key,
+        "telemetry_scope": "turn",
+        "injection_types": ["turn_brief", "preference_context"],
+    }
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": response_id}}))
+
+    assert any(
+        "pref_context_injected=true" in entry and "injection_types=turn_brief,preference_context" in entry
+        for entry in logs
+    )
+
+
+def test_terminal_answer_context_audit_keeps_generic_turn_brief_pref_false(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    logs = _capture_terminal_audit_logs(monkeypatch)
+    turn_id = "turn_turn_brief_only"
+    input_event_key = "item_turn_brief_only"
+    response_id = "resp_turn_brief_only"
+    _prime_response_done_api(
+        api,
+        turn_id=turn_id,
+        input_event_key=input_event_key,
+        response_id=response_id,
+        origin="assistant_message",
+    )
+    turn_key = api._memory_usage_audit_turn_key(turn_id=turn_id, input_event_key=input_event_key)
+    api._memory_usage_audit_store()[turn_key] = {
+        "run_id": "run-405-repro",
+        "turn_id": turn_id,
+        "input_event_key": input_event_key,
+        "telemetry_scope": "turn",
+        "injection_types": ["turn_brief"],
+    }
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": response_id}}))
+
+    assert any("pref_context_injected=false" in entry and "injection_types=turn_brief" in entry for entry in logs)
+
+
+def test_terminal_answer_context_audit_keeps_direct_preference_context_pref_true(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    logs = _capture_terminal_audit_logs(monkeypatch)
+    turn_id = "turn_direct_pref"
+    input_event_key = "item_direct_pref"
+    response_id = "resp_direct_pref"
+    _prime_response_done_api(
+        api,
+        turn_id=turn_id,
+        input_event_key=input_event_key,
+        response_id=response_id,
+        origin="assistant_message",
+    )
+    turn_key = api._memory_usage_audit_turn_key(turn_id=turn_id, input_event_key=input_event_key)
+    api._memory_usage_audit_store()[turn_key] = {
+        "run_id": "run-405-repro",
+        "turn_id": turn_id,
+        "input_event_key": input_event_key,
+        "telemetry_scope": "turn",
+        "injection_types": ["preference_context"],
+    }
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": response_id}}))
+
+    assert any("pref_context_injected=true" in entry and "injection_types=preference_context" in entry for entry in logs)
+
 
 def test_response_created_syncs_helper_owned_fields_for_assistant_message() -> None:
     api = _make_api_stub()
