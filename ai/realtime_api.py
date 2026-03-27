@@ -6630,11 +6630,35 @@ class RealtimeAPI:
         transcript_final_state: dict[str, Any] | None,
         pref_ctx_state: dict[str, Any] | None,
     ) -> bool:
-        _ = transcript_final_state
-        _ = pref_ctx_state
         if not isinstance(server_auto_state, PendingServerAutoResponse) or not server_auto_state.active:
             return False
         canonical_key = str(server_auto_state.canonical_key or "").strip()
+        transcript_state = transcript_final_state if isinstance(transcript_final_state, dict) else {}
+        transcript_turn_id = str(transcript_state.get("turn_id") or "").strip()
+        transcript_input_event_key = str(transcript_state.get("input_event_key") or "").strip()
+        pref_ctx_hit = bool(isinstance(pref_ctx_state, dict) and pref_ctx_state.get("hit", False))
+        same_turn = bool(transcript_turn_id and transcript_turn_id == str(server_auto_state.turn_id or "").strip())
+        transcript_canonical_key = (
+            self._canonical_utterance_key(turn_id=transcript_turn_id, input_event_key=transcript_input_event_key)
+            if same_turn and transcript_input_event_key
+            else ""
+        )
+        if (
+            canonical_key
+            and self._canonical_first_audio_started(canonical_key)
+            and pref_ctx_hit
+            and same_turn
+            and transcript_canonical_key
+            and transcript_canonical_key != canonical_key
+        ):
+            logger.info(
+                "pref_ctx_takeover_override run_id=%s turn_id=%s transcript_key=%s pending_key=%s reason=preference_hit_after_audio_started",
+                self._current_run_id() or "",
+                transcript_turn_id or str(server_auto_state.turn_id or "").strip() or "turn-unknown",
+                transcript_canonical_key,
+                canonical_key,
+            )
+            return True
         if canonical_key and self._canonical_first_audio_started(canonical_key):
             return False
         return True
@@ -16253,6 +16277,23 @@ class RealtimeAPI:
                 tool_followup_release=metadata_tool_followup_release,
                 tool_call_id=metadata_tool_call_id,
             )
+            pref_payload = self._peek_pending_preference_memory_context_payload(
+                turn_id=turn_id,
+                input_event_key=str(self._active_response_input_event_key or resolved_input_event_key or ""),
+            )
+            if isinstance(pref_payload, dict):
+                logger.info(
+                    "pref_context_response_bind run_id=%s response_id=%s turn_id=%s input_event_key=%s canonical_key=%s origin=%s pref_hit=%s returned_count=%s prompt_len=%s",
+                    self._current_run_id() or "",
+                    str(self._active_response_id or "").strip() or "unknown",
+                    turn_id,
+                    str(self._active_response_input_event_key or resolved_input_event_key or "").strip() or "unknown",
+                    lifecycle_canonical_key,
+                    origin,
+                    str(bool(pref_payload.get("hit", False))).lower(),
+                    int(pref_payload.get("returned_count") or 0),
+                    len(str(pref_payload.get("prompt_note") or "")),
+                )
             if metadata_tool_followup in {"true", "1", "yes"}:
                 self._mark_tool_followup_timing(
                     turn_id=turn_id,

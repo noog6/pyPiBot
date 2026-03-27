@@ -1214,7 +1214,29 @@ class ResponseCreateRuntime:
             )
             if memory_note_to_send:
                 memory_injection_types.append("preference_context")
+        pref_context_injected = bool(
+            (
+                "preference_context" in memory_injection_types
+                or (
+                    prepared_snapshot.preference_note
+                    and memory_note_to_send
+                    and memory_note_to_send == prepared_snapshot.preference_note
+                )
+            )
+        )
         if memory_note_to_send:
+            if pref_context_injected:
+                logger.info(
+                    "pref_context_injected run_id=%s turn_id=%s input_event_key=%s canonical_key=%s origin=%s note_len=%s injection_types=%s had_pending_pref_context=%s",
+                    api._current_run_id() or "",
+                    turn_id,
+                    current_input_event_key or "unknown",
+                    canonical_key,
+                    normalized_origin,
+                    len(memory_note_to_send),
+                    ",".join(memory_injection_types) or "none",
+                    str(prepared_snapshot.had_pending_preference_context).lower(),
+                )
             try:
                 await api._send_memory_brief_note(websocket, memory_note_to_send)
                 for injection_type in memory_injection_types:
