@@ -16878,6 +16878,29 @@ class RealtimeAPI:
         )
         return bool(sent)
 
+    def _release_preference_recall_reentry_for_canonical_key(
+        self,
+        *,
+        canonical_key: str | None,
+        reason: str,
+    ) -> bool:
+        normalized_key = str(canonical_key or "").strip()
+        if not normalized_key:
+            return False
+        reentry_store = getattr(self, "_preference_recall_reentry_requested_keys", None)
+        if not isinstance(reentry_store, set):
+            return False
+        if normalized_key not in reentry_store:
+            return False
+        reentry_store.discard(normalized_key)
+        logger.debug(
+            "pref_recall_reentry_released run_id=%s canonical_key=%s reason=%s",
+            self._current_run_id() or "",
+            normalized_key,
+            reason or "unknown",
+        )
+        return True
+
     async def _handle_input_audio_transcription_completed_event(
         self,
         event: dict[str, Any],

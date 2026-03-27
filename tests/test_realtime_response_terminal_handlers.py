@@ -110,6 +110,7 @@ def _make_api() -> RealtimeAPI:
     api.get_continuity_brief = RealtimeAPI.get_continuity_brief.__get__(api, RealtimeAPI)
     api.get_continuity_debug_summary = RealtimeAPI.get_continuity_debug_summary.__get__(api, RealtimeAPI)
     api._maybe_log_continuity_debug_summary_on_turn_close = RealtimeAPI._maybe_log_continuity_debug_summary_on_turn_close.__get__(api, RealtimeAPI)
+    api._release_preference_recall_reentry_for_canonical_key = RealtimeAPI._release_preference_recall_reentry_for_canonical_key.__get__(api, RealtimeAPI)
     return api
 
 
@@ -146,6 +147,24 @@ def test_handle_response_done_clears_terminal_response_text_store() -> None:
     asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_1"}}))
 
     assert "resp_1" not in api._terminal_response_text_by_response_id
+
+
+def test_handle_response_done_releases_preference_recall_reentry_key_on_terminal_close() -> None:
+    api = _make_api()
+    api._preference_recall_reentry_requested_keys = {"turn_1::input_evt_1"}
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=False,
+            close_reason="confirmation_hold",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_1"}}))
+
+    assert "turn_1::input_evt_1" not in api._preference_recall_reentry_requested_keys
 
 
 
@@ -191,6 +210,25 @@ def test_handle_response_completed_clears_terminal_response_text_store() -> None
     asyncio.run(api.handle_response_completed({"type": "response.completed", "response": {"id": "resp_1"}}))
 
     assert "resp_1" not in api._terminal_response_text_by_response_id
+
+
+def test_handle_response_completed_releases_preference_recall_reentry_key_on_terminal_close() -> None:
+    api = _make_api()
+    api._preference_recall_reentry_requested_keys = {"turn_1::input_evt_1"}
+    api._clear_cancelled_response_tracking = lambda *_args, **_kwargs: None
+    api._maybe_enqueue_reflection = lambda *_args, **_kwargs: None
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=False,
+            close_reason="confirmation_hold",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+
+    asyncio.run(api.handle_response_completed({"type": "response.completed", "response": {"id": "resp_1"}}))
+
+    assert "turn_1::input_evt_1" not in api._preference_recall_reentry_requested_keys
 
 
 def test_handle_response_done_logs_normal_deliverable_selection() -> None:
