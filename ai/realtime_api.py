@@ -8747,6 +8747,13 @@ class RealtimeAPI:
         authority_seam: str,
         normalization_warnings: tuple[str, ...] = (),
     ) -> None:
+        canonical_authority_seam = "ai.tool_followup_arbitration.decide_tool_followup_arbitration"
+        observation_normalization_warnings = list(normalization_warnings)
+        normalized_observation_source = str(authority_seam or "").strip()
+        if normalized_observation_source and normalized_observation_source != canonical_authority_seam:
+            observation_normalization_warnings.append(
+                f"tool_followup_observation_source:{normalized_observation_source}"
+            )
         trace_store = getattr(self, "_turn_arbitration_trace_by_key", None)
         if not isinstance(trace_store, dict):
             trace_store = {}
@@ -8772,8 +8779,8 @@ class RealtimeAPI:
             parent_canonical_key=parent_canonical_key,
             parent_semantic_owner_key=parent_semantic_owner_key,
             blocked_by_parent_final_coverage=blocked_by_parent_final_coverage,
-            authority_seam=authority_seam,
-            normalization_warnings=normalization_warnings,
+            authority_seam=canonical_authority_seam,
+            normalization_warnings=tuple(observation_normalization_warnings),
         )
         trace = merge_arbitration_observations_for_turn(
             existing_trace=trace_store.get(trace_key),

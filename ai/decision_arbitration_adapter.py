@@ -486,7 +486,7 @@ _TERMINAL_SELECTION_AUTHORITY_SEAM = "ai.terminal_deliverable_arbitration.arbitr
 _TERMINAL_SELECTION_POLICY_DOMAIN = "response_terminal_selection"
 _SEMANTIC_OWNER_AUTHORITY_SEAM = "ai.semantic_owner_arbitration.decide_semantic_owner"
 _SEMANTIC_OWNER_POLICY_DOMAIN = "response_semantic_owner"
-_TOOL_FOLLOWUP_AUTHORITY_SEAM = "ai.realtime_api.tool_followup_observation"
+_TOOL_FOLLOWUP_AUTHORITY_SEAM = "ai.tool_followup_arbitration.decide_tool_followup_arbitration"
 _TOOL_FOLLOWUP_POLICY_DOMAIN = "tool_followup_release"
 
 
