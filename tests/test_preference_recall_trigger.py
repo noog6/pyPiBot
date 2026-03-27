@@ -345,6 +345,36 @@ def test_preference_question_treats_memory_cards_text_as_hit_when_memories_empty
     assert memory_context["returned_count"] >= 1
 
 
+def test_preference_question_text_only_payload_without_evidence_stays_miss(monkeypatch) -> None:
+    api = _make_api_stub()
+    captured_contexts: list[dict[str, object]] = []
+
+    async def _fake_recall(**_kwargs):
+        return {
+            "memory_cards_text": "Relevant memory:\n- \"User's favorite editor is Vim.\"",
+            "memories": [],
+            "memory_cards": [],
+        }
+
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "recall_memories", _fake_recall)
+    monkeypatch.setattr(api, "send_assistant_message", AsyncMock())
+    api._set_pending_preference_memory_context = lambda **kwargs: captured_contexts.append(kwargs)
+
+    handled = asyncio.run(
+        api._maybe_handle_preference_recall_intent(
+            "Which editor do I prefer?",
+            _Ws(),
+            source="text_message",
+        )
+    )
+
+    assert handled is False
+    assert captured_contexts
+    memory_context = captured_contexts[0]["memory_context"]
+    assert memory_context["hit"] is False
+    assert memory_context["returned_count"] == 0
+
+
 def test_preference_question_empty_payload_emits_saved_yet_message(monkeypatch) -> None:
     api = _make_api_stub()
     captured_contexts: list[dict[str, object]] = []

@@ -5331,7 +5331,7 @@ class RealtimeAPI:
                 semantic_score = float(semantic_match.group(1)) if semantic_match else 0.0
                 lexical_score = float(lexical_match.group(1)) if lexical_match else 0.0
 
-            memory_text = str(card.get("memory", ""))
+            memory_text = str(card.get("memory", "") or card.get("content", ""))
             memory_tokens = set(self._extract_preference_keywords(memory_text))
             overlaps = bool(query_tokens and query_tokens.intersection(memory_tokens))
             keep = (
@@ -5373,13 +5373,34 @@ class RealtimeAPI:
             len(filtered_cards),
             dropped_count,
         )
+        incoming_memory_cards_text = str(payload.get("memory_cards_text", "")).strip()
         filtered_payload = dict(payload)
         filtered_payload["memory_cards"] = filtered_cards
-        filtered_payload["memories"] = filtered_memories
-        filtered_payload["memory_cards_text"] = render_memory_cards_for_assistant(
+        # Preserve memory evidence when we cannot reliably join filtered cards back to memory rows.
+        preserve_unjoined_memories = filtering_mode == "fallback_text" and not filtered_cards
+        if filtered_memories:
+            filtered_payload["memories"] = filtered_memories
+        elif filtered_cards:
+            filtered_payload["memories"] = filtered_memories
+        elif preserve_unjoined_memories:
+            filtered_payload["memories"] = memories
+        else:
+            filtered_payload["memories"] = filtered_memories
+
+        rendered_cards_text = render_memory_cards_for_assistant(
             filtered_cards,
-            total_memories=len(filtered_memories),
+            total_memories=len(filtered_payload.get("memories", [])) if isinstance(filtered_payload.get("memories"), list) else 0,
         )
+        preserve_incoming_cards_text = (
+            filtering_mode == "fallback_text"
+            and not filtered_cards
+            and bool(memories)
+            and bool(incoming_memory_cards_text)
+        )
+        if preserve_incoming_cards_text:
+            filtered_payload["memory_cards_text"] = incoming_memory_cards_text
+        else:
+            filtered_payload["memory_cards_text"] = rendered_cards_text
         return filtered_payload
 
     async def _run_preference_recall_with_fallbacks(
@@ -5394,13 +5415,17 @@ class RealtimeAPI:
         recall_query_variants = self._build_preference_recall_query_variants(query)
         fallback_query = self._preference_recall_fallback_query(query)
         strict_domain_query = self._strict_preference_domain_query(query)
-        max_attempts = int(getattr(self, "_preference_recall_max_attempts", 1))
+        configured_max_attempts = int(getattr(self, "_preference_recall_max_attempts", 2))
+        max_attempts = max(1, configured_max_attempts)
+        if strict_domain_query:
+            max_attempts = max(2, max_attempts)
         if fallback_query and max_attempts > 1:
             fallback_variant = (fallback_query, "canonical")
             if all(existing != fallback_query for existing, _ in recall_query_variants):
                 recall_query_variants.append(fallback_variant)
 
         planned_attempts = recall_query_variants[:max_attempts]
+        preference_domain_fallback = "preference" if strict_domain_query else None
         if (
             strict_domain_query
             and max_attempts > 0
@@ -5410,6 +5435,25 @@ class RealtimeAPI:
             if len(planned_attempts) >= max_attempts:
                 planned_attempts = planned_attempts[: max_attempts - 1]
             planned_attempts.append(strict_variant)
+        if (
+            preference_domain_fallback
+            and max_attempts > 1
+            and all(existing_query != preference_domain_fallback for existing_query, _ in planned_attempts)
+        ):
+            logger.debug(
+                "preference_recall_broad_fallback_enabled run_id=%s resolved_turn_id=%s strict_domain_query=%s fallback_query=%s",
+                self._current_run_id() or "",
+                resolved_turn_id,
+                strict_domain_query,
+                preference_domain_fallback,
+            )
+            fallback_variant = (preference_domain_fallback, "canonical")
+            if len(planned_attempts) >= max_attempts:
+                if planned_attempts and planned_attempts[0][0] == strict_domain_query:
+                    planned_attempts = [planned_attempts[0]]
+                else:
+                    planned_attempts = planned_attempts[: max_attempts - 1]
+            planned_attempts.append(fallback_variant)
 
         last_empty_reason = "no_ranked_matches"
         for attempt_index, (candidate_query, variant_class) in enumerate(planned_attempts):
@@ -5427,7 +5471,7 @@ class RealtimeAPI:
                 candidate_query,
                 max_attempts,
             )
-            payload = await recall_fn(query=candidate_query, limit=3, scope=scope)
+            raw_payload = payload = await recall_fn(query=candidate_query, limit=3, scope=scope)
             payload = self._filter_preference_recall_payload_for_user(
                 payload if isinstance(payload, dict) else {},
                 query=candidate_query,
@@ -5452,7 +5496,25 @@ class RealtimeAPI:
             payload_returned_count = payload.get("returned_count") if isinstance(payload, dict) else None
             derived_returned_count = len(memories) + cards_count
             returned_count = payload_returned_count if isinstance(payload_returned_count, int) and payload_returned_count >= 0 else derived_returned_count
-            hit = bool(returned_count > 0 or derived_returned_count > 0)
+            raw_memory_cards_text = (
+                str(raw_payload.get("memory_cards_text", "")).strip()
+                if isinstance(raw_payload, dict)
+                else ""
+            )
+            has_candidate_trace_evidence = bool(
+                trace_present
+                and (
+                    int(candidate_counts.get("combined_candidates", 0)) > 0
+                    or int(candidate_counts.get("lexical_candidates", 0)) > 0
+                    or int(candidate_counts.get("semantic_candidates", 0)) > 0
+                )
+            )
+            text_evidence = bool(memory_cards_text or raw_memory_cards_text) and bool(
+                derived_returned_count > 0 or has_candidate_trace_evidence
+            )
+            hit = bool(returned_count > 0 or derived_returned_count > 0 or text_evidence)
+            if hit and returned_count <= 0:
+                returned_count = 1
 
             if hit and not memory_cards_text:
                 best_memory = ""

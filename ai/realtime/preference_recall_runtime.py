@@ -467,13 +467,24 @@ async def _analyze_preference_recall_intent(controller, text: str, *, source: st
         result_payload = result_payload if isinstance(result_payload, dict) else {}
         memories = controller._preference_recall_memories_from_payload(result_payload)
         cards = result_payload.get("memory_cards") if isinstance(result_payload.get("memory_cards"), list) else []
-        memory_cards_text = controller._sanitize_memory_cards_text_for_user(
-            str(result_payload.get("memory_cards_text", "")).strip()
-        )
+        raw_memory_cards_text = str(result_payload.get("memory_cards_text", "")).strip()
+        memory_cards_text = controller._sanitize_memory_cards_text_for_user(raw_memory_cards_text)
         derived_returned_count = len(memories) + len(cards)
         payload_returned_count = result_payload.get("returned_count")
         returned_count = payload_returned_count if isinstance(payload_returned_count, int) and payload_returned_count >= 0 else derived_returned_count
-        hit = bool(returned_count > 0 or derived_returned_count > 0)
+        trace_payload = result_payload.get("trace") if isinstance(result_payload.get("trace"), dict) else {}
+        candidate_counts = trace_payload.get("candidate_counts") if isinstance(trace_payload.get("candidate_counts"), dict) else {}
+        has_candidate_trace_evidence = bool(
+            int(candidate_counts.get("combined_candidates", 0)) > 0
+            or int(candidate_counts.get("lexical_candidates", 0)) > 0
+            or int(candidate_counts.get("semantic_candidates", 0)) > 0
+        )
+        text_evidence = bool(memory_cards_text or raw_memory_cards_text) and bool(
+            derived_returned_count > 0 or has_candidate_trace_evidence
+        )
+        hit = bool(returned_count > 0 or derived_returned_count > 0 or text_evidence)
+        if hit and returned_count <= 0:
+            returned_count = 1
         if hit and not memory_cards_text:
             best_memory = ""
             if cards and isinstance(cards[0], dict):
