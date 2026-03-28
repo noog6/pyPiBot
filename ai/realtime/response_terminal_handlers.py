@@ -805,10 +805,24 @@ class ResponseTerminalHandlers:
                 response_id=resolved_response_id or active_response_id_before_clear
             )
         )
+        semantic_parent_turn_id = str(getattr(semantic_owner_decision, "parent_turn_id", "") or "").strip()
+        continuity_turn_id = turn_id
+        continuity_rebind_allowed = False
+        continuity_rebind_reason = ""
+        if (
+            continuity_close_commitment
+            and semantic_parent_turn_id
+            and semantic_parent_turn_id != turn_id
+            and semantic_owner_canonical_key
+            and semantic_owner_canonical_key != done_canonical_key
+        ):
+            continuity_turn_id = semantic_parent_turn_id
+            continuity_rebind_allowed = True
+            continuity_rebind_reason = "semantic_owner_parent_promoted"
         api._apply_continuity_event(
             "response_done",
             run_id=api._current_run_id(),
-            turn_id=turn_id,
+            turn_id=continuity_turn_id,
             response_id=active_response_id_before_clear,
             origin=active_response_origin_before_clear,
             keep_ongoing="true" if provisional_server_auto_close_deferred or exact_phrase_close_deferred or interrupted_tool_output_candidate or followthrough_chain_bridge else "",
@@ -816,6 +830,8 @@ class ResponseTerminalHandlers:
             close_commitment="true" if continuity_close_commitment else "",
             close_unresolved="true" if continuity_close_unresolved else "",
             complete_final_report="true" if continuity_complete_final_report else "",
+            allow_cross_turn_rebind="true" if continuity_rebind_allowed else "",
+            cross_turn_rebind_reason=continuity_rebind_reason,
         )
         if interrupted_tool_output_candidate or followthrough_chain_bridge:
             logger.info(

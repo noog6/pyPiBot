@@ -809,6 +809,43 @@ def test_compound_followthrough_can_rebind_cross_turn_with_explicit_reason() -> 
     ]
 
 
+def test_compound_response_done_cross_turn_rebind_completes_report_and_logs_reason(caplog: pytest.LogCaptureFixture) -> None:
+    ledger = ContinuityLedger()
+    ledger.update_from_event(
+        "transcript_final",
+        text="Look right, check diagnostics, then report done.",
+        source="input_audio_transcription",
+        turn_id="turn_parent",
+    )
+    ledger.update_from_event(
+        "tool_result_received",
+        tool_name="gesture_look_right",
+        call_id="call-1",
+        turn_id="turn_parent",
+    )
+    ledger.update_from_event(
+        "tool_result_received",
+        tool_name="read_runtime_diagnostics",
+        call_id="call-2",
+        turn_id="turn_parent",
+    )
+
+    with caplog.at_level(logging.INFO):
+        ledger.update_from_event(
+            "response_done",
+            turn_id="turn_parent",
+            close_commitment="true",
+            complete_final_report="true",
+            allow_cross_turn_rebind="true",
+            cross_turn_rebind_reason="semantic_owner_parent_promoted",
+        )
+
+    brief = ledger.build_brief("run-rebind", "turn_parent", "after_response_done_rebind")
+    assert brief.compound_request is None
+    assert "continuity_compound_owner_rebind_accepted" in caplog.text
+    assert "reason=semantic_owner_parent_promoted" in caplog.text
+
+
 def test_compound_observability_does_not_mutate_runtime_authority_state() -> None:
     api = RealtimeAPI.__new__(RealtimeAPI)
     api._continuity_ledger = ContinuityLedger()
