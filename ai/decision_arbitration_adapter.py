@@ -1164,7 +1164,11 @@ def _semantic_owner_parent_promotion_is_expected(trace: TurnArbitrationTrace) ->
                 if native_reason != "released_for_followup_delivery":
                     continue
             elif distinctness == "redundant":
-                if native_reason not in {"parent_not_coverage_qualified", "parent_not_deliverable"}:
+                if native_reason not in {
+                    "parent_not_coverage_qualified",
+                    "parent_not_deliverable",
+                    "parent_terminal_selection_not_coverage_qualified",
+                }:
                     continue
             elif distinctness != "distinct":
                 continue

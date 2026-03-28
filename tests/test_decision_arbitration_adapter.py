@@ -1418,6 +1418,60 @@ def test_turn_review_summary_keeps_legacy_parent_not_deliverable_reason_compatib
     assert summary.semantic_owner_summary == "semantic owner promoted to parent after tool-output delivery"
 
 
+def test_turn_review_summary_accepts_terminal_selection_not_coverage_qualified_reason_for_redundant_followup_parent_promotion() -> None:
+    trace = merge_arbitration_observations_for_turn(
+        terminal_selection_observation=build_terminal_selection_observation(
+            run_id="run-review-followup-gesture-terminal-uncovered",
+            turn_id="turn-review-followup-gesture-terminal-uncovered",
+            input_event_key="tool:call_gesture_terminal_uncovered",
+            canonical_key="turn-review-followup-gesture-terminal-uncovered::tool:call_gesture_terminal_uncovered",
+            origin="tool_output",
+            selected=True,
+            selection_reason="normal",
+            transcript_final_seen=False,
+            active_response_was_provisional=False,
+        ),
+        semantic_owner_observation=build_semantic_owner_observation(
+            run_id="run-review-followup-gesture-terminal-uncovered",
+            turn_id="turn-review-followup-gesture-terminal-uncovered",
+            input_event_key="tool:call_gesture_terminal_uncovered",
+            execution_canonical_key="turn-review-followup-gesture-terminal-uncovered::tool:call_gesture_terminal_uncovered",
+            semantic_owner_canonical_key="turn-review-followup-gesture-terminal-uncovered::item_parent",
+            origin="tool_output",
+            selected=True,
+            selection_reason="normal",
+            parent_turn_id="turn-review-followup-gesture-terminal-uncovered",
+            parent_input_event_key="item_parent",
+            native_reason_code="parent_promoted_from_tool_output",
+        ),
+        semantic_owner_canonical_key="turn-review-followup-gesture-terminal-uncovered::item_parent",
+        tool_followup_observation=build_tool_followup_observation(
+            run_id="run-review-followup-gesture-terminal-uncovered",
+            turn_id="turn-review-followup-gesture-terminal-uncovered",
+            input_event_key="tool:call_gesture_terminal_uncovered",
+            canonical_key="turn-review-followup-gesture-terminal-uncovered::tool:call_gesture_terminal_uncovered",
+            origin="tool_output",
+            parent_coverage_state="uncovered",
+            followup_outcome_posture="released",
+            native_reason_code="parent_terminal_selection_not_coverage_qualified",
+            native_outcome_action="SEND",
+            followup_distinctness="redundant",
+            parent_canonical_key="turn-review-followup-gesture-terminal-uncovered::item_parent",
+            parent_semantic_owner_key="turn-review-followup-gesture-terminal-uncovered::item_parent",
+        ),
+    )
+
+    summary = build_turn_review_summary(trace)
+    diagnostics = trace.diagnostics
+
+    assert diagnostics is not None
+    assert "semantic_owner_parent_promotion_expected" in diagnostics.diagnostic_codes
+    assert "semantic_owner_diverged" not in diagnostics.diagnostic_codes
+    assert diagnostics.suspicious_mismatch_count == 0
+    assert summary.semantic_owner_summary == "semantic owner promoted to parent after tool-output delivery"
+    assert summary.review_bucket == "partial_expected"
+
+
 def test_turn_review_summary_keeps_redundant_followup_with_delivery_reason_suspicious() -> None:
     trace = merge_arbitration_observations_for_turn(
         terminal_selection_observation=build_terminal_selection_observation(
