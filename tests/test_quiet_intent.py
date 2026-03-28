@@ -81,6 +81,24 @@ def test_quiet_intent_selects_curious_witness_for_query_stance_and_flag() -> Non
     assert "continuity_stance_assisting_query" in decision.reason_codes
 
 
+def test_quiet_intent_does_not_promote_curious_witness_for_assisting_stance_alone() -> None:
+    selector = QuietIntentSelector()
+    decision = selector.select(
+        QuietIntentInputs(
+            interaction_state=InteractionState.IDLE,
+            conversation_active=True,
+            continuity_stance=QuietIntentContinuityStance.ASSISTING_QUERY,
+            continuity_stance_raw="assisting_query",
+            ops_severity=QuietIntentOpsSeverity.UNKNOWN,
+            ops_severity_raw="unknown",
+            recent_utterance_flags=(),
+            attention_active=False,
+        )
+    )
+    assert decision.mode == QuietIntentMode.OBSERVER
+    assert "continuity_stance_assisting_query" not in decision.reason_codes
+
+
 def test_quiet_intent_log_payload_contains_bounded_inputs_and_biases() -> None:
     selector = QuietIntentSelector()
     decision = selector.select(

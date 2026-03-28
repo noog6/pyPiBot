@@ -219,13 +219,14 @@ class QuietIntentSelector:
             scores[QuietIntentMode.COMPANION_PRESENCE] += 0.20
             reasons[QuietIntentMode.COMPANION_PRESENCE].append("attention_continuity_active")
 
-        if "curiosity_signal" in flags or "exploration_request" in flags:
+        has_curiosity_context = "curiosity_signal" in flags or "exploration_request" in flags
+        if has_curiosity_context:
             scores[QuietIntentMode.CURIOUS_WITNESS] += 0.70
             reasons[QuietIntentMode.CURIOUS_WITNESS].append("curiosity_context")
-        if stance in {
-            QuietIntentContinuityStance.ASSISTING_QUERY.value,
-            QuietIntentContinuityStance.RECOVERING_CONTEXT.value,
-        }:
+        if stance == QuietIntentContinuityStance.RECOVERING_CONTEXT.value:
+            scores[QuietIntentMode.CURIOUS_WITNESS] += 0.20
+            reasons[QuietIntentMode.CURIOUS_WITNESS].append(f"continuity_stance_{stance}")
+        elif stance == QuietIntentContinuityStance.ASSISTING_QUERY.value and has_curiosity_context:
             scores[QuietIntentMode.CURIOUS_WITNESS] += 0.20
             reasons[QuietIntentMode.CURIOUS_WITNESS].append(f"continuity_stance_{stance}")
 
