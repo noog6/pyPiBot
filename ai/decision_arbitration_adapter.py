@@ -1,6 +1,9 @@
-"""Decision-arbitration normalization for the response.create observation seam.
+"""Decision-arbitration observability adapter.
 
-This adapter is observational only and must not be used to drive runtime authority.
+This module normalizes *already-made* seam decisions into diagnostics-friendly
+payloads. It is intentionally observational-only and must not drive runtime
+authority. Authoritative arbitration remains distributed across seam-local
+modules.
 """
 
 from __future__ import annotations
@@ -143,6 +146,8 @@ class NormalizedObservationLogPayload(TypedDict):
     parent_semantic_owner_key: str | None
     blocked_by_parent_final_coverage: bool | None
     authority_retained_by: str
+    decision_source_seam: str
+    decision_source_kind: Literal["authoritative_seam"]
     candidate_count: int
     observational_only: bool
     normalization_warnings: tuple[str, ...]
@@ -235,6 +240,8 @@ class NormalizedArbitrationObservation:
             "parent_semantic_owner_key": self.decision.parent_semantic_owner_key,
             "blocked_by_parent_final_coverage": self.decision.blocked_by_parent_final_coverage,
             "authority_retained_by": self.decision.authority_retained_by,
+            "decision_source_seam": self.decision.authority_retained_by,
+            "decision_source_kind": "authoritative_seam",
             "candidate_count": len(self.candidates),
             "observational_only": self.context.observational_only,
             "normalization_warnings": self.normalization_warnings,
@@ -304,6 +311,10 @@ class TurnArbitrationTraceLogPayload(TypedDict):
     latest_tool_followup_parent_coverage_state: str | None
     latest_tool_followup_outcome_posture: str | None
     latest_tool_followup_distinctness: str | None
+    response_create_authority_seam: str | None
+    terminal_authority_seam: str | None
+    semantic_owner_authority_seam: str | None
+    latest_tool_followup_authority_seam: str | None
     transcript_final_state: str | None
     normalized_warning_count: int
     warning_codes: tuple[str, ...]
@@ -340,6 +351,7 @@ class TurnArbitrationReviewLogPayload(TypedDict):
     trace_complete: bool
     trace_partial: bool
     observational_only: bool
+    authority_boundary: str
 
 
 @dataclass(frozen=True)
@@ -420,6 +432,26 @@ class TurnArbitrationTrace:
             "latest_tool_followup_distinctness": (
                 tool_followup.followup_distinctness if tool_followup else None
             ),
+            "response_create_authority_seam": (
+                self.response_create_observation.context.authority_retained_by
+                if self.response_create_observation
+                else None
+            ),
+            "terminal_authority_seam": (
+                self.terminal_selection_observation.context.authority_retained_by
+                if self.terminal_selection_observation
+                else None
+            ),
+            "semantic_owner_authority_seam": (
+                self.semantic_owner_observation.context.authority_retained_by
+                if self.semantic_owner_observation
+                else None
+            ),
+            "latest_tool_followup_authority_seam": (
+                self.tool_followup_observations[-1].context.authority_retained_by
+                if self.tool_followup_observations
+                else None
+            ),
             "transcript_final_state": _trace_transcript_final_state(
                 self.response_create_observation,
                 self.terminal_selection_observation,
@@ -453,6 +485,7 @@ class TurnArbitrationReviewSummary:
     trace_complete: bool
     trace_partial: bool
     observational_only: bool = True
+    authority_boundary: str = "observational_only_adapter"
 
     def to_log_payload(self) -> TurnArbitrationReviewLogPayload:
         return {
@@ -475,6 +508,7 @@ class TurnArbitrationReviewSummary:
             "trace_complete": self.trace_complete,
             "trace_partial": self.trace_partial,
             "observational_only": self.observational_only,
+            "authority_boundary": self.authority_boundary,
         }
 
 

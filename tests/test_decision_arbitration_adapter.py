@@ -238,6 +238,36 @@ def test_manual_lifecycle_shape_can_be_normalized() -> None:
     assert observation.decision.observational_only is True
 
 
+def test_observation_payload_includes_decision_source_provenance_fields() -> None:
+    api = _make_api_stub()
+    runtime = api._response_create_runtime
+    event = {
+        "type": "response.create",
+        "response": {"metadata": {"turn_id": "turn_payload_source", "input_event_key": "item_payload_source"}},
+    }
+    snapshot = runtime.prepare_response_create_snapshot(
+        response_create_event=event,
+        origin="assistant_message",
+        utterance_context=None,
+        memory_brief_note=None,
+        now=1.0,
+    )
+    decision, lifecycle_decision = runtime._decide_response_create_action_with_lifecycle(snapshot)
+    observation = build_response_create_observation(
+        snapshot=snapshot,
+        execution_decision=decision,
+        lifecycle_decision=lifecycle_decision,
+        same_turn_owner_reason=snapshot.same_turn_owner_reason,
+        canonical_audio_started=False,
+    )
+
+    payload = observation.to_log_payload()
+
+    assert payload["decision_source_seam"] == "ai.response_create_arbitration.decide_response_create_arbitration"
+    assert payload["decision_source_kind"] == "authoritative_seam"
+    assert payload["decision_source_seam"] == payload["authority_retained_by"]
+
+
 def test_same_turn_owner_missing_reason_uses_conservative_fallback_warning() -> None:
     api = _make_api_stub()
     runtime = api._response_create_runtime
@@ -1998,6 +2028,97 @@ def test_get_latest_turn_review_summary_falls_back_for_legacy_trace_without_atta
 
     assert latest == expected
     assert payload == expected.to_log_payload()
+
+
+def test_turn_trace_payload_includes_per_seam_authority_provenance() -> None:
+    api = _make_api_stub()
+    runtime = api._response_create_runtime
+    event = {
+        "type": "response.create",
+        "response": {"metadata": {"turn_id": "turn-provenance", "input_event_key": "item-provenance"}},
+    }
+    snapshot = runtime.prepare_response_create_snapshot(
+        response_create_event=event,
+        origin="assistant_message",
+        utterance_context=None,
+        memory_brief_note=None,
+        now=1.0,
+    )
+    execution_decision, lifecycle_decision = runtime._decide_response_create_action_with_lifecycle(snapshot)
+    trace = merge_arbitration_observations_for_turn(
+        response_create_observation=build_response_create_observation(
+            snapshot=snapshot,
+            execution_decision=execution_decision,
+            lifecycle_decision=lifecycle_decision,
+            same_turn_owner_reason=None,
+            canonical_audio_started=False,
+        ),
+        terminal_selection_observation=build_terminal_selection_observation(
+            run_id=snapshot.run_id,
+            turn_id=snapshot.turn_id,
+            input_event_key=snapshot.input_event_key,
+            canonical_key=snapshot.canonical_key,
+            origin="assistant_message",
+            selected=True,
+            selection_reason="normal",
+            transcript_final_seen=True,
+            active_response_was_provisional=False,
+        ),
+        semantic_owner_observation=build_semantic_owner_observation(
+            run_id=snapshot.run_id,
+            turn_id=snapshot.turn_id,
+            input_event_key=snapshot.input_event_key,
+            execution_canonical_key=snapshot.canonical_key,
+            semantic_owner_canonical_key=snapshot.canonical_key,
+            origin="assistant_message",
+            selected=True,
+            selection_reason="normal",
+        ),
+        tool_followup_observation=build_tool_followup_observation(
+            run_id=snapshot.run_id,
+            turn_id=snapshot.turn_id,
+            input_event_key="tool:call_1",
+            canonical_key=f"{snapshot.turn_id}::tool:call_1",
+            origin="tool_output",
+            parent_coverage_state="coverage_pending",
+            followup_outcome_posture="pending",
+            native_reason_code="parent_deliverable_pending",
+            native_outcome_action="HOLD",
+            followup_distinctness="not_applicable",
+        ),
+        semantic_owner_canonical_key=snapshot.canonical_key,
+    )
+
+    payload = trace.to_log_payload()
+
+    assert payload["response_create_authority_seam"] == "ai.response_create_arbitration.decide_response_create_arbitration"
+    assert payload["terminal_authority_seam"] == (
+        "ai.terminal_deliverable_arbitration.arbitrate_terminal_deliverable_selection"
+    )
+    assert payload["semantic_owner_authority_seam"] == "ai.semantic_owner_arbitration.decide_semantic_owner"
+    assert payload["latest_tool_followup_authority_seam"] == "ai.tool_followup_arbitration.decide_tool_followup_arbitration"
+
+
+def test_turn_review_summary_payload_marks_adapter_authority_boundary() -> None:
+    trace = merge_arbitration_observations_for_turn(
+        tool_followup_observation=build_tool_followup_observation(
+            run_id="run-authority-boundary",
+            turn_id="turn-authority-boundary",
+            input_event_key="tool:call_authority_boundary",
+            canonical_key="turn-authority-boundary::tool:call_authority_boundary",
+            origin="tool_output",
+            parent_coverage_state="coverage_pending",
+            followup_outcome_posture="pending",
+            native_reason_code="parent_deliverable_pending",
+            native_outcome_action="HOLD",
+            followup_distinctness="not_applicable",
+        ),
+    )
+
+    payload = summarize_turn_arbitration_for_review(trace)
+
+    assert payload["observational_only"] is True
+    assert payload["authority_boundary"] == "observational_only_adapter"
 
 def test_should_emit_turn_review_summary_info_for_complete_trace() -> None:
     api = _make_api_stub()
