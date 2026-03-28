@@ -289,6 +289,37 @@ def test_preference_recall_truthfulness_guard_for_checking_phrase(monkeypatch) -
     assert all(ctx["memory_context"]["returned_count"] >= 1 for ctx in captured_contexts)
 
 
+def test_preference_recall_direct_question_high_confidence_prompts_direct_answer_first(monkeypatch) -> None:
+    api = _make_api_stub()
+    captured_contexts: list[dict[str, object]] = []
+
+    async def _fake_recall(**_kwargs):
+        return {
+            "memories": [{"content": "User's favorite editor is Vim.", "tags": ["preference"]}],
+            "memory_cards_text": "Relevant memory:\n- \"User's favorite editor is Vim.\"",
+            "memory_cards": [{"confidence": "High"}],
+        }
+
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "recall_memories", _fake_recall)
+    monkeypatch.setattr(api, "send_assistant_message", AsyncMock())
+    api._set_pending_preference_memory_context = lambda **kwargs: captured_contexts.append(kwargs)
+
+    asyncio.run(
+        api._maybe_handle_preference_recall_intent(
+            "Hey Theo, do you remember what my favorite editor is?",
+            _Ws(),
+            source="text_message",
+        )
+    )
+
+    assert captured_contexts
+    memory_context = captured_contexts[0]["memory_context"]
+    assert memory_context["direct_answer_first"] is True
+    prompt_note = str(memory_context["prompt_note"])
+    assert "Answer directly in the first sentence" in prompt_note
+    assert "Any optional update question must be secondary." in prompt_note
+
+
 def test_preference_question_empty_recall_returns_saved_yet_message(monkeypatch) -> None:
     api = _make_api_stub()
     captured_contexts: list[dict[str, object]] = []
