@@ -21,7 +21,7 @@ import signal
 import threading
 import time
 import uuid
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Literal
 from urllib import request
 from urllib.parse import urlparse
 
@@ -204,6 +204,11 @@ Response metadata: {response_metadata}
 
 ALLOWED_OUTBOUND_HOSTS = {"api.openai.com"}
 ALLOWED_OUTBOUND_SCHEMES = {"https", "wss"}
+
+TurnContractKind = Literal["EXACT_PHRASE", "INCLUDE_PHRASE", "NO_CONTRACT"]
+TURN_CONTRACT_KIND_EXACT_PHRASE: TurnContractKind = "EXACT_PHRASE"
+TURN_CONTRACT_KIND_INCLUDE_PHRASE: TurnContractKind = "INCLUDE_PHRASE"
+TURN_CONTRACT_KIND_NO_CONTRACT: TurnContractKind = "NO_CONTRACT"
 
 
 _EMAIL_REDACT_RE = re.compile(r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[A-Za-z]{2,}\b")
@@ -4884,6 +4889,8 @@ class RealtimeAPI:
         normalized_text = str(text or "").strip()
         lowered = normalized_text.lower()
         exact_phrase = ""
+        contract_kind: TurnContractKind = TURN_CONTRACT_KIND_NO_CONTRACT
+        contract_reason_code = "no_contract_detected"
         explicit_gesture_tools: set[str] = set()
         if "attention hold" in lowered or "listening hold" in lowered:
             explicit_gesture_tools.add("gesture_attention_hold")
@@ -4915,6 +4922,9 @@ class RealtimeAPI:
                 or ""
             ).strip()
             exact_phrase = exact_phrase.lstrip(": ").strip()
+            if exact_phrase:
+                contract_kind = TURN_CONTRACT_KIND_EXACT_PHRASE
+                contract_reason_code = "explicit_say_exactly"
         required_phrase = ""
         # Literal phrase contracts must be explicitly authored (quoted) so ordinary
         # conversational prompts ("say hello or whatever you prefer") do not create
@@ -4930,6 +4940,9 @@ class RealtimeAPI:
                 or ""
             ).strip()
             required_phrase = required_phrase.lstrip(":, ").strip()
+            if required_phrase and not exact_phrase:
+                contract_kind = TURN_CONTRACT_KIND_INCLUDE_PHRASE
+                contract_reason_code = "explicit_quoted_say"
         no_tools = bool(re.search(r"\bdo\s+not\s+(?:call|use|run|invoke)\s+tools?\b", lowered))
         no_gesture = bool(
             re.search(r"\bdo\s+not\s+(?:gesture|move|nod|tilt|snap)\b", lowered)
@@ -4939,6 +4952,9 @@ class RealtimeAPI:
         return {
             "exact_phrase": exact_phrase,
             "required_phrase": required_phrase if not exact_phrase else "",
+            "contract_phrase": exact_phrase or required_phrase,
+            "contract_kind": contract_kind,
+            "contract_reason_code": contract_reason_code,
             "no_tools": no_tools,
             "no_gesture": no_gesture,
             "allowed_explicit_action_request": bool(explicit_gesture_tools),
@@ -4959,12 +4975,13 @@ class RealtimeAPI:
             contracts[turn_id] = contract
             self._turn_contract_fallback = contract
             logger.info(
-                "turn_contract_set run_id=%s turn_id=%s source=%s exact_phrase=%s required_phrase=%s no_tools=%s no_gesture=%s",
+                "turn_contract_assignment run_id=%s turn_id=%s source=%s contract_kind=%s contract_reason_code=%s phrase_present=%s no_tools=%s no_gesture=%s",
                 self._current_run_id() or "",
                 turn_id,
                 source,
-                "true" if contract.get("exact_phrase") else "false",
-                "true" if contract.get("required_phrase") else "false",
+                str(contract.get("contract_kind") or TURN_CONTRACT_KIND_NO_CONTRACT),
+                str(contract.get("contract_reason_code") or "unknown"),
+                "true" if contract.get("contract_phrase") else "false",
                 str(bool(contract.get("no_tools"))).lower(),
                 str(bool(contract.get("no_gesture"))).lower(),
             )
@@ -5029,18 +5046,45 @@ class RealtimeAPI:
         return False
 
     def _turn_contract_exact_phrase(self, *, turn_id: str | None = None) -> str:
-        return str(self._active_turn_contract(turn_id=turn_id).get("exact_phrase") or "").strip()
+        phrase, contract_kind = self._turn_contract_phrase_for_kind(turn_id=turn_id)
+        if contract_kind == TURN_CONTRACT_KIND_EXACT_PHRASE:
+            return phrase
+        return ""
 
     def _turn_contract_required_phrase(self, *, turn_id: str | None = None) -> str:
-        return str(self._active_turn_contract(turn_id=turn_id).get("required_phrase") or "").strip()
+        phrase, contract_kind = self._turn_contract_phrase_for_kind(turn_id=turn_id)
+        if contract_kind == TURN_CONTRACT_KIND_INCLUDE_PHRASE:
+            return phrase
+        return ""
+
+    def _turn_contract_phrase_for_kind(
+        self,
+        *,
+        turn_id: str | None = None,
+        contract: dict[str, Any] | None = None,
+    ) -> tuple[str, TurnContractKind]:
+        active_contract = contract if isinstance(contract, dict) else self._active_turn_contract(turn_id=turn_id)
+        contract_kind = str(active_contract.get("contract_kind") or TURN_CONTRACT_KIND_NO_CONTRACT).strip().upper()
+        contract_phrase = str(active_contract.get("contract_phrase") or "").strip()
+        if contract_kind == TURN_CONTRACT_KIND_EXACT_PHRASE and contract_phrase:
+            return contract_phrase, TURN_CONTRACT_KIND_EXACT_PHRASE
+        if contract_kind == TURN_CONTRACT_KIND_INCLUDE_PHRASE and contract_phrase:
+            return contract_phrase, TURN_CONTRACT_KIND_INCLUDE_PHRASE
+        # Backward-compatible fallback for pre-kind contract payloads.
+        exact_phrase = str(active_contract.get("exact_phrase") or "").strip()
+        if exact_phrase:
+            return exact_phrase, TURN_CONTRACT_KIND_EXACT_PHRASE
+        required_phrase = str(active_contract.get("required_phrase") or "").strip()
+        if required_phrase:
+            return required_phrase, TURN_CONTRACT_KIND_INCLUDE_PHRASE
+        return "", TURN_CONTRACT_KIND_NO_CONTRACT
 
     def _turn_contract_phrase_obligation(self, *, turn_id: str | None = None) -> tuple[str, str]:
-        exact_phrase = self._turn_contract_exact_phrase(turn_id=turn_id)
-        if exact_phrase:
-            return exact_phrase, "exact"
-        required_phrase = self._turn_contract_required_phrase(turn_id=turn_id)
-        if required_phrase:
-            return required_phrase, "include"
+        phrase, contract_kind = self._turn_contract_phrase_for_kind(turn_id=turn_id)
+        if contract_kind == TURN_CONTRACT_KIND_EXACT_PHRASE:
+            return phrase, "exact"
+        if contract_kind == TURN_CONTRACT_KIND_INCLUDE_PHRASE:
+            return phrase, "include"
         return "", "none"
 
     def _normalize_startup_contract_phrase(self, text: str | None) -> str:
@@ -5065,7 +5109,13 @@ class RealtimeAPI:
         response_id: str | None = None,
         spoken_text: str | None = None,
     ) -> bool:
-        phrase, mode = self._turn_contract_phrase_obligation(turn_id=turn_id)
+        phrase, contract_kind = self._turn_contract_phrase_for_kind(turn_id=turn_id)
+        if contract_kind == TURN_CONTRACT_KIND_EXACT_PHRASE:
+            mode = "exact"
+        elif contract_kind == TURN_CONTRACT_KIND_INCLUDE_PHRASE:
+            mode = "include"
+        else:
+            mode = "none"
         if not phrase:
             return False
         spoken_candidates = [spoken_text]
@@ -5089,10 +5139,12 @@ class RealtimeAPI:
             spoken_text=spoken,
         )
         logger.info(
-            "startup_contract_eval run_id=%s turn_id=%s response_id=%s mode=%s satisfied=%s phrase=%r spoken=%r",
+            "turn_contract_eval run_id=%s turn_id=%s response_id=%s contract_kind=%s eval_reason_code=%s mode=%s satisfied=%s phrase=%r spoken=%r",
             self._current_run_id() or "",
             str(turn_id or self._current_turn_id_or_unknown()),
             str(response_id or "none"),
+            contract_kind,
+            "satisfied" if satisfied else "obligation_unsatisfied",
             mode,
             str(satisfied).lower(),
             phrase,
@@ -5120,6 +5172,9 @@ class RealtimeAPI:
             return
         contract["exact_phrase"] = ""
         contract["required_phrase"] = ""
+        contract["contract_phrase"] = ""
+        contract["contract_kind"] = TURN_CONTRACT_KIND_NO_CONTRACT
+        contract["contract_reason_code"] = "phrase_obligation_satisfied"
         if not contract.get("no_tools") and not contract.get("no_gesture"):
             contracts.pop(resolved_turn_id, None)
         if isinstance(getattr(self, "_turn_contract_fallback", None), dict):
@@ -5138,10 +5193,16 @@ class RealtimeAPI:
         websocket: Any,
     ) -> bool:
         contract = self._active_turn_contract(turn_id=turn_id)
-        exact_phrase = str(contract.get("exact_phrase") or "").strip()
-        required_phrase = str(contract.get("required_phrase") or "").strip()
-        phrase = exact_phrase or required_phrase
+        phrase, mode = self._turn_contract_phrase_obligation(turn_id=turn_id)
         if not phrase:
+            return False
+        if mode != "exact":
+            logger.info(
+                "turn_contract_exact_phrase_repair_skipped run_id=%s turn_id=%s contract_kind=%s reason_code=repair_exact_only",
+                self._current_run_id() or "",
+                turn_id,
+                str(contract.get("contract_kind") or TURN_CONTRACT_KIND_NO_CONTRACT),
+            )
             return False
         if contract.get("exact_phrase_repair_scheduled"):
             return False

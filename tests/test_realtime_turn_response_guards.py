@@ -12,6 +12,7 @@ if "audioop" not in sys.modules:
     sys.modules["audioop"] = types.ModuleType("audioop")
 
 from collections import deque
+from unittest.mock import patch
 
 from ai.realtime.response_create_runtime import ResponseCreateRuntime
 from ai.realtime.types import CanonicalResponseState
@@ -105,6 +106,8 @@ def test_turn_contract_parse_detects_exact_phrase_and_no_gesture() -> None:
     )
 
     assert contract["exact_phrase"] == "Ready. Run 556 online."
+    assert contract["contract_kind"] == "EXACT_PHRASE"
+    assert contract["contract_reason_code"] == "explicit_say_exactly"
     assert contract["no_tools"] is True
     assert contract["no_gesture"] is True
 
@@ -177,6 +180,8 @@ def test_turn_contract_required_phrase_repair_uses_exact_phrase_instruction() ->
     api._turn_contracts_by_turn_id = {
         "turn_1": {
             "required_phrase": "Ready!",
+            "contract_phrase": "Ready!",
+            "contract_kind": "INCLUDE_PHRASE",
             "exact_phrase": "",
             "exact_phrase_repair_scheduled": False,
         }
@@ -198,10 +203,8 @@ def test_turn_contract_required_phrase_repair_uses_exact_phrase_instruction() ->
         )
     )
 
-    assert scheduled is True
-    assert sent_events[0]["event"]["response"]["instructions"] == (
-        "Exact phrase repair mode. Speak exactly this sentence and nothing else: 'Ready!'."
-    )
+    assert scheduled is False
+    assert sent_events == []
 
 
 def test_turn_contract_exact_phrase_repair_counts_queued_pending_as_scheduled() -> None:
@@ -304,6 +307,25 @@ def test_turn_contract_parse_detects_required_phrase_without_exactly_when_quoted
 
     assert contract["exact_phrase"] == ""
     assert contract["required_phrase"] == "Sentinel Theo online."
+    assert contract["contract_kind"] == "INCLUDE_PHRASE"
+    assert contract["contract_reason_code"] == "explicit_quoted_say"
+
+
+def test_turn_contract_phrase_for_kind_prefers_typed_contract_fields() -> None:
+    api = _make_api()
+    api._turn_contracts_by_turn_id = {
+        "turn_1": {
+            "contract_kind": "INCLUDE_PHRASE",
+            "contract_phrase": "Sentinel Theo online.",
+            "required_phrase": "legacy required should be ignored",
+            "exact_phrase": "legacy exact should be ignored",
+        }
+    }
+
+    phrase, kind = api._turn_contract_phrase_for_kind(turn_id="turn_1")
+
+    assert phrase == "Sentinel Theo online."
+    assert kind == "INCLUDE_PHRASE"
 
 
 def test_turn_contract_parse_does_not_create_required_phrase_for_unquoted_conversational_say() -> None:
@@ -315,6 +337,8 @@ def test_turn_contract_parse_does_not_create_required_phrase_for_unquoted_conver
 
     assert contract["exact_phrase"] == ""
     assert contract["required_phrase"] == ""
+    assert contract["contract_kind"] == "NO_CONTRACT"
+    assert contract["contract_reason_code"] == "no_contract_detected"
 
 
 
@@ -440,6 +464,68 @@ def test_turn_contract_exact_phrase_not_open_when_already_spoken() -> None:
 
     assert api._turn_contract_exact_phrase_open(turn_id="turn_1") is False
     assert api._turn_contract_exact_phrase(turn_id="turn_1") == ""
+
+
+def test_turn_contract_no_contract_does_not_trigger_phrase_machinery() -> None:
+    api = _make_api()
+    api._update_turn_contract_from_input(
+        "Please speak naturally and keep it short.",
+        source="input_audio_transcription",
+    )
+    api._assistant_reply_accum = "Absolutely — here's the short answer."
+
+    assert api._turn_contract_phrase_obligation(turn_id="turn_1") == ("", "none")
+    assert api._turn_contract_exact_phrase_open(turn_id="turn_1") is False
+
+
+def test_turn_contract_assignment_and_eval_logs_include_kind_and_reason() -> None:
+    api = _make_api()
+    with patch.object(logger, "info") as info_mock:
+        api._update_turn_contract_from_input('Say exactly "Ready!"', source="startup_prompt")
+        api._assistant_reply_accum = "Nope."
+        assert api._turn_contract_exact_phrase_open(turn_id="turn_1", response_id="resp_1") is True
+
+    assignment_calls = [
+        call.args
+        for call in info_mock.call_args_list
+        if call.args and "turn_contract_assignment" in str(call.args[0])
+    ]
+    eval_calls = [
+        call.args
+        for call in info_mock.call_args_list
+        if call.args and "turn_contract_eval" in str(call.args[0])
+    ]
+    assert assignment_calls
+    assert assignment_calls[-1][4] == "EXACT_PHRASE"
+    assert assignment_calls[-1][5] == "explicit_say_exactly"
+    assert eval_calls
+    assert eval_calls[-1][4] == "EXACT_PHRASE"
+    assert eval_calls[-1][5] == "obligation_unsatisfied"
+
+
+def test_turn_contract_eval_log_uses_helper_resolved_kind_when_fields_mismatch() -> None:
+    api = _make_api()
+    api._turn_contracts_by_turn_id = {
+        "turn_1": {
+            "contract_kind": "NO_CONTRACT",
+            "contract_phrase": "",
+            "required_phrase": "Sentinel Theo online.",
+            "exact_phrase": "",
+        }
+    }
+    api._assistant_reply_accum = "Hello there."
+
+    with patch.object(logger, "info") as info_mock:
+        assert api._turn_contract_exact_phrase_open(turn_id="turn_1", response_id="resp_1") is True
+
+    eval_calls = [
+        call.args
+        for call in info_mock.call_args_list
+        if call.args and "turn_contract_eval" in str(call.args[0])
+    ]
+    assert eval_calls
+    # Helper falls back to required_phrase => INCLUDE_PHRASE.
+    assert eval_calls[-1][4] == "INCLUDE_PHRASE"
 
 
 def test_response_done_decision_holds_terminal_selection_when_exact_phrase_open() -> None:
