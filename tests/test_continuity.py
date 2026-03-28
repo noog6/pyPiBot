@@ -704,6 +704,29 @@ def test_compound_chain_closes_only_after_last_non_report_step_then_report() -> 
     assert after_final_report_done.compound_request is None
 
 
+def test_compound_response_done_with_close_commitment_does_not_skip_pending_followthrough_steps() -> None:
+    ledger = ContinuityLedger()
+    ledger.update_from_event(
+        "transcript_final",
+        text="Look right, check diagnostics, look center, then tell me what diagnostics reported.",
+        source="input_audio_transcription",
+    )
+    ledger.update_from_event("tool_result_received", tool_name="gesture_look_right", call_id="call-1")
+    ledger.update_from_event("tool_result_received", tool_name="read_runtime_diagnostics", call_id="call-2")
+
+    ledger.update_from_event("response_done", close_commitment="true", close_unresolved="true")
+
+    after_done = ledger.build_brief("run-order", "turn-1", "after_mid_chain_done")
+    assert after_done.compound_request is not None
+    assert [step.status for step in after_done.compound_request.steps] == [
+        "completed",
+        "completed",
+        "active",
+        "pending",
+    ]
+    assert after_done.compound_request.final_followup_pending is True
+
+
 def test_compound_followthrough_does_not_cross_turn_without_explicit_rebind() -> None:
     ledger = ContinuityLedger()
     ledger.update_from_event(
