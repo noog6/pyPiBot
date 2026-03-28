@@ -13,6 +13,40 @@ from ai.tools import function_map
 
 _PREFERENCE_VALUE_MARKERS = ("favorite", "favourite", "preferred", "preference")
 _PREFERENCE_VALUE_DOMAINS = ("editor", "ide", "tool", "workflow", "language", "theme", "music", "drink", "food")
+_DIRECT_PREFERENCE_RECALL_PATTERNS = (
+    re.compile(r"\bdo you remember\b.+\bmy\b.+\b(favorite|favourite|preferred)\b", re.IGNORECASE),
+    re.compile(r"\bwhat(?:'s| is)\s+my\s+.+\b(favorite|favourite|preferred)\b", re.IGNORECASE),
+    re.compile(r"\bwhich\s+.+\bdo i\s+(?:prefer|usually use)\b", re.IGNORECASE),
+)
+
+
+def _is_direct_preference_recall_question(text: str) -> bool:
+        normalized = str(text or "").strip()
+        if not normalized:
+            return False
+        return any(pattern.search(normalized) for pattern in _DIRECT_PREFERENCE_RECALL_PATTERNS)
+
+
+def _is_high_confidence_preference_hit(*, hit: bool, cards: list[dict[str, Any]], memories: list[dict[str, Any]]) -> bool:
+        if not hit:
+            return False
+        for card in cards:
+            if not isinstance(card, dict):
+                continue
+            confidence = str(card.get("confidence", "")).strip().lower()
+            if confidence in {"high", "very high"}:
+                return True
+        for memory in memories:
+            if not isinstance(memory, dict):
+                continue
+            score = memory.get("score")
+            if isinstance(score, (int, float)) and float(score) >= 0.75:
+                return True
+        if len(memories) == 1 and isinstance(memories[0], dict):
+            memory_text = str(memories[0].get("content", "")).strip().lower()
+            if memory_text and any(marker in memory_text for marker in _PREFERENCE_VALUE_MARKERS):
+                return True
+        return False
 
 
 def _build_preference_recall_reply(*, hit: bool, memory_cards_text: str, memories: list[dict[str, Any]], cards: list[dict[str, Any]]) -> str:
@@ -36,19 +70,37 @@ def _build_preference_recall_reply(*, hit: bool, memory_cards_text: str, memorie
         return "I don't have that preference stored yet—tell me and I can remember it."
 
 
-def _build_preference_memory_context(*, hit: bool, returned_count: int, memory_cards_text: str, memories: list[dict[str, Any]], cards: list[dict[str, Any]]) -> dict[str, Any]:
+def _build_preference_memory_context(
+    *,
+    hit: bool,
+    returned_count: int,
+    memory_cards_text: str,
+    memories: list[dict[str, Any]],
+    cards: list[dict[str, Any]],
+    direct_question: bool,
+    high_confidence: bool,
+) -> dict[str, Any]:
         recalled_value = _build_preference_recall_reply(
             hit=hit,
             memory_cards_text=memory_cards_text,
             memories=memories,
             cards=cards,
         )
+        direct_answer_first = bool(hit and direct_question and high_confidence)
         if hit:
-            prompt_note = (
-                "Preference recall context for this SAME response: matched stored preference(s). "
-                f"Top recalled value: {recalled_value}\n"
-                "Use the recalled value directly in your answer to the user question."
-            )
+            if direct_answer_first:
+                prompt_note = (
+                    "Preference recall context for this SAME response: matched stored preference(s). "
+                    f"Top recalled value: {recalled_value}\n"
+                    "Answer directly in the first sentence using the recalled value (for example: "
+                    "\"Your favorite editor is Vim.\"). Any optional update question must be secondary."
+                )
+            else:
+                prompt_note = (
+                    "Preference recall context for this SAME response: matched stored preference(s). "
+                    f"Top recalled value: {recalled_value}\n"
+                    "Use the recalled value directly in your answer to the user question."
+                )
         else:
             prompt_note = (
                 "Preference recall context for this SAME response: no stored preference matched this query. "
@@ -60,6 +112,8 @@ def _build_preference_memory_context(*, hit: bool, returned_count: int, memory_c
             "hit": hit,
             "returned_count": returned_count,
             "recalled_value": recalled_value if hit else "",
+            "direct_answer_first": direct_answer_first,
+            "high_confidence": bool(high_confidence),
             "prompt_note": prompt_note,
         }
 
@@ -523,12 +577,20 @@ async def _analyze_preference_recall_intent(controller, text: str, *, source: st
             returned_count,
         )
 
+        direct_question = _is_direct_preference_recall_question(text)
+        high_confidence = _is_high_confidence_preference_hit(
+            hit=hit,
+            cards=cards,
+            memories=memories,
+        )
         memory_context = _build_preference_memory_context(
             hit=hit,
             returned_count=returned_count,
             memory_cards_text=memory_cards_text,
             memories=memories,
             cards=cards,
+            direct_question=direct_question,
+            high_confidence=high_confidence,
         )
 
         turn_timestamps["preference_recall_end"] = time.monotonic()
