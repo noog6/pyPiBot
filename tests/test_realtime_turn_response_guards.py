@@ -295,15 +295,26 @@ def test_turn_contract_prompt_contract_adopted_from_unknown_turn() -> None:
     assert api._turn_contract_exact_phrase(turn_id="turn_1") == "Ready. Run 556 online."
 
 
-def test_turn_contract_parse_detects_required_phrase_without_exactly() -> None:
+def test_turn_contract_parse_detects_required_phrase_without_exactly_when_quoted() -> None:
     api = _make_api()
 
     contract = api._parse_turn_contract_from_text(
-        "Do one attention snap, then say, Sentinel Theo online."
+        'Do one attention snap, then say, "Sentinel Theo online."'
     )
 
     assert contract["exact_phrase"] == ""
     assert contract["required_phrase"] == "Sentinel Theo online."
+
+
+def test_turn_contract_parse_does_not_create_required_phrase_for_unquoted_conversational_say() -> None:
+    api = _make_api()
+
+    contract = api._parse_turn_contract_from_text(
+        "Say hello world or whatever fun salutation you prefer."
+    )
+
+    assert contract["exact_phrase"] == ""
+    assert contract["required_phrase"] == ""
 
 
 
@@ -321,7 +332,7 @@ def test_turn_contract_parse_does_not_map_generic_release_words_to_attention_rel
 def test_response_done_decision_holds_terminal_selection_when_required_phrase_open() -> None:
     api = _make_api()
     api._update_turn_contract_from_input(
-        "Do one attention snap, then say, Sentinel Theo online.",
+        'Do one attention snap, then say, "Sentinel Theo online."',
         source="input_audio_transcription",
     )
     api._assistant_reply_accum = ""
@@ -342,7 +353,7 @@ def test_response_done_decision_holds_terminal_selection_when_required_phrase_op
 def test_turn_contract_required_phrase_not_open_when_already_spoken() -> None:
     api = _make_api()
     api._update_turn_contract_from_input(
-        "Do one attention snap, then say, Sentinel Theo online.",
+        'Do one attention snap, then say, "Sentinel Theo online."',
         source="input_audio_transcription",
     )
     api._assistant_reply_accum = "Sentinel Theo online."
@@ -355,7 +366,7 @@ def test_startup_required_phrase_normalization_variants_satisfy_contract() -> No
 
     for spoken in variants:
         api = _make_api()
-        api._update_turn_contract_from_input("Say Ready!", source="startup_prompt")
+        api._update_turn_contract_from_input('Say "Ready!"', source="startup_prompt")
         api._terminal_response_text_by_response_id = {"resp_ready": spoken}
 
         assert api._turn_contract_satisfied_by_text(
@@ -368,7 +379,7 @@ def test_startup_required_phrase_normalization_variants_satisfy_contract() -> No
 
 def test_startup_required_phrase_uses_per_response_reply_text_when_terminal_text_missing() -> None:
     api = _make_api()
-    api._update_turn_contract_from_input("Say Ready!", source="startup_prompt")
+    api._update_turn_contract_from_input('Say "Ready!"', source="startup_prompt")
     api._assistant_reply_accum = ""
     api.assistant_reply = ""
     api._assistant_reply_by_response_id = {"resp_ready": "Ready!"}
@@ -378,7 +389,7 @@ def test_startup_required_phrase_uses_per_response_reply_text_when_terminal_text
 
 def test_startup_required_phrase_remains_open_for_unsatisfied_transcript() -> None:
     api = _make_api()
-    api._update_turn_contract_from_input("Say Ready!", source="startup_prompt")
+    api._update_turn_contract_from_input('Say "Ready!"', source="startup_prompt")
     api._terminal_response_text_by_response_id = {"resp_hello": "Hello there."}
 
     selected, reason = api._response_done_deliverable_decision(
@@ -398,7 +409,7 @@ def test_startup_required_phrase_remains_open_for_unsatisfied_transcript() -> No
 
 def test_startup_required_phrase_uses_terminal_transcript_after_reply_buffer_clears() -> None:
     api = _make_api()
-    api._update_turn_contract_from_input("Say Ready!", source="startup_prompt")
+    api._update_turn_contract_from_input('Say "Ready!"', source="startup_prompt")
     api._assistant_reply_accum = ""
     api.assistant_reply = ""
     api._terminal_response_text_by_response_id = {"resp_ready": "Ready!"}

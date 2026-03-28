@@ -4916,15 +4916,17 @@ class RealtimeAPI:
             ).strip()
             exact_phrase = exact_phrase.lstrip(": ").strip()
         required_phrase = ""
+        # Literal phrase contracts must be explicitly authored (quoted) so ordinary
+        # conversational prompts ("say hello or whatever you prefer") do not create
+        # brittle include-phrase obligations.
         say_match = re.search(
-            r"""(?is)\b(?:say|speak)\b(?!\s+exactly\b)\s*[:,]?\s*(?:"([^"]+)"|'([^']+)'|([^\n.?!]+(?:[.?!](?!\s+do\s+not\b))?))""",
+            r"""(?is)\b(?:say|speak)\b(?!\s+exactly\b)\s*[:,]?\s*(?:"([^"]+)"|'([^']+)')""",
             normalized_text,
         )
         if say_match:
             required_phrase = (
                 say_match.group(1)
                 or say_match.group(2)
-                or say_match.group(3)
                 or ""
             ).strip()
             required_phrase = required_phrase.lstrip(":, ").strip()
