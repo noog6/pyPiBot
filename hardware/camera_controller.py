@@ -283,7 +283,8 @@ class CameraController:
             if len(self._pending_images) == self._pending_images.maxlen:
                 self._pending_images.popleft()
             self._pending_images.append(image)
-        logger.info("[CAMERA] Queued image until realtime loop is ready (%s).", reason)
+        log_method = logger.debug if reason == "response_in_progress" else logger.info
+        log_method("[CAMERA] Queued image until realtime loop is ready (%s).", reason)
 
     def _drain_pending_images(self) -> bool:
         if not self._can_send_realtime():

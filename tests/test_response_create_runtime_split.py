@@ -7,6 +7,7 @@ from dataclasses import replace
 import os
 import sys
 import types
+from types import SimpleNamespace
 from unittest.mock import patch
 
 if "audioop" not in sys.modules:
@@ -845,7 +846,7 @@ def test_record_tool_followup_observation_dedupes_identical_info_turn_summary() 
     assert len(summary_calls) == 1
 
 
-def test_record_tool_followup_observation_logs_material_info_turn_summary_update() -> None:
+def test_record_tool_followup_observation_keeps_suspicious_updates_visible_in_info() -> None:
     api = _make_api_stub()
     api._current_run_id = lambda: "run-tool-info"
     api._turn_arbitration_trace_by_key = {}
@@ -882,6 +883,35 @@ def test_record_tool_followup_observation_logs_material_info_turn_summary_update
     assert len(summary_calls) == 2
     assert "tool followup suppressed" in summary_calls[0].args[6]
     assert "tool followup released" in summary_calls[1].args[6]
+
+
+def test_emit_turn_review_summary_info_skips_coherent_complete_deferred_summary() -> None:
+    api = _make_api_stub()
+    trace = SimpleNamespace(
+        run_id="run-deferred",
+        turn_id="turn-deferred",
+        trace_complete=True,
+        trace_partial=False,
+        review_summary=SimpleNamespace(
+            run_id="run-deferred",
+            turn_id="turn-deferred",
+            review_bucket="coherent",
+            review_priority="low",
+            overall_verdict="coherent turn trace",
+            overall_summary="response.create deferred (active_response); terminal deliverable selected; semantic owner stayed on execution canonical; no tool followup observations; no suspicious signals",
+            response_create_summary="response.create deferred (active_response)",
+            terminal_summary="terminal deliverable selected",
+            semantic_owner_summary="semantic owner stayed on execution canonical",
+            tool_followup_summary="no tool followup observations",
+            trace_complete=True,
+        ),
+    )
+
+    with patch("ai.realtime_api.logger.info") as info_log:
+        emitted = api._emit_turn_review_summary_info_if_material(trace)
+
+    assert emitted is False
+    info_log.assert_not_called()
 
 
 def test_evaluate_response_create_attempt_logs_turn_diagnostics() -> None:

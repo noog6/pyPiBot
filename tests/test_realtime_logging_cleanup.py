@@ -178,3 +178,27 @@ def test_tool_followup_terminal_states_keep_cleanup_behavior() -> None:
             "created",
         )
         debug_mock.assert_not_called()
+
+
+def test_tool_followup_transitional_created_states_log_debug_only() -> None:
+    for transitional_state in ("creating", "created"):
+        api = _make_api()
+        api._tool_followup_state_by_canonical_key = {"turn-1::tool-call-1": "scheduled_release"}
+        api._clear_stale_assistant_message_creates_for_tool_followup = lambda **_kwargs: None
+
+        with patch("ai.realtime_api.logger.info") as info_mock, patch("ai.realtime_api.logger.debug") as debug_mock:
+            RealtimeAPI._set_tool_followup_state(
+                api,
+                canonical_key="turn-1::tool-call-1",
+                state=transitional_state,
+                reason="transitional_transition",
+            )
+
+        info_mock.assert_not_called()
+        debug_mock.assert_called_once_with(
+            "tool_followup_state canonical_key=%s state=%s reason=%s prior_state=%s",
+            "turn-1::tool-call-1",
+            transitional_state,
+            "transitional_transition",
+            "scheduled_release",
+        )
