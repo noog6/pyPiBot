@@ -6263,7 +6263,7 @@ def test_status_only_gesture_followup_observation_marks_released_child_redundant
     assert observation.decision.native_reason_code == "parent_not_deliverable"
     assert observation.context.authority_retained_by == "ai.tool_followup_arbitration.decide_tool_followup_arbitration"
     assert observation.decision.authority_retained_by == "ai.tool_followup_arbitration.decide_tool_followup_arbitration"
-    assert "tool_followup_observation_source:tool_followup_release_seam" in observation.normalization_warnings
+    assert "provenance_source:tool_followup:tool_followup_release_seam" in observation.normalization_warnings
 
 
 def test_provisional_server_auto_parent_progression_holds_then_suppresses_followup_after_terminal_selection() -> None:

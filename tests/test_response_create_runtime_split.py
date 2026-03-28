@@ -795,7 +795,7 @@ def test_record_tool_followup_observation_logs_info_turn_summary_for_suspicious_
     observation = trace.tool_followup_observations[-1]
     assert observation.context.authority_retained_by == "ai.tool_followup_arbitration.decide_tool_followup_arbitration"
     assert observation.decision.authority_retained_by == "ai.tool_followup_arbitration.decide_tool_followup_arbitration"
-    assert "tool_followup_observation_source:ai.realtime_api" in observation.normalization_warnings
+    assert "provenance_source:tool_followup:ai.realtime_api" in observation.normalization_warnings
 
     summary_call = None
     for call in info_log.call_args_list:
