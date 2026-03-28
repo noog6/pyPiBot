@@ -92,8 +92,11 @@ def _build_preference_memory_context(
                 prompt_note = (
                     "Preference recall context for this SAME response: matched stored preference(s). "
                     f"Top recalled value: {recalled_value}\n"
-                    "Answer directly in the first sentence using the recalled value (for example: "
-                    "\"Your favorite editor is Vim.\"). Any optional update question must be secondary."
+                    "First sentence must be only the direct factual answer using the recalled value "
+                    "(for example: \"Your favorite editor is Vim.\"). "
+                    "Do not start the first sentence with memory-preface lead-ins like "
+                    "\"Actually\", \"I have a note\", \"I remember\", or \"You mentioned\". "
+                    "Any optional update check or memory-reference language must appear only after the first sentence."
                 )
             else:
                 prompt_note = (
