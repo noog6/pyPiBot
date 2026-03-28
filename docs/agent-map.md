@@ -8,7 +8,8 @@ flow, coordinating audio in/out, tool execution, and event injections.
 > **Architecture context:** This map focuses on runtime/lifecycle orchestration.
 > For layer ownership and roadmap context (runtime vs perception/memory vs
 > arbitration/governance), see
-> [`docs/architecture/theo_cognitive_stack.md`](architecture/theo_cognitive_stack.md) (see the **Fast Layer Triage Matrix** for quick placement checks)
+> [`docs/architecture/theo_cognitive_stack.md`](architecture/theo_cognitive_stack.md) (see the **Fast Layer Triage Matrix** for quick placement checks),
+> and [`docs/architecture/quiet_intent.md`](architecture/quiet_intent.md) for quiet-intent ownership/authority boundaries.
 > and the architecture index at
 > [`docs/architecture/README.md`](architecture/README.md).
 
@@ -28,7 +29,10 @@ The entrypoint in `main.py` builds and launches the following components:
   emergency phrases. It exposes
   `is_ready_for_injections` for other threads to gate event delivery. It also
   tracks orchestration phases (sense/plan/act/reflect/idle) during the response
-  lifecycle and emits phase-transition logs for observability.【F:ai/realtime_api.py†L92-L208】【F:ai/orchestration.py†L1-L27】
+  lifecycle and emits phase-transition logs for observability. On interaction-state
+  transitions, it also refreshes Quiet Intent (consultative posture-bias snapshot)
+  and emits deduped quiet-intent diagnostics; this does not alter arbitration,
+  governance, or execution authority seams.【F:ai/realtime_api.py†L92-L208】【F:ai/realtime_api.py†L4461-L4668】【F:ai/orchestration.py†L1-L27】
 - **Governance layer**: Builds action packets for tool calls, applies tool tier
   policy (read-only vs. reversible vs. stateful/credentialed), enforces autonomy
   windows, and decides whether approval is required before execution.【F:ai/governance.py†L13-L320】

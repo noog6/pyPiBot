@@ -109,16 +109,17 @@ Theo is no longer at a "continuity missing" stage.
 
 ### Layer 6 — Conversational pacing + embodiment cues (**implemented, bounded behavior layer**)
 
-**Owns:** micro-ack pacing and deterministic embodiment cue policy.
+**Owns:** micro-ack pacing, deterministic embodiment cue policy, and consultative quiet-intent posture-bias diagnostics.
 
-**Anchors:** `ai/micro_ack_manager.py`, `ai/embodiment_policy.py`, `ai/attention_continuity.py`, integration in `ai/realtime_api.py`.
+**Anchors:** `ai/micro_ack_manager.py`, `ai/embodiment_policy.py`, `ai/attention_continuity.py`, `ai/quiet_intent.py`, integration in `ai/realtime_api.py`.
 
 **Now true in code:**
 - Micro-acks are rate-limited, deduped, category/channel gated, and suppressible when followup/near-ready conditions apply.
 - Embodiment policy maps interaction state + attention snapshot to governed cue actions.
 - Attention continuity provides a short ASR churn hold window; it is not a second runtime machine.
+- Quiet Intent emits deterministic consultative posture biases plus a diagnostic snapshot, refreshed on interaction-state transitions; runtime currently logs/stores this output but does not route it into response-create arbitration, governance, tool followup, or terminal selection authority seams.
 
-**Boundary:** these cues are expression/pacing aids, not substitutes for terminal deliverables.
+**Boundary:** these cues are expression/pacing aids and consultative diagnostics, not substitutes for terminal deliverables or policy authority.
 
 ---
 
@@ -137,6 +138,7 @@ Theo is no longer at a "continuity missing" stage.
 | Response/terminal/followup arbitration | Implemented, expanding | Extend seam-locally with explicit reason codes. |
 | Perception/memory | Partial | Improve relevance/discipline before adding broad new policy. |
 | Continuity ledger | Implemented narrow | Use as context/diagnostic signal, not control authority. |
+| Quiet Intent posture biasing | Implemented consultative | Treat as posture/diagnostic signal; not an authority seam. |
 | Governance | Implemented partial | Keep fail-closed and confirmation semantics explicit. |
 | Higher cognition (planner/cost/persona/ecosystem) | Aspirational/backlog | Do not imply these are already present. |
 
