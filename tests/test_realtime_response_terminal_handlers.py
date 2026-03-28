@@ -1205,6 +1205,81 @@ def test_handle_response_done_parent_promoted_cross_turn_final_tool_report_clear
     assert parent_brief.commitments == ()
 
 
+def test_handle_response_done_logs_continuity_handoff_fields(monkeypatch) -> None:
+    api = _make_api()
+    api._current_turn_id_or_unknown = lambda: "turn_3"
+    api._active_input_event_key_for_turn = lambda turn_id: "item_parent" if turn_id == "turn_2" else "tool:call_final"
+    api._apply_continuity_event(
+        "transcript_final",
+        text="Look right, check diagnostics, then report done.",
+        source="input_audio_transcription",
+        turn_id="turn_2",
+    )
+    api._apply_continuity_event(
+        "tool_result_received",
+        tool_name="gesture_look_right",
+        call_id="call-1",
+        turn_id="turn_2",
+    )
+    api._apply_continuity_event(
+        "tool_result_received",
+        tool_name="read_runtime_diagnostics",
+        call_id="call-2",
+        turn_id="turn_2",
+    )
+    api._active_response_origin = "tool_output"
+    api._active_response_input_event_key = "tool:call_final"
+    api._active_response_canonical_key = "turn_3::tool:call_final"
+    api._active_response_id = "resp_tool_final"
+    api._response_done_followthrough_chain_remaining = lambda **_kwargs: False
+    api._terminal_response_text_by_response_id = {"resp_tool_final": "I'm back to center. Diagnostics are connected."}
+    api._semantic_owner_decision_for_response = Mock(
+        return_value=SimpleNamespace(
+            semantic_owner_canonical_key="turn_2::item_parent",
+            parent_turn_id="turn_2",
+            parent_input_event_key="item_parent",
+            selected_candidate_id="semantic_owner_parent",
+            reason_code="parent_promoted_from_tool_output",
+        )
+    )
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+
+    info_logs: list[str] = []
+    from core.logging import logger as runtime_logger
+
+    monkeypatch.setattr(
+        runtime_logger,
+        "info",
+        lambda msg, *args, **_kwargs: info_logs.append(msg % args if args else msg),
+    )
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_tool_final"}}))
+
+    log_output = "\n".join(info_logs)
+    assert "continuity_response_done_handoff" in log_output
+    assert "turn_id=turn_3" in log_output
+    assert "continuity_turn_id=turn_2" in log_output
+    assert "selected=True" in log_output
+    assert "selection_reason=normal" in log_output
+    assert "close_commitment=True" in log_output
+    assert "close_unresolved=True" in log_output
+    assert "complete_final_report=True" in log_output
+    assert "followthrough_chain_remaining=False" in log_output
+    assert "allow_cross_turn_rebind=True" in log_output
+    assert "rebind_reason=semantic_owner_parent_promoted" in log_output
+    assert "semantic_parent_turn_id=turn_2" in log_output
+    assert "done_canonical_key=turn_3::tool:call_final" in log_output
+    assert "semantic_owner_canonical_key=turn_2::item_parent" in log_output
+
+
 def test_handle_response_done_parent_promoted_intermediate_tool_output_does_not_clear_final_report() -> None:
     api = _make_api()
     api._current_turn_id_or_unknown = lambda: "turn_3"

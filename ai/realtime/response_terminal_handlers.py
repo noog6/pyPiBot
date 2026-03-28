@@ -819,6 +819,22 @@ class ResponseTerminalHandlers:
             continuity_turn_id = semantic_parent_turn_id
             continuity_rebind_allowed = True
             continuity_rebind_reason = "semantic_owner_parent_promoted"
+        logger.info(
+            "continuity_response_done_handoff turn_id=%s continuity_turn_id=%s selected=%s selection_reason=%s close_commitment=%s close_unresolved=%s complete_final_report=%s followthrough_chain_remaining=%s allow_cross_turn_rebind=%s rebind_reason=%s semantic_parent_turn_id=%s done_canonical_key=%s semantic_owner_canonical_key=%s",
+            turn_id,
+            continuity_turn_id,
+            selected,
+            str(selection_reason or "").strip() or "unknown",
+            continuity_close_commitment,
+            continuity_close_unresolved,
+            continuity_complete_final_report,
+            followthrough_chain_remaining_for_close,
+            continuity_rebind_allowed,
+            continuity_rebind_reason or "none",
+            semantic_parent_turn_id or "none",
+            done_canonical_key,
+            semantic_owner_canonical_key or "none",
+        )
         api._apply_continuity_event(
             "response_done",
             run_id=api._current_run_id(),
