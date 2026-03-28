@@ -2167,6 +2167,61 @@ def test_should_emit_turn_review_summary_info_for_complete_trace() -> None:
     assert should_emit_turn_review_summary_info(trace) is True
 
 
+def test_should_emit_turn_review_summary_info_skips_complete_coherent_deferred_trace() -> None:
+    api = _make_api_stub()
+    runtime = api._response_create_runtime
+    api._response_in_flight = True
+    event = {
+        "type": "response.create",
+        "response": {"metadata": {"turn_id": "turn_info_deferred", "input_event_key": "item_info_deferred"}},
+    }
+    snapshot = runtime.prepare_response_create_snapshot(
+        response_create_event=event,
+        origin="assistant_message",
+        utterance_context=None,
+        memory_brief_note=None,
+        now=1.0,
+    )
+    decision, lifecycle_decision = runtime._decide_response_create_action_with_lifecycle(snapshot)
+    trace = merge_arbitration_observations_for_turn(
+        response_create_observation=build_response_create_observation(
+            snapshot=snapshot,
+            execution_decision=decision,
+            lifecycle_decision=lifecycle_decision,
+            same_turn_owner_reason=snapshot.same_turn_owner_reason,
+            canonical_audio_started=False,
+        ),
+        terminal_selection_observation=build_terminal_selection_observation(
+            run_id=snapshot.run_id,
+            turn_id=snapshot.turn_id,
+            input_event_key=snapshot.input_event_key,
+            canonical_key=snapshot.canonical_key,
+            origin="assistant_message",
+            selected=True,
+            selection_reason="selected",
+            transcript_final_seen=True,
+            active_response_was_provisional=False,
+        ),
+        semantic_owner_observation=build_semantic_owner_observation(
+            run_id=snapshot.run_id,
+            turn_id=snapshot.turn_id,
+            input_event_key=snapshot.input_event_key,
+            execution_canonical_key=snapshot.canonical_key,
+            semantic_owner_canonical_key=snapshot.canonical_key,
+            origin="assistant_message",
+            selected=True,
+            selection_reason="selected",
+        ),
+        semantic_owner_canonical_key=snapshot.canonical_key,
+    )
+
+    assert trace.trace_complete is True
+    assert trace.review_summary is not None
+    assert trace.review_summary.review_bucket == "coherent"
+    assert "response.create deferred" in trace.review_summary.response_create_summary
+    assert should_emit_turn_review_summary_info(trace) is False
+
+
 def test_should_emit_turn_review_summary_info_for_partial_suspicious_trace() -> None:
     trace = merge_arbitration_observations_for_turn(
         tool_followup_observation=build_tool_followup_observation(

@@ -111,6 +111,7 @@ def test_camera_and_motion_emitters_use_debug_level() -> None:
     motion_source = Path("motion/motion_controller.py").read_text(encoding="utf-8")
 
     assert 'logger.debug("[CAMERA] skipped (motion active)")' in camera_source
+    assert 'log_method = logger.debug if reason == "response_in_progress" else logger.info' in camera_source
     assert "log_debug(" in motion_source
     assert "[MOTION] 'pan' servo move completed" in motion_source
     assert "[MOTION] 'tilt' servo move completed" in motion_source

@@ -366,7 +366,8 @@ class ContinuityLedger:
         reminder_due = not fingerprint_changed and cooldown_expired and last_ts is not None
         self._last_brief_log_fingerprint = fingerprint
         self._last_brief_log_ts = now
-        logger.info(
+        log_method = logger.debug if reminder_due else logger.info
+        log_method(
             "continuity_brief_built run_id=%s turn_id=%s stance=%s ongoing=%s blockers=%s commitments=%s current=%s closed=%s compound_steps=%s reason=%s settlement=%s reminder=%s fingerprint_changed=%s cooldown_s=%s cooldown_elapsed_s=%s",
             run_id,
             turn_id,

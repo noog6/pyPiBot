@@ -1243,19 +1243,25 @@ def test_unchanged_brief_logs_again_after_cooldown_expiry(
     clock = _FakeClock()
     ledger = ContinuityLedger(time_source=clock, brief_log_cooldown_s=10.0)
 
-    with caplog.at_level(logging.INFO, logger="ai.continuity"):
+    with caplog.at_level(logging.DEBUG, logger="ai.continuity"):
         ledger.build_brief("run-1", "turn-1", "session_health")
         clock.advance(10.0)
         ledger.build_brief("run-1", "turn-1", "session_health")
 
-    brief_logs = [
+    info_brief_logs = [
+        record
+        for record in caplog.records
+        if record.message.startswith("continuity_brief_built") and record.levelno == logging.INFO
+    ]
+    debug_brief_logs = [
         record for record in caplog.records if record.message.startswith("continuity_brief_built")
     ]
-    assert len(brief_logs) == 2
-    assert "fingerprint_changed=True" in brief_logs[0].message
-    assert "fingerprint_changed=False" in brief_logs[1].message
-    assert "reminder=True" in brief_logs[1].message
-    assert "cooldown_elapsed_s=10.0" in brief_logs[1].message
+    assert len(info_brief_logs) == 1
+    assert len(debug_brief_logs) == 2
+    assert "fingerprint_changed=True" in debug_brief_logs[0].message
+    assert "fingerprint_changed=False" in debug_brief_logs[1].message
+    assert "reminder=True" in debug_brief_logs[1].message
+    assert "cooldown_elapsed_s=10.0" in debug_brief_logs[1].message
 
 
 def test_session_health_style_repeated_build_brief_calls_are_suppressed_when_unchanged(

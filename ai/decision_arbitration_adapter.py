@@ -1464,9 +1464,26 @@ def should_emit_turn_review_summary_info(trace: TurnArbitrationTrace) -> bool:
     review_summary = get_latest_turn_review_summary(trace)
     if review_summary is None:
         return False
-    if trace.trace_complete:
+    if review_summary.review_bucket in {"suspicious", "needs_review"}:
         return True
-    return review_summary.review_bucket in {"suspicious", "needs_review"}
+    if not trace.trace_complete:
+        return False
+    if review_summary.review_bucket != "coherent":
+        return False
+    return _coherent_summary_is_settled_for_info(review_summary)
+
+
+def _coherent_summary_is_settled_for_info(review_summary: TurnArbitrationReviewSummary) -> bool:
+    response_summary = str(review_summary.response_create_summary or "").strip().lower()
+    semantic_summary = str(review_summary.semantic_owner_summary or "").strip().lower()
+    tool_summary = str(review_summary.tool_followup_summary or "").strip().lower()
+    if response_summary.startswith("response.create deferred"):
+        return False
+    if semantic_summary == "semantic owner parent promotion pending tool-followup evidence":
+        return False
+    if tool_summary.startswith("tool followup pending"):
+        return False
+    return True
 
 
 def turn_review_summary_info_fingerprint(

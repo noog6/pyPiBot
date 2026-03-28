@@ -8511,7 +8511,7 @@ class RealtimeAPI:
             self._tool_followup_state_by_canonical_key = state_store
         prior_state = str(state_store.get(normalized_canonical_key) or "new").strip().lower() or "new"
         log_method = logger.info
-        if normalized_state == "blocked_active_response":
+        if normalized_state in {"blocked_active_response", "creating", "created"}:
             log_method = logger.debug
         if prior_state == normalized_state:
             logger.debug(
@@ -9358,7 +9358,7 @@ class RealtimeAPI:
                 f"selected={str(artifact.terminal_selected).lower()},"
                 f"reason={artifact.terminal_reason}"
             )
-            logger.info(
+            logger.debug(
                 "parent_coverage_source_of_truth run_id=%s parent_response_id=%s covered=%s source=%s coverage_gap=%s canonical_observed=%s canonical_class=%s terminal_selected=%s terminal_reason=%s",
                 self._current_run_id() or "",
                 str(getattr(parent_state, "response_id", "") or "").strip() or "none",
