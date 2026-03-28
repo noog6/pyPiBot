@@ -808,6 +808,35 @@ def test_handle_response_done_downgrades_empty_tool_followup_terminal_selection(
     )
 
 
+def test_handle_response_done_preserves_compound_followthrough_contract_on_non_empty_tool_output() -> None:
+    api = _make_api()
+    api._active_response_origin = "tool_output"
+    api._active_response_input_event_key = "tool:call_mid_chain"
+    api._active_response_canonical_key = "turn_1::tool:call_mid_chain"
+    api._active_response_id = "resp_mid_chain"
+    api._is_empty_response_done = lambda **_kwargs: False
+    api._response_done_followthrough_chain_remaining = lambda **_kwargs: True
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    apply_continuity_event = Mock()
+    api._apply_continuity_event = apply_continuity_event
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_mid_chain"}}))
+
+    apply_continuity_event.assert_called_once()
+    _event_name, kwargs = apply_continuity_event.call_args
+    assert kwargs["close_ongoing"] == "true"
+    assert kwargs["close_commitment"] == ""
+    assert kwargs["close_unresolved"] == ""
+
+
 def test_handle_response_done_keeps_terminal_text_evidence_for_tool_followup_arbitration() -> None:
     api = _make_api()
     api._active_response_origin = "tool_output"

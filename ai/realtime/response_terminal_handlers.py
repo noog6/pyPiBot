@@ -785,7 +785,16 @@ class ResponseTerminalHandlers:
         if interrupted_tool_output_candidate:
             continuity_close_allowed = False
         continuity_origin = str(active_response_origin_before_clear or "").strip().lower()
-        continuity_close_commitment = continuity_close_allowed and continuity_origin == "tool_output"
+        followthrough_chain_remaining_for_close = api._response_done_followthrough_chain_remaining(
+            turn_id=turn_id,
+            origin=active_response_origin_before_clear,
+            response_id=active_response_id_before_clear,
+        )
+        continuity_close_commitment = (
+            continuity_close_allowed
+            and continuity_origin == "tool_output"
+            and not followthrough_chain_remaining_for_close
+        )
         continuity_close_unresolved = continuity_close_commitment and not obligation_open
         api._apply_continuity_event(
             "response_done",

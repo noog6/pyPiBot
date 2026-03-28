@@ -810,7 +810,7 @@ class ContinuityLedger:
         ):
             return
         updated = state
-        if close_commitment:
+        if close_commitment and not updated.completed_step_ids:
             idx = updated.active_step_index
             if idx is None:
                 idx = self._first_pending_step_index(updated, include_report=False)
