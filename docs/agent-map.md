@@ -65,11 +65,11 @@ flowchart TD
     MAIN --> MM[MemoryManager]
     MM --> EW[MemoryEmbeddingWorker.start]
 
-    MAIN --> RT[RealtimeAPI (required)]
+    MAIN --> RT["RealtimeAPI (required)"]
     RT --> EB[EventBus]
-    RT --> EI[EventInjector.start in run()]
+    RT --> EI["EventInjector.start in run()"]
     RT --> WS[WebSocket loops]
-    RT --> TOOLS[Tool dispatch + Governance]
+    RT --> TOOLS["Tool dispatch + Governance"]
 
     MAIN --> MOT[MotionController.start_control_loop]
     MAIN --> CAM[CameraController.start_vision_loop]
@@ -89,8 +89,8 @@ flowchart TD
     SHUT --> OPS_STOP[ops_orchestrator.stop_loop]
     SHUT --> CAM_STOP[camera.stop_vision_loop]
     SHUT --> MOT_STOP[motion.stop_control_loop]
-    SHUT --> IMU_STOP[imu.stop_loop + unregister]
-    SHUT --> BAT_STOP[battery.stop_loop + unregister]
+    SHUT --> IMU_STOP["imu.stop_loop + unregister"]
+    SHUT --> BAT_STOP["battery.stop_loop + unregister"]
 ```
 
 ### Layered Dependency Map
