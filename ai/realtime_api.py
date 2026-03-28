@@ -276,6 +276,12 @@ _DESCRIPTIVE_TURN_REQUEST_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bidentify\s+(?:it|this|that)\b", re.IGNORECASE),
     re.compile(r"\bwhat\s+(?:am\s+i|i(?:'|\u2019)?m)\s+holding\b", re.IGNORECASE),
 )
+_QUIET_INTENT_CURIOSITY_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bwhy\b", re.IGNORECASE),
+    re.compile(r"\bhow\b", re.IGNORECASE),
+    re.compile(r"\bcurious\b", re.IGNORECASE),
+    re.compile(r"\bwonder(?:ing)?\b", re.IGNORECASE),
+)
 _GESTURE_ONLY_TOOL_OUTPUT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^(?:just\s+)?nodded(?:\s+to\s+confirm(?:\s+that)?(?:\s+for\s+you)?)?\.?$", re.IGNORECASE),
     re.compile(r"^(?:i\s+)?(?:just\s+)?(?:nodded|confirmed|acknowledged)(?:\s+that)?(?:\s+for\s+you)?\.?$", re.IGNORECASE),
@@ -4570,7 +4576,7 @@ class RealtimeAPI:
             flags.append("calm_context")
         if any(token in text for token in ("observe", "notice", "watch", "look")):
             flags.append("observation_context")
-        if any(token in text for token in ("why", "how", "curious", "wonder", "?")):
+        if any(pattern.search(text) for pattern in _QUIET_INTENT_CURIOSITY_PATTERNS):
             flags.append("curiosity_signal")
         if any(token in text for token in ("alert", "alarm", "warning", "critical", "anomaly")):
             flags.append("anomaly_signal")
@@ -4616,18 +4622,17 @@ class RealtimeAPI:
         decision = selector.select(inputs)
         self._latest_quiet_intent_decision = decision
         payload = decision.to_diagnostic_snapshot()
+        consultative = decision.to_consultative_bias_output()
         fingerprint = "|".join(
             (
-                str(payload["mode"]),
-                str(payload["confidence_band"]),
-                ",".join(str(code) for code in payload["reason_codes"]),
-                str(payload["interaction_state"]),
-                str(payload["conversation_active"]).lower(),
-                str(payload["continuity_stance"] or "idle"),
-                str(payload["continuity_stance_raw"] or "idle"),
-                str(payload["ops_severity"] or "unknown"),
-                str(payload["ops_severity_raw"] or "unknown"),
-                str(payload["attention_active"]).lower(),
+                str(consultative["mode"]),
+                str(consultative["confidence_band"]),
+                ",".join(str(code) for code in consultative["reason_codes"]),
+                f"{float(consultative['initiative_level']):.2f}",
+                f"{float(consultative['verbosity_bias']):.2f}",
+                f"{float(consultative['gesture_bias']):.2f}",
+                f"{float(consultative['interruption_tolerance']):.2f}",
+                f"{float(consultative['observation_threshold']):.2f}",
                 ",".join(str(flag) for flag in payload["recent_utterance_flags"]),
             )
         )
