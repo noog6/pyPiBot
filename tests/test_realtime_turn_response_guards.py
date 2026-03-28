@@ -2644,6 +2644,41 @@ def test_turn_followthrough_chain_remaining_include_report_false_ignores_settlem
     assert api._turn_followthrough_chain_remaining(turn_id="turn_2", include_report_followup=False) is False
 
 
+def test_turn_followthrough_chain_remaining_include_report_false_ignores_non_compound_settlement_residue() -> None:
+    api = _make_api()
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(compound_request=None)
+    api._continuity_ledger = types.SimpleNamespace(
+        build_turn_settlement=lambda _brief: types.SimpleNamespace(
+            settlement_state="followthrough_remaining",
+            has_commitments=True,
+        )
+    )
+
+    assert api._turn_followthrough_chain_remaining(turn_id="turn_2") is True
+    assert api._turn_followthrough_chain_remaining(turn_id="turn_2", include_report_followup=False) is False
+
+
+def test_turn_followthrough_chain_remaining_include_report_false_keeps_non_report_steps_open() -> None:
+    api = _make_api()
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
+        compound_request=types.SimpleNamespace(
+            final_followup_pending=True,
+            steps=(
+                types.SimpleNamespace(kind="gesture", status="pending"),
+                types.SimpleNamespace(kind="report", status="pending"),
+            ),
+        )
+    )
+    api._continuity_ledger = types.SimpleNamespace(
+        build_turn_settlement=lambda _brief: types.SimpleNamespace(
+            settlement_state="followthrough_remaining",
+            has_commitments=True,
+        )
+    )
+
+    assert api._turn_followthrough_chain_remaining(turn_id="turn_2", include_report_followup=False) is True
+
+
 def test_turn_followthrough_chain_remaining_logs_guard_decision(monkeypatch) -> None:
     api = _make_api()
     api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
