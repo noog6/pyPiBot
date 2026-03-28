@@ -81,7 +81,9 @@ Theo is no longer at a "continuity missing" stage.
 
 **Owns:** short-horizon continuity ledger state and classification for diagnostics/context.
 
-**Anchors:** `ai/continuity.py`, use-sites in `ai/realtime_api.py`.
+**Anchors:** `ai/continuity.py`, use-sites in `ai/realtime_api.py`, `ai/realtime/response_terminal_handlers.py`.
+
+**Reference:** `docs/architecture/continuity_presence.md` is the current-state contract for continuity ownership, data model, runtime integration, and explicit non-authority boundaries.
 
 **Now true in code:**
 - Continuity has explicit item kinds/status/priority and stance labels.

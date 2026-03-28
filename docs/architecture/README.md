@@ -7,6 +7,7 @@ references.
 
 - [Theo Cognitive Stack (Code-Aligned)](theo_cognitive_stack.md)
 - [Theo Curiosity Engine](curiosity_engine.md)
+- [Theo Continuity / Presence (Current-State Audit)](continuity_presence.md)
 - [Theo Quiet Intent (Current-State Audit)](quiet_intent.md)
 - [Theo Conversation Stack Plateau](theo_conversation_stack_plateau.md)
 
