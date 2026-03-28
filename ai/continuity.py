@@ -844,6 +844,14 @@ class ContinuityLedger:
         owner_turn_id = str(self._compound_owner_turn_id or "").strip()
         incoming_turn_id = str(turn_id or "").strip()
         if not owner_turn_id or not incoming_turn_id or owner_turn_id == incoming_turn_id:
+            if allow_cross_turn_rebind and owner_turn_id and incoming_turn_id and owner_turn_id == incoming_turn_id:
+                logger.info(
+                    "continuity_compound_owner_rebind_accepted event=%s owner_turn_id=%s incoming_turn_id=%s action=noop reason=%s",
+                    event_type,
+                    owner_turn_id,
+                    incoming_turn_id,
+                    reason or "unspecified",
+                )
             return True
         if allow_cross_turn_rebind:
             logger.info(
