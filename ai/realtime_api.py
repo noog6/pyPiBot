@@ -9657,7 +9657,6 @@ class RealtimeAPI:
                 )
                 return decision
             if not final_followup_pending:
-                decision = True
                 logger.info(
                     "response_done_followthrough_guard_decision turn_id=%s include_report_followup=%s settlement_state=%s final_followup_pending=%s open_non_report_steps=%s decision=%s",
                     normalized_turn_id,

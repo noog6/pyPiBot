@@ -838,6 +838,43 @@ def test_handle_response_done_preserves_compound_followthrough_contract_on_non_e
     assert kwargs["complete_final_report"] == ""
 
 
+def test_handle_response_done_closes_plain_tool_output_commitment_when_only_settlement_residue_remains() -> None:
+    api = _make_api()
+    api._active_response_origin = "tool_output"
+    api._active_response_input_event_key = "tool:call_look"
+    api._active_response_canonical_key = "turn_1::tool:call_look"
+    api._active_response_id = "resp_tool_look"
+    api._record_terminal_response_text(response_id="resp_tool_look", text="I looked at it.")
+    api._response_trace_by_id_store = {"resp_tool_look": {"parent_turn_id": "turn_1"}}
+    api.get_continuity_brief = lambda **_kwargs: SimpleNamespace(compound_request=None)
+    api._continuity_ledger = SimpleNamespace(
+        build_turn_settlement=lambda _brief: SimpleNamespace(
+            settlement_state="followthrough_remaining",
+            has_commitments=True,
+        )
+    )
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    apply_continuity_event = Mock()
+    api._apply_continuity_event = apply_continuity_event
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_tool_look"}}))
+
+    apply_continuity_event.assert_called_once()
+    _event_name, kwargs = apply_continuity_event.call_args
+    assert kwargs["close_ongoing"] == "true"
+    assert kwargs["close_commitment"] == "true"
+    assert kwargs["close_unresolved"] == "true"
+    assert "complete_final_report" in kwargs
+
+
 def test_handle_response_done_keeps_terminal_text_evidence_for_tool_followup_arbitration() -> None:
     api = _make_api()
     api._active_response_origin = "tool_output"
