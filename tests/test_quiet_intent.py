@@ -14,8 +14,12 @@ _QUIET_INTENT_SPEC.loader.exec_module(_QUIET_INTENT_MODULE)
 QuietIntentInputs = _QUIET_INTENT_MODULE.QuietIntentInputs
 QuietIntentPolicyBiases = _QUIET_INTENT_MODULE.QuietIntentPolicyBiases
 QuietIntentDecision = _QUIET_INTENT_MODULE.QuietIntentDecision
+QuietIntentContinuityStance = _QUIET_INTENT_MODULE.QuietIntentContinuityStance
 QuietIntentMode = _QUIET_INTENT_MODULE.QuietIntentMode
+QuietIntentOpsSeverity = _QUIET_INTENT_MODULE.QuietIntentOpsSeverity
 QuietIntentSelector = _QUIET_INTENT_MODULE.QuietIntentSelector
+normalize_continuity_stance = _QUIET_INTENT_MODULE.normalize_continuity_stance
+normalize_ops_severity = _QUIET_INTENT_MODULE.normalize_ops_severity
 
 
 def test_quiet_intent_selects_sentinel_on_critical_alert_context() -> None:
@@ -24,8 +28,10 @@ def test_quiet_intent_selects_sentinel_on_critical_alert_context() -> None:
         QuietIntentInputs(
             interaction_state=InteractionState.IDLE,
             conversation_active=False,
-            continuity_stance="idle",
-            ops_severity="critical",
+            continuity_stance=QuietIntentContinuityStance.IDLE,
+            continuity_stance_raw="idle",
+            ops_severity=QuietIntentOpsSeverity.CRITICAL,
+            ops_severity_raw="critical",
             recent_utterance_flags=("alert_context",),
             attention_active=False,
         )
@@ -42,8 +48,10 @@ def test_quiet_intent_selects_resting_ritual_for_calm_idle_context() -> None:
         QuietIntentInputs(
             interaction_state=InteractionState.IDLE,
             conversation_active=False,
-            continuity_stance="idle",
-            ops_severity="unknown",
+            continuity_stance=QuietIntentContinuityStance.IDLE,
+            continuity_stance_raw="idle",
+            ops_severity=QuietIntentOpsSeverity.UNKNOWN,
+            ops_severity_raw="unknown",
             recent_utterance_flags=("calm_context",),
             attention_active=False,
         )
@@ -60,8 +68,10 @@ def test_quiet_intent_selects_curious_witness_for_query_stance_and_flag() -> Non
         QuietIntentInputs(
             interaction_state=InteractionState.THINKING,
             conversation_active=True,
-            continuity_stance="assisting_query",
-            ops_severity="unknown",
+            continuity_stance=QuietIntentContinuityStance.ASSISTING_QUERY,
+            continuity_stance_raw="assisting_query",
+            ops_severity=QuietIntentOpsSeverity.UNKNOWN,
+            ops_severity_raw="unknown",
             recent_utterance_flags=("curiosity_signal",),
             attention_active=True,
         )
@@ -77,8 +87,10 @@ def test_quiet_intent_log_payload_contains_bounded_inputs_and_biases() -> None:
         QuietIntentInputs(
             interaction_state=InteractionState.LISTENING,
             conversation_active=True,
-            continuity_stance="awaiting_user",
-            ops_severity="unknown",
+            continuity_stance=QuietIntentContinuityStance.AWAITING_USER,
+            continuity_stance_raw="awaiting_user",
+            ops_severity=QuietIntentOpsSeverity.UNKNOWN,
+            ops_severity_raw="unknown",
             recent_utterance_flags=(),
             attention_active=True,
         )
@@ -87,6 +99,8 @@ def test_quiet_intent_log_payload_contains_bounded_inputs_and_biases() -> None:
     assert payload["mode"] == QuietIntentMode.COMPANION_PRESENCE.value
     assert payload["confidence_band"] in {"low", "medium", "high"}
     assert payload["interaction_state"] == InteractionState.LISTENING.value
+    assert payload["continuity_stance_raw"] == "awaiting_user"
+    assert payload["ops_severity_raw"] == "unknown"
     assert payload["conversation_active"] is True
     assert payload["attention_active"] is True
     assert isinstance(payload["reason_codes"], list)
@@ -99,8 +113,10 @@ def test_quiet_intent_consultative_bias_output_excludes_runtime_snapshot_fields(
         QuietIntentInputs(
             interaction_state=InteractionState.IDLE,
             conversation_active=False,
-            continuity_stance="idle",
-            ops_severity="warning",
+            continuity_stance=QuietIntentContinuityStance.IDLE,
+            continuity_stance_raw="idle",
+            ops_severity=QuietIntentOpsSeverity.WARNING,
+            ops_severity_raw="warning",
             recent_utterance_flags=("alert_context",),
             attention_active=False,
         )
@@ -117,8 +133,10 @@ def test_quiet_intent_confidence_band_is_ordinal_and_bounded() -> None:
     inputs = QuietIntentInputs(
         interaction_state=InteractionState.IDLE,
         conversation_active=False,
-        continuity_stance="idle",
-        ops_severity="unknown",
+        continuity_stance=QuietIntentContinuityStance.IDLE,
+        continuity_stance_raw="idle",
+        ops_severity=QuietIntentOpsSeverity.UNKNOWN,
+        ops_severity_raw="unknown",
         recent_utterance_flags=(),
         attention_active=False,
     )
@@ -137,10 +155,19 @@ def test_quiet_intent_log_payload_alias_matches_diagnostic_snapshot() -> None:
         QuietIntentInputs(
             interaction_state=InteractionState.LISTENING,
             conversation_active=True,
-            continuity_stance="awaiting_user",
-            ops_severity="unknown",
+            continuity_stance=QuietIntentContinuityStance.AWAITING_USER,
+            continuity_stance_raw="awaiting_user",
+            ops_severity=QuietIntentOpsSeverity.UNKNOWN,
+            ops_severity_raw="unknown",
             recent_utterance_flags=("curiosity_signal",),
             attention_active=True,
         )
     )
     assert decision.to_log_payload() == decision.to_diagnostic_snapshot()
+
+
+def test_quiet_intent_normalizers_bound_unknown_tokens() -> None:
+    assert normalize_continuity_stance(" custom_mode ") == QuietIntentContinuityStance.OTHER
+    assert normalize_continuity_stance("") == QuietIntentContinuityStance.IDLE
+    assert normalize_ops_severity(" noisy ") == QuietIntentOpsSeverity.UNKNOWN
+    assert normalize_ops_severity(" warning ") == QuietIntentOpsSeverity.WARNING

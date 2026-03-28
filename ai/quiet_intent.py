@@ -18,6 +18,47 @@ class QuietIntentMode(str, Enum):
     CURIOUS_WITNESS = "curious_witness"
 
 
+class QuietIntentContinuityStance(str, Enum):
+    """Bounded continuity stance tokens consumed by quiet-intent scoring."""
+
+    IDLE = "idle"
+    AWAITING_USER = "awaiting_user"
+    ASSISTING_QUERY = "assisting_query"
+    RECOVERING_CONTEXT = "recovering_context"
+    OTHER = "other"
+
+
+class QuietIntentOpsSeverity(str, Enum):
+    """Bounded operations severity tokens consumed by quiet-intent scoring."""
+
+    UNKNOWN = "unknown"
+    INFO = "info"
+    WARNING = "warning"
+    CRITICAL = "critical"
+
+
+_KNOWN_CONTINUITY_STANCES = {token.value: token for token in QuietIntentContinuityStance}
+_KNOWN_OPS_SEVERITIES = {token.value: token for token in QuietIntentOpsSeverity}
+
+
+def normalize_continuity_stance(raw_value: object) -> QuietIntentContinuityStance:
+    """Normalize raw continuity stance into a bounded token."""
+
+    token = str(raw_value or "").strip().lower()
+    if not token:
+        return QuietIntentContinuityStance.IDLE
+    return _KNOWN_CONTINUITY_STANCES.get(token, QuietIntentContinuityStance.OTHER)
+
+
+def normalize_ops_severity(raw_value: object) -> QuietIntentOpsSeverity:
+    """Normalize raw ops severity into a bounded token."""
+
+    token = str(raw_value or "").strip().lower()
+    if not token:
+        return QuietIntentOpsSeverity.UNKNOWN
+    return _KNOWN_OPS_SEVERITIES.get(token, QuietIntentOpsSeverity.UNKNOWN)
+
+
 @dataclass(frozen=True)
 class QuietIntentPolicyBiases:
     """Bounded policy biases emitted by the quiet intent selector."""
@@ -35,8 +76,10 @@ class QuietIntentInputs:
 
     interaction_state: InteractionState
     conversation_active: bool
-    continuity_stance: str
-    ops_severity: str
+    continuity_stance: QuietIntentContinuityStance
+    continuity_stance_raw: str
+    ops_severity: QuietIntentOpsSeverity
+    ops_severity_raw: str
     recent_utterance_flags: tuple[str, ...]
     attention_active: bool
 
@@ -79,8 +122,10 @@ class QuietIntentDecision:
         payload["confidence"] = round(self.confidence, 2)
         payload["interaction_state"] = self.bounded_inputs.interaction_state.value
         payload["conversation_active"] = self.bounded_inputs.conversation_active
-        payload["continuity_stance"] = self.bounded_inputs.continuity_stance
-        payload["ops_severity"] = self.bounded_inputs.ops_severity
+        payload["continuity_stance"] = self.bounded_inputs.continuity_stance.value
+        payload["continuity_stance_raw"] = self.bounded_inputs.continuity_stance_raw
+        payload["ops_severity"] = self.bounded_inputs.ops_severity.value
+        payload["ops_severity_raw"] = self.bounded_inputs.ops_severity_raw
         payload["recent_utterance_flags"] = list(self.bounded_inputs.recent_utterance_flags)
         payload["attention_active"] = self.bounded_inputs.attention_active
         return payload
@@ -151,11 +196,13 @@ class QuietIntentSelector:
         reasons: dict[QuietIntentMode, list[str]] = {mode: [] for mode in QuietIntentMode}
 
         flags = {str(flag).strip().lower() for flag in inputs.recent_utterance_flags if str(flag).strip()}
-        ops_severity = str(inputs.ops_severity or "").strip().lower()
-        stance = str(inputs.continuity_stance or "").strip().lower()
+        ops_severity = inputs.ops_severity.value
+        stance = inputs.continuity_stance.value
 
-        if ops_severity in {"critical", "warning"}:
-            scores[QuietIntentMode.SENTINEL] += 0.70 if ops_severity == "critical" else 0.50
+        if ops_severity in {QuietIntentOpsSeverity.CRITICAL.value, QuietIntentOpsSeverity.WARNING.value}:
+            scores[QuietIntentMode.SENTINEL] += (
+                0.70 if ops_severity == QuietIntentOpsSeverity.CRITICAL.value else 0.50
+            )
             reasons[QuietIntentMode.SENTINEL].append(f"ops_severity_{ops_severity}")
         if "anomaly_signal" in flags or "alert_context" in flags:
             scores[QuietIntentMode.SENTINEL] += 0.40
@@ -175,7 +222,10 @@ class QuietIntentSelector:
         if "curiosity_signal" in flags or "exploration_request" in flags:
             scores[QuietIntentMode.CURIOUS_WITNESS] += 0.70
             reasons[QuietIntentMode.CURIOUS_WITNESS].append("curiosity_context")
-        if stance in {"assisting_query", "recovering_context"}:
+        if stance in {
+            QuietIntentContinuityStance.ASSISTING_QUERY.value,
+            QuietIntentContinuityStance.RECOVERING_CONTEXT.value,
+        }:
             scores[QuietIntentMode.CURIOUS_WITNESS] += 0.20
             reasons[QuietIntentMode.CURIOUS_WITNESS].append(f"continuity_stance_{stance}")
 
