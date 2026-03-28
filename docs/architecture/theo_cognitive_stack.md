@@ -56,11 +56,13 @@ Theo is no longer at a "continuity missing" stage.
 
 ### Layer 3 — Turn arbitration seams (**implemented, still expanding**)
 
+Reference: `docs/architecture/decision_arbitration_authority_map.md` is the seam-authority source of truth for what owns response-create, terminal-deliverable, semantic-owner, tool-followup, and governance-adjacent boundaries.
+
 **Owns:** per-turn decision surfaces that decide which candidate path wins.
 
 **Anchors:**
 - `ai/interaction_lifecycle_policy.py` (response-create + server-auto-created gating)
-- `ai/realtime/response_create_runtime.py` (candidate construction + execution decision)
+- `ai/realtime/response_create_runtime.py` (authoritative execution/orchestration around response-create arbitration; not a pure arbitration policy seam)
 - `ai/terminal_deliverable_arbitration.py` (terminal deliverable selection)
 - `ai/semantic_owner_arbitration.py` (semantic owner reassignment)
 - `ai/tool_followup_arbitration.py` (release/hold/suppress followups)

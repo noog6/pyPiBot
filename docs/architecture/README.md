@@ -13,6 +13,7 @@ references.
 
 ## Runtime / lifecycle architecture references
 
+- [Decision Arbitration Authority Map (Implemented Runtime)](decision_arbitration_authority_map.md)
 - [Agent + Thread Map](../agent-map.md)
 - [Realtime API Migration Map](../realtime_api_migration_map.md)
 - [Realtime API Surgery Plan](../realtime_api_surgery_plan.md)
