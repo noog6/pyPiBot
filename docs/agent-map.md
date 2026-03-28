@@ -9,7 +9,8 @@ flow, coordinating audio in/out, tool execution, and event injections.
 > For layer ownership and roadmap context (runtime vs perception/memory vs
 > arbitration/governance), see
 > [`docs/architecture/theo_cognitive_stack.md`](architecture/theo_cognitive_stack.md) (see the **Fast Layer Triage Matrix** for quick placement checks),
-> and [`docs/architecture/quiet_intent.md`](architecture/quiet_intent.md) for quiet-intent ownership/authority boundaries.
+> and [`docs/architecture/quiet_intent.md`](architecture/quiet_intent.md) for quiet-intent ownership/authority boundaries,
+> and [`docs/architecture/continuity_presence.md`](architecture/continuity_presence.md) for continuity/presence ownership and boundary constraints.
 > and the architecture index at
 > [`docs/architecture/README.md`](architecture/README.md).
 
