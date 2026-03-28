@@ -51,22 +51,48 @@ class QuietIntentDecision:
     policy_biases: QuietIntentPolicyBiases
     bounded_inputs: QuietIntentInputs
 
-    def to_log_payload(self) -> dict[str, object]:
+    @property
+    def confidence_band(self) -> str:
+        """Bounded ordinal confidence indicator for consultative consumers."""
+        if self.confidence < 0.50:
+            return "low"
+        if self.confidence < 0.75:
+            return "medium"
+        return "high"
+
+    def to_consultative_bias_output(self) -> dict[str, object]:
+        """Consultative posture output; excludes runtime state snapshot fields."""
         return {
             "mode": self.mode.value,
-            "confidence": round(self.confidence, 2),
+            "confidence_band": self.confidence_band,
             "reason_codes": list(self.reason_codes),
-            "interaction_state": self.bounded_inputs.interaction_state.value,
-            "conversation_active": self.bounded_inputs.conversation_active,
-            "continuity_stance": self.bounded_inputs.continuity_stance,
-            "ops_severity": self.bounded_inputs.ops_severity,
-            "recent_utterance_flags": list(self.bounded_inputs.recent_utterance_flags),
-            "attention_active": self.bounded_inputs.attention_active,
             "initiative_level": self.policy_biases.initiative_level,
             "verbosity_bias": self.policy_biases.verbosity_bias,
             "gesture_bias": self.policy_biases.gesture_bias,
             "interruption_tolerance": self.policy_biases.interruption_tolerance,
             "observation_threshold": self.policy_biases.observation_threshold,
+        }
+
+    def to_diagnostic_snapshot(self) -> dict[str, object]:
+        """Diagnostic snapshot for logging and audits, including bounded inputs."""
+        payload = self.to_consultative_bias_output()
+        payload["confidence"] = round(self.confidence, 2)
+        payload["interaction_state"] = self.bounded_inputs.interaction_state.value
+        payload["conversation_active"] = self.bounded_inputs.conversation_active
+        payload["continuity_stance"] = self.bounded_inputs.continuity_stance
+        payload["ops_severity"] = self.bounded_inputs.ops_severity
+        payload["recent_utterance_flags"] = list(self.bounded_inputs.recent_utterance_flags)
+        payload["attention_active"] = self.bounded_inputs.attention_active
+        return payload
+
+    def to_log_payload(self) -> dict[str, object]:
+        """Transitional logging-only alias for diagnostic payload emission.
+
+        Prefer :meth:`to_diagnostic_snapshot` for explicit diagnostics and
+        :meth:`to_consultative_bias_output` for posture-bias consumption.
+        """
+        return {
+            **self.to_diagnostic_snapshot(),
         }
 
 

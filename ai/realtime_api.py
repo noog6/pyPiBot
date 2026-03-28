@@ -796,6 +796,7 @@ class RealtimeAPI:
         self._attention_continuity = AttentionContinuity(hold_window_s=1.25)
         self._quiet_intent_selector = QuietIntentSelector()
         self._latest_quiet_intent_decision: QuietIntentDecision | None = None
+        self._latest_quiet_intent_log_fingerprint: str | None = None
         self._latest_ops_severity = "unknown"
         continuity_cfg = config.get("continuity") or {}
         self._continuity_debug_summary_on_turn_close = bool(
@@ -4605,14 +4606,37 @@ class RealtimeAPI:
         inputs = self._quiet_intent_inputs(state=state, attention=attention)
         decision = selector.select(inputs)
         self._latest_quiet_intent_decision = decision
-        payload = decision.to_log_payload()
+        payload = decision.to_diagnostic_snapshot()
+        fingerprint = "|".join(
+            (
+                str(payload["mode"]),
+                str(payload["confidence_band"]),
+                ",".join(str(code) for code in payload["reason_codes"]),
+                str(payload["interaction_state"]),
+                str(payload["conversation_active"]).lower(),
+                str(payload["continuity_stance"] or "idle"),
+                str(payload["ops_severity"] or "unknown"),
+                str(payload["attention_active"]).lower(),
+                ",".join(str(flag) for flag in payload["recent_utterance_flags"]),
+            )
+        )
+        if fingerprint == getattr(self, "_latest_quiet_intent_log_fingerprint", None):
+            logger.debug(
+                "quiet_intent_decision_unchanged mode=%s confidence_band=%s reason_codes=%s",
+                payload["mode"],
+                payload["confidence_band"],
+                ",".join(str(code) for code in payload["reason_codes"]) or "none",
+            )
+            return
+        self._latest_quiet_intent_log_fingerprint = fingerprint
         logger.info(
-            "quiet_intent_decision mode=%s confidence=%.2f reason_codes=%s interaction_state=%s "
+            "quiet_intent_decision mode=%s confidence=%.2f confidence_band=%s reason_codes=%s interaction_state=%s "
             "conversation_active=%s continuity_stance=%s ops_severity=%s attention_active=%s "
             "initiative_level=%.2f verbosity_bias=%.2f gesture_bias=%.2f interruption_tolerance=%.2f "
             "observation_threshold=%.2f flags=%s",
             payload["mode"],
             float(payload["confidence"]),
+            payload["confidence_band"],
             ",".join(str(code) for code in payload["reason_codes"]) or "none",
             payload["interaction_state"],
             str(payload["conversation_active"]).lower(),
