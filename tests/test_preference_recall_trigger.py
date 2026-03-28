@@ -316,8 +316,13 @@ def test_preference_recall_direct_question_high_confidence_prompts_direct_answer
     memory_context = captured_contexts[0]["memory_context"]
     assert memory_context["direct_answer_first"] is True
     prompt_note = str(memory_context["prompt_note"])
-    assert "Answer directly in the first sentence" in prompt_note
-    assert "Any optional update question must be secondary." in prompt_note
+    assert "First sentence must be only the direct factual answer" in prompt_note
+    assert "Do not start the first sentence with memory-preface lead-ins" in prompt_note
+    assert "\"Actually\"" in prompt_note
+    assert "\"I have a note\"" in prompt_note
+    assert "\"I remember\"" in prompt_note
+    assert "\"You mentioned\"" in prompt_note
+    assert "Any optional update check or memory-reference language must appear only after the first sentence." in prompt_note
 
 
 def test_preference_question_empty_recall_returns_saved_yet_message(monkeypatch) -> None:
