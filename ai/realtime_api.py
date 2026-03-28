@@ -100,7 +100,13 @@ from ai.terminal_deliverable_arbitration import (
 )
 from ai.attention_continuity import AttentionContinuity, AttentionSnapshot
 from ai.continuity import ContinuityBrief, ContinuityLedger, ContinuityTurnSettlement
-from ai.quiet_intent import QuietIntentDecision, QuietIntentInputs, QuietIntentSelector
+from ai.quiet_intent import (
+    QuietIntentDecision,
+    QuietIntentInputs,
+    QuietIntentSelector,
+    normalize_continuity_stance,
+    normalize_ops_severity,
+)
 from ai.semantic_owner_arbitration import SemanticOwnerDecision, decide_semantic_owner
 from ai.embodiment_policy import (
     EMBODIMENT_PRIORITY_ALLOW,
@@ -4567,9 +4573,9 @@ class RealtimeAPI:
         if any(token in text for token in ("why", "how", "curious", "wonder", "?")):
             flags.append("curiosity_signal")
         if any(token in text for token in ("alert", "alarm", "warning", "critical", "anomaly")):
-            flags.append("alert_context")
             flags.append("anomaly_signal")
-        return tuple(flags)
+        ordered = ("calm_context", "observation_context", "curiosity_signal", "anomaly_signal")
+        return tuple(flag for flag in ordered if flag in flags)
 
     def _quiet_intent_inputs(self, *, state: InteractionState, attention: AttentionSnapshot) -> QuietIntentInputs:
         now = time.monotonic()
@@ -4590,11 +4596,14 @@ class RealtimeAPI:
             ).strip() or "idle"
         except Exception:
             continuity_stance = "idle"
+        ops_severity_raw = str(getattr(self, "_latest_ops_severity", "unknown") or "unknown").strip().lower()
         return QuietIntentInputs(
             interaction_state=state,
             conversation_active=conversation_active,
-            continuity_stance=continuity_stance,
-            ops_severity=str(getattr(self, "_latest_ops_severity", "unknown") or "unknown").strip().lower(),
+            continuity_stance=normalize_continuity_stance(continuity_stance),
+            continuity_stance_raw=continuity_stance,
+            ops_severity=normalize_ops_severity(ops_severity_raw),
+            ops_severity_raw=ops_severity_raw,
             recent_utterance_flags=self._classify_recent_utterance_flags(),
             attention_active=bool(attention.active),
         )
@@ -4615,7 +4624,9 @@ class RealtimeAPI:
                 str(payload["interaction_state"]),
                 str(payload["conversation_active"]).lower(),
                 str(payload["continuity_stance"] or "idle"),
+                str(payload["continuity_stance_raw"] or "idle"),
                 str(payload["ops_severity"] or "unknown"),
+                str(payload["ops_severity_raw"] or "unknown"),
                 str(payload["attention_active"]).lower(),
                 ",".join(str(flag) for flag in payload["recent_utterance_flags"]),
             )
@@ -4631,7 +4642,8 @@ class RealtimeAPI:
         self._latest_quiet_intent_log_fingerprint = fingerprint
         logger.info(
             "quiet_intent_decision mode=%s confidence=%.2f confidence_band=%s reason_codes=%s interaction_state=%s "
-            "conversation_active=%s continuity_stance=%s ops_severity=%s attention_active=%s "
+            "conversation_active=%s continuity_stance=%s continuity_stance_raw=%s "
+            "ops_severity=%s ops_severity_raw=%s attention_active=%s "
             "initiative_level=%.2f verbosity_bias=%.2f gesture_bias=%.2f interruption_tolerance=%.2f "
             "observation_threshold=%.2f flags=%s",
             payload["mode"],
@@ -4641,7 +4653,9 @@ class RealtimeAPI:
             payload["interaction_state"],
             str(payload["conversation_active"]).lower(),
             payload["continuity_stance"] or "idle",
+            payload["continuity_stance_raw"] or "idle",
             payload["ops_severity"] or "unknown",
+            payload["ops_severity_raw"] or "unknown",
             str(payload["attention_active"]).lower(),
             float(payload["initiative_level"]),
             float(payload["verbosity_bias"]),
