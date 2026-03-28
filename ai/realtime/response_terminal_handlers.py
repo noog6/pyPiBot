@@ -797,6 +797,10 @@ class ResponseTerminalHandlers:
             and not followthrough_chain_remaining_for_close
         )
         continuity_close_unresolved = continuity_close_commitment and not obligation_open
+        # NOTE: This flag name is legacy compound-centric language. In practice this
+        # marks that response.done delivered the final substantive fulfillment for
+        # this terminal path (selected + normal + substantive evidence), which can
+        # include non-compound tool-output completions.
         continuity_complete_final_report = (
             continuity_close_commitment
             and selected

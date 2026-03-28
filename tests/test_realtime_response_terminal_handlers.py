@@ -872,7 +872,9 @@ def test_handle_response_done_closes_plain_tool_output_commitment_when_only_sett
     assert kwargs["close_ongoing"] == "true"
     assert kwargs["close_commitment"] == "true"
     assert kwargs["close_unresolved"] == "true"
-    assert "complete_final_report" in kwargs
+    # Legacy name, broader contract: plain substantive terminal completion still
+    # emits complete_final_report even with no compound report step in scope.
+    assert kwargs["complete_final_report"] == "true"
 
 
 def test_handle_response_done_keeps_terminal_text_evidence_for_tool_followup_arbitration() -> None:
