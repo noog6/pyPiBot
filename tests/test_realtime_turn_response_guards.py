@@ -2619,3 +2619,57 @@ def test_turn_followthrough_chain_remaining_can_ignore_report_only_pending_follo
 
     assert api._turn_followthrough_chain_remaining(turn_id="turn_2") is True
     assert api._turn_followthrough_chain_remaining(turn_id="turn_2", include_report_followup=False) is False
+
+
+def test_turn_followthrough_chain_remaining_include_report_false_ignores_settlement_only_when_report_step_is_only_open() -> None:
+    api = _make_api()
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
+        compound_request=types.SimpleNamespace(
+            final_followup_pending=True,
+            steps=(
+                types.SimpleNamespace(kind="gesture", status="completed"),
+                types.SimpleNamespace(kind="diagnostics", status="completed"),
+                types.SimpleNamespace(kind="report", status="pending"),
+            ),
+        )
+    )
+    api._continuity_ledger = types.SimpleNamespace(
+        build_turn_settlement=lambda _brief: types.SimpleNamespace(
+            settlement_state="followthrough_remaining",
+            has_commitments=True,
+        )
+    )
+
+    assert api._turn_followthrough_chain_remaining(turn_id="turn_2") is True
+    assert api._turn_followthrough_chain_remaining(turn_id="turn_2", include_report_followup=False) is False
+
+
+def test_turn_followthrough_chain_remaining_logs_guard_decision(monkeypatch) -> None:
+    api = _make_api()
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
+        compound_request=types.SimpleNamespace(
+            final_followup_pending=True,
+            steps=(types.SimpleNamespace(kind="report", status="pending"),),
+        )
+    )
+    api._continuity_ledger = types.SimpleNamespace(
+        build_turn_settlement=lambda _brief: types.SimpleNamespace(
+            settlement_state="followthrough_remaining",
+            has_commitments=True,
+        )
+    )
+
+    info_logs: list[str] = []
+    monkeypatch.setattr(logger, "info", lambda msg, *args, **_kwargs: info_logs.append(msg % args if args else msg))
+
+    decision = api._turn_followthrough_chain_remaining(turn_id="turn_2", include_report_followup=False)
+    log_output = "\n".join(info_logs)
+
+    assert decision is False
+    assert "response_done_followthrough_guard_decision" in log_output
+    assert "turn_id=turn_2" in log_output
+    assert "include_report_followup=False" in log_output
+    assert "settlement_state=followthrough_remaining" in log_output
+    assert "final_followup_pending=True" in log_output
+    assert "open_non_report_steps=False" in log_output
+    assert "decision=False" in log_output

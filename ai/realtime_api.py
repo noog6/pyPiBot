@@ -9638,19 +9638,93 @@ class RealtimeAPI:
             reason="response_done_followthrough_guard",
         )
         settlement = self._continuity_ledger_instance().build_turn_settlement(brief)
-        if str(getattr(settlement, "settlement_state", "") or "").strip().lower() == "followthrough_remaining":
-            return True
         compound_state = getattr(brief, "compound_request", None)
-        if not bool(getattr(compound_state, "final_followup_pending", False)):
-            return False
+        settlement_state = str(getattr(settlement, "settlement_state", "") or "").strip().lower()
+        final_followup_pending = bool(getattr(compound_state, "final_followup_pending", False))
+        open_non_report_steps = False
+        decision = False
+        if settlement_state == "followthrough_remaining":
+            if include_report_followup:
+                decision = True
+                logger.info(
+                    "response_done_followthrough_guard_decision turn_id=%s include_report_followup=%s settlement_state=%s final_followup_pending=%s open_non_report_steps=%s decision=%s",
+                    normalized_turn_id,
+                    include_report_followup,
+                    settlement_state or "unknown",
+                    final_followup_pending,
+                    open_non_report_steps,
+                    decision,
+                )
+                return decision
+            if not final_followup_pending:
+                decision = True
+                logger.info(
+                    "response_done_followthrough_guard_decision turn_id=%s include_report_followup=%s settlement_state=%s final_followup_pending=%s open_non_report_steps=%s decision=%s",
+                    normalized_turn_id,
+                    include_report_followup,
+                    settlement_state or "unknown",
+                    final_followup_pending,
+                    open_non_report_steps,
+                    decision,
+                )
+                return decision
+            steps = getattr(compound_state, "steps", ()) or ()
+            open_non_report_steps = any(
+                str(getattr(step, "kind", "") or "").strip() != "report"
+                and str(getattr(step, "status", "") or "").strip() != "completed"
+                for step in steps
+            )
+            decision = open_non_report_steps
+            logger.info(
+                "response_done_followthrough_guard_decision turn_id=%s include_report_followup=%s settlement_state=%s final_followup_pending=%s open_non_report_steps=%s decision=%s",
+                normalized_turn_id,
+                include_report_followup,
+                settlement_state or "unknown",
+                final_followup_pending,
+                open_non_report_steps,
+                decision,
+            )
+            return decision
+        if not final_followup_pending:
+            logger.info(
+                "response_done_followthrough_guard_decision turn_id=%s include_report_followup=%s settlement_state=%s final_followup_pending=%s open_non_report_steps=%s decision=%s",
+                normalized_turn_id,
+                include_report_followup,
+                settlement_state or "unknown",
+                final_followup_pending,
+                open_non_report_steps,
+                decision,
+            )
+            return decision
         if include_report_followup:
-            return True
+            decision = True
+            logger.info(
+                "response_done_followthrough_guard_decision turn_id=%s include_report_followup=%s settlement_state=%s final_followup_pending=%s open_non_report_steps=%s decision=%s",
+                normalized_turn_id,
+                include_report_followup,
+                settlement_state or "unknown",
+                final_followup_pending,
+                open_non_report_steps,
+                decision,
+            )
+            return decision
         steps = getattr(compound_state, "steps", ()) or ()
-        return any(
+        open_non_report_steps = any(
             str(getattr(step, "kind", "") or "").strip() != "report"
             and str(getattr(step, "status", "") or "").strip() != "completed"
             for step in steps
         )
+        decision = open_non_report_steps
+        logger.info(
+            "response_done_followthrough_guard_decision turn_id=%s include_report_followup=%s settlement_state=%s final_followup_pending=%s open_non_report_steps=%s decision=%s",
+            normalized_turn_id,
+            include_report_followup,
+            settlement_state or "unknown",
+            final_followup_pending,
+            open_non_report_steps,
+            decision,
+        )
+        return decision
 
     def _resolve_parent_trace_context(
         self,
