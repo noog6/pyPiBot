@@ -835,6 +835,7 @@ def test_handle_response_done_preserves_compound_followthrough_contract_on_non_e
     assert kwargs["close_ongoing"] == "true"
     assert kwargs["close_commitment"] == ""
     assert kwargs["close_unresolved"] == ""
+    assert kwargs["complete_final_report"] == ""
 
 
 def test_handle_response_done_keeps_terminal_text_evidence_for_tool_followup_arbitration() -> None:
@@ -1043,6 +1044,146 @@ def test_handle_response_done_followthrough_bridge_does_not_suppress_later_final
     assert continuity_events[0]["close_ongoing"] == ""
     assert continuity_events[1]["keep_ongoing"] == ""
     assert continuity_events[1]["close_ongoing"] == "true"
+
+
+def test_handle_response_done_final_tool_report_completes_compound_when_obligation_still_open() -> None:
+    api = _make_api()
+    api._apply_continuity_event(
+        "transcript_final",
+        text="Look right, check diagnostics, then report done.",
+        source="input_audio_transcription",
+        turn_id="turn_1",
+    )
+    api._apply_continuity_event(
+        "tool_result_received",
+        tool_name="gesture_look_right",
+        call_id="call-1",
+        turn_id="turn_1",
+    )
+    api._apply_continuity_event(
+        "tool_result_received",
+        tool_name="read_runtime_diagnostics",
+        call_id="call-2",
+        turn_id="turn_1",
+    )
+    api._active_response_origin = "tool_output"
+    api._active_response_input_event_key = "tool:call_final"
+    api._active_response_canonical_key = "turn_1::tool:call_final"
+    api._active_response_id = "resp_tool_final"
+    api._response_obligations = {"turn_1:open": {"pending": True}}
+    api._response_done_followthrough_chain_remaining = lambda **_kwargs: False
+    api._terminal_response_text_by_response_id = {"resp_tool_final": "Done. Report complete."}
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_tool_final"}}))
+
+    brief = api.get_continuity_brief("run-test", "turn_1", reason="post_final_tool_report")
+    assert brief.compound_request is None
+
+
+def test_handle_response_done_parent_promoted_final_tool_report_completes_compound() -> None:
+    api = _make_api()
+    api._apply_continuity_event(
+        "transcript_final",
+        text="Look right, check diagnostics, then report done.",
+        source="input_audio_transcription",
+        turn_id="turn_1",
+    )
+    api._apply_continuity_event(
+        "tool_result_received",
+        tool_name="gesture_look_right",
+        call_id="call-1",
+        turn_id="turn_1",
+    )
+    api._apply_continuity_event(
+        "tool_result_received",
+        tool_name="read_runtime_diagnostics",
+        call_id="call-2",
+        turn_id="turn_1",
+    )
+    api._active_response_origin = "tool_output"
+    api._active_response_input_event_key = "tool:call_final"
+    api._active_response_canonical_key = "turn_1::tool:call_final"
+    api._active_response_id = "resp_tool_final"
+    api._response_obligations = {"turn_1:open": {"pending": True}}
+    api._response_done_followthrough_chain_remaining = lambda **_kwargs: False
+    api._terminal_response_text_by_response_id = {"resp_tool_final": "Final answer for parent request."}
+    api._semantic_owner_decision_for_response = Mock(
+        return_value=SimpleNamespace(
+            semantic_owner_canonical_key="turn_1::item_parent",
+            parent_turn_id="turn_1",
+            parent_input_event_key="item_parent",
+            selected_candidate_id="semantic_owner_parent",
+            reason_code="parent_promoted_from_tool_output",
+        )
+    )
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_tool_final"}}))
+
+    brief = api.get_continuity_brief("run-test", "turn_1", reason="post_parent_promoted_tool_report")
+    assert brief.compound_request is None
+
+
+def test_handle_response_done_empty_tool_output_does_not_falsely_complete_final_report() -> None:
+    api = _make_api()
+    api._apply_continuity_event(
+        "transcript_final",
+        text="Look right, check diagnostics, then report done.",
+        source="input_audio_transcription",
+        turn_id="turn_1",
+    )
+    api._apply_continuity_event(
+        "tool_result_received",
+        tool_name="gesture_look_right",
+        call_id="call-1",
+        turn_id="turn_1",
+    )
+    api._apply_continuity_event(
+        "tool_result_received",
+        tool_name="read_runtime_diagnostics",
+        call_id="call-2",
+        turn_id="turn_1",
+    )
+    api._active_response_origin = "tool_output"
+    api._active_response_input_event_key = "tool:call_final"
+    api._active_response_canonical_key = "turn_1::tool:call_final"
+    api._active_response_id = "resp_tool_final"
+    api._response_done_followthrough_chain_remaining = lambda **_kwargs: False
+    api._is_empty_response_done = lambda **_kwargs: True
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_tool_final"}}))
+
+    brief = api.get_continuity_brief("run-test", "turn_1", reason="post_empty_tool_output")
+    assert brief.compound_request is not None
+    assert brief.compound_request.final_followup_pending is True
+    assert brief.compound_request.steps[-1].kind == "report"
+    assert brief.compound_request.steps[-1].status == "pending"
 
 def test_handle_response_done_defers_mic_recovery_until_after_chained_tool_followups_drain() -> None:
     api = _make_api()

@@ -692,6 +692,7 @@ class ContinuityLedger:
         close_ongoing = self._as_bool(payload.get("close_ongoing"))
         close_commitment = self._as_bool(payload.get("close_commitment"))
         close_unresolved = self._as_bool(payload.get("close_unresolved"))
+        complete_final_report = self._as_bool(payload.get("complete_final_report"))
         keep_ongoing = self._as_bool(payload.get("keep_ongoing"))
         owner_turn_id = self._clean_text(payload.get("turn_id"))
         allow_rebind = self._as_bool(payload.get("allow_cross_turn_rebind"))
@@ -710,11 +711,12 @@ class ContinuityLedger:
         self._advance_compound_state_on_response_done(
             close_commitment=close_commitment,
             close_unresolved=close_unresolved,
+            complete_final_report=complete_final_report,
             turn_id=owner_turn_id,
             allow_cross_turn_rebind=allow_rebind,
             rebind_reason=rebind_reason,
         )
-        self._stance = "idle" if close_ongoing or close_commitment or close_unresolved else "awaiting_user"
+        self._stance = "idle" if close_ongoing or close_commitment or close_unresolved or complete_final_report else "awaiting_user"
 
     def _advance_compound_state_on_tool_start(
         self,
@@ -795,6 +797,7 @@ class ContinuityLedger:
         *,
         close_commitment: bool,
         close_unresolved: bool,
+        complete_final_report: bool,
         turn_id: str,
         allow_cross_turn_rebind: bool,
         rebind_reason: str,
@@ -819,7 +822,7 @@ class ContinuityLedger:
                 if step.kind != "report":
                     updated = self._replace_compound_step_status(updated, idx, "completed")
         if (
-            close_unresolved
+            (close_unresolved or complete_final_report)
             and updated.final_followup_pending
             and not self._has_open_non_report_steps(updated)
         ):
