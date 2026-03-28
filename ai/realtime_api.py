@@ -9603,8 +9603,12 @@ class RealtimeAPI:
         turn_id: str,
         origin: str,
         response_id: str | None,
+        include_report_followup: bool = True,
     ) -> bool:
-        current_turn_followthrough = self._turn_followthrough_chain_remaining(turn_id=turn_id)
+        current_turn_followthrough = self._turn_followthrough_chain_remaining(
+            turn_id=turn_id,
+            include_report_followup=include_report_followup,
+        )
         if current_turn_followthrough:
             return True
         if str(origin or "").strip().lower() != "tool_output":
@@ -9616,9 +9620,12 @@ class RealtimeAPI:
         parent_turn_id = str(trace_context.get("parent_turn_id") or "").strip()
         if not parent_turn_id or parent_turn_id == str(turn_id or "").strip():
             return False
-        return self._turn_followthrough_chain_remaining(turn_id=parent_turn_id)
+        return self._turn_followthrough_chain_remaining(
+            turn_id=parent_turn_id,
+            include_report_followup=include_report_followup,
+        )
 
-    def _turn_followthrough_chain_remaining(self, *, turn_id: str) -> bool:
+    def _turn_followthrough_chain_remaining(self, *, turn_id: str, include_report_followup: bool = True) -> bool:
         normalized_turn_id = str(turn_id or "").strip()
         if not normalized_turn_id:
             return False
@@ -9634,7 +9641,16 @@ class RealtimeAPI:
         if str(getattr(settlement, "settlement_state", "") or "").strip().lower() == "followthrough_remaining":
             return True
         compound_state = getattr(brief, "compound_request", None)
-        return bool(getattr(compound_state, "final_followup_pending", False))
+        if not bool(getattr(compound_state, "final_followup_pending", False)):
+            return False
+        if include_report_followup:
+            return True
+        steps = getattr(compound_state, "steps", ()) or ()
+        return any(
+            str(getattr(step, "kind", "") or "").strip() != "report"
+            and str(getattr(step, "status", "") or "").strip() != "completed"
+            for step in steps
+        )
 
     def _resolve_parent_trace_context(
         self,

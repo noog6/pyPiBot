@@ -2600,3 +2600,22 @@ def test_turn_followthrough_chain_remaining_ignores_generic_commitment_without_f
     )
 
     assert api._turn_followthrough_chain_remaining(turn_id="turn_2") is False
+
+
+def test_turn_followthrough_chain_remaining_can_ignore_report_only_pending_followup() -> None:
+    api = _make_api()
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
+        compound_request=types.SimpleNamespace(
+            final_followup_pending=True,
+            steps=(types.SimpleNamespace(kind="report", status="pending"),),
+        )
+    )
+    api._continuity_ledger = types.SimpleNamespace(
+        build_turn_settlement=lambda _brief: types.SimpleNamespace(
+            settlement_state="active_items_only",
+            has_commitments=True,
+        )
+    )
+
+    assert api._turn_followthrough_chain_remaining(turn_id="turn_2") is True
+    assert api._turn_followthrough_chain_remaining(turn_id="turn_2", include_report_followup=False) is False

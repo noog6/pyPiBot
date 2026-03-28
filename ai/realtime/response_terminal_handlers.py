@@ -789,6 +789,7 @@ class ResponseTerminalHandlers:
             turn_id=turn_id,
             origin=active_response_origin_before_clear,
             response_id=active_response_id_before_clear,
+            include_report_followup=False,
         )
         continuity_close_commitment = (
             continuity_close_allowed
@@ -796,6 +797,14 @@ class ResponseTerminalHandlers:
             and not followthrough_chain_remaining_for_close
         )
         continuity_close_unresolved = continuity_close_commitment and not obligation_open
+        continuity_complete_final_report = (
+            continuity_close_commitment
+            and selected
+            and selection_reason == "normal"
+            and api._selected_response_has_substantive_evidence(
+                response_id=resolved_response_id or active_response_id_before_clear
+            )
+        )
         api._apply_continuity_event(
             "response_done",
             run_id=api._current_run_id(),
@@ -806,6 +815,7 @@ class ResponseTerminalHandlers:
             close_ongoing="true" if continuity_close_allowed else "",
             close_commitment="true" if continuity_close_commitment else "",
             close_unresolved="true" if continuity_close_unresolved else "",
+            complete_final_report="true" if continuity_complete_final_report else "",
         )
         if interrupted_tool_output_candidate or followthrough_chain_bridge:
             logger.info(
