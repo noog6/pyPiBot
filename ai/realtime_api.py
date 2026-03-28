@@ -100,6 +100,7 @@ from ai.terminal_deliverable_arbitration import (
 )
 from ai.attention_continuity import AttentionContinuity, AttentionSnapshot
 from ai.continuity import ContinuityBrief, ContinuityLedger, ContinuityTurnSettlement
+from ai.quiet_intent import QuietIntentDecision, QuietIntentInputs, QuietIntentSelector
 from ai.semantic_owner_arbitration import SemanticOwnerDecision, decide_semantic_owner
 from ai.embodiment_policy import (
     EMBODIMENT_PRIORITY_ALLOW,
@@ -793,6 +794,9 @@ class RealtimeAPI:
         self._speaking_started = False
         self._embodiment_policy = EmbodimentPolicy()
         self._attention_continuity = AttentionContinuity(hold_window_s=1.25)
+        self._quiet_intent_selector = QuietIntentSelector()
+        self._latest_quiet_intent_decision: QuietIntentDecision | None = None
+        self._latest_ops_severity = "unknown"
         continuity_cfg = config.get("continuity") or {}
         self._continuity_debug_summary_on_turn_close = bool(
             continuity_cfg.get("debug_summary_on_turn_close", False)
@@ -3947,6 +3951,9 @@ class RealtimeAPI:
             request_response = event.request_response
         if event.source in {"battery", "imu", "camera", "ops", "health"} and event.request_response is None:
             request_response = bool(request_response) and safety_override
+        severity_value = str((event.metadata or {}).get("severity") or event.kind or "").strip().lower()
+        if event.source in {"battery", "ops", "health"} and severity_value:
+            self._latest_ops_severity = severity_value
         queued_payload = {
             "type": "event",
             "event": event,
@@ -3961,7 +3968,7 @@ class RealtimeAPI:
                 "severity": str((event.metadata or {}).get("severity") or "").strip().lower(),
             },
         }
-        severity = str((event.metadata or {}).get("severity") or event.kind or "").strip().lower()
+        severity = severity_value
         priority = str(event.priority or "").strip().lower()
         if self._maybe_defer_startup_injection(
             source=event.source,
@@ -4438,6 +4445,7 @@ class RealtimeAPI:
                 logger.info("speaking_settle_skipped reason=no_active_speaking_episode from_state=%s to_state=%s", previous_state.value, state.value)
 
         snapshot = self._attention_continuity.snapshot(now_s=now) if getattr(self, "_attention_continuity", None) is not None else AttentionSnapshot(active=False, user_speaking=False, acquired_at_s=None, hold_until_s=None, release_reason="uninitialized")
+        self._refresh_quiet_intent(state=state, attention=snapshot)
 
         decision = self._embodiment_policy.decide_state_cue(
             state=state,
@@ -4545,6 +4553,79 @@ class RealtimeAPI:
     def _handle_state_earcon(self, state: InteractionState) -> None:
         """Hook for earcon cues on state transitions."""
         logger.debug("Earcon cue for state: %s", state.value)
+
+    def _classify_recent_utterance_flags(self) -> tuple[str, ...]:
+        text = str(getattr(self, "_last_user_input_text", "") or "").strip().lower()
+        if not text:
+            return ()
+        flags: list[str] = []
+        if any(token in text for token in ("tea", "chill", "calm", "rest", "quiet")):
+            flags.append("calm_context")
+        if any(token in text for token in ("observe", "notice", "watch", "look")):
+            flags.append("observation_context")
+        if any(token in text for token in ("why", "how", "curious", "wonder", "?")):
+            flags.append("curiosity_signal")
+        if any(token in text for token in ("alert", "alarm", "warning", "critical", "anomaly")):
+            flags.append("alert_context")
+            flags.append("anomaly_signal")
+        return tuple(flags)
+
+    def _quiet_intent_inputs(self, *, state: InteractionState, attention: AttentionSnapshot) -> QuietIntentInputs:
+        now = time.monotonic()
+        last_input = getattr(self, "_last_user_input_time", None)
+        recent_input = bool(isinstance(last_input, (int, float)) and (now - float(last_input)) <= 120.0)
+        conversation_active = bool(recent_input or self.response_in_progress or self._response_in_flight)
+        run_id = self._current_run_id()
+        turn_id = self._current_turn_id_or_unknown()
+        continuity_stance = "idle"
+        try:
+            continuity_stance = str(
+                self.get_continuity_brief(
+                    run_id=str(run_id or ""),
+                    turn_id=str(turn_id or "turn-unknown"),
+                    reason="quiet_intent_state_transition",
+                ).stance
+                or "idle"
+            ).strip() or "idle"
+        except Exception:
+            continuity_stance = "idle"
+        return QuietIntentInputs(
+            interaction_state=state,
+            conversation_active=conversation_active,
+            continuity_stance=continuity_stance,
+            ops_severity=str(getattr(self, "_latest_ops_severity", "unknown") or "unknown").strip().lower(),
+            recent_utterance_flags=self._classify_recent_utterance_flags(),
+            attention_active=bool(attention.active),
+        )
+
+    def _refresh_quiet_intent(self, *, state: InteractionState, attention: AttentionSnapshot) -> None:
+        selector = getattr(self, "_quiet_intent_selector", None)
+        if not isinstance(selector, QuietIntentSelector):
+            return
+        inputs = self._quiet_intent_inputs(state=state, attention=attention)
+        decision = selector.select(inputs)
+        self._latest_quiet_intent_decision = decision
+        payload = decision.to_log_payload()
+        logger.info(
+            "quiet_intent_decision mode=%s confidence=%.2f reason_codes=%s interaction_state=%s "
+            "conversation_active=%s continuity_stance=%s ops_severity=%s attention_active=%s "
+            "initiative_level=%.2f verbosity_bias=%.2f gesture_bias=%.2f interruption_tolerance=%.2f "
+            "observation_threshold=%.2f flags=%s",
+            payload["mode"],
+            float(payload["confidence"]),
+            ",".join(str(code) for code in payload["reason_codes"]) or "none",
+            payload["interaction_state"],
+            str(payload["conversation_active"]).lower(),
+            payload["continuity_stance"] or "idle",
+            payload["ops_severity"] or "unknown",
+            str(payload["attention_active"]).lower(),
+            float(payload["initiative_level"]),
+            float(payload["verbosity_bias"]),
+            float(payload["gesture_bias"]),
+            float(payload["interruption_tolerance"]),
+            float(payload["observation_threshold"]),
+            ",".join(str(flag) for flag in payload["recent_utterance_flags"]) or "none",
+        )
 
     def _continuity_ledger_instance(self) -> ContinuityLedger:
         ledger = getattr(self, "_continuity_ledger", None)
@@ -8752,7 +8833,7 @@ class RealtimeAPI:
         normalized_observation_source = str(authority_seam or "").strip()
         if normalized_observation_source and normalized_observation_source != canonical_authority_seam:
             observation_normalization_warnings.append(
-                f"tool_followup_observation_source:{normalized_observation_source}"
+                f"provenance_source:tool_followup:{normalized_observation_source}"
             )
         trace_store = getattr(self, "_turn_arbitration_trace_by_key", None)
         if not isinstance(trace_store, dict):
