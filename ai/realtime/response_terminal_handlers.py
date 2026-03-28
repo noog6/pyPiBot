@@ -810,7 +810,7 @@ class ResponseTerminalHandlers:
         continuity_rebind_allowed = False
         continuity_rebind_reason = ""
         if (
-            continuity_close_commitment
+            continuity_complete_final_report
             and semantic_parent_turn_id
             and semantic_parent_turn_id != turn_id
             and semantic_owner_canonical_key
