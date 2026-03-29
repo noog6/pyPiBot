@@ -100,6 +100,8 @@ _STYLE_MULTIPLIER = {
 _DISTANCE_SCALE_DEGREES = 18.0
 _LOOK_DURATION_MIN_MS = 160
 _LOOK_DURATION_MAX_MS = 1400
+_CANONICAL_CENTER_PAN_DEGREES = 0.0
+_CANONICAL_CENTER_TILT_DEGREES = 0.0
 
 
 DEFAULT_GESTURES = (
@@ -624,8 +626,12 @@ class GestureLibrary:
         """
         pan_min, pan_max = self._get_servo_limits(controller, "pan")
         tilt_min, tilt_max = self._get_servo_limits(controller, "tilt")
-        target_pan = self._clamp(base_pan + spec.pan_offset * intensity, pan_min, pan_max)
-        target_tilt = self._clamp(base_tilt + spec.tilt_offset * intensity, tilt_min, tilt_max)
+        if definition.name == "gesture_look_center":
+            target_pan = self._clamp(_CANONICAL_CENTER_PAN_DEGREES, pan_min, pan_max)
+            target_tilt = self._clamp(_CANONICAL_CENTER_TILT_DEGREES, tilt_min, tilt_max)
+        else:
+            target_pan = self._clamp(base_pan + spec.pan_offset * intensity, pan_min, pan_max)
+            target_tilt = self._clamp(base_tilt + spec.tilt_offset * intensity, tilt_min, tilt_max)
         frame = controller.generate_base_keyframe(
             pan_degrees=target_pan,
             tilt_degrees=target_tilt,
