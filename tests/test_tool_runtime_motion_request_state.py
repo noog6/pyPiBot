@@ -93,3 +93,28 @@ def test_new_center_request_still_queues_motion(monkeypatch) -> None:
     assert result["message"] == "Moving back to center."
     assert "tool_result_has_distinct_info" not in result
     assert controller.added_actions == [queued_action]
+
+
+def test_retry_center_while_still_off_center_is_not_suppressed(monkeypatch) -> None:
+    controller = _FakeMotionController(
+        pan=22.0,
+        tilt=-3.0,
+        moving=False,
+        current_action=None,
+        action_queue=[],
+    )
+    monkeypatch.setattr(tool_runtime.MotionController, "get_instance", classmethod(lambda cls: controller))
+    monkeypatch.setattr(
+        tool_runtime,
+        "gesture_look_center",
+        lambda delay_ms=0: SimpleNamespace(name="gesture_look_center"),
+    )
+
+    first = tool_runtime.enqueue_look_center_gesture()
+    controller.action_queue.clear()
+    second = tool_runtime.enqueue_look_center_gesture()
+
+    assert first["queued"] is True
+    assert second["queued"] is True
+    assert first["motion_request_state"] == "new_request"
+    assert second["motion_request_state"] == "new_request"

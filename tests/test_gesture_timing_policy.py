@@ -132,6 +132,47 @@ def test_distance_and_style_adjust_look_timing() -> None:
     assert long_snap < long_neutral < long_solemn
 
 
+def test_look_center_targets_canonical_pose_regardless_of_starting_pose() -> None:
+    gesture_library = _load_gesture_library_module()
+    library = gesture_library.GestureLibrary.__new__(gesture_library.GestureLibrary)
+    definition = _definition(gesture_library, "gesture_look_center")
+    spec = definition.frames[0]
+
+    class _Servo:
+        def __init__(self, minimum: float, maximum: float) -> None:
+            self.min_angle = minimum
+            self.max_angle = maximum
+
+    class _Controller:
+        def __init__(self) -> None:
+            self.servo_registry = types.SimpleNamespace(
+                servos={
+                    "pan": _Servo(-90.0, 90.0),
+                    "tilt": _Servo(-45.0, 45.0),
+                }
+            )
+
+        def generate_base_keyframe(self, *, pan_degrees: float, tilt_degrees: float):
+            frame = gesture_library.Keyframe()
+            frame.servo_destination = {"pan": pan_degrees, "tilt": tilt_degrees}
+            return frame
+
+    frame = library._create_keyframe(
+        _Controller(),
+        definition=definition,
+        spec=spec,
+        base_pan=-55.96,
+        base_tilt=25.0,
+        transition_pan=-55.96,
+        transition_tilt=25.0,
+        intensity=1.0,
+        style="neutral",
+    )
+
+    assert frame.servo_destination["pan"] == 0.0
+    assert frame.servo_destination["tilt"] == 0.0
+
+
 def test_non_look_gesture_keeps_authored_duration() -> None:
     gesture_library = _load_gesture_library_module()
     library = gesture_library.GestureLibrary.__new__(gesture_library.GestureLibrary)
