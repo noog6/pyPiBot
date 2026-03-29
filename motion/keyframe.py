@@ -8,7 +8,16 @@ from typing import Any
 
 @dataclass
 class Keyframe:
-    """Represents a motion keyframe."""
+    """Represents a runtime motion keyframe.
+
+    Timing fields:
+    - `final_target_time`: nominal per-frame target duration in milliseconds.
+      Gesture builds copy authored spec time into this field.
+    - `deadline_ms`: absolute monotonic timestamp (`millis()`) computed when
+      the controller initializes this frame (`start_time_ms + final_target_time`).
+    - `duration_ms`: runtime-normalized duration derived at init time from
+      `final_target_time` for logging/introspection (`max(1, final_target_time)`).
+    """
 
     id: int = 0
     name: str = ""

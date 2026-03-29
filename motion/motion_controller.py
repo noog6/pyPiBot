@@ -374,6 +374,13 @@ class MotionController:
         return dt_s
 
     def _init_frame(self, frame: Keyframe, now_ms: int) -> None:
+        """Initialize runtime timing/position state for the active frame.
+
+        `frame.final_target_time` is treated as a nominal per-frame target
+        duration (ms). On initialization we derive:
+        - `deadline_ms`: absolute cutoff timestamp (`now_ms + nominal_duration`)
+        - `duration_ms`: normalized runtime duration for reporting/logs
+        """
         frame.start_time_ms = now_ms
         self._last_update_ms = now_ms - max(self.control_loop_period_ms, 1)
 
@@ -404,6 +411,14 @@ class MotionController:
         frame.is_initialized = True
 
     def _frame_done(self, frame: Keyframe, at_dest: bool, now_ms: int) -> bool:
+        """Return whether the frame should advance under current timing rules.
+
+        Current contract intentionally requires BOTH:
+        1) destination reached (`at_dest`), and
+        2) nominal time budget elapsed (`now_ms >= deadline_ms`).
+
+        If no deadline exists, completion is purely `at_dest`.
+        """
         fail_open_on_deadline = False
 
         if not frame.has_deadline():

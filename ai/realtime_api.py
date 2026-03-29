@@ -12324,6 +12324,11 @@ class RealtimeAPI:
         return text if len(text) <= limit else f"{text[:limit]}…"
 
     def _find_gesture_definition(self, gesture_name: str) -> dict[str, Any] | None:
+        """Return static gesture metadata used for dry-run/staging summaries.
+
+        `total_duration_ms` is a nominal sum of spec frame durations from
+        `DEFAULT_GESTURES`; it is not a runtime completion guarantee.
+        """
         for definition in DEFAULT_GESTURES:
             if definition.name == gesture_name:
                 total_duration = sum(frame.duration_ms for frame in definition.frames)
@@ -12539,7 +12544,7 @@ class RealtimeAPI:
             duration = motion_info.get("duration_ms")
             return (
                 f"Would queue gesture '{motion_info['gesture']}' "
-                f"for ~{duration}ms within safe servo bounds."
+                f"with nominal spec duration ~{duration}ms within safe servo bounds."
             )
         return f"Would call {action.tool_name} with the proposed arguments."
 

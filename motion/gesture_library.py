@@ -16,7 +16,13 @@ from storage.controller import StorageController
 
 @dataclass(frozen=True)
 class GestureFrameSpec:
-    """Definition for a single gesture keyframe offset."""
+    """Definition for one gesture frame in author-time (spec) coordinates.
+
+    `duration_ms` is the nominal target dwell/move time for this frame in the
+    gesture definition. It is copied into `Keyframe.final_target_time` when the
+    runtime keyframe chain is built, then converted into runtime timing state
+    (`deadline_ms`, `duration_ms`) when the controller initializes the frame.
+    """
 
     name: str
     pan_offset: float
@@ -408,7 +414,12 @@ class GestureLibrary:
             self._persist_library()
 
     def build_action(self, name: str, delay_ms: int = 0, intensity: float = 1.0) -> Action:
-        """Build an action from a gesture definition."""
+        """Build an action from a gesture definition.
+
+        Timing note: gesture frame `duration_ms` values are treated as nominal
+        spec durations. Runtime completion still depends on controller
+        termination rules (`_frame_done`), not this build-time conversion alone.
+        """
 
         definition = self.get(name)
         controller = MotionController.get_instance()
@@ -512,6 +523,12 @@ class GestureLibrary:
         base_tilt: float,
         intensity: float,
     ) -> Keyframe:
+        """Create a runtime keyframe from a gesture spec frame.
+
+        The authored `spec.duration_ms` is copied into
+        `Keyframe.final_target_time` as the per-frame nominal target time.
+        Absolute runtime deadlines are derived later by `MotionController`.
+        """
         pan_min, pan_max = self._get_servo_limits(controller, "pan")
         tilt_min, tilt_max = self._get_servo_limits(controller, "tilt")
         frame = controller.generate_base_keyframe(
