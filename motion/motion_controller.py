@@ -40,6 +40,7 @@ class MotionTuning:
     position_eps_deg: float = 0.05
     at_dest_eps_deg: float = 0.5
     debug_motion: bool = False
+    debug_motion_log_interval_ms: int = 200
 
 
 TUNING = MotionTuning()
@@ -124,6 +125,7 @@ class MotionController:
         self.action_queue: list[Action] = []
         self.current_action: Action | None = None
         self._last_update_ms: int | None = None
+        self._last_motion_debug_log_ms: int | None = None
         MotionController._instance = self
 
     @classmethod
@@ -283,7 +285,7 @@ class MotionController:
             and abs(self.current_servo_position["tilt"] - desired_tilt) <= eps
         )
 
-        if TUNING.debug_motion:
+        if self._should_emit_motion_debug_log(now_ms):
             log_info(
                 "[MOTION][debug] dt=%.4f pan_v=%.2f pan_vmax=%.2f tilt_v=%.2f tilt_vmax=%.2f "
                 "pan_err=%.2f tilt_err=%.2f",
@@ -322,6 +324,20 @@ class MotionController:
             self._moving_event.clear()
             return True
 
+        return False
+
+    def _should_emit_motion_debug_log(self, now_ms: int) -> bool:
+        if not TUNING.debug_motion:
+            return False
+
+        interval_ms = max(0, int(TUNING.debug_motion_log_interval_ms))
+        if interval_ms == 0:
+            return True
+
+        last_log_ms = self._last_motion_debug_log_ms
+        if last_log_ms is None or now_ms - last_log_ms >= interval_ms:
+            self._last_motion_debug_log_ms = now_ms
+            return True
         return False
 
     def _compute_dt_s(self, now_ms: int) -> float:
