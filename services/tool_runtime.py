@@ -8,6 +8,8 @@ import re
 import shutil
 import socket
 import subprocess
+import threading
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -34,6 +36,25 @@ logger = logging.getLogger(__name__)
 
 
 _runtime_diagnostics_provider: Callable[[], dict[str, Any]] | None = None
+_MOTION_TRACKABLE_GESTURES = frozenset(
+    {
+        "gesture_idle",
+        "gesture_nod",
+        "gesture_no",
+        "gesture_look_around",
+        "gesture_look_up",
+        "gesture_look_left",
+        "gesture_look_right",
+        "gesture_look_down",
+        "gesture_look_center",
+        "gesture_curious_tilt",
+        "gesture_attention_snap",
+    }
+)
+_motion_state_lock = threading.Lock()
+_motion_state_by_request_key: dict[str, dict[str, Any]] = {}
+_motion_request_key_by_tool_call_id: dict[str, str] = {}
+_motion_callbacks_registered_for_controller_id: int | None = None
 
 
 def set_runtime_diagnostics_provider(provider: Callable[[], dict[str, Any]] | None) -> None:
@@ -86,6 +107,143 @@ def _collect_host_status() -> dict[str, Any]:
     if any(value == "unknown" for value in load_average.values()) and load_reason:
         status["load_average_reason"] = load_reason
     return status
+
+
+def _motion_request_key(action: Any) -> str:
+    existing = str(getattr(action, "_motion_request_key", "") or "").strip()
+    if existing:
+        return existing
+    key = (
+        f"{str(getattr(action, 'name', 'unknown') or 'unknown')}:"
+        f"{int(getattr(action, 'timestamp', 0) or 0)}"
+    )
+    setattr(action, "_motion_request_key", key)
+    return key
+
+
+def _register_motion_queued(action: Any) -> str:
+    now = time.monotonic()
+    action_name = str(getattr(action, "name", "") or "").strip()
+    action_obj_id = id(action)
+    base_request_key = _motion_request_key(action)
+    with _motion_state_lock:
+        request_key = base_request_key
+        state = _motion_state_by_request_key.get(request_key)
+        if state is not None and int(state.get("_action_obj_id", -1)) != action_obj_id:
+            request_key = f"{base_request_key}:{action_obj_id}"
+            state = _motion_state_by_request_key.get(request_key)
+        setattr(action, "_motion_request_key", request_key)
+        if state is None:
+            state = {
+                "request_key": request_key,
+                "gesture": action_name or "unknown",
+                "status": "queued",
+                "queued_monotonic_s": now,
+                "started_monotonic_s": None,
+                "completed_monotonic_s": None,
+                "tool_call_id": None,
+                "correlation_source": "action.name+action.timestamp",
+                "_action_obj_id": action_obj_id,
+            }
+            _motion_state_by_request_key[request_key] = state
+        else:
+            state["status"] = "queued"
+            state["queued_monotonic_s"] = now
+            state["_action_obj_id"] = action_obj_id
+    logger.info(
+        "gesture_motion_registered state=queued request_key=%s gesture=%s correlation_source=%s",
+        request_key,
+        action_name or "unknown",
+        "action.name+action.timestamp",
+    )
+    return request_key
+
+
+def register_tool_call_motion_request(*, tool_call_id: str | None, motion_request_key: str | None) -> None:
+    normalized_call_id = str(tool_call_id or "").strip()
+    normalized_request_key = str(motion_request_key or "").strip()
+    if not normalized_call_id or not normalized_request_key:
+        return
+    with _motion_state_lock:
+        _motion_request_key_by_tool_call_id[normalized_call_id] = normalized_request_key
+        state = _motion_state_by_request_key.get(normalized_request_key)
+        if state is not None:
+            state["tool_call_id"] = normalized_call_id
+    logger.info(
+        "gesture_motion_registered state=bound_tool_call request_key=%s tool_call_id=%s",
+        normalized_request_key,
+        normalized_call_id,
+    )
+
+
+def get_tool_call_motion_state(tool_call_id: str | None) -> dict[str, Any] | None:
+    normalized_call_id = str(tool_call_id or "").strip()
+    if not normalized_call_id:
+        return None
+    with _motion_state_lock:
+        request_key = _motion_request_key_by_tool_call_id.get(normalized_call_id)
+        if not request_key:
+            return None
+        state = _motion_state_by_request_key.get(request_key)
+        if not isinstance(state, dict):
+            return None
+        return {key: value for key, value in state.items() if not str(key).startswith("_")}
+
+
+def is_tool_call_motion_completed(tool_call_id: str | None) -> bool | None:
+    state = get_tool_call_motion_state(tool_call_id)
+    if state is None:
+        return None
+    return str(state.get("status") or "").strip() == "completed"
+
+
+def _on_motion_action_lifecycle(event: str, action: Any) -> None:
+    # Contract note: "started" reflects dequeue/enter-execution in controller flow.
+    # It is not a guarantee that the first servo increment has already been emitted.
+    action_name = str(getattr(action, "name", "") or "").strip()
+    if action_name not in _MOTION_TRACKABLE_GESTURES:
+        return
+    request_key = _motion_request_key(action)
+    now = time.monotonic()
+    with _motion_state_lock:
+        state = _motion_state_by_request_key.get(request_key)
+        if state is None:
+            state = {
+                "request_key": request_key,
+                "gesture": action_name,
+                "status": "unknown",
+                "queued_monotonic_s": None,
+                "started_monotonic_s": None,
+                "completed_monotonic_s": None,
+                "tool_call_id": None,
+                "correlation_source": "action.name+action.timestamp",
+                "_action_obj_id": id(action),
+            }
+            _motion_state_by_request_key[request_key] = state
+        if event == "started":
+            state["status"] = "started"
+            state["started_monotonic_s"] = now
+        elif event == "completed":
+            state["status"] = "completed"
+            state["completed_monotonic_s"] = now
+    if event in {"started", "completed"}:
+        logger.info(
+            "gesture_motion_registered state=%s request_key=%s gesture=%s",
+            event,
+            request_key,
+            action_name,
+        )
+
+
+def _ensure_motion_callbacks_registered(controller: MotionController) -> None:
+    global _motion_callbacks_registered_for_controller_id
+    controller_id = id(controller)
+    if _motion_callbacks_registered_for_controller_id == controller_id:
+        return
+    register_fn = getattr(controller, "register_action_lifecycle_callback", None)
+    if callable(register_fn):
+        register_fn(_on_motion_action_lifecycle)
+        _motion_callbacks_registered_for_controller_id = controller_id
 
 
 def _read_wifi_ssid() -> tuple[str, str | None]:
@@ -438,9 +596,10 @@ def enqueue_look_center_gesture(delay_ms: int = 0) -> dict[str, Any]:
         result["tool_result_has_distinct_info"] = True
     else:
         action = gesture_look_center(delay_ms=delay_ms)
-        controller.add_action_to_queue(action)
+        motion_request_key = _add_action_to_motion_queue(action)
         result["queued"] = True
         result["gesture"] = action.name
+        result["motion_request_key"] = motion_request_key
         result["message"] = "Moving back to center."
     logger.info(
         "motion_request_eval tool=%s state=%s no_duplicate_motion_queued=%s delay_ms=%s",
@@ -495,10 +654,19 @@ def set_output_volume(percent: int, emergency: bool = False) -> dict[str, Any]:
 
 
 def _enqueue_gesture(action: Any, delay_ms: int, intensity: float) -> dict[str, Any]:
-    _add_action_to_motion_queue(action)
-    return {"queued": True, "gesture": action.name, "delay_ms": delay_ms, "intensity": intensity}
+    motion_request_key = _add_action_to_motion_queue(action)
+    return {
+        "queued": True,
+        "gesture": action.name,
+        "delay_ms": delay_ms,
+        "intensity": intensity,
+        "motion_request_key": motion_request_key,
+    }
 
 
-def _add_action_to_motion_queue(action: Any) -> None:
+def _add_action_to_motion_queue(action: Any) -> str:
     controller = MotionController.get_instance()
+    _ensure_motion_callbacks_registered(controller)
+    motion_request_key = _register_motion_queued(action)
     controller.add_action_to_queue(action)
+    return motion_request_key
