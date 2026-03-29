@@ -22,7 +22,12 @@ class Action:
         return self.timestamp < other.timestamp
 
     def set_frame_times(self, target_start_time: int) -> None:
-        """Reset frame timing for a new action run."""
+        """Reset per-run timing state for a new action execution.
+
+        This clears runtime-derived timing (`deadline_ms`, init flag) so each
+        frame recomputes absolute timing from its nominal `final_target_time`
+        when first processed by the motion controller.
+        """
 
         frame_index = self.frames
         while frame_index:
