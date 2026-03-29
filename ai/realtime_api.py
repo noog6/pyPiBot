@@ -8552,6 +8552,21 @@ class RealtimeAPI:
     def _tool_followup_input_event_key(self, *, call_id: str) -> str:
         return f"tool:{str(call_id or '').strip() or 'unknown'}"
 
+    def get_gesture_motion_state(self, *, tool_call_id: str | None) -> dict[str, Any] | None:
+        """Return local physical motion state for a gesture tool call.
+
+        Contract note:
+        - tool result truth: gesture request was accepted/queued.
+        - motion state truth: physical execution lifecycle (started/completed).
+        """
+
+        return tool_runtime.get_tool_call_motion_state(tool_call_id)
+
+    def is_gesture_motion_completed(self, *, tool_call_id: str | None) -> bool | None:
+        """Return whether the gesture motion for `tool_call_id` physically completed."""
+
+        return tool_runtime.is_tool_call_motion_completed(tool_call_id)
+
     def _tool_followup_state(self, *, canonical_key: str) -> str:
         normalized_canonical_key = str(canonical_key or "").strip()
         if not normalized_canonical_key:
@@ -18628,6 +18643,14 @@ class RealtimeAPI:
                     self._current_turn_id_or_unknown(),
                     call_id,
                 )
+                motion_request_key = ""
+                if isinstance(result, dict):
+                    motion_request_key = str(result.get("motion_request_key") or "").strip()
+                if function_name.startswith("gesture_") and motion_request_key:
+                    tool_runtime.register_tool_call_motion_request(
+                        tool_call_id=call_id,
+                        motion_request_key=motion_request_key,
+                    )
                 self._record_intent_completion(function_name, args, idempotency_key=self._idempotency_key_for_action(action))
                 self._mark_tool_followup_timing(
                     turn_id=self._current_turn_id_or_unknown(),

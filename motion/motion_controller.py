@@ -7,6 +7,7 @@ import threading
 import time
 import traceback
 from dataclasses import dataclass
+from typing import Callable
 
 from hardware.servo_registry import ServoRegistry
 from motion.action import Action
@@ -124,6 +125,7 @@ class MotionController:
         self.axis_v_max = {"pan": 0.0, "tilt": 0.0}
         self.action_queue: list[Action] = []
         self.current_action: Action | None = None
+        self._action_lifecycle_callbacks: list[Callable[[str, Action], None]] = []
         self._last_update_ms: int | None = None
         self._last_motion_debug_log_ms: int | None = None
         MotionController._instance = self
@@ -209,6 +211,8 @@ class MotionController:
                 self.current_action.current_frame = self.current_action.current_frame.next
 
                 if self.current_action.current_frame is None:
+                    completed_action = self.current_action
+                    self._emit_action_lifecycle("completed", completed_action)
                     self.current_action = self.get_next_action()
 
     def move_to_keyframe(self, new_frame: Keyframe) -> bool:
@@ -456,11 +460,33 @@ class MotionController:
                 next_action = heapq.heappop(self.action_queue)
         if next_action:
             next_action.set_frame_times(current_time)
+            self._emit_action_lifecycle("started", next_action)
         return next_action
 
     def add_action_to_queue(self, new_action: Action) -> None:
         with self._queue_lock:
             heapq.heappush(self.action_queue, new_action)
+        self._emit_action_lifecycle("queued", new_action)
+
+    def register_action_lifecycle_callback(self, callback: Callable[[str, Action], None]) -> None:
+        if not callable(callback):
+            return
+        if callback not in self._action_lifecycle_callbacks:
+            self._action_lifecycle_callbacks.append(callback)
+
+    def _emit_action_lifecycle(self, event: str, action: Action) -> None:
+        if not self._action_lifecycle_callbacks:
+            return
+        for callback in list(self._action_lifecycle_callbacks):
+            try:
+                callback(event, action)
+            except Exception as exc:
+                log_warning(
+                    "[MOTION] action lifecycle callback failed event=%s action=%s error=%s",
+                    event,
+                    str(getattr(action, "name", "unknown") or "unknown"),
+                    exc,
+                )
 
     def is_moving(self) -> bool:
         return self._moving_event.is_set()
