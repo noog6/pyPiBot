@@ -58,6 +58,7 @@ class GestureDefinition:
     name: str
     priority: int
     frames: tuple[GestureFrameSpec, ...]
+    timing_style: str = "neutral"
 
     def to_dict(self) -> dict[str, object]:
         """Return the definition as a serializable dictionary."""
@@ -65,6 +66,7 @@ class GestureDefinition:
         return {
             "name": self.name,
             "priority": self.priority,
+            "timing_style": self.timing_style,
             "frames": [frame.to_dict() for frame in self.frames],
         }
 
@@ -76,8 +78,28 @@ class GestureDefinition:
         return cls(
             name=str(payload["name"]),
             priority=int(payload["priority"]),
+            timing_style=str(payload.get("timing_style", "neutral")),
             frames=frames,
         )
+
+
+_LOOK_GESTURE_NAMES = frozenset(
+    {
+        "gesture_look_up",
+        "gesture_look_down",
+        "gesture_look_left",
+        "gesture_look_right",
+        "gesture_look_center",
+    }
+)
+_STYLE_MULTIPLIER = {
+    "neutral": 1.0,
+    "snap": 0.75,
+    "solemn": 1.35,
+}
+_DISTANCE_SCALE_DEGREES = 18.0
+_LOOK_DURATION_MIN_MS = 160
+_LOOK_DURATION_MAX_MS = 1400
 
 
 DEFAULT_GESTURES = (
@@ -186,6 +208,7 @@ DEFAULT_GESTURES = (
     GestureDefinition(
         name="gesture_look_up",
         priority=2,
+        timing_style="neutral",
         frames=(
             GestureFrameSpec(
                 name="look-up",
@@ -198,6 +221,7 @@ DEFAULT_GESTURES = (
     GestureDefinition(
         name="gesture_look_left",
         priority=2,
+        timing_style="neutral",
         frames=(
             GestureFrameSpec(
                 name="look-left",
@@ -210,6 +234,7 @@ DEFAULT_GESTURES = (
     GestureDefinition(
         name="gesture_look_right",
         priority=2,
+        timing_style="neutral",
         frames=(
             GestureFrameSpec(
                 name="look-right",
@@ -222,11 +247,25 @@ DEFAULT_GESTURES = (
     GestureDefinition(
         name="gesture_look_down",
         priority=2,
+        timing_style="neutral",
         frames=(
             GestureFrameSpec(
                 name="look-down",
                 pan_offset=0.0,
                 tilt_offset=-999.0,
+                duration_ms=600,
+            ),
+        ),
+    ),
+    GestureDefinition(
+        name="gesture_look_center",
+        priority=2,
+        timing_style="neutral",
+        frames=(
+            GestureFrameSpec(
+                name="look-center",
+                pan_offset=0.0,
+                tilt_offset=0.0,
                 duration_ms=600,
             ),
         ),
@@ -413,7 +452,13 @@ class GestureLibrary:
         if added:
             self._persist_library()
 
-    def build_action(self, name: str, delay_ms: int = 0, intensity: float = 1.0) -> Action:
+    def build_action(
+        self,
+        name: str,
+        delay_ms: int = 0,
+        intensity: float = 1.0,
+        style: str | None = None,
+    ) -> Action:
         """Build an action from a gesture definition.
 
         Timing note: gesture frame `duration_ms` values are treated as nominal
@@ -434,6 +479,7 @@ class GestureLibrary:
             base_pan=current_pan,
             base_tilt=current_tilt,
             intensity=float(intensity),
+            style=(style or definition.timing_style),
         )
         return Action(
             priority=definition.priority,
@@ -490,38 +536,85 @@ class GestureLibrary:
         base_pan: float,
         base_tilt: float,
         intensity: float,
+        style: str,
     ) -> Keyframe:
         iterator = iter(definition.frames)
+        transition_pan = base_pan
+        transition_tilt = base_tilt
         first_spec = next(iterator)
         first_frame = self._create_keyframe(
             controller,
+            definition,
             first_spec,
             base_pan=base_pan,
             base_tilt=base_tilt,
+            transition_pan=transition_pan,
+            transition_tilt=transition_tilt,
             intensity=intensity,
+            style=style,
         )
+        transition_pan = float(first_frame.servo_destination["pan"])
+        transition_tilt = float(first_frame.servo_destination["tilt"])
         current = first_frame
 
         for spec in iterator:
             next_frame = self._create_keyframe(
                 controller,
+                definition,
                 spec,
                 base_pan=base_pan,
                 base_tilt=base_tilt,
+                transition_pan=transition_pan,
+                transition_tilt=transition_tilt,
                 intensity=intensity,
+                style=style,
             )
             current.next = next_frame
             current = next_frame
+            transition_pan = float(next_frame.servo_destination["pan"])
+            transition_tilt = float(next_frame.servo_destination["tilt"])
 
         return first_frame
+
+    def _duration_for_frame(
+        self,
+        *,
+        definition: GestureDefinition,
+        spec: GestureFrameSpec,
+        target_pan: float,
+        target_tilt: float,
+        transition_pan: float,
+        transition_tilt: float,
+        style: str,
+    ) -> int:
+        if definition.name not in _LOOK_GESTURE_NAMES:
+            return int(spec.duration_ms)
+
+        pan_delta = abs(target_pan - transition_pan)
+        tilt_delta = abs(target_tilt - transition_tilt)
+        distance = pan_delta + tilt_delta
+        baseline_ms = int(
+            round(
+                float(spec.duration_ms)
+                * max(distance / _DISTANCE_SCALE_DEGREES, 0.35)
+            )
+        )
+
+        multiplier = _STYLE_MULTIPLIER.get(style, _STYLE_MULTIPLIER["neutral"])
+        styled_ms = int(round(baseline_ms * multiplier))
+        return int(self._clamp(styled_ms, _LOOK_DURATION_MIN_MS, _LOOK_DURATION_MAX_MS))
 
     def _create_keyframe(
         self,
         controller: MotionController,
+        definition: GestureDefinition,
         spec: GestureFrameSpec,
         base_pan: float,
         base_tilt: float,
+        transition_pan: float,
+        transition_tilt: float,
         intensity: float,
+        style: str,
     ) -> Keyframe:
         """Create a runtime keyframe from a gesture spec frame.
 
@@ -531,10 +624,20 @@ class GestureLibrary:
         """
         pan_min, pan_max = self._get_servo_limits(controller, "pan")
         tilt_min, tilt_max = self._get_servo_limits(controller, "tilt")
+        target_pan = self._clamp(base_pan + spec.pan_offset * intensity, pan_min, pan_max)
+        target_tilt = self._clamp(base_tilt + spec.tilt_offset * intensity, tilt_min, tilt_max)
         frame = controller.generate_base_keyframe(
-            pan_degrees=self._clamp(base_pan + spec.pan_offset * intensity, pan_min, pan_max),
-            tilt_degrees=self._clamp(base_tilt + spec.tilt_offset * intensity, tilt_min, tilt_max),
+            pan_degrees=target_pan,
+            tilt_degrees=target_tilt,
         )
         frame.name = spec.name
-        frame.final_target_time = spec.duration_ms
+        frame.final_target_time = self._duration_for_frame(
+            definition=definition,
+            spec=spec,
+            target_pan=target_pan,
+            target_tilt=target_tilt,
+            transition_pan=transition_pan,
+            transition_tilt=transition_tilt,
+            style=style,
+        )
         return frame
