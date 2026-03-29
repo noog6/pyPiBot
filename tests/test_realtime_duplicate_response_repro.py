@@ -4808,8 +4808,95 @@ def test_low_risk_gesture_followup_payload_is_status_only() -> None:
     assert metadata.get("tool_followup_suppress_if_parent_covered") == "true"
     assert metadata.get("tool_followup_status_only") == "true"
     assert "Gesture follow-up only" in instructions
-    assert "Do not restate or re-answer semantic memory/preferences content" in instructions
-    assert "Do not narrate environment/vision context" in instructions
+    assert "avoid final completion claims" in instructions
+
+
+def test_gesture_followup_payload_queued_motion_uses_in_progress_wording() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    api._current_response_turn_id = "turn_gesture_payload_queued"
+    api._active_input_event_key_by_turn_id["turn_gesture_payload_queued"] = "item_parent_payload_queued"
+    api.get_gesture_motion_state = lambda *, tool_call_id: {"status": "queued"}
+
+    response_create_event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_gesture_payload_queued",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+
+    payload = response_create_event.get("response") or {}
+    metadata = payload.get("metadata") or {}
+    instructions = str(payload.get("instructions") or "")
+
+    assert metadata.get("gesture_motion_status") == "queued"
+    assert "queued and may begin shortly" in instructions
+    assert "avoid final completion claims" in instructions
+
+
+def test_gesture_followup_payload_started_motion_uses_in_progress_wording() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    api._current_response_turn_id = "turn_gesture_payload_started"
+    api._active_input_event_key_by_turn_id["turn_gesture_payload_started"] = "item_parent_payload_started"
+    api.get_gesture_motion_state = lambda *, tool_call_id: {"status": "started"}
+
+    response_create_event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_gesture_payload_started",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+
+    payload = response_create_event.get("response") or {}
+    metadata = payload.get("metadata") or {}
+    instructions = str(payload.get("instructions") or "")
+
+    assert metadata.get("gesture_motion_status") == "started"
+    assert "started but is not physically complete yet" in instructions
+    assert "avoid final completion claims" in instructions
+
+
+def test_gesture_followup_payload_completed_motion_allows_completion_wording() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    api._current_response_turn_id = "turn_gesture_payload_completed"
+    api._active_input_event_key_by_turn_id["turn_gesture_payload_completed"] = "item_parent_payload_completed"
+    api.get_gesture_motion_state = lambda *, tool_call_id: {"status": "completed"}
+
+    response_create_event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_gesture_payload_completed",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+
+    payload = response_create_event.get("response") or {}
+    metadata = payload.get("metadata") or {}
+    instructions = str(payload.get("instructions") or "")
+
+    assert metadata.get("gesture_motion_status") == "completed"
+    assert "definitive completion wording is allowed" in instructions
+    assert "not required" in instructions
+
+
+def test_gesture_followup_payload_unknown_motion_avoids_completion_claims() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    api._current_response_turn_id = "turn_gesture_payload_unknown"
+    api._active_input_event_key_by_turn_id["turn_gesture_payload_unknown"] = "item_parent_payload_unknown"
+    api.get_gesture_motion_state = lambda *, tool_call_id: {"status": "bogus_future_state"}
+
+    response_create_event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_gesture_payload_unknown",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+
+    payload = response_create_event.get("response") or {}
+    metadata = payload.get("metadata") or {}
+    instructions = str(payload.get("instructions") or "")
+
+    assert metadata.get("gesture_motion_status") is None
+    assert "Physical completion is unknown" in instructions
+    assert "avoid final completion claims" in instructions
 
 
 def test_low_risk_gesture_followup_payload_preserves_distinct_motion_state() -> None:
