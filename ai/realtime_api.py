@@ -8769,6 +8769,41 @@ class RealtimeAPI:
             "gesture_attention_snap",
         }
 
+    def _gesture_followup_motion_status(self, *, call_id: str, tool_name: str | None) -> str | None:
+        if not self._is_low_risk_reversible_gesture_tool(tool_name=tool_name):
+            return None
+        motion_state = self.get_gesture_motion_state(tool_call_id=call_id)
+        normalized_status = str((motion_state or {}).get("status") or "").strip().lower()
+        if normalized_status in {"queued", "started", "completed"}:
+            return normalized_status
+        return None
+
+    def _gesture_followup_instruction(self, *, motion_status: str | None) -> str:
+        base_instruction = (
+            "Gesture follow-up only: keep the status update to one short sentence. "
+            "Do not restate or re-answer semantic memory/preferences content already covered by the parent response. "
+            "Do not narrate environment/vision context in gesture-only followups. "
+        )
+        if motion_status == "completed":
+            return (
+                f"{base_instruction}"
+                "The gesture motion is physically complete, so definitive completion wording is allowed but not required."
+            )
+        if motion_status == "started":
+            return (
+                f"{base_instruction}"
+                "The gesture motion has started but is not physically complete yet; use in-progress wording and avoid final completion claims."
+            )
+        if motion_status == "queued":
+            return (
+                f"{base_instruction}"
+                "The gesture request is queued and may begin shortly; acknowledge acceptance/in-progress status and avoid final completion claims."
+            )
+        return (
+            f"{base_instruction}"
+            "Physical completion is unknown; avoid final completion claims."
+        )
+
     def _descriptive_visual_tool_followup_instruction(
         self,
         *,
@@ -8839,13 +8874,15 @@ class RealtimeAPI:
             parent_input_event_key=parent_input_event_key,
         )
         if self._is_low_risk_reversible_gesture_tool(tool_name=normalized_tool_name) and not descriptive_visual_instruction:
+            motion_status = self._gesture_followup_motion_status(
+                call_id=tool_call_id,
+                tool_name=normalized_tool_name,
+            )
             metadata["tool_followup_suppress_if_parent_covered"] = "true"
             metadata["tool_followup_status_only"] = "true"
-            response_payload["instructions"] = (
-                "Gesture follow-up only: acknowledge gesture completion in one short sentence. "
-                "Do not restate or re-answer semantic memory/preferences content already covered by the parent response. "
-                "Do not narrate environment/vision context in gesture-only followups."
-            )
+            if motion_status:
+                metadata["gesture_motion_status"] = motion_status
+            response_payload["instructions"] = self._gesture_followup_instruction(motion_status=motion_status)
         if descriptive_visual_instruction:
             existing_instructions = str(response_payload.get("instructions") or "").strip()
             response_payload["instructions"] = (
