@@ -217,6 +217,7 @@ class MotionController:
             self._init_frame(new_frame, now_ms)
 
         dt_s = self._compute_dt_s(now_ms)
+        nominal_dt_s = self._compute_nominal_dt_s()
         desired_pan = new_frame.servo_destination["pan"]
         desired_tilt = new_frame.servo_destination["tilt"]
         pan_remaining = desired_pan - self.current_servo_position["pan"]
@@ -227,11 +228,11 @@ class MotionController:
                 TUNING.pan_step_max_deg,
                 TUNING.pan_step_scale_deg,
             )
-            / dt_s
+            / nominal_dt_s
         )
-        tilt_v_max_raw = TUNING.tilt_step_max_deg / dt_s
-        pan_v_max = self._smooth_v_max("pan", pan_v_max_raw, dt_s)
-        tilt_v_max = self._smooth_v_max("tilt", tilt_v_max_raw, dt_s)
+        tilt_v_max_raw = TUNING.tilt_step_max_deg / nominal_dt_s
+        pan_v_max = self._smooth_v_max("pan", pan_v_max_raw, nominal_dt_s)
+        tilt_v_max = self._smooth_v_max("tilt", tilt_v_max_raw, nominal_dt_s)
         pan_a_max = TUNING.pan_a_max
         tilt_a_max = TUNING.tilt_a_max
 
@@ -348,8 +349,17 @@ class MotionController:
         self.axis_v_max[axis] = smoothed
         return smoothed
 
+    def _compute_nominal_dt_s(self) -> float:
+        dt_s = max(self.control_loop_period_ms, 1) / 1000.0
+        if dt_s < TUNING.dt_min_s:
+            return TUNING.dt_min_s
+        if dt_s > TUNING.dt_max_s:
+            return TUNING.dt_max_s
+        return dt_s
+
     def _init_frame(self, frame: Keyframe, now_ms: int) -> None:
         frame.start_time_ms = now_ms
+        self._last_update_ms = now_ms - max(self.control_loop_period_ms, 1)
 
         dur = max(0, int(frame.final_target_time))
         frame.deadline_ms = now_ms + dur
