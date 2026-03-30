@@ -1307,6 +1307,7 @@ class ResponseCreateRuntime:
 
         if api._pending_response_create is None and api._response_create_queue:
             api._dedupe_queued_confirmation_reminders()
+            drain_source_trigger = normalized_source_trigger
             queued_candidates: list[tuple[int, int, dict[str, Any], dict[str, Any], str, str, str]] = []
             retained_queue_entries: list[dict[str, Any]] = []
             for queued in list(api._response_create_queue):
@@ -1319,6 +1320,17 @@ class ResponseCreateRuntime:
                     turn_id=picked_turn_id,
                     input_event_key=picked_input_event_key,
                 )
+                if api._is_stale_queued_response_create(queued):
+                    skipped_reason = "stale_queued_response_create"
+                    logger.info(
+                        "response_create_queue_drop_stale run_id=%s turn_id=%s canonical_key=%s origin=%s source_trigger=%s",
+                        api._current_run_id() or "",
+                        picked_turn_id,
+                        canonical_key,
+                        str(picked_origin or "unknown").strip().lower() or "unknown",
+                        drain_source_trigger,
+                    )
+                    continue
                 if api._drop_response_create_for_terminal_state(
                     turn_id=picked_turn_id,
                     input_event_key=picked_input_event_key,
@@ -1390,6 +1402,24 @@ class ResponseCreateRuntime:
         response_metadata = api._extract_response_create_metadata(pending.event)
         queued_trigger = api._extract_response_create_trigger(response_metadata)
         pending_input_event_key = str(response_metadata.get("input_event_key") or "").strip()
+        pending_stale_probe = {
+            "origin": pending.origin,
+            "event": pending.event,
+            "turn_id": pending.turn_id,
+            "enqueued_done_serial": pending.enqueued_done_serial,
+        }
+        if api._is_stale_queued_response_create(pending_stale_probe):
+            api._pending_response_create = None
+            if pending.reason != "legacy_queue_hydration":
+                api._sync_pending_response_create_queue()
+            drain_result = "dropped_stale_queued"
+            skipped_reason = "stale_queued_response_create"
+            _emit_drain_trace(
+                stage="post",
+                queue_len_before_value=queue_len_before,
+                queue_len_after_value=len(getattr(api, "_response_create_queue", deque()) or ()),
+            )
+            return
         selected_pending_origin = pending.origin
         selected_pending_turn_id = pending.turn_id
         selected_pending_input_event_key = pending_input_event_key or "unknown"

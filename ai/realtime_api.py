@@ -13626,16 +13626,30 @@ class RealtimeAPI:
 
     def _is_stale_queued_response_create(self, queued: dict[str, Any]) -> bool:
         origin = str(queued.get("origin") or "").strip().lower()
-        if origin not in {"tool_output", "assistant_message"}:
+        if origin not in {"tool_output", "assistant_message", "upgraded_response"}:
             return False
         enqueued_serial = queued.get("enqueued_done_serial")
         if not isinstance(enqueued_serial, int):
             return False
         completed_distance = self._response_done_serial - enqueued_serial
+        response_metadata = self._extract_response_create_metadata(queued.get("event") or {})
+        if origin == "upgraded_response":
+            if completed_distance < 1:
+                return False
+            turn_id = str(
+                queued.get("turn_id")
+                or response_metadata.get("turn_id")
+                or ""
+            ).strip()
+            if not turn_id or not self._turn_has_final_deliverable(turn_id=turn_id):
+                return False
+            # Upgraded response creates that were deferred behind an active response
+            # become stale once the same turn has already emitted a final
+            # substantive deliverable.
+            return True
         if origin == "assistant_message":
             if completed_distance < 1:
                 return False
-            response_metadata = self._extract_response_create_metadata(queued.get("event") or {})
             approval_flow = str(response_metadata.get("approval_flow", "")).strip().lower()
             if approval_flow in {"true", "1", "yes"} and self._has_active_confirmation_token():
                 return False

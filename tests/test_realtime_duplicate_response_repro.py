@@ -7696,3 +7696,107 @@ def test_tool_followup_release_after_response_done_drains_after_listening_clears
 
     response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
     assert len(response_create_events) == 1
+
+
+def test_stale_queued_upgraded_response_is_dropped_after_final_deliverable() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+
+    turn_id = "turn_interrupt_chain"
+    input_event_key = "item_interrupt_followup"
+    canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+    api._canonical_response_state_mutate(
+        canonical_key=canonical_key,
+        turn_id=turn_id,
+        input_event_key=input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "assistant_message"),
+            setattr(record, "response_id", "resp-substantive"),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "final"),
+            setattr(record, "done", True),
+        ),
+    )
+    api._response_done_serial = 2
+    api._response_create_queue.append(
+        {
+            "websocket": ws,
+            "event": {
+                "type": "response.create",
+                "response": {
+                    "metadata": {
+                        "turn_id": turn_id,
+                        "input_event_key": input_event_key,
+                        "origin": "upgraded_response",
+                    }
+                },
+            },
+            "origin": "upgraded_response",
+            "turn_id": turn_id,
+            "record_ai_call": False,
+            "debug_context": None,
+            "memory_brief_note": None,
+            "enqueued_done_serial": 1,
+            "enqueue_seq": 1,
+        }
+    )
+
+    asyncio.run(api._drain_response_create_queue(source_trigger="playback_complete"))
+
+    assert ws.sent == []
+    assert api._pending_response_create is None
+    assert len(api._response_create_queue) == 0
+
+
+def test_stale_pending_upgraded_response_is_dropped_before_send() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+
+    turn_id = "turn_interrupt_chain_pending"
+    input_event_key = "item_interrupt_followup_pending"
+    canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+    api._canonical_response_state_mutate(
+        canonical_key=canonical_key,
+        turn_id=turn_id,
+        input_event_key=input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "assistant_message"),
+            setattr(record, "response_id", "resp-substantive-pending"),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "final"),
+            setattr(record, "done", True),
+        ),
+    )
+    api._response_done_serial = 3
+    api._pending_response_create = PendingResponseCreate(
+        websocket=ws,
+        event={
+            "type": "response.create",
+            "response": {
+                "metadata": {
+                    "turn_id": turn_id,
+                    "input_event_key": input_event_key,
+                    "origin": "upgraded_response",
+                }
+            },
+        },
+        origin="upgraded_response",
+        turn_id=turn_id,
+        created_at=0.0,
+        reason="active_response",
+        record_ai_call=False,
+        debug_context=None,
+        memory_brief_note=None,
+        queued_reminder_key=None,
+        enqueued_done_serial=1,
+        enqueue_seq=7,
+    )
+
+    asyncio.run(api._drain_response_create_queue(source_trigger="playback_complete"))
+
+    assert ws.sent == []
+    assert api._pending_response_create is None
