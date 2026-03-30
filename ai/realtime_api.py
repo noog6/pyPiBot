@@ -8804,6 +8804,72 @@ class RealtimeAPI:
             "Physical completion is unknown; avoid final completion claims."
         )
 
+    def _log_gesture_followup_truth_snapshot(
+        self,
+        *,
+        turn_id: str,
+        tool_call_id: str,
+        tool_name: str,
+        motion_status: str | None,
+    ) -> None:
+        run_id = str(self._current_run_id() or "").strip() or "unknown"
+        active_step_kind = "none"
+        active_step_status = "none"
+        recent_completed_step_id = "none"
+        next_pending_step_id = "none"
+        final_followup_pending = False
+        open_non_report_steps = False
+        try:
+            brief = self.get_continuity_brief(
+                run_id=run_id,
+                turn_id=turn_id,
+                reason="gesture_followup_truth_snapshot",
+            )
+            compound_state = getattr(brief, "compound_request", None)
+            if compound_state is not None:
+                steps = tuple(getattr(compound_state, "steps", ()) or ())
+                active_idx = getattr(compound_state, "active_step_index", None)
+                if isinstance(active_idx, int) and 0 <= active_idx < len(steps):
+                    active_step = steps[active_idx]
+                    active_step_kind = str(getattr(active_step, "kind", "") or "").strip() or "unknown"
+                    active_step_status = str(getattr(active_step, "status", "") or "").strip() or "unknown"
+                recent_completed_step_id = (
+                    str(getattr(compound_state, "recent_completed_step_id", "") or "").strip() or "none"
+                )
+                next_pending_step_id = (
+                    str(getattr(compound_state, "next_pending_step_id", "") or "").strip() or "none"
+                )
+                final_followup_pending = bool(getattr(compound_state, "final_followup_pending", False))
+                open_non_report_steps = any(
+                    str(getattr(step, "kind", "") or "").strip() != "report"
+                    and str(getattr(step, "status", "") or "").strip() != "completed"
+                    for step in steps
+                )
+        except Exception:
+            logger.debug(
+                "gesture_followup_truth_snapshot_unavailable run_id=%s turn_id=%s tool_call_id=%s",
+                run_id,
+                turn_id,
+                tool_call_id,
+            )
+        logger.info(
+            "gesture_followup_truth_snapshot run_id=%s turn_id=%s tool_call_id=%s tool_name=%s "
+            "motion_status=%s continuity_active_step_kind=%s continuity_active_step_status=%s "
+            "continuity_recent_completed_step_id=%s continuity_next_pending_step_id=%s "
+            "continuity_final_followup_pending=%s continuity_open_non_report_steps=%s",
+            run_id,
+            turn_id,
+            tool_call_id,
+            tool_name,
+            motion_status or "unknown",
+            active_step_kind,
+            active_step_status,
+            recent_completed_step_id,
+            next_pending_step_id,
+            str(final_followup_pending).lower(),
+            str(open_non_report_steps).lower(),
+        )
+
     def _descriptive_visual_tool_followup_instruction(
         self,
         *,
@@ -8877,6 +8943,12 @@ class RealtimeAPI:
             motion_status = self._gesture_followup_motion_status(
                 call_id=tool_call_id,
                 tool_name=normalized_tool_name,
+            )
+            self._log_gesture_followup_truth_snapshot(
+                turn_id=turn_id,
+                tool_call_id=tool_call_id,
+                tool_name=normalized_tool_name,
+                motion_status=motion_status,
             )
             metadata["tool_followup_suppress_if_parent_covered"] = "true"
             metadata["tool_followup_status_only"] = "true"

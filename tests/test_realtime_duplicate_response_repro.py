@@ -4877,6 +4877,49 @@ def test_gesture_followup_payload_completed_motion_allows_completion_wording() -
     assert "not required" in instructions
 
 
+def test_gesture_followup_truth_snapshot_logs_continuity_and_motion_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    api._current_response_turn_id = "turn_gesture_truth_snapshot"
+    api._active_input_event_key_by_turn_id["turn_gesture_truth_snapshot"] = "item_parent_truth_snapshot"
+    api.get_gesture_motion_state = lambda *, tool_call_id: {"status": "started"}
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
+        compound_request=types.SimpleNamespace(
+            steps=(
+                types.SimpleNamespace(step_id="step_1", kind="gesture", status="completed"),
+                types.SimpleNamespace(step_id="step_2", kind="gesture", status="active"),
+                types.SimpleNamespace(step_id="step_3", kind="report", status="pending"),
+            ),
+            active_step_index=1,
+            recent_completed_step_id="step_1",
+            next_pending_step_id="step_3",
+            final_followup_pending=True,
+        )
+    )
+    recorded_logs: list[str] = []
+
+    def _fake_info(message: str, *args: object, **_kwargs: object) -> None:
+        if args:
+            recorded_logs.append(message % args)
+        else:
+            recorded_logs.append(message)
+
+    monkeypatch.setattr("ai.realtime_api.logger.info", _fake_info)
+    api._build_tool_followup_response_create_event(
+        call_id="call_gesture_truth_snapshot",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+    combined_output = "\n".join(recorded_logs)
+
+    assert "gesture_followup_truth_snapshot" in combined_output
+    assert "motion_status=started" in combined_output
+    assert "continuity_active_step_kind=gesture" in combined_output
+    assert "continuity_active_step_status=active" in combined_output
+    assert "continuity_final_followup_pending=true" in combined_output
+    assert "continuity_open_non_report_steps=true" in combined_output
+
+
 def test_gesture_followup_payload_unknown_motion_avoids_completion_claims() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
