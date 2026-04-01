@@ -5015,6 +5015,27 @@ def test_tool_followup_queue_does_not_rebind_turn_active_key_to_tool_key() -> No
     assert api._active_input_event_key_for_turn("turn_1") == "item_parent"
 
 
+def test_tool_followup_continuity_owner_turn_prefers_semantic_owner_trace() -> None:
+    api = _make_api_stub()
+    api._active_response_id = "resp_tool_followup"
+    api._response_trace_context_by_id = {
+        "resp_tool_followup": {
+            "origin": "tool_output",
+            "turn_id": "turn_3",
+            "parent_turn_id": "turn_2",
+            "semantic_owner_turn_id": "turn_2",
+        }
+    }
+
+    owner_turn_id, allow_rebind, reason = api._resolve_continuity_tool_event_owner_turn(
+        fallback_turn_id="turn_3",
+    )
+
+    assert owner_turn_id == "turn_2"
+    assert allow_rebind is True
+    assert reason == "tool_followup_semantic_owner_handoff"
+
+
 def test_catalog_only_descriptive_tool_followup_adds_uncertainty_guardrail_instruction() -> None:
     api = _make_api_stub()
     _wire_runtime(api)

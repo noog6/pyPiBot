@@ -10043,6 +10043,31 @@ class RealtimeAPI:
             "transcript_text": transcript_text,
         }
 
+    def _resolve_continuity_tool_event_owner_turn(
+        self,
+        *,
+        fallback_turn_id: str,
+    ) -> tuple[str, bool, str]:
+        normalized_fallback_turn_id = str(fallback_turn_id or "").strip() or "turn-unknown"
+        active_response_id = str(getattr(self, "_active_response_id", "") or "").strip()
+        if not active_response_id:
+            return normalized_fallback_turn_id, False, ""
+        trace_context = self._response_trace_by_id().get(active_response_id, {})
+        if not isinstance(trace_context, dict):
+            return normalized_fallback_turn_id, False, ""
+        trace_origin = str(trace_context.get("origin") or "").strip().lower()
+        if trace_origin != "tool_output":
+            return normalized_fallback_turn_id, False, ""
+        owner_turn_id = str(
+            trace_context.get("semantic_owner_turn_id")
+            or trace_context.get("parent_turn_id")
+            or trace_context.get("turn_id")
+            or ""
+        ).strip()
+        if not owner_turn_id or owner_turn_id == normalized_fallback_turn_id:
+            return normalized_fallback_turn_id, False, ""
+        return owner_turn_id, True, "tool_followup_semantic_owner_handoff"
+
     def _semantic_owner_decision_for_response(
         self,
         *,
@@ -18524,16 +18549,23 @@ class RealtimeAPI:
                     OrchestrationPhase.ACT,
                     reason=f"function_call {function_name}",
                 )
+                continuity_turn_id, continuity_rebind_allowed, continuity_rebind_reason = (
+                    self._resolve_continuity_tool_event_owner_turn(
+                        fallback_turn_id=self._current_turn_id_or_unknown(),
+                    )
+                )
                 self._apply_continuity_event(
                     "tool_call_started",
                     run_id=self._current_run_id(),
-                    turn_id=self._current_turn_id_or_unknown(),
+                    turn_id=continuity_turn_id,
                     tool_name=function_name,
                     call_id=call_id,
                     commitment_summary=self._continuity_ledger_instance().commitment_summary_for_tool(
                         function_name,
                         self._last_user_input_text,
                     ),
+                    allow_cross_turn_rebind="true" if continuity_rebind_allowed else "",
+                    cross_turn_rebind_reason=continuity_rebind_reason,
                 )
                 await self._execute_action(
                     action,
@@ -18868,12 +18900,19 @@ class RealtimeAPI:
                     marker="tool_result_received",
                     call_id=call_id,
                 )
+                continuity_turn_id, continuity_rebind_allowed, continuity_rebind_reason = (
+                    self._resolve_continuity_tool_event_owner_turn(
+                        fallback_turn_id=self._current_turn_id_or_unknown(),
+                    )
+                )
                 self._apply_continuity_event(
                     "tool_result_received",
                     run_id=self._current_run_id(),
-                    turn_id=self._current_turn_id_or_unknown(),
+                    turn_id=continuity_turn_id,
                     tool_name=function_name,
                     call_id=call_id,
+                    allow_cross_turn_rebind="true" if continuity_rebind_allowed else "",
+                    cross_turn_rebind_reason=continuity_rebind_reason,
                 )
             except Exception as exc:
                 error_message = f"Error executing function '{function_name}': {exc}"
