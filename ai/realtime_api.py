@@ -9378,7 +9378,16 @@ class RealtimeAPI:
     ) -> ToolFollowupArbitrationArtifact:
         suppressible = str(response_metadata.get("tool_followup_suppress_if_parent_covered", "")).strip().lower() in {"true", "1", "yes"}
         tool_name = str(response_metadata.get("tool_name") or "").strip().lower()
+        is_low_risk_reversible_gesture_tool = self._is_low_risk_reversible_gesture_tool(tool_name=tool_name)
         has_distinct_info = str(response_metadata.get("tool_result_has_distinct_info", "")).strip().lower() in {"true", "1", "yes"}
+        followthrough_turn_id = str(
+            response_metadata.get("parent_turn_id")
+            or response_metadata.get("turn_id")
+            or ""
+        ).strip()
+        followthrough_chain_remaining = False
+        if followthrough_turn_id and is_low_risk_reversible_gesture_tool:
+            followthrough_chain_remaining = self._gesture_followthrough_chain_remaining(turn_id=followthrough_turn_id)
         state_entry = self._resolve_parent_state_for_tool_followup(
             response_metadata=response_metadata,
             blocked_by_response_id=blocked_by_response_id,
@@ -9464,7 +9473,8 @@ class RealtimeAPI:
         decision = decide_tool_followup_arbitration(
             suppressible=suppressible,
             has_distinct_info=has_distinct_info,
-            is_low_risk_reversible_gesture_tool=self._is_low_risk_reversible_gesture_tool(tool_name=tool_name),
+            followthrough_chain_remaining=followthrough_chain_remaining,
+            is_low_risk_reversible_gesture_tool=is_low_risk_reversible_gesture_tool,
             parent_resolved=state_entry is not None,
             parent_origin=parent_origin,
             parent_done=parent_done,
@@ -9811,6 +9821,37 @@ class RealtimeAPI:
             turn_id=parent_turn_id,
             include_report_followup=include_report_followup,
         )
+
+    def _gesture_followthrough_chain_remaining(self, *, turn_id: str) -> bool:
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return False
+        if not self._turn_followthrough_chain_remaining(
+            turn_id=normalized_turn_id,
+            include_report_followup=False,
+        ):
+            return False
+        run_id = str(self._current_run_id() or "").strip()
+        if not run_id:
+            return False
+        brief = self.get_continuity_brief(
+            run_id=run_id,
+            turn_id=normalized_turn_id,
+            reason="tool_followup_gesture_followthrough_guard",
+        )
+        compound_state = getattr(brief, "compound_request", None)
+        if compound_state is None:
+            return False
+        steps = tuple(getattr(compound_state, "steps", ()) or ())
+        active_step_index = getattr(compound_state, "active_step_index", None)
+        if not isinstance(active_step_index, int) or not (0 <= active_step_index < len(steps)):
+            return False
+        active_step = steps[active_step_index]
+        active_kind = str(getattr(active_step, "kind", "") or "").strip().lower()
+        active_status = str(getattr(active_step, "status", "") or "").strip().lower()
+        if active_kind != "gesture":
+            return False
+        return active_status != "completed"
 
     def _turn_followthrough_chain_remaining(self, *, turn_id: str, include_report_followup: bool = True) -> bool:
         normalized_turn_id = str(turn_id or "").strip()
