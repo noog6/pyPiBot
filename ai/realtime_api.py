@@ -16589,6 +16589,13 @@ class RealtimeAPI:
                     expected_input_event_key,
                     self._active_response_id or "unknown",
                 )
+                self._quarantine_cancelled_response_id(
+                    response_id=self._active_response_id,
+                    turn_id=turn_id,
+                    input_event_key=expected_input_event_key,
+                    origin="server_auto",
+                    reason="server_auto_binding_guard",
+                )
                 cancel_event = {"type": "response.cancel"}
                 log_ws_event("Outgoing", cancel_event)
                 self._track_outgoing_event(cancel_event, origin="server_auto_binding_guard")
