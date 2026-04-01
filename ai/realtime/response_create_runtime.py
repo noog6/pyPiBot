@@ -17,6 +17,7 @@ from ai.decision_arbitration_adapter import (
     summarize_turn_arbitration_trace,
 )
 from ai.interaction_lifecycle_policy import ResponseCreateDecision
+from ai.contract_breach import ContractBreachSnapshot, detect_contract_breach
 from ai.response_create_arbitration import (
     ResponseCreateArbitrationDecision,
     decide_response_create_arbitration,
@@ -316,6 +317,32 @@ class ResponseCreateRuntime:
             snapshot.pending_server_auto_present,
             snapshot.tool_followup_state,
         )
+        breach_artifact = detect_contract_breach(
+            ContractBreachSnapshot(
+                source_seam="response_create_runtime",
+                turn_id=snapshot.turn_id,
+                response_id="none",
+                origin=str(snapshot.normalized_origin or "unknown").strip().lower(),
+                canonical_key=snapshot.canonical_key,
+                reason_code=decision.reason_code,
+                is_tool_followup=bool(snapshot.tool_followup),
+                create_action=decision.action.value,
+            )
+        )
+        if breach_artifact is not None:
+            logger.info(
+                "contract_breach_detected breach_type=%s source_seam=%s canonical_key=%s turn_id=%s response_id=%s origin=%s reason_code=%s recommended_action=%s fingerprint=%s evidence=%s",
+                breach_artifact.breach_type.value,
+                breach_artifact.source_seam,
+                breach_artifact.canonical_key,
+                breach_artifact.turn_id,
+                breach_artifact.response_id,
+                breach_artifact.origin,
+                breach_artifact.reason_code,
+                breach_artifact.recommended_action.value,
+                breach_artifact.fingerprint,
+                "|".join(breach_artifact.evidence),
+            )
 
     def prepare_response_create_snapshot(
         self,

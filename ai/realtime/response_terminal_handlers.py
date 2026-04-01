@@ -21,6 +21,7 @@ from ai.decision_arbitration_adapter import (
 from interaction import InteractionState
 from ai.orchestration import OrchestrationPhase
 from ai.realtime.asr_trust import topic_mismatch_detected
+from ai.contract_breach import ContractBreachSnapshot, detect_contract_breach
 from ai.utils import RUN_TIME_TABLE_LOG_JSON
 
 if TYPE_CHECKING:
@@ -832,6 +833,38 @@ class ResponseTerminalHandlers:
             continuity_turn_id = continuity_candidate_turn_id
             continuity_rebind_allowed = True
             continuity_rebind_reason = "semantic_owner_parent_promoted"
+        # Use raw execution seam facts (done_canonical_key + selection_reason) for
+        # observability to avoid conflating semantic-owner promotions.
+        breach_artifact = detect_contract_breach(
+            ContractBreachSnapshot(
+                source_seam="response_terminal_handlers",
+                turn_id=turn_id,
+                response_id=str(active_response_id_before_clear or "none"),
+                origin=str(active_response_origin_before_clear or "unknown").strip().lower(),
+                canonical_key=done_canonical_key,
+                reason_code=str(selection_reason or "unknown"),
+                is_terminal_event=True,
+                selected_deliverable=bool(selected),
+                is_empty_done=bool(is_empty_done),
+                pending_tool_followup=bool(pending_tool_followup_after_release),
+                followthrough_chain_remaining=bool(followthrough_chain_remaining_for_close),
+            )
+        )
+        if breach_artifact is not None:
+            logger.info(
+                "contract_breach_detected breach_type=%s source_seam=%s canonical_key=%s turn_id=%s response_id=%s origin=%s reason_code=%s recommended_action=%s fingerprint=%s evidence=%s",
+                breach_artifact.breach_type.value,
+                breach_artifact.source_seam,
+                breach_artifact.canonical_key,
+                breach_artifact.turn_id,
+                breach_artifact.response_id,
+                breach_artifact.origin,
+                breach_artifact.reason_code,
+                breach_artifact.recommended_action.value,
+                breach_artifact.fingerprint,
+                "|".join(breach_artifact.evidence),
+            )
+
         logger.info(
             "continuity_response_done_handoff turn_id=%s continuity_turn_id=%s selected=%s selection_reason=%s close_commitment=%s close_unresolved=%s complete_final_report=%s followthrough_chain_remaining=%s allow_cross_turn_rebind=%s rebind_reason=%s semantic_parent_turn_id=%s done_canonical_key=%s semantic_owner_canonical_key=%s",
             turn_id,
