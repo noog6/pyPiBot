@@ -3175,6 +3175,34 @@ class RealtimeAPI:
         )
         return True
 
+    def _should_hold_turn_for_non_substantive_talk_over(self) -> bool:
+        active_turn_id = str(self._current_turn_id_or_unknown() or "").strip() or "turn-unknown"
+        if active_turn_id == "turn-unknown":
+            return False
+        followthrough_remaining = self._turn_followthrough_chain_remaining(
+            turn_id=active_turn_id,
+            include_report_followup=True,
+        )
+        if not followthrough_remaining:
+            return False
+        active_origin = str(getattr(self, "_active_response_origin", "") or "").strip().lower()
+        active_response_id = str(getattr(self, "_active_response_id", "") or "").strip()
+        active_tool_output = active_origin == "tool_output" and bool(active_response_id)
+        interrupted_candidates = self._pending_interrupted_tool_output_candidates_for_turn(
+            interruption_turn_id=active_turn_id,
+        )
+        hold_turn = active_tool_output or bool(interrupted_candidates)
+        logger.info(
+            "talk_over_turn_hold_decision run_id=%s turn_id=%s hold_turn=%s active_origin=%s followthrough_remaining=%s interrupted_candidates=%s",
+            self._current_run_id() or "",
+            active_turn_id,
+            str(hold_turn).lower(),
+            active_origin or "unknown",
+            str(followthrough_remaining).lower(),
+            len(interrupted_candidates),
+        )
+        return hold_turn
+
     def _is_interrupted_tool_output_candidate(
         self,
         *,

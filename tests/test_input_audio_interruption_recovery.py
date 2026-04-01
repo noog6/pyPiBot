@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
+import types
 from types import SimpleNamespace
+
+if "audioop" not in sys.modules:
+    sys.modules["audioop"] = types.ModuleType("audioop")
 
 from ai.realtime.input_audio_events import InputAudioEventHandlers
 from interaction import InteractionState
@@ -32,7 +37,7 @@ class _Manager:
         _ = reason
 
 
-def _api_stub(*, defer_interrupt: bool):
+def _api_stub(*, defer_interrupt: bool, hold_turn: bool = False):
     api = SimpleNamespace()
     api._reset_utterance_info_summary = lambda: None
     api._mark_utterance_info_summary = lambda **_kwargs: None
@@ -49,15 +54,20 @@ def _api_stub(*, defer_interrupt: bool):
     api._get_or_create_transport = lambda: _Transport()
     api._utterance_counter = 0
     api._next_response_turn_id = lambda: "turn-2"
+    api._should_hold_turn_for_non_substantive_talk_over = lambda: hold_turn
 
     class _Scope:
+        def __init__(self, *, turn_id: str):
+            self._turn_id = turn_id
+
         def __enter__(self):
+            api._current_response_turn_id = self._turn_id
             return None
 
         def __exit__(self, *_args):
             return False
 
-    api._utterance_context_scope = lambda **_kwargs: _Scope()
+    api._utterance_context_scope = lambda **kwargs: _Scope(turn_id=kwargs.get("turn_id", "turn-unknown"))
     api._active_utterance = None
     api._log_utterance_envelope = lambda *_args, **_kwargs: None
     api._has_active_confirmation_token = lambda: False
@@ -86,3 +96,23 @@ def test_talk_over_cancel_not_sent_for_deferred_tool_output_candidate() -> None:
     asyncio.run(handler.handle_input_audio_buffer_speech_started({}, ws))
 
     assert ws.sent == []
+
+
+def test_talk_over_hold_keeps_existing_authoritative_turn() -> None:
+    api = _api_stub(defer_interrupt=True, hold_turn=True)
+    handler = InputAudioEventHandlers(api)
+    ws = _Ws()
+
+    asyncio.run(handler.handle_input_audio_buffer_speech_started({}, ws))
+
+    assert api._current_response_turn_id == "turn-1"
+
+
+def test_talk_over_without_hold_still_advances_turn() -> None:
+    api = _api_stub(defer_interrupt=True, hold_turn=False)
+    handler = InputAudioEventHandlers(api)
+    ws = _Ws()
+
+    asyncio.run(handler.handle_input_audio_buffer_speech_started({}, ws))
+
+    assert api._current_response_turn_id == "turn-2"
