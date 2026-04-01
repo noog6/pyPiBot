@@ -940,3 +940,37 @@ def test_evaluate_response_create_attempt_logs_turn_diagnostics() -> None:
     assert payload["trace_partial"] is True
     assert "expected_terminal_selection_missing" in payload["diagnostic_codes"]
     assert payload["observational_only"] is True
+
+
+def test_response_create_runtime_logs_contract_breach_for_tool_followup_owner_mismatch(monkeypatch) -> None:
+    api = _make_api_stub()
+    runtime = api._response_create_runtime
+    info_messages = _capture_info_messages(monkeypatch)
+    event = {
+        "type": "response.create",
+        "response": {
+            "metadata": {
+                "turn_id": "turn_tool",
+                "input_event_key": "tool:call_1",
+                "tool_followup": "true",
+                "tool_call_id": "call_1",
+            }
+        },
+    }
+    snapshot = runtime.prepare_response_create_snapshot(
+        response_create_event=event,
+        origin="tool_output",
+        utterance_context=None,
+        memory_brief_note=None,
+        now=1.0,
+    )
+    decision = runtime._build_execution_decision(
+        action=ResponseCreateOutcomeAction.DROP,
+        reason_code="same_turn_already_owned",
+        explanation="drop",
+        selected_candidate_id="same_turn_owner",
+    )
+
+    runtime._log_response_create_outcome(snapshot=snapshot, decision=decision)
+
+    assert any("contract_breach_detected" in msg for msg in info_messages)

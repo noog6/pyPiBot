@@ -2868,3 +2868,25 @@ def test_continuity_summary_turn_close_logger_deduplicates_same_turn() -> None:
     assert "settlement_detail=origin=user_transcript |" in summary
     assert "current=[ongoing/active:Do you know what your battery voltage is at? [origin=user_transcript]]" in summary
     assert "recently_closed=[-]" in summary
+
+
+def test_handle_response_done_logs_contract_breach_for_empty_tool_followup_done() -> None:
+    api = _make_api()
+    api._active_response_origin = "tool_output"
+    api._is_empty_response_done = lambda **_kwargs: True
+    api._turn_has_pending_tool_followup = lambda **_kwargs: True
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+
+    with patch("ai.realtime.response_terminal_handlers.logger.info") as info_log:
+        asyncio.run(api.handle_response_done({"type": "response.done"}))
+
+    logged = [call.args[0] for call in info_log.call_args_list if call.args]
+    assert any("contract_breach_detected" in message for message in logged)
