@@ -7,6 +7,7 @@ import logging
 import sys
 import types
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 if "audioop" not in sys.modules:
@@ -1242,6 +1243,77 @@ def test_handle_response_done_parent_promoted_cross_turn_final_tool_report_clear
     parent_brief = api.get_continuity_brief("run-test", "turn_2", reason="post_cross_turn_parent_promoted_tool_report")
     assert parent_brief.compound_request is None
     assert parent_brief.commitments == ()
+
+
+def test_handle_response_done_parent_promoted_followthrough_guard_uses_parent_turn_for_final_close() -> None:
+    api = _make_api()
+    api._current_turn_id_or_unknown = lambda: "turn_3"
+    api._active_input_event_key_for_turn = lambda turn_id: "item_parent" if turn_id == "turn_2" else "tool:call_final"
+    api._apply_continuity_event(
+        "transcript_final",
+        text="Look right, check diagnostics, then report done.",
+        source="input_audio_transcription",
+        turn_id="turn_2",
+    )
+    api._apply_continuity_event(
+        "tool_result_received",
+        tool_name="gesture_look_right",
+        call_id="call-1",
+        turn_id="turn_2",
+    )
+    api._apply_continuity_event(
+        "tool_result_received",
+        tool_name="read_runtime_diagnostics",
+        call_id="call-2",
+        turn_id="turn_2",
+    )
+    real_apply_continuity_event = RealtimeAPI._apply_continuity_event.__get__(api, RealtimeAPI)
+    apply_continuity_event = Mock(side_effect=real_apply_continuity_event)
+    api._apply_continuity_event = apply_continuity_event
+    api._active_response_origin = "tool_output"
+    api._active_response_input_event_key = "tool:call_final"
+    api._active_response_canonical_key = "turn_3::tool:call_final"
+    api._active_response_id = "resp_tool_final"
+    checked_turn_ids: list[str] = []
+
+    def _followthrough(**kwargs: Any) -> bool:
+        turn_id = str(kwargs.get("turn_id") or "")
+        checked_turn_ids.append(turn_id)
+        return turn_id == "turn_3"
+
+    api._response_done_followthrough_chain_remaining = _followthrough
+    api._terminal_response_text_by_response_id = {"resp_tool_final": "I'm back to center. Diagnostics are connected."}
+    api._semantic_owner_decision_for_response = Mock(
+        return_value=SimpleNamespace(
+            semantic_owner_canonical_key="turn_2::item_parent",
+            parent_turn_id="turn_2",
+            parent_input_event_key="item_parent",
+            selected_candidate_id="semantic_owner_parent",
+            reason_code="parent_promoted_from_tool_output",
+        )
+    )
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_tool_final"}}))
+
+    assert checked_turn_ids[-1] == "turn_2"
+    response_done_calls = [call for call in apply_continuity_event.call_args_list if call.args and call.args[0] == "response_done"]
+    assert len(response_done_calls) == 1
+    _, kwargs = response_done_calls[0]
+    assert kwargs["turn_id"] == "turn_2"
+    assert kwargs["close_commitment"] == "true"
+    assert kwargs["close_unresolved"] == "true"
+    assert kwargs["complete_final_report"] == "true"
+    assert kwargs["allow_cross_turn_rebind"] == "true"
+    assert kwargs["cross_turn_rebind_reason"] == "semantic_owner_parent_promoted"
 
 
 def test_handle_response_done_logs_continuity_handoff_fields(monkeypatch) -> None:
