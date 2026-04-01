@@ -8804,6 +8804,40 @@ class RealtimeAPI:
             "Physical completion is unknown; avoid final completion claims."
         )
 
+    def _gesture_followup_should_remain_status_only(self, *, turn_id: str) -> bool:
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return True
+        run_id = str(self._current_run_id() or "").strip()
+        if not run_id:
+            return True
+        try:
+            brief = self.get_continuity_brief(
+                run_id=run_id,
+                turn_id=normalized_turn_id,
+                reason="gesture_followup_status_only_guard",
+            )
+        except Exception:
+            logger.debug(
+                "gesture_followup_status_only_guard_unavailable run_id=%s turn_id=%s",
+                run_id,
+                normalized_turn_id,
+            )
+            return True
+        compound_state = getattr(brief, "compound_request", None)
+        if compound_state is None:
+            return True
+        final_followup_pending = bool(getattr(compound_state, "final_followup_pending", False))
+        if not final_followup_pending:
+            return True
+        steps = tuple(getattr(compound_state, "steps", ()) or ())
+        open_non_report_steps = any(
+            str(getattr(step, "kind", "") or "").strip() != "report"
+            and str(getattr(step, "status", "") or "").strip() != "completed"
+            for step in steps
+        )
+        return open_non_report_steps
+
     def _log_gesture_followup_truth_snapshot(
         self,
         *,
@@ -8940,6 +8974,7 @@ class RealtimeAPI:
             parent_input_event_key=parent_input_event_key,
         )
         if self._is_low_risk_reversible_gesture_tool(tool_name=normalized_tool_name) and not descriptive_visual_instruction:
+            keep_status_only = self._gesture_followup_should_remain_status_only(turn_id=turn_id)
             motion_status = self._gesture_followup_motion_status(
                 call_id=tool_call_id,
                 tool_name=normalized_tool_name,
@@ -8950,11 +8985,23 @@ class RealtimeAPI:
                 tool_name=normalized_tool_name,
                 motion_status=motion_status,
             )
-            metadata["tool_followup_suppress_if_parent_covered"] = "true"
-            metadata["tool_followup_status_only"] = "true"
-            if motion_status:
-                metadata["gesture_motion_status"] = motion_status
-            response_payload["instructions"] = self._gesture_followup_instruction(motion_status=motion_status)
+            if keep_status_only:
+                metadata["tool_followup_suppress_if_parent_covered"] = "true"
+                metadata["tool_followup_status_only"] = "true"
+                if motion_status:
+                    metadata["gesture_motion_status"] = motion_status
+                response_payload["instructions"] = self._gesture_followup_instruction(motion_status=motion_status)
+            else:
+                existing_instructions = str(response_payload.get("instructions") or "").strip()
+                report_instruction = (
+                    "Final follow-up report is still owed for the parent turn. "
+                    "Now deliver that completion report in one concise sentence."
+                )
+                response_payload["instructions"] = (
+                    f"{existing_instructions} {report_instruction}".strip()
+                    if existing_instructions
+                    else report_instruction
+                )
         if descriptive_visual_instruction:
             existing_instructions = str(response_payload.get("instructions") or "").strip()
             response_payload["instructions"] = (
