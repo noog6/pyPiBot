@@ -1336,7 +1336,10 @@ def test_handle_response_done_parent_promoted_followthrough_guard_uses_parent_tu
 
     def _followthrough(**kwargs: Any) -> bool:
         turn_id = str(kwargs.get("turn_id") or "")
+        include_report_followup = bool(kwargs.get("include_report_followup", True))
         checked_turn_ids.append(turn_id)
+        if not include_report_followup:
+            return False
         return turn_id == "turn_3"
 
     api._response_done_followthrough_chain_remaining = _followthrough
@@ -1474,6 +1477,8 @@ def test_handle_response_done_parent_promoted_intermediate_tool_output_does_not_
     api._active_response_id = "resp_tool_middle"
     api._response_done_followthrough_chain_remaining = lambda **_kwargs: True
     api._terminal_response_text_by_response_id = {"resp_tool_middle": "Mid-step status."}
+    apply_selection = Mock()
+    api._apply_terminal_deliverable_selection = apply_selection
     api._semantic_owner_decision_for_response = Mock(
         return_value=SimpleNamespace(
             semantic_owner_canonical_key="turn_2::item_parent",
@@ -1501,6 +1506,9 @@ def test_handle_response_done_parent_promoted_intermediate_tool_output_does_not_
     assert kwargs["turn_id"] == "turn_3"
     assert kwargs["allow_cross_turn_rebind"] == ""
     assert kwargs["complete_final_report"] == ""
+    apply_selection.assert_called_once()
+    assert apply_selection.call_args.kwargs["selected"] is False
+    assert apply_selection.call_args.kwargs["selection_reason"] == "tool_followup_precedence"
     parent_brief = api.get_continuity_brief("run-test", "turn_2", reason="post_cross_turn_intermediate_tool_output")
     assert parent_brief.compound_request is not None
     assert any(step.kind == "report" and step.status == "pending" for step in parent_brief.compound_request.steps)

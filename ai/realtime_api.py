@@ -9866,6 +9866,12 @@ class RealtimeAPI:
                 origin=normalized_origin,
                 response_id=response_id,
             ),
+            followthrough_non_report_steps_remaining=self._response_done_followthrough_chain_remaining(
+                turn_id=turn_id,
+                origin=normalized_origin,
+                response_id=response_id,
+                include_report_followup=False,
+            ),
             exact_phrase_obligation_open=self._turn_contract_exact_phrase_open(
                 turn_id=turn_id,
                 response_id=response_id,
