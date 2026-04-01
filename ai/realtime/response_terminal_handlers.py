@@ -785,8 +785,21 @@ class ResponseTerminalHandlers:
         if interrupted_tool_output_candidate:
             continuity_close_allowed = False
         continuity_origin = str(active_response_origin_before_clear or "").strip().lower()
+        semantic_parent_turn_id = str(getattr(semantic_owner_decision, "parent_turn_id", "") or "").strip()
+        continuity_candidate_turn_id = turn_id
+        continuity_candidate_rebind = False
+        if (
+            continuity_origin == "tool_output"
+            and selected
+            and semantic_parent_turn_id
+            and semantic_parent_turn_id != turn_id
+            and semantic_owner_canonical_key
+            and semantic_owner_canonical_key != done_canonical_key
+        ):
+            continuity_candidate_turn_id = semantic_parent_turn_id
+            continuity_candidate_rebind = True
         followthrough_chain_remaining_for_close = api._response_done_followthrough_chain_remaining(
-            turn_id=turn_id,
+            turn_id=continuity_candidate_turn_id,
             origin=active_response_origin_before_clear,
             response_id=active_response_id_before_clear,
             include_report_followup=False,
@@ -809,18 +822,14 @@ class ResponseTerminalHandlers:
                 response_id=resolved_response_id or active_response_id_before_clear
             )
         )
-        semantic_parent_turn_id = str(getattr(semantic_owner_decision, "parent_turn_id", "") or "").strip()
         continuity_turn_id = turn_id
         continuity_rebind_allowed = False
         continuity_rebind_reason = ""
         if (
-            continuity_complete_final_report
-            and semantic_parent_turn_id
-            and semantic_parent_turn_id != turn_id
-            and semantic_owner_canonical_key
-            and semantic_owner_canonical_key != done_canonical_key
+            continuity_close_commitment
+            and continuity_candidate_rebind
         ):
-            continuity_turn_id = semantic_parent_turn_id
+            continuity_turn_id = continuity_candidate_turn_id
             continuity_rebind_allowed = True
             continuity_rebind_reason = "semantic_owner_parent_promoted"
         logger.info(
