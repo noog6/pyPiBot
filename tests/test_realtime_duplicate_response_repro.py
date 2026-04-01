@@ -4807,6 +4807,8 @@ def test_low_risk_gesture_followup_payload_is_status_only() -> None:
     assert metadata.get("tool_followup") == "true"
     assert metadata.get("tool_followup_suppress_if_parent_covered") == "true"
     assert metadata.get("tool_followup_status_only") == "true"
+    assert metadata.get("tool_followup_silent_audio") == "true"
+    assert metadata.get("tool_followup_silent_user_facing_output") == "true"
     assert "Gesture follow-up only" in instructions
     assert "avoid final completion claims" in instructions
 
@@ -4974,6 +4976,8 @@ def test_low_risk_gesture_followup_drops_status_only_when_only_report_followup_r
 
     assert metadata.get("tool_followup_status_only") is None
     assert metadata.get("tool_followup_suppress_if_parent_covered") is None
+    assert metadata.get("tool_followup_silent_audio") is None
+    assert metadata.get("tool_followup_silent_user_facing_output") is None
     assert "Final follow-up report is still owed for the parent turn." in instructions
 
 
