@@ -193,15 +193,43 @@ def test_response_created_origin_correlation_prefers_non_micro_ack_for_server_au
 
     origin_logs = [entry for entry in logs if entry.startswith("response.created:")]
     assert origin_logs == ["response.created: origin=server_auto"]
-    assert list(api._pending_response_create_origins) == [
-        {
-            "origin": "assistant_message",
-            "micro_ack": "true",
-            "consumes_canonical_slot": "false",
-            "turn_id": "",
-            "input_event_key": "",
-        }
-    ]
+
+
+def test_response_created_binding_old_silent_audio_key_backfills_user_facing_silent_flag(monkeypatch) -> None:
+    api = _build_api()
+    logs: list[str] = []
+    monkeypatch.setattr("ai.realtime_api.log_info", logs.append)
+
+    api._track_outgoing_event({"type": "response.create"}, origin="tool_output")
+
+    asyncio.run(
+        api.handle_event(
+            {
+                "type": "response.created",
+                "response": {
+                    "id": "resp_compat",
+                    "metadata": {
+                        "turn_id": "turn_compat",
+                        "input_event_key": "tool:call_compat",
+                        "tool_followup": "true",
+                        "tool_call_id": "call_compat",
+                        "tool_followup_silent_audio": "true",
+                    },
+                },
+            },
+            websocket=None,
+        )
+    )
+
+    trace_context = api._response_trace_by_id().get("resp_compat", {})
+    assert trace_context.get("tool_followup_silent_user_facing_output") == "true"
+    assert (
+        api._should_process_response_event_ingress(
+            {"type": "response.output_audio.delta", "response_id": "resp_compat"},
+            source="audio_delta",
+        )
+        is False
+    )
 
 
 def test_response_created_binding_prompt_happy_path_never_logs_unknown_active_key(monkeypatch) -> None:

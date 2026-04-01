@@ -7286,6 +7286,39 @@ class RealtimeAPI:
         response_id = self._response_id_from_event(event)
         if self._should_drop_stale_response_event(event):
             return False
+        trace_context = self._response_trace_by_id().get(response_id, {}) if response_id else {}
+        silent_tool_followup_output = (
+            str(
+                trace_context.get("tool_followup_silent_user_facing_output")
+                or trace_context.get("tool_followup_silent_audio")
+                or ""
+            ).strip().lower() in {"true", "1", "yes"}
+        )
+        if silent_tool_followup_output and event_type in {
+            "response.output_audio.delta",
+            "response.output_audio.done",
+            "response.output_audio_transcript.delta",
+            "response.output_audio_transcript.done",
+            "response.audio_transcript.done",
+        }:
+            if event_type == "response.output_audio.done":
+                self._mark_tool_followup_timing(
+                    turn_id=str(trace_context.get("turn_id") or self._current_turn_id_or_unknown()).strip() or "turn-unknown",
+                    marker="followup_output_audio_done_suppressed",
+                    call_id=str(trace_context.get("tool_call_id") or "").strip() or None,
+                    canonical_key=str(trace_context.get("canonical_key") or "").strip() or None,
+                    response_id=response_id or None,
+                    is_tool_followup=True,
+                    released=str(trace_context.get("tool_followup_release") or "").strip().lower() in {"true", "1", "yes"},
+                )
+            logger.info(
+                "tool_followup_user_facing_output_suppressed run_id=%s response_id=%s canonical_key=%s event_type=%s reason=intermediate_non_report_followthrough",
+                self._current_run_id() or "",
+                response_id or "unknown",
+                str(trace_context.get("canonical_key") or "").strip() or "unknown",
+                event_type,
+            )
+            return False
         cancelled_ids = getattr(self, "_cancelled_response_ids", set())
         if (
             event_type == "response.completed"
@@ -9030,6 +9063,8 @@ class RealtimeAPI:
             if keep_status_only:
                 metadata["tool_followup_suppress_if_parent_covered"] = "true"
                 metadata["tool_followup_status_only"] = "true"
+                metadata["tool_followup_silent_audio"] = "true"
+                metadata["tool_followup_silent_user_facing_output"] = "true"
                 if motion_status:
                     metadata["gesture_motion_status"] = motion_status
                 response_payload["instructions"] = self._gesture_followup_instruction(motion_status=motion_status)
@@ -16864,6 +16899,14 @@ class RealtimeAPI:
             metadata_tool_followup = str((response_metadata or {}).get("tool_followup") or "").strip().lower()
             metadata_tool_followup_release = str((response_metadata or {}).get("tool_followup_release") or "").strip().lower()
             metadata_tool_call_id = str((response_metadata or {}).get("tool_call_id") or "").strip()
+            metadata_tool_followup_silent_audio = str(
+                (response_metadata or {}).get("tool_followup_silent_audio") or ""
+            ).strip().lower()
+            metadata_tool_followup_silent_user_facing_output = str(
+                (response_metadata or {}).get("tool_followup_silent_user_facing_output")
+                or (response_metadata or {}).get("tool_followup_silent_audio")
+                or ""
+            ).strip().lower()
             metadata_trigger = str((response_metadata or {}).get("trigger") or "").strip().lower()
             metadata_reason = str((response_metadata or {}).get("reason") or "").strip().lower()
             self._record_response_trace_context(
@@ -16879,6 +16922,8 @@ class RealtimeAPI:
                 parent_input_event_key=str((response_metadata or {}).get("parent_input_event_key") or ""),
                 tool_followup=metadata_tool_followup,
                 tool_followup_release=metadata_tool_followup_release,
+                tool_followup_silent_audio=metadata_tool_followup_silent_audio,
+                tool_followup_silent_user_facing_output=metadata_tool_followup_silent_user_facing_output,
                 tool_call_id=metadata_tool_call_id,
             )
             pref_payload = self._peek_pending_preference_memory_context_payload(

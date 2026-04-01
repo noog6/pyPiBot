@@ -6,13 +6,14 @@ from contextlib import contextmanager
 import types
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 if "audioop" not in sys.modules:
     sys.modules["audioop"] = types.ModuleType("audioop")
 
 from ai.realtime.event_router import EventRouter
 from ai.realtime_api import RealtimeAPI
+from interaction import InteractionState
 
 
 TARGET_EVENT_TYPES = {
@@ -192,6 +193,145 @@ def test_cancelled_audio_delta_is_suppressed_without_side_effects() -> None:
         "run-123",
         "resp-cancelled",
     )
+
+
+def test_status_only_tool_followup_audio_delta_is_suppressed_without_side_effects() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._cancelled_response_ids = set()
+    api._suppressed_audio_response_ids = set()
+    api._superseded_response_ids = set()
+    api._response_trace_context_by_id = {
+        "resp-status-only": {
+            "tool_followup_silent_audio": "true",
+            "canonical_key": "run-123:turn-1:tool:call-status-only",
+        }
+    }
+    api._current_run_id = lambda: "run-123"
+    api._audio_accum = bytearray(b"seed")
+    api._audio_accum_response_id = "resp-other"
+    api._mic_receive_on_first_audio = True
+    api._audio_playback_busy = False
+    api._speaking_started = False
+    api._is_active_response_guarded = lambda: False
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._cancel_micro_ack = lambda **_kwargs: None
+    api._current_turn_id_or_unknown = lambda: "turn-1"
+    api._canonical_response_state_mutate = lambda **_kwargs: None
+    api._canonical_lifecycle_state = lambda _key: {}
+    api._lifecycle_controller = lambda: SimpleNamespace(on_audio_delta=lambda _key: None)
+    api._active_response_canonical_key = ""
+    api.audio_player = SimpleNamespace(play_audio=AsyncMock())
+    api.mic = SimpleNamespace(is_receiving=False, start_receiving=AsyncMock())
+    api.state_manager = SimpleNamespace(update_state=AsyncMock())
+
+    with patch("ai.realtime_api.logger.info") as info_log:
+        asyncio.run(
+            api._handle_response_output_audio_delta_event(
+                {
+                    "type": "response.output_audio.delta",
+                    "response": {"id": "resp-status-only"},
+                    "delta": "c29tZV9hdWRpbw==",
+                },
+                None,
+            )
+        )
+
+    assert api._audio_accum == bytearray(b"seed")
+    assert api._mic_receive_on_first_audio is True
+    assert api._audio_playback_busy is False
+    assert api._speaking_started is False
+    api.mic.start_receiving.assert_not_called()
+    api.state_manager.update_state.assert_not_called()
+    api.audio_player.play_audio.assert_not_called()
+    info_log.assert_any_call(
+        "tool_followup_user_facing_output_suppressed run_id=%s response_id=%s canonical_key=%s event_type=%s reason=intermediate_non_report_followthrough",
+        "run-123",
+        "resp-status-only",
+        "run-123:turn-1:tool:call-status-only",
+        "response.output_audio.delta",
+    )
+
+
+def test_silent_tool_followup_transcript_delta_is_suppressed_without_user_facing_text() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._cancelled_response_ids = set()
+    api._suppressed_audio_response_ids = set()
+    api._superseded_response_ids = set()
+    api._stale_response_ids_set = set()
+    api._response_trace_context_by_id = {
+        "resp-status-only": {
+            "tool_followup_silent_audio": "true",
+            "canonical_key": "run-123:turn-1:tool:call-status-only",
+        }
+    }
+    api._is_active_response_guarded = lambda: False
+    api._mark_utterance_info_summary = AsyncMock()
+    api._mark_first_assistant_utterance_observed_if_needed = AsyncMock()
+    api._append_assistant_reply_text = AsyncMock()
+    api.state_manager = SimpleNamespace(state=InteractionState.THINKING, update_state=AsyncMock())
+    api._current_run_id = lambda: "run-123"
+
+    with patch("ai.realtime_api.logger.info") as info_log:
+        asyncio.run(
+            api._handle_event_legacy(
+                {
+                    "type": "response.output_audio_transcript.delta",
+                    "response_id": "resp-status-only",
+                    "delta": "I'm turning to the right now.",
+                },
+                None,
+            )
+        )
+
+    api._mark_utterance_info_summary.assert_not_called()
+    api._mark_first_assistant_utterance_observed_if_needed.assert_not_called()
+    api._append_assistant_reply_text.assert_not_called()
+    api.state_manager.update_state.assert_not_called()
+    info_log.assert_any_call(
+        "tool_followup_user_facing_output_suppressed run_id=%s response_id=%s canonical_key=%s event_type=%s reason=intermediate_non_report_followthrough",
+        "run-123",
+        "resp-status-only",
+        "run-123:turn-1:tool:call-status-only",
+        "response.output_audio_transcript.delta",
+    )
+
+
+def test_silent_tool_followup_audio_done_records_suppressed_timing_marker() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._cancelled_response_ids = set()
+    api._suppressed_audio_response_ids = set()
+    api._superseded_response_ids = set()
+    api._stale_response_ids_set = set()
+    api._response_trace_context_by_id = {
+        "resp-status-only": {
+            "tool_followup_silent_user_facing_output": "true",
+            "tool_followup": "true",
+            "tool_followup_release": "true",
+            "tool_call_id": "call-status-only",
+            "turn_id": "turn-1",
+            "canonical_key": "run-123:turn-1:tool:call-status-only",
+        }
+    }
+    api._current_run_id = lambda: "run-123"
+    api._current_turn_id_or_unknown = lambda: "turn-1"
+    api._mark_tool_followup_timing = Mock()
+    api.handle_audio_response_done = AsyncMock()
+    api.state_manager = SimpleNamespace(update_state=AsyncMock())
+
+    asyncio.run(
+        api._handle_event_legacy(
+            {
+                "type": "response.output_audio.done",
+                "response_id": "resp-status-only",
+            },
+            None,
+        )
+    )
+
+    api._mark_tool_followup_timing.assert_called_once()
+    assert api._mark_tool_followup_timing.call_args.kwargs["marker"] == "followup_output_audio_done_suppressed"
+    api.handle_audio_response_done.assert_not_called()
+    api.state_manager.update_state.assert_not_called()
 
 
 def test_cancelled_audio_events_capture_timing_and_emit_race_log_once() -> None:
