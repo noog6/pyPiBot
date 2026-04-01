@@ -46,6 +46,7 @@ def decide_tool_followup_arbitration(
     *,
     suppressible: bool,
     has_distinct_info: bool,
+    followthrough_chain_remaining: bool,
     is_low_risk_reversible_gesture_tool: bool,
     parent_resolved: bool,
     parent_origin: str,
@@ -73,6 +74,13 @@ def decide_tool_followup_arbitration(
         return ToolFollowupArbitrationDecision(
             action=ToolFollowupDecisionAction.RELEASE,
             reason_code="distinct_info",
+            parent_coverage_state="not_applicable",
+            blocked_by_parent_final_coverage=None,
+        )
+    if followthrough_chain_remaining:
+        return ToolFollowupArbitrationDecision(
+            action=ToolFollowupDecisionAction.RELEASE,
+            reason_code="followthrough_chain_remaining",
             parent_coverage_state="not_applicable",
             blocked_by_parent_final_coverage=None,
         )

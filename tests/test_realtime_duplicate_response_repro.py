@@ -6046,6 +6046,112 @@ def test_distinct_info_followup_remains_unsuppressed_where_intended() -> None:
     assert reason == "distinct_info"
 
 
+def test_tool_followup_parent_covered_not_suppressed_when_non_report_followthrough_remains() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_followthrough_remaining"
+    parent_input_event_key = "item_followthrough_remaining"
+    parent_response_id = "resp-followthrough-covered"
+    parent_canonical_key = api._canonical_utterance_key(
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+    )
+    api._canonical_response_state_mutate(
+        canonical_key=parent_canonical_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "assistant_message"),
+            setattr(record, "response_id", parent_response_id),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "final"),
+            setattr(record, "done", True),
+        ),
+    )
+    api._apply_terminal_deliverable_selection(
+        canonical_key=parent_canonical_key,
+        response_id=parent_response_id,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        selected=True,
+        selection_reason="normal",
+    )
+    api._gesture_followthrough_chain_remaining = lambda **_kwargs: True
+
+    response_create_event, _canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_followthrough_remaining",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+    metadata = ((response_create_event.get("response") or {}).get("metadata") or {})
+    metadata["turn_id"] = turn_id
+    metadata["parent_turn_id"] = turn_id
+    metadata["parent_input_event_key"] = parent_input_event_key
+    metadata["blocked_by_response_id"] = parent_response_id
+
+    should_drop, _parent_entry, reason = api._should_suppress_queued_tool_followup_release(
+        response_metadata=metadata,
+        blocked_by_response_id=parent_response_id,
+    )
+
+    assert should_drop is False
+    assert reason == "followthrough_chain_remaining"
+
+
+def test_tool_followup_parent_covered_stays_suppressed_without_gesture_followthrough_guard() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_followthrough_guard_off"
+    parent_input_event_key = "item_followthrough_guard_off"
+    parent_response_id = "resp-followthrough-guard-off"
+    parent_canonical_key = api._canonical_utterance_key(
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+    )
+    api._canonical_response_state_mutate(
+        canonical_key=parent_canonical_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "assistant_message"),
+            setattr(record, "response_id", parent_response_id),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "final"),
+            setattr(record, "done", True),
+        ),
+    )
+    api._apply_terminal_deliverable_selection(
+        canonical_key=parent_canonical_key,
+        response_id=parent_response_id,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        selected=True,
+        selection_reason="normal",
+    )
+    api._gesture_followthrough_chain_remaining = lambda **_kwargs: False
+
+    response_create_event, _canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_followthrough_guard_off",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+    metadata = ((response_create_event.get("response") or {}).get("metadata") or {})
+    metadata["turn_id"] = turn_id
+    metadata["parent_turn_id"] = turn_id
+    metadata["parent_input_event_key"] = parent_input_event_key
+    metadata["blocked_by_response_id"] = parent_response_id
+
+    should_drop, _parent_entry, reason = api._should_suppress_queued_tool_followup_release(
+        response_metadata=metadata,
+        blocked_by_response_id=parent_response_id,
+    )
+
+    assert should_drop is True
+    assert reason == "parent_covered_tool_result"
+
+
 def test_suppressed_tool_followup_lineage_is_idempotent_across_repeated_queue_drains() -> None:
     api = _make_api_stub()
     _wire_runtime(api)

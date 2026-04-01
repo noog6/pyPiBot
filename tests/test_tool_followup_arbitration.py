@@ -14,6 +14,7 @@ def test_decide_tool_followup_arbitration_suppresses_parent_covered_gesture_foll
     decision = decide_tool_followup_arbitration(
         suppressible=True,
         has_distinct_info=False,
+        followthrough_chain_remaining=False,
         is_low_risk_reversible_gesture_tool=True,
         parent_resolved=True,
         parent_origin="assistant_message",
@@ -36,6 +37,7 @@ def test_decide_tool_followup_arbitration_holds_when_parent_classification_pendi
     decision = decide_tool_followup_arbitration(
         suppressible=True,
         has_distinct_info=False,
+        followthrough_chain_remaining=False,
         is_low_risk_reversible_gesture_tool=True,
         parent_resolved=True,
         parent_origin="server_auto",
@@ -58,6 +60,7 @@ def test_decide_tool_followup_arbitration_releases_distinct_info_without_parent_
     decision = decide_tool_followup_arbitration(
         suppressible=True,
         has_distinct_info=True,
+        followthrough_chain_remaining=False,
         is_low_risk_reversible_gesture_tool=False,
         parent_resolved=False,
         parent_origin="",
@@ -80,6 +83,7 @@ def test_decide_tool_followup_arbitration_releases_selected_but_uncovered_parent
     decision = decide_tool_followup_arbitration(
         suppressible=True,
         has_distinct_info=False,
+        followthrough_chain_remaining=False,
         is_low_risk_reversible_gesture_tool=True,
         parent_resolved=True,
         parent_origin="assistant_message",
@@ -102,6 +106,7 @@ def test_decide_tool_followup_arbitration_releases_unknown_parent_coverage_with_
     decision = decide_tool_followup_arbitration(
         suppressible=True,
         has_distinct_info=False,
+        followthrough_chain_remaining=False,
         is_low_risk_reversible_gesture_tool=True,
         parent_resolved=True,
         parent_origin="assistant_message",
@@ -118,3 +123,26 @@ def test_decide_tool_followup_arbitration_releases_unknown_parent_coverage_with_
     assert decision.reason_code == "parent_coverage_unknown"
     assert decision.parent_coverage_state == "unknown"
     assert decision.blocked_by_parent_final_coverage is False
+
+
+def test_decide_tool_followup_arbitration_releases_when_followthrough_chain_remaining() -> None:
+    decision = decide_tool_followup_arbitration(
+        suppressible=True,
+        has_distinct_info=False,
+        followthrough_chain_remaining=True,
+        is_low_risk_reversible_gesture_tool=True,
+        parent_resolved=True,
+        parent_origin="assistant_message",
+        parent_done=True,
+        parent_covered=True,
+        coverage_source="canonical",
+        deliverable_class="final",
+        terminal_selected=True,
+        terminal_reason="normal",
+        classification_pending=False,
+    )
+
+    assert decision.action is ToolFollowupDecisionAction.RELEASE
+    assert decision.reason_code == "followthrough_chain_remaining"
+    assert decision.parent_coverage_state == "not_applicable"
+    assert decision.blocked_by_parent_final_coverage is None
