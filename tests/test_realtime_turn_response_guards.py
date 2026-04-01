@@ -1430,6 +1430,49 @@ def test_response_created_discards_invalidated_empty_retry_before_activation() -
     assert sent_events == [{"type": "response.cancel"}]
 
 
+def test_response_created_server_auto_stale_ignore_quarantines_response_id() -> None:
+    api = _make_api()
+    quarantined: list[dict[str, str]] = []
+    sent_events: list[dict[str, object]] = []
+
+    async def _async_capture(_websocket, event):
+        sent_events.append(event)
+
+    api._consume_response_origin = lambda _event: "server_auto"
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._track_outgoing_event = lambda *_args, **_kwargs: None
+    api._active_input_event_key_for_turn = lambda _turn_id: "item_expected"
+    api._current_turn_id_or_unknown = lambda: "turn_2"
+    api._current_input_event_key = "mismatch_key"
+    api._pending_server_auto_input_event_keys = deque(["mismatch_key"])
+    api._quarantine_cancelled_response_id = lambda **kwargs: quarantined.append(kwargs)
+    api._set_response_gating_verdict = lambda **_kwargs: None
+    api._log_response_binding_event = lambda **_kwargs: None
+    api._mark_transcript_response_outcome = lambda **_kwargs: None
+    api._log_response_site_debug = lambda **_kwargs: None
+    api._set_active_response_state(canonical_key=None)
+    api._set_active_response_state(input_event_key=None)
+    api._get_or_create_transport = lambda: types.SimpleNamespace(send_json=_async_capture)
+
+    asyncio.run(
+        api._handle_response_created_event(
+            {"response": {"id": "resp_stale_server_auto", "metadata": {}}},
+            object(),
+        )
+    )
+
+    assert quarantined == [
+        {
+            "response_id": "resp_stale_server_auto",
+            "turn_id": "turn_2",
+            "input_event_key": "item_expected",
+            "origin": "server_auto",
+            "reason": "server_auto_binding_guard",
+        }
+    ]
+    assert sent_events == [{"type": "response.cancel"}]
+
+
 def test_invalidated_empty_retry_store_clears_on_turn_contender_cleanup() -> None:
     api = _make_api()
     api._invalidate_superseded_empty_retry_lineage_for_turn(
