@@ -846,6 +846,68 @@ def test_compound_response_done_cross_turn_rebind_completes_report_and_logs_reas
     assert "reason=semantic_owner_parent_promoted" in caplog.text
 
 
+def test_compound_final_followthrough_after_intermediate_turn_rebind_clears_pending_state() -> None:
+    ledger = ContinuityLedger()
+    ledger.update_from_event(
+        "transcript_final",
+        text="Look right, look left, then look center and tell me when done.",
+        source="input_audio_transcription",
+        turn_id="turn_2",
+    )
+    ledger.update_from_event(
+        "tool_result_received",
+        tool_name="gesture_look_right",
+        call_id="call-1",
+        turn_id="turn_2",
+    )
+    ledger.update_from_event(
+        "tool_result_received",
+        tool_name="gesture_look_left",
+        call_id="call-2",
+        turn_id="turn_2",
+    )
+
+    ledger.update_from_event(
+        "response_done",
+        turn_id="turn_3",
+        keep_ongoing="true",
+    )
+
+    before_followthrough = ledger.build_brief("run-rebind", "turn_3", "before_followthrough")
+    assert before_followthrough.compound_request is not None
+    assert before_followthrough.compound_request.active_step_index == 2
+    assert before_followthrough.compound_request.final_followup_pending is True
+
+    ledger.update_from_event(
+        "tool_call_started",
+        tool_name="gesture_look_center",
+        call_id="call-3",
+        turn_id="turn_3",
+        allow_cross_turn_rebind="true",
+        cross_turn_rebind_reason="tool_followup_semantic_owner_handoff",
+    )
+    ledger.update_from_event(
+        "tool_result_received",
+        tool_name="gesture_look_center",
+        call_id="call-3",
+        turn_id="turn_3",
+        allow_cross_turn_rebind="true",
+        cross_turn_rebind_reason="tool_followup_semantic_owner_handoff",
+    )
+    ledger.update_from_event(
+        "response_done",
+        turn_id="turn_3",
+        close_commitment="true",
+        close_unresolved="true",
+        complete_final_report="true",
+        allow_cross_turn_rebind="true",
+        cross_turn_rebind_reason="semantic_owner_parent_promoted",
+    )
+
+    after_done = ledger.build_brief("run-rebind", "turn_3", "after_followthrough")
+    assert after_done.compound_request is None
+
+
 def test_compound_observability_does_not_mutate_runtime_authority_state() -> None:
     api = RealtimeAPI.__new__(RealtimeAPI)
     api._continuity_ledger = ContinuityLedger()
