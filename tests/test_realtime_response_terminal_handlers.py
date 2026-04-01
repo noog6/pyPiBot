@@ -360,6 +360,64 @@ def test_handle_response_done_drops_stale_response_after_upgraded_replacement() 
     assert api._active_response_id == "resp_new"
 
 
+def test_handle_response_done_ignores_non_correlatable_server_auto_done_during_followthrough() -> None:
+    api = _make_api()
+    api._active_response_id = "resp_ghost"
+    api._active_response_origin = "server_auto"
+    api._active_response_input_event_key = "unknown"
+    api._active_response_canonical_key = "run-788:turn_2:unknown"
+    api._current_turn_id_or_unknown = lambda: "turn_2"
+    api._active_input_event_key_for_turn = lambda _turn_id: ""
+    api._stale_response_map = {}
+    api._stale_response_ids_set = set()
+    api._turn_has_pending_tool_followup = lambda **_kwargs: True
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock()
+    api._apply_terminal_deliverable_selection = Mock()
+    api._reconcile_semantic_substantive_owner = Mock()
+    api._reconcile_terminal_substantive_response = Mock()
+
+    with patch("ai.realtime_api.logger.info") as api_info_log:
+        asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_ghost"}}))
+
+    ignored = [
+        call
+        for call in api_info_log.call_args_list
+        if call.args
+        and call.args[0]
+        == "response_terminal_event_ignored run_id=%s classification=%s event_type=%s response_id=%s origin=%s turn_id=%s input_event_key=%s canonical_key=%s active_response_id=%s active_canonical_key=%s reasons=%s"
+    ]
+    assert ignored, "expected non-correlatable server_auto response.done to be ignored"
+    assert "non_correlatable_server_auto_during_followthrough" in ignored[0].args[11]
+    api._apply_terminal_deliverable_selection.assert_not_called()
+    api._reconcile_semantic_substantive_owner.assert_not_called()
+    api._reconcile_terminal_substantive_response.assert_not_called()
+    api._maybe_schedule_empty_response_retry.assert_not_awaited()
+    api._build_confirmation_transition_decision.assert_not_called()
+
+
+def test_response_terminal_admission_allows_correlatable_server_auto_during_followthrough() -> None:
+    api = _make_api()
+    api._active_response_id = "resp_server_auto"
+    api._active_response_origin = "server_auto"
+    api._active_response_input_event_key = "synthetic_server_auto_3"
+    api._active_response_canonical_key = "run-788:turn_2:synthetic_server_auto_3"
+    api._current_turn_id_or_unknown = lambda: "turn_2"
+    api._active_input_event_key_for_turn = lambda _turn_id: "synthetic_server_auto_3"
+    api._turn_has_pending_tool_followup = lambda **_kwargs: True
+
+    admitted = api._should_admit_response_terminal_event(
+        event_type="response.done",
+        response_id="resp_server_auto",
+        turn_id="turn_2",
+        input_event_key="synthetic_server_auto_3",
+        canonical_key="run-788:turn_2:synthetic_server_auto_3",
+        origin="server_auto",
+    )
+
+    assert admitted is True
+
+
 def test_handle_response_done_drops_missing_response_id_with_unknown_origin_before_terminal_mutation() -> None:
     api = _make_api()
     api._active_response_id = None

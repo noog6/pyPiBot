@@ -7386,6 +7386,20 @@ class RealtimeAPI:
             and (inactive_response_id or no_active_owner)
         ):
             reasons.append("turn_active_key_canonical_mismatch")
+        followthrough_pending = bool(self._turn_has_pending_tool_followup(turn_id=normalized_turn_id))
+        non_correlatable_input_key = normalized_input_event_key in {"", "unknown"}
+        non_correlatable_canonical_key = (
+            not normalized_canonical_key
+            or normalized_canonical_key == "unknown"
+            or normalized_canonical_key.endswith(":unknown")
+        )
+        if (
+            normalized_origin == "server_auto"
+            and followthrough_pending
+            and non_correlatable_input_key
+            and non_correlatable_canonical_key
+        ):
+            reasons.append("non_correlatable_server_auto_during_followthrough")
         if missing_response_id and (normalized_origin == "unknown" or no_active_owner):
             reasons.append("missing_response_id")
         if not reasons:
