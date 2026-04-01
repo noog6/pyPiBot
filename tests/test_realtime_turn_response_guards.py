@@ -2805,3 +2805,44 @@ def test_turn_followthrough_chain_remaining_logs_guard_decision(monkeypatch) -> 
     assert "final_followup_pending=True" in log_output
     assert "open_non_report_steps=False" in log_output
     assert "decision=False" in log_output
+
+
+def test_should_hold_turn_for_non_substantive_talk_over_requires_followthrough_chain() -> None:
+    api = _make_api()
+    api._current_response_turn_id = "turn_2"
+    api._active_response_origin = "tool_output"
+    api._active_response_id = "resp_tool_2"
+    api._turn_followthrough_chain_remaining = lambda **_kwargs: False
+    api._interrupted_tool_output_candidates_by_response_id = {}
+
+    assert api._should_hold_turn_for_non_substantive_talk_over() is False
+
+
+def test_should_hold_turn_for_non_substantive_talk_over_when_tool_output_followthrough_active() -> None:
+    api = _make_api()
+    api._current_response_turn_id = "turn_2"
+    api._active_response_origin = "tool_output"
+    api._active_response_id = "resp_tool_2"
+    api._turn_followthrough_chain_remaining = lambda **_kwargs: True
+    api._interrupted_tool_output_candidates_by_response_id = {}
+
+    assert api._should_hold_turn_for_non_substantive_talk_over() is True
+
+
+def test_should_hold_turn_for_non_substantive_talk_over_when_interrupted_candidate_pending() -> None:
+    api = _make_api()
+    api._current_response_turn_id = "turn_2"
+    api._active_response_origin = "assistant_message"
+    api._active_response_id = ""
+    api._turn_followthrough_chain_remaining = lambda **_kwargs: True
+    api._interrupted_tool_output_candidates_by_response_id = {
+        "resp_tool_2": {
+            "resolution": "pending",
+            "interruption_turn_id": "turn_2",
+            "canonical_key": "run-1:turn_2:tool:call_2",
+            "turn_id": "turn_2",
+            "input_event_key": "tool:call_2",
+        }
+    }
+
+    assert api._should_hold_turn_for_non_substantive_talk_over() is True

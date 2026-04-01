@@ -80,8 +80,16 @@ class InputAudioEventHandlers:
                     turn_id,
                     str(getattr(self._api, "_active_response_id", "") or "").strip() or "none",
                 )
+        hold_turn_for_talk_over = False
+        hold_predicate = getattr(self._api, "_should_hold_turn_for_non_substantive_talk_over", None)
+        if callable(hold_predicate):
+            hold_turn_for_talk_over = bool(hold_predicate())
         self._api._utterance_counter += 1
-        next_turn_id = self._api._next_response_turn_id()
+        next_turn_id = (
+            self._api._current_turn_id_or_unknown()
+            if hold_turn_for_talk_over
+            else self._api._next_response_turn_id()
+        )
         with self._api._utterance_context_scope(
             turn_id=next_turn_id,
             input_event_key="",
