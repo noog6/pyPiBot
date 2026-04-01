@@ -22,6 +22,7 @@ def _decide(**overrides: object) -> TerminalDeliverableDecision:
         "transcript_final_seen": True,
         "turn_has_pending_tool_followup": False,
         "followthrough_chain_remaining": False,
+        "followthrough_non_report_steps_remaining": False,
         "exact_phrase_obligation_open": False,
         "descriptive_turn": False,
         "tool_output_gesture_only": False,
@@ -140,4 +141,34 @@ def test_terminal_deliverable_arbitration_bridges_empty_tool_output_when_followt
         False,
         "tool_followup_precedence",
         "tool_followup_precedence",
+    )
+
+
+def test_terminal_deliverable_arbitration_blocks_non_empty_tool_output_when_followthrough_remains() -> None:
+    decision = _decide(
+        origin="tool_output",
+        response_done_is_empty=False,
+        followthrough_chain_remaining=True,
+        followthrough_non_report_steps_remaining=True,
+    )
+
+    assert decision == TerminalDeliverableDecision(
+        False,
+        "tool_followup_precedence",
+        "tool_followup_precedence",
+    )
+
+
+def test_terminal_deliverable_arbitration_allows_non_empty_tool_output_when_followthrough_is_done() -> None:
+    decision = _decide(
+        origin="tool_output",
+        response_done_is_empty=False,
+        followthrough_chain_remaining=False,
+        turn_has_pending_tool_followup=False,
+    )
+
+    assert decision == TerminalDeliverableDecision(
+        True,
+        "normal",
+        "terminal_selected",
     )
