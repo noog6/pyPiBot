@@ -9765,7 +9765,7 @@ class RealtimeAPI:
         )
         return True
 
-    def _turn_has_pending_tool_followup(self, *, turn_id: str) -> bool:
+    def _turn_has_pending_tool_followup(self, *, turn_id: str, include_status_only: bool = False) -> bool:
         normalized_turn_id = str(turn_id or "").strip()
         if not normalized_turn_id:
             return False
@@ -9788,8 +9788,11 @@ class RealtimeAPI:
             if turn_prefix not in normalized_canonical_key:
                 continue
             state = str(raw_state or "").strip().lower() or "new"
-            if state in pending_states and not self._tool_followup_is_status_only_gesture(
-                canonical_key=normalized_canonical_key,
+            if state in pending_states and (
+                include_status_only
+                or not self._tool_followup_is_status_only_gesture(
+                    canonical_key=normalized_canonical_key,
+                )
             ):
                 return True
         return False

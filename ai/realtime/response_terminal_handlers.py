@@ -511,6 +511,10 @@ class ResponseTerminalHandlers:
             response_id=resolved_response_id,
         )
         pending_tool_followup_after_release = api._turn_has_pending_tool_followup(turn_id=turn_id)
+        pending_tool_followup_any_after_release = api._turn_has_pending_tool_followup(
+            turn_id=turn_id,
+            include_status_only=True,
+        )
         transcript_linked_input_event_key = str(api._active_input_event_key_for_turn(turn_id) or "").strip()
         transcript_final_linked = bool(transcript_linked_input_event_key and transcript_linked_input_event_key.startswith("item_"))
         obligations_map = getattr(api, "_response_obligations", {})
@@ -922,7 +926,9 @@ class ResponseTerminalHandlers:
             allow_cross_turn_rebind="true" if continuity_rebind_allowed else "",
             cross_turn_rebind_reason=continuity_rebind_reason,
         )
-        if interrupted_tool_output_candidate or followthrough_chain_bridge:
+        if interrupted_tool_output_candidate or (
+            followthrough_chain_bridge and pending_tool_followup_any_after_release
+        ):
             logger.info(
                 "empty_response_retry_skipped reason=%s run_id=%s turn_id=%s response_id=%s",
                 "interrupted_tool_output_candidate" if interrupted_tool_output_candidate else "followthrough_chain_remaining",
