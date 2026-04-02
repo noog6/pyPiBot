@@ -48,6 +48,29 @@ class ResponseTerminalHandlers:
     def __init__(self, api: RealtimeAPI) -> None:
         self._api = api
 
+    def _contract_breach_step_context(self, *, turn_id: str) -> tuple[str, str]:
+        """Return continuity-derived step-position context for breach log enrichment only."""
+        api = self._api
+        run_id = str(api._current_run_id() or "").strip()
+        normalized_turn_id = str(turn_id or "").strip()
+        if not run_id or not normalized_turn_id:
+            return ("none", "none")
+        try:
+            brief = api.get_continuity_brief(
+                run_id=run_id,
+                turn_id=normalized_turn_id,
+                reason="contract_breach_detected",
+            )
+        except Exception:
+            return ("none", "none")
+        compound_state = getattr(brief, "compound_request", None)
+        if compound_state is None:
+            return ("none", "none")
+        active_step_index = getattr(compound_state, "active_step_index", None)
+        active_step_index_value = str(active_step_index) if isinstance(active_step_index, int) else "none"
+        next_pending_step_id = str(getattr(compound_state, "next_pending_step_id", "") or "").strip() or "none"
+        return (active_step_index_value, next_pending_step_id)
+
     async def handle_transcribe_response_done(self, event: dict[str, Any] | None = None) -> None:
         api = self._api
         if (
@@ -851,8 +874,10 @@ class ResponseTerminalHandlers:
             )
         )
         if breach_artifact is not None:
+            # Advisory observability context only; this must not influence breach detection semantics.
+            active_step_index, next_pending_step_id = self._contract_breach_step_context(turn_id=turn_id)
             logger.info(
-                "contract_breach_detected breach_type=%s source_seam=%s canonical_key=%s turn_id=%s response_id=%s origin=%s reason_code=%s recommended_action=%s fingerprint=%s evidence=%s",
+                "contract_breach_detected breach_type=%s source_seam=%s canonical_key=%s turn_id=%s response_id=%s origin=%s reason_code=%s recommended_action=%s fingerprint=%s active_step_index=%s next_pending_step_id=%s evidence=%s",
                 breach_artifact.breach_type.value,
                 breach_artifact.source_seam,
                 breach_artifact.canonical_key,
@@ -862,6 +887,8 @@ class ResponseTerminalHandlers:
                 breach_artifact.reason_code,
                 breach_artifact.recommended_action.value,
                 breach_artifact.fingerprint,
+                active_step_index,
+                next_pending_step_id,
                 "|".join(breach_artifact.evidence),
             )
 
