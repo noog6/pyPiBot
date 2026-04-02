@@ -261,7 +261,13 @@ class ResponseLifecycleTracker:
                 }
             },
         }
-        sent = await self._api._send_response_create(websocket, response_create_event, origin=normalized_origin, record_ai_call=True)
+        retry_origin = normalized_origin
+        if allow_origin_retry_override and normalized_origin == "tool_output":
+            retry_origin = "server_auto"
+            response_create_event["response"]["metadata"]["empty_retry_materialization"] = "report_followup"
+            response_create_event["response"]["metadata"]["empty_retry_origin"] = "tool_output_followthrough_bridge"
+
+        sent = await self._api._send_response_create(websocket, response_create_event, origin=retry_origin, record_ai_call=True)
         if sent:
             logger.info(
                 "empty_response_retry_scheduled run_id=%s turn_id=%s canonical_key=%s attempt=%s max_attempts=%s",
