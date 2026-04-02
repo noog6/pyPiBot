@@ -136,6 +136,124 @@ for terminal deliverable arbitration bridging.
 - This is scoped to turn-close followthrough protection and does not create new
   arbitration authority inside continuity.
 
+## Response terminal + followthrough bridge runtime contract
+
+This section documents runtime contracts exercised at `response.done` time.
+
+### Non-deliverable intermediate tool-followup
+
+- A tool-output `response.done` can be intentionally marked non-deliverable when
+  terminal arbitration returns `selected=false` with
+  `selection_reason=tool_followup_precedence`.
+- In that state, runtime treats the event as an intermediate followthrough step,
+  not the turn’s final user-facing answer.
+- The runtime still applies terminal-selection bookkeeping for auditability, but
+  continuity close is not committed from that event alone.
+
+### When followthrough is still open
+
+- Followthrough openness is evaluated by
+  `_turn_followthrough_chain_remaining(..., include_report_followup=...)`, which
+  inspects continuity settlement + compound state.
+- With `include_report_followup=False` (the response-done guard path), report-only
+  pending steps do not by themselves force reopening; unresolved non-report steps
+  do.
+
+### Intentional `selected=false` and turn progression behavior
+
+- `selected=false` is expected for intermediate/non-deliverable tool-followup
+  terminals and should not be interpreted as a runtime fault by itself.
+- When followthrough remains, continuity handoff sets `keep_ongoing=true` and
+  withholds close commitment; when followthrough is resolved and a normal
+  substantive terminal is selected, close commitment can proceed.
+- This is why turn progression may stay open after one `response.done` and close
+  only after a later followthrough completion.
+
+## Empty-response retry contract (bridge-aware)
+
+### Empty-response candidate criteria
+
+Retry is considered only when the canonical response is empty of user-facing
+evidence (no assistant text, no terminal response text, no audio started, no
+deliverable observed, and no progress/final deliverable class), websocket is
+available, and delivery state is not terminal (`cancelled`/`failed`/`errored`).
+
+### Origin gating and narrow bridge exception
+
+- Default retryable origins are `prompt`, `server_auto`, and `user_transcript`.
+- `tool_output` is normally origin-gated out.
+- Narrow exception: when an empty `tool_output` terminal is a followthrough bridge
+  case (`tool_followup_precedence` or `empty_tool_followup_non_deliverable` plus
+  followthrough-chain remaining), retry origin is override-promoted for dispatch
+  as `server_auto`.
+
+### What promotion does and does not mean
+
+- Promotion is dispatch materialization for the retry create event
+  (`empty_retry_materialization=report_followup`), not a global ownership rewrite.
+- This keeps retry transport semantics compatible with server-auto handling while
+  preserving separate ownership/provisional rules.
+
+## Contract breach detection (observability contract)
+
+- Contract breach detection is an INFO-level diagnostic aid for suspicious seam
+  combinations; it is not a hard runtime exception path.
+- Current breach types:
+  - `EMPTY_TOOL_FOLLOWUP_DONE`
+  - `FOLLOWTHROUGH_REMAINING_WITH_NON_DELIVERABLE_OUTPUT`
+  - `TOOL_FOLLOWUP_BLOCKED_BY_SAME_TURN_OWNER`
+- `recommended_action` is operational guidance for investigation/repair intent,
+  not an automatically enforced recovery command.
+- Breach logs should be treated as investigate-first signals. Do not suppress the
+  log family without proving the seam facts are benign and covered by tests.
+
+## Log anchor interpretation (high-signal only)
+
+- `response_done_followthrough_guard_decision`
+  - Emitted by followthrough guard evaluation.
+  - `decision=true` means followthrough is still open for the evaluated scope.
+  - `include_report_followup=false` indicates report-only followup should be
+    ignored for close-blocking.
+
+- `terminal_deliverable_selection_applied`
+  - Authoritative terminal-selection write point for a response.
+  - `canonical_key` is execution ownership; `semantic_owner_canonical_key` can
+    differ when semantic parent promotion occurs.
+  - `selected=false` with reasons like `tool_followup_precedence` or
+    `provisional_server_auto_awaiting_transcript_final` is an intentional
+    non-terminal selection, not necessarily a fault.
+
+- `semantic_answer_owner_resolved`
+  - Emitted when semantic owner is reassigned away from execution key (typically
+    tool-output parent promotion).
+  - If absent, semantic owner remained execution-scoped.
+
+- `continuity_response_done_handoff`
+  - Summarizes close intent:
+    - `close_commitment=true` means runtime is trying to settle commitment
+      continuity.
+    - `complete_final_report=true` means selected+substantive final report path
+      completed.
+    - `followthrough_chain_remaining=true` means progression remains open.
+    - `allow_cross_turn_rebind=true` with
+      `rebind_reason=semantic_owner_parent_promoted` indicates parent-turn
+      continuity handoff.
+
+- `empty_response_detected`
+  - Confirms empty-response evidence for a canonical done path before retry
+    arbitration.
+
+- `empty_response_retry_origin_override_applied`
+  - Narrow exception path only: bridged tool-output followthrough empty-done is
+    being retried through `server_auto` dispatch semantics.
+  - Should appear with bridge metadata on the resulting create event
+    (`empty_retry_materialization=report_followup`).
+
+- `contract_breach_detected`
+  - Advisory diagnostic artifact, not hard runtime failure.
+  - `recommended_action` means “investigate this seam posture”; do not treat as
+    auto-remediation.
+
 ## Runtime integration map
 
 ### Producers (write path)

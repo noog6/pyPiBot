@@ -89,6 +89,14 @@ This is a code-aligned map, not a redesign proposal. It describes distributed ar
 - Tool-followup release/suppress decisions.
 - Governance confirmations.
 
+#### Runtime seam note: non-deliverable intermediate tool-followups
+
+- `selected=false` with reasons such as `tool_followup_precedence` is an expected
+  intermediate state when chained tool followthrough is still open.
+- In this case, terminal bookkeeping still applies, but turn-close commitment is
+  deferred to later followthrough completion rather than forced at the current
+  `response.done`.
+
 ---
 
 ### 5) Semantic owner arbitration seam (authoritative, narrow)
@@ -98,6 +106,15 @@ This is a code-aligned map, not a redesign proposal. It describes distributed ar
 
 **Owns**
 - Canonical semantic owner assignment decision (`retain_execution` vs `reassign_parent`) after terminal selection context is known.
+
+**Execution vs semantic ownership distinction**
+- Execution canonical key: the key of the response that actually emitted the
+  terminal event.
+- Semantic owner canonical key: the canonical answer owner used for continuity
+  and final deliverable reconciliation.
+- Promotion to parent is narrow: selected terminal, `selection_reason=normal`,
+  `origin=tool_output`, valid non-tool-prefixed parent lineage, and parent
+  canonical state exists.
 
 **Does not own**
 - Whether terminal was selected in the first place.
@@ -161,6 +178,26 @@ This is a code-aligned map, not a redesign proposal. It describes distributed ar
 **Does not own**
 - Arbitration winner selection, governance approvals, or lifecycle hard gates.
 
+## Pending `server_auto` ownership rules (implemented runtime)
+
+### True pending/provisional ownership path
+
+- Pending `server_auto` ownership is claimed only on lifecycle `DEFER` paths for
+  provisional/transcript-coupled responses (recorded via pending-server-auto
+  stores and mutation-guarded by turn/response/upgrade lineage).
+- This ownership is tied to transcript-final upgrade/cancel-and-replace flows,
+  not to every server-auto-shaped dispatch.
+
+### Bridge materialization path (must not claim pending ownership)
+
+- Empty-response retry bridge creates may be dispatched with `origin=server_auto`
+  for transport semantics, but metadata-marked materialization
+  (`empty_retry_materialization=report_followup`,
+  `empty_retry_origin=tool_output_followthrough_bridge`) must not register as
+  pending provisional server-auto owner.
+- This preserves the distinction between dispatch-origin compatibility and true
+  provisional ownership semantics.
+
 ## Runtime composition (single-turn path)
 
 This is the implemented composition order in runtime code.
@@ -204,6 +241,8 @@ This is the implemented composition order in runtime code.
 - Do not move response arbitration decisions into governance/confirmation seams.
 - Keep continuity/quiet-intent inputs consultative unless a seam explicitly promotes them to authority with tests.
 - Keep arbitration changes seam-local with explicit reason codes.
+- Treat `contract_breach_detected` as diagnosis/triage telemetry; investigate the
+  seam facts and reason codes before considering any suppression.
 
 ## Most important correction captured by this doc
 
