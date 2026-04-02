@@ -2888,5 +2888,37 @@ def test_handle_response_done_logs_contract_breach_for_empty_tool_followup_done(
     with patch("ai.realtime.response_terminal_handlers.logger.info") as info_log:
         asyncio.run(api.handle_response_done({"type": "response.done"}))
 
-    logged = [call.args[0] for call in info_log.call_args_list if call.args]
-    assert any("contract_breach_detected" in message for message in logged)
+    breach_logs = [call for call in info_log.call_args_list if call.args and "contract_breach_detected" in call.args[0]]
+    assert breach_logs
+    breach_log = breach_logs[0]
+    assert "active_step_index=%s" in breach_log.args[0]
+    assert "next_pending_step_id=%s" in breach_log.args[0]
+    assert breach_log.args[10] == "none"
+    assert breach_log.args[11] == "none"
+
+
+def test_handle_response_done_logs_contract_breach_with_followthrough_step_context() -> None:
+    api = _make_api()
+    api._active_response_origin = "tool_output"
+    api._is_empty_response_done = lambda **_kwargs: True
+    api._turn_has_pending_tool_followup = lambda **_kwargs: True
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    with patch(
+        "ai.realtime.response_terminal_handlers.ResponseTerminalHandlers._contract_breach_step_context",
+        return_value=("1", "step_3"),
+    ), patch("ai.realtime.response_terminal_handlers.logger.info") as info_log:
+        asyncio.run(api.handle_response_done({"type": "response.done"}))
+
+    breach_logs = [call for call in info_log.call_args_list if call.args and "contract_breach_detected" in call.args[0]]
+    assert breach_logs
+    breach_log = breach_logs[0]
+    assert breach_log.args[10] == "1"
+    assert breach_log.args[11] == "step_3"
