@@ -35,6 +35,7 @@ def decide_empty_response_done_action(
     attempt_count: int,
     max_attempts: int,
     websocket_available: bool,
+    allow_origin_retry_override: bool = False,
 ) -> EmptyResponseDecision:
     normalized_origin = str(origin or "unknown").strip().lower() or "unknown"
     normalized_delivery_state = str(delivery_state_before_done or "").strip().lower()
@@ -45,7 +46,7 @@ def decide_empty_response_done_action(
         return EmptyResponseDecision(EmptyResponseDecisionAction.NOOP, "non_empty_response")
     if not websocket_available:
         return EmptyResponseDecision(EmptyResponseDecisionAction.NOOP, "websocket_unavailable")
-    if normalized_origin not in RETRYABLE_ORIGINS:
+    if normalized_origin not in RETRYABLE_ORIGINS and not allow_origin_retry_override:
         return EmptyResponseDecision(EmptyResponseDecisionAction.NOOP, "origin_not_retryable")
     if normalized_delivery_state in TERMINAL_DELIVERY_STATES:
         return EmptyResponseDecision(EmptyResponseDecisionAction.NOOP, "delivery_state_terminal")
@@ -178,6 +179,19 @@ class ResponseLifecycleTracker:
             logger.info("empty_response_retry_skipped reason=already_retried run_id=%s turn_id=%s", run_id, turn_id)
             return
 
+        allow_origin_retry_override = self._tool_output_followthrough_retry_eligible(
+            turn_id=turn_id,
+            canonical_key=canonical_key,
+            origin=normalized_origin,
+        )
+        if allow_origin_retry_override:
+            logger.info(
+                "empty_response_retry_origin_override_applied run_id=%s turn_id=%s origin=%s reason=tool_output_followthrough_bridge",
+                run_id,
+                turn_id,
+                normalized_origin or "unknown",
+            )
+
         decision = decide_empty_response_done_action(
             origin=normalized_origin,
             delivery_state_before_done=delivery_state_before_done,
@@ -186,6 +200,7 @@ class ResponseLifecycleTracker:
             attempt_count=prior_attempts,
             max_attempts=max_attempts,
             websocket_available=websocket is not None,
+            allow_origin_retry_override=allow_origin_retry_override,
         )
         if decision.action == EmptyResponseDecisionAction.NOOP:
             logger.info(
@@ -258,3 +273,36 @@ class ResponseLifecycleTracker:
             )
         else:
             logger.info("empty_response_retry_skipped reason=state_not_retryable run_id=%s turn_id=%s", run_id, turn_id)
+
+    def _tool_output_followthrough_retry_eligible(
+        self,
+        *,
+        turn_id: str,
+        canonical_key: str,
+        origin: str,
+    ) -> bool:
+        if str(origin or "").strip().lower() != "tool_output":
+            return False
+        if hasattr(self._api, "_turn_has_pending_tool_followup") and self._api._turn_has_pending_tool_followup(turn_id=turn_id):
+            return False
+        response_state = self._api._canonical_response_state(canonical_key)
+        response_id = str(getattr(response_state, "response_id", "") or "").strip()
+        if not response_id:
+            return False
+        selection_store = getattr(self._api, "_terminal_deliverable_selection_store", None)
+        if not callable(selection_store):
+            return False
+        selection_entry = selection_store().get(response_id, {})
+        selection_reason = str(selection_entry.get("reason") or "").strip().lower()
+        if selection_reason not in {"tool_followup_precedence", "empty_tool_followup_non_deliverable"}:
+            return False
+        if not hasattr(self._api, "_response_done_followthrough_chain_remaining"):
+            return False
+        return bool(
+            self._api._response_done_followthrough_chain_remaining(
+                turn_id=turn_id,
+                origin=origin,
+                response_id=response_id,
+                include_report_followup=False,
+            )
+        )
