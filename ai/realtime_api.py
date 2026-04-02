@@ -9032,11 +9032,17 @@ class RealtimeAPI:
             response_payload["metadata"] = metadata
         tool_call_id = str(call_id or "").strip() or "unknown"
         turn_id = self._current_turn_id_or_unknown()
-        parent_input_event_key = self._parent_input_event_key_for_tool_followup(turn_id=turn_id)
+        semantic_owner_turn_id, _semantic_owner_rebind, _semantic_owner_reason = (
+            self._resolve_continuity_tool_event_owner_turn(
+                fallback_turn_id=turn_id,
+            )
+        )
+        parent_turn_id = str(semantic_owner_turn_id or turn_id).strip() or turn_id
+        parent_input_event_key = self._parent_input_event_key_for_tool_followup(turn_id=parent_turn_id)
         tool_input_event_key = self._tool_followup_input_event_key(call_id=tool_call_id)
         metadata["turn_id"] = turn_id
         metadata["input_event_key"] = tool_input_event_key
-        metadata["parent_turn_id"] = turn_id
+        metadata["parent_turn_id"] = parent_turn_id
         if parent_input_event_key:
             metadata["parent_input_event_key"] = parent_input_event_key
         metadata["tool_followup"] = "true"
