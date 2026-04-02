@@ -32,12 +32,12 @@ class MotionTuning:
     dt_min_s: float = 0.005
     dt_max_s: float = 0.05
     pan_step_min_deg: float = 0.2
-    pan_step_max_deg: float = 1.6
-    pan_step_scale_deg: float = 90.0
+    pan_step_max_deg: float = 1.2
+    pan_step_scale_deg: float = 70.0
     tilt_step_max_deg: float = 1.5
-    pan_a_max: float = 600.0
+    pan_a_max: float = 165.0
     tilt_a_max: float = 400.0
-    v_max_smoothing_tau_s: float = 0.04
+    v_max_smoothing_tau_s: float = 0.02
     position_eps_deg: float = 0.05
     at_dest_eps_deg: float = 0.5
     debug_motion: bool = False
