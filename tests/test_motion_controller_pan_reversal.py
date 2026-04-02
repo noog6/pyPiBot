@@ -109,3 +109,88 @@ def test_pan_reversal_profile_ignores_low_speed_sign_flips(monkeypatch) -> None:
     assert reversal is False
     assert v_max == 60.0
     assert a_max == 165.0
+
+
+def test_pan_reversal_profile_ignores_same_sign_high_speed(monkeypatch) -> None:
+    motion_controller = _load_motion_controller_module()
+    monkeypatch.setattr(
+        motion_controller,
+        "TUNING",
+        motion_controller.MotionTuning(pan_reversal_speed_threshold_dps=20.0),
+    )
+
+    v_max, a_max, reversal = motion_controller.pan_reversal_limited_profile(
+        pan_err_deg=10.0,
+        pan_v_dps=25.0,
+        pan_v_max_dps=60.0,
+        pan_a_max_dps2=165.0,
+    )
+
+    assert reversal is False
+    assert v_max == 60.0
+    assert a_max == 165.0
+
+
+def test_pan_reversal_profile_ignores_zero_error_or_velocity(monkeypatch) -> None:
+    motion_controller = _load_motion_controller_module()
+    monkeypatch.setattr(
+        motion_controller,
+        "TUNING",
+        motion_controller.MotionTuning(pan_reversal_speed_threshold_dps=20.0),
+    )
+
+    _, _, reversal_zero_err = motion_controller.pan_reversal_limited_profile(
+        pan_err_deg=0.0,
+        pan_v_dps=25.0,
+        pan_v_max_dps=60.0,
+        pan_a_max_dps2=165.0,
+    )
+    _, _, reversal_zero_v = motion_controller.pan_reversal_limited_profile(
+        pan_err_deg=-10.0,
+        pan_v_dps=0.0,
+        pan_v_max_dps=60.0,
+        pan_a_max_dps2=165.0,
+    )
+
+    assert reversal_zero_err is False
+    assert reversal_zero_v is False
+
+
+def test_pan_reversal_profile_ignores_just_below_speed_threshold(monkeypatch) -> None:
+    motion_controller = _load_motion_controller_module()
+    monkeypatch.setattr(
+        motion_controller,
+        "TUNING",
+        motion_controller.MotionTuning(pan_reversal_speed_threshold_dps=20.0),
+    )
+
+    v_max, a_max, reversal = motion_controller.pan_reversal_limited_profile(
+        pan_err_deg=-10.0,
+        pan_v_dps=19.99,
+        pan_v_max_dps=60.0,
+        pan_a_max_dps2=165.0,
+    )
+
+    assert reversal is False
+    assert v_max == 60.0
+    assert a_max == 165.0
+
+
+def test_pan_reversal_state_reports_debug_inputs(monkeypatch) -> None:
+    motion_controller = _load_motion_controller_module()
+    monkeypatch.setattr(
+        motion_controller,
+        "TUNING",
+        motion_controller.MotionTuning(pan_reversal_speed_threshold_dps=20.0),
+    )
+
+    speed, threshold, sign_opposed, over_threshold, reversal = motion_controller.pan_reversal_state(
+        pan_err_deg=-10.0,
+        pan_v_dps=25.0,
+    )
+
+    assert speed == 25.0
+    assert threshold == 20.0
+    assert sign_opposed is True
+    assert over_threshold is True
+    assert reversal is True

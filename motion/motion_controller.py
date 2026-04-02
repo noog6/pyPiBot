@@ -109,15 +109,24 @@ def pan_reversal_limited_profile(
 ) -> tuple[float, float, bool]:
     """Apply stricter pan limits during high-speed sign reversals."""
 
-    reversal = (
-        abs(pan_v_dps) >= TUNING.pan_reversal_speed_threshold_dps and pan_err_deg * pan_v_dps < 0.0
-    )
+    _, _, _, _, reversal = pan_reversal_state(pan_err_deg, pan_v_dps)
     if not reversal:
         return pan_v_max_dps, pan_a_max_dps2, False
 
     v_scale = clamp01(TUNING.pan_reversal_v_max_scale)
     a_scale = clamp01(TUNING.pan_reversal_a_max_scale)
     return pan_v_max_dps * v_scale, pan_a_max_dps2 * a_scale, True
+
+
+def pan_reversal_state(pan_err_deg: float, pan_v_dps: float) -> tuple[float, float, bool, bool, bool]:
+    """Return pan reversal diagnostics used by limiter and debug logs."""
+
+    speed = abs(pan_v_dps)
+    threshold = TUNING.pan_reversal_speed_threshold_dps
+    sign_opposed = pan_err_deg * pan_v_dps < 0.0
+    over_speed_threshold = speed >= threshold
+    reversal = over_speed_threshold and sign_opposed
+    return speed, threshold, sign_opposed, over_speed_threshold, reversal
 
 
 class MotionController:
@@ -259,12 +268,24 @@ class MotionController:
         pan_v_max = self._smooth_v_max("pan", pan_v_max_raw, nominal_dt_s)
         tilt_v_max = self._smooth_v_max("tilt", tilt_v_max_raw, nominal_dt_s)
         pan_a_max = TUNING.pan_a_max
+        pan_v = self.axis_v["pan"]
+        (
+            pan_speed,
+            pan_reversal_threshold,
+            pan_sign_opposed,
+            pan_over_threshold,
+            pan_reversal,
+        ) = pan_reversal_state(
+            pan_remaining,
+            pan_v,
+        )
         pan_v_max, pan_a_max, pan_in_reversal = pan_reversal_limited_profile(
             pan_remaining,
-            self.axis_v["pan"],
+            pan_v,
             pan_v_max,
             pan_a_max,
         )
+        pan_reversal = pan_in_reversal
         tilt_a_max = TUNING.tilt_a_max
 
         limited_pan = limit_step(
@@ -318,9 +339,10 @@ class MotionController:
             log_info(
                 "[MOTION][debug] dt=%.4f pan_v=%.2f pan_vmax=%.2f pan_vmax_raw=%.2f "
                 "pan_amax=%.2f tilt_v=%.2f tilt_vmax=%.2f "
-                "pan_err=%.2f tilt_err=%.2f pan_reversal=%s",
+                "pan_err=%.2f tilt_err=%.2f pan_v_abs=%.2f pan_rev_threshold=%.2f "
+                "pan_rev_sign_opposed=%s pan_rev_over_threshold=%s pan_reversal=%s",
                 dt_s,
-                self.axis_v["pan"],
+                pan_v,
                 pan_v_max,
                 pan_v_max_raw,
                 pan_a_max,
@@ -328,7 +350,11 @@ class MotionController:
                 tilt_v_max,
                 desired_pan - self.current_servo_position["pan"],
                 desired_tilt - self.current_servo_position["tilt"],
-                pan_in_reversal,
+                pan_speed,
+                pan_reversal_threshold,
+                pan_sign_opposed,
+                pan_over_threshold,
+                pan_reversal,
             )
 
         done = self._frame_done(new_frame, at_dest, now_ms)
