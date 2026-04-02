@@ -171,10 +171,10 @@ def test_terminal_cancelled_state_skips_retry_with_reason() -> None:
 
 def test_tool_output_followthrough_bridge_empty_retry_uses_origin_override() -> None:
     api = _make_api()
-    sent_events: list[dict] = []
+    sent_events: list[tuple[dict, dict]] = []
 
-    async def _capture_send_response_create(_websocket, event, **_kwargs):
-        sent_events.append(event)
+    async def _capture_send_response_create(_websocket, event, **kwargs):
+        sent_events.append((event, kwargs))
         return True
 
     response_id = "resp_tool_bridge"
@@ -212,7 +212,10 @@ def test_tool_output_followthrough_bridge_empty_retry_uses_origin_override() -> 
     )
 
     assert len(sent_events) == 1
-    assert sent_events[0]["response"]["metadata"]["retry_reason"] == "empty_response_done"
+    sent_event, sent_kwargs = sent_events[0]
+    assert sent_event["response"]["metadata"]["retry_reason"] == "empty_response_done"
+    assert sent_event["response"]["metadata"]["empty_retry_materialization"] == "report_followup"
+    assert sent_kwargs["origin"] == "server_auto"
 
 
 def test_empty_response_retry_exhausted_emits_fallback_without_scheduling_retry(caplog) -> None:
