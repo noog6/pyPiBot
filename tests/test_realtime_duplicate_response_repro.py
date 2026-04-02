@@ -5040,6 +5040,40 @@ def test_tool_followup_continuity_owner_turn_prefers_semantic_owner_trace() -> N
     assert reason == "tool_followup_semantic_owner_handoff"
 
 
+def test_build_tool_followup_event_preserves_parent_owner_on_cross_turn_split() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    execution_turn = "turn_3"
+    semantic_owner_turn = "turn_2"
+    semantic_parent_input_event_key = "item_parent_2"
+    api._current_turn_id_or_unknown = lambda: execution_turn
+    api._active_input_event_key_by_turn_id[semantic_owner_turn] = semantic_parent_input_event_key
+    api._active_input_event_key_by_turn_id[execution_turn] = "tool:call_prev"
+    api._active_response_id = "resp_tool_followup_split"
+    api._response_trace_context_by_id = {
+        "resp_tool_followup_split": {
+            "origin": "tool_output",
+            "turn_id": execution_turn,
+            "parent_turn_id": semantic_owner_turn,
+            "semantic_owner_turn_id": semantic_owner_turn,
+            # Deliberately stale/mismatched to prove parent input resolution
+            # comes from semantic owner turn binding, not this trace field.
+            "parent_input_event_key": "item_stale_trace_parent",
+        }
+    }
+
+    response_create_event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_split_owner",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+
+    metadata = ((response_create_event.get("response") or {}).get("metadata") or {})
+    assert metadata["turn_id"] == execution_turn
+    assert metadata["parent_turn_id"] == semantic_owner_turn
+    assert metadata["parent_input_event_key"] == semantic_parent_input_event_key
+
+
 def test_catalog_only_descriptive_tool_followup_adds_uncertainty_guardrail_instruction() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
