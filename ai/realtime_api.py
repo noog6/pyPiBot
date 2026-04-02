@@ -16529,6 +16529,12 @@ class RealtimeAPI:
         log_info(f"response.created: origin={origin}")
         response = event.get("response") or {}
         response_metadata = response.get("metadata") if isinstance(response, dict) else None
+        empty_retry_bridge_materialization = (
+            isinstance(response_metadata, dict)
+            and str(response_metadata.get("empty_retry_materialization") or "").strip().lower() == "report_followup"
+            and str(response_metadata.get("empty_retry_origin") or "").strip().lower()
+            == "tool_output_followthrough_bridge"
+        )
         metadata_turn_id = str(response_metadata.get("turn_id") or "").strip() if isinstance(response_metadata, dict) else ""
         metadata_input_event_key = str(response_metadata.get("input_event_key") or "").strip() if isinstance(response_metadata, dict) else ""
         metadata_upgrade_chain_id = str(response_metadata.get("upgrade_chain_id") or "").strip() if isinstance(response_metadata, dict) else ""
@@ -16663,13 +16669,14 @@ class RealtimeAPI:
                     turn_id,
                     origin,
                 )
-            self._active_server_auto_input_event_key = input_event_key
-            self._set_response_gating_verdict(
-                turn_id=turn_id,
-                input_event_key=input_event_key,
-                action="NOOP",
-                reason="awaiting_transcript_final",
-            )
+            self._active_server_auto_input_event_key = None if empty_retry_bridge_materialization else input_event_key
+            if not empty_retry_bridge_materialization:
+                self._set_response_gating_verdict(
+                    turn_id=turn_id,
+                    input_event_key=input_event_key,
+                    action="NOOP",
+                    reason="awaiting_transcript_final",
+                )
             self._log_response_binding_event(
                 response_key=input_event_key,
                 turn_id=turn_id,
@@ -16873,12 +16880,13 @@ class RealtimeAPI:
                 await transport.send_json(websocket, cancel_event)
             return
         if lifecycle_created_decision.action is LifecycleDecisionAction.DEFER:
-            self._record_pending_server_auto_response(
-                turn_id=turn_id,
-                response_id=self._active_response_id,
-                canonical_key=lifecycle_canonical_key,
-                upgrade_chain_id=upgrade_chain_id,
-            )
+            if not empty_retry_bridge_materialization:
+                self._record_pending_server_auto_response(
+                    turn_id=turn_id,
+                    response_id=self._active_response_id,
+                    canonical_key=lifecycle_canonical_key,
+                    upgrade_chain_id=upgrade_chain_id,
+                )
             self._mark_response_provisional(response_id=self._active_response_id)
         self._set_active_response_state(canonical_key=lifecycle_canonical_key)
         self._bind_active_input_event_key_for_turn(
