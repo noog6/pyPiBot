@@ -484,6 +484,42 @@ def test_response_created_syncs_helper_owned_fields_for_server_auto_guarded_path
     assert api._active_server_auto_input_event_key == "synthetic_server_auto_4"
 
 
+def test_response_created_bridge_empty_retry_does_not_claim_pending_server_auto_owner() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api._current_input_event_key = "tool:call_bridge__empty_retry"
+    api._pending_response_create_origins.append(
+        {
+            "origin": "server_auto",
+            "turn_id": "turn_bridge",
+            "input_event_key": "tool:call_bridge__empty_retry",
+            "consumes_canonical_slot": "true",
+        }
+    )
+
+    asyncio.run(
+        api._handle_response_created_event(
+            {
+                "type": "response.created",
+                "response": {
+                    "id": "resp-bridge-empty-retry",
+                    "metadata": {
+                        "empty_retry_materialization": "report_followup",
+                        "empty_retry_origin": "tool_output_followthrough_bridge",
+                    },
+                },
+            },
+            ws,
+        )
+    )
+
+    assert api._active_response_origin == "server_auto"
+    assert api._active_response_input_event_key == "tool:call_bridge__empty_retry"
+    assert api._active_server_auto_input_event_key is None
+    assert api._pending_server_auto_response_for_turn(turn_id="turn_bridge") is None
+
+
 def test_duplicate_assistant_message_create_single_flight_guard(monkeypatch) -> None:
     """Deterministic run-405 repro now guarded to single assistant_message response.create."""
 
