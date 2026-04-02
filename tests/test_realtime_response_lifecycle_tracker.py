@@ -63,6 +63,8 @@ def _make_api() -> RealtimeAPI:
     api._debug_dump_canonical_key_timeline = lambda **kwargs: None
     api._lifecycle_controller = lambda: type("_Lifecycle", (), {"on_response_done": lambda self, *_: None})()
     api._turn_has_pending_tool_followup = lambda **_kwargs: False
+    api._response_done_followthrough_chain_remaining = lambda **_kwargs: False
+    api._terminal_deliverable_selection_store = lambda: {}
     return api
 
 
@@ -165,6 +167,52 @@ def test_terminal_cancelled_state_skips_retry_with_reason() -> None:
 
     assert decision.action == EmptyResponseDecisionAction.NOOP
     assert decision.reason_code == "delivery_state_terminal"
+
+
+def test_tool_output_followthrough_bridge_empty_retry_uses_origin_override() -> None:
+    api = _make_api()
+    sent_events: list[dict] = []
+
+    async def _capture_send_response_create(_websocket, event, **_kwargs):
+        sent_events.append(event)
+        return True
+
+    response_id = "resp_tool_bridge"
+    selection_store = {
+        response_id: {
+            "selected": False,
+            "reason": "tool_followup_precedence",
+            "canonical_key": "turn_1::tool:call_1",
+        }
+    }
+    api._terminal_deliverable_selection_store = lambda: selection_store
+    api._response_done_followthrough_chain_remaining = lambda **_kwargs: True
+    api._canonical_response_state = lambda _canonical_key: type(
+        "_State",
+        (),
+        {
+            "audio_started": False,
+            "deliverable_observed": False,
+            "deliverable_class": "non_deliverable",
+            "response_id": response_id,
+        },
+    )()
+    api._send_response_create = _capture_send_response_create
+    canonical_key = api._canonical_utterance_key(turn_id="turn_1", input_event_key="tool:call_1")
+
+    asyncio.run(
+        api._maybe_schedule_empty_response_retry(
+            websocket=object(),
+            turn_id="turn_1",
+            canonical_key=canonical_key,
+            input_event_key="tool:call_1",
+            origin="tool_output",
+            delivery_state_before_done="done",
+        )
+    )
+
+    assert len(sent_events) == 1
+    assert sent_events[0]["response"]["metadata"]["retry_reason"] == "empty_response_done"
 
 
 def test_empty_response_retry_exhausted_emits_fallback_without_scheduling_retry(caplog) -> None:
