@@ -57,6 +57,11 @@ def _setup_api() -> RealtimeAPI:
     api._last_user_input_text = "look around and remind me"
     api._approval_timeout_s = 20.0
     api._pending_action = None
+    api._current_turn_id_or_unknown = lambda: "turn_1"
+    api._continuity_ledger = SimpleNamespace(
+        compound_has_open_non_report_steps=lambda: False,
+        compound_owner_turn_id=lambda: "",
+    )
     return api
 
 
@@ -215,3 +220,28 @@ def test_companion_gesture_tool_request_generated_call_id_is_realtime_safe() -> 
     call_id = str(result.get("call_id") or "")
     assert call_id.startswith("compgest_")
     assert len(call_id) <= 32
+
+
+def test_companion_gesture_tool_request_suppressed_during_followthrough_execution() -> None:
+    api = _setup_api()
+    api._continuity_ledger = SimpleNamespace(
+        compound_has_open_non_report_steps=lambda: True,
+        compound_owner_turn_id=lambda: "turn_owner",
+    )
+
+    result = asyncio.run(
+        RealtimeAPI._submit_companion_gesture_tool_request(
+            api,
+            tool_name="gesture_look_around",
+            tool_args={},
+            websocket=object(),
+            source="preference_recall_companion_gesture",
+            turn_id="turn_2",
+            query="look around",
+        )
+    )
+
+    assert result["outcome"] == "suppress"
+    assert result["executed"] is False
+    assert result["reason"].startswith("followthrough_execution_active")
+    api._execute_action.assert_not_awaited()

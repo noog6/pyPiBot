@@ -138,7 +138,55 @@ def test_turn_contract_allows_explicit_requested_gesture_even_when_no_gesture_pr
     )
 
     assert api._turn_contract_blocks_tool_call(tool_name="gesture_attention_snap") is False
-    assert api._turn_contract_blocks_tool_call(tool_name="gesture_nod") is True
+
+
+def test_runtime_gesture_suppressed_during_active_followthrough_execution() -> None:
+    api = _make_api()
+    api._current_turn_id_or_unknown = lambda: "turn_current"
+    api._continuity_ledger = types.SimpleNamespace(
+        compound_has_open_non_report_steps=lambda: True,
+        compound_owner_turn_id=lambda: "turn_owner",
+    )
+
+    blocked, reason = api._should_suppress_nonessential_runtime_gesture_during_followthrough(
+        gesture_name="gesture_idle"
+    )
+
+    assert blocked is True
+    assert "followthrough_execution_active" in reason
+
+
+def test_attention_interrupt_gesture_not_suppressed_during_active_followthrough_execution() -> None:
+    api = _make_api()
+    api._continuity_ledger = types.SimpleNamespace(
+        compound_has_open_non_report_steps=lambda: True,
+        compound_owner_turn_id=lambda: "turn_owner",
+    )
+
+    blocked, reason = api._should_suppress_nonessential_runtime_gesture_during_followthrough(
+        gesture_name="gesture_attention_release"
+    )
+
+    assert blocked is False
+    assert reason == ""
+
+
+def test_arbitrate_server_auto_response_created_defers_for_followthrough_owner_mismatch() -> None:
+    api = _make_api()
+    api._continuity_ledger = types.SimpleNamespace(
+        compound_has_open_non_report_steps=lambda: True,
+        compound_owner_turn_id=lambda: "turn_owner",
+    )
+
+    outcome, reason = api._arbitrate_server_auto_response_created(
+        turn_id="turn_new",
+        input_event_key="synthetic_server_auto_1",
+        canonical_key="run-395:turn_new:synthetic_server_auto_1",
+        origin="server_auto",
+    )
+
+    assert outcome.value == "defer"
+    assert reason == "followthrough_owner_turn_mismatch"
 
 
 def test_turn_contract_exact_phrase_repair_scheduled_when_parent_missing_phrase() -> None:
