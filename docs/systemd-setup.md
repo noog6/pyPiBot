@@ -111,21 +111,6 @@ Example:
 
 This allows operators to inspect an individual run in isolation, while still keeping aggregated service-level logs.
 
-## Log rotation
-
-A logrotate template is provided at `ops/logrotate/pypibot` to rotate:
-
-- `/home/pi/workarea/pyPiBot/log/pyPiBot.log`
-- `/home/pi/workarea/pyPiBot/log/pyPiBot-error.log`
-- `/home/pi/workarea/pyPiBot/log/git-sync.log`
-
-Install it on the target host with:
-
-```bash
-sudo cp ops/logrotate/pypibot /etc/logrotate.d/pypibot
-sudo logrotate -f /etc/logrotate.d/pypibot
-```
-
 ## Log types: systemd vs app-managed
 
 - **Systemd stdout/stderr logs** (`pyPiBot.log`, `pyPiBot-error.log`) capture process-level output configured by `StandardOutput`/`StandardError` in the unit file.
@@ -133,23 +118,15 @@ sudo logrotate -f /etc/logrotate.d/pypibot
 
 Use systemd logs for service health and lifecycle troubleshooting; use per-run logs for investigating behavior within a specific run.
 
-Per-run logs are intentionally managed directly by Theo and are not included in `ops/logrotate/pypibot`.
+Per-run logs are intentionally managed directly by Theo.
 
 ## Operator verification checklist
-
-After deploying the updated logrotate config:
 
 1. Verify per-run logs are discoverable:
    ```bash
    find log -name 'run_*.log'
    ```
    Expect one or more matched files when runs have executed.
-
-2. Dry-run logrotate and verify systemd-level logs are included:
-   ```bash
-   sudo logrotate -d /etc/logrotate.d/pypibot
-   ```
-   Expect debug output showing consideration/rotation checks for `pyPiBot.log`, `pyPiBot-error.log`, and `git-sync.log` only (not `run_*.log`).
 
 ## Operator checklist: Raspberry Pi Zero 2 W
 
@@ -195,10 +172,9 @@ The default deployment intentionally uses matching absolute paths under
 `/home/pi/workarea/pyPiBot` across:
 
 - `systemd/pyPiBot.service` (`ExecStart`, `WorkingDirectory`, log file paths, `ExecStartPre` script path)
-- `ops/logrotate/pypibot` (rotated logfile paths)
 - `scripts/systemd-git-sync.sh` defaults (`REPO_DIR`, `LOG_FILE`)
 
-If you change one location root, update all three artifacts together in the same change.
+If you change one location root, update both artifacts together in the same change.
 
 ## Auto-sync security considerations
 
