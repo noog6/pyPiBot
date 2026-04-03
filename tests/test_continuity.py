@@ -636,7 +636,9 @@ def test_compound_final_followup_stays_pending_until_explicitly_closed() -> None
     ledger.update_from_event("response_done", close_unresolved="true")
 
     after_followup = ledger.build_brief("run-followup", "turn-1", "after_followup_close")
-    assert after_followup.compound_request is None
+    assert after_followup.compound_request is not None
+    assert after_followup.compound_request.final_followup_pending is True
+    assert after_followup.compound_request.steps[2].status == "pending"
 
 
 def test_compound_response_done_does_not_complete_report_before_prior_non_report_step() -> None:
@@ -700,6 +702,18 @@ def test_compound_chain_closes_only_after_last_non_report_step_then_report() -> 
     assert before_final_report_done.compound_request.final_followup_pending is True
 
     ledger.update_from_event("response_done", close_unresolved="true")
+    after_non_final_response_done = ledger.build_brief("run-order", "turn-1", "after_non_final_response_done")
+    assert after_non_final_response_done.compound_request is not None
+    assert [step.status for step in after_non_final_response_done.compound_request.steps] == [
+        "completed",
+        "completed",
+        "completed",
+        "completed",
+        "pending",
+    ]
+    assert after_non_final_response_done.compound_request.final_followup_pending is True
+
+    ledger.update_from_event("response_done", complete_final_report="true")
     after_final_report_done = ledger.build_brief("run-order", "turn-1", "after_final_report_done")
     assert after_final_report_done.compound_request is None
 
