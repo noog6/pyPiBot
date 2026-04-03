@@ -10315,30 +10315,79 @@ class RealtimeAPI:
             return False, ""
         if normalized_gesture_name in _FOLLOWTHROUGH_RUNTIME_GESTURE_INTERRUPT_ALLOWLIST:
             return False, ""
+        blocked, reason = self._should_suppress_nonessential_runtime_emission_during_followthrough(
+            emission_kind="gesture",
+            emission_name=normalized_gesture_name,
+        )
+        if blocked:
+            return True, reason
+        return False, ""
+
+    def _should_suppress_nonessential_runtime_emission_during_followthrough(
+        self,
+        *,
+        emission_kind: str,
+        emission_name: str = "",
+        origin: str = "",
+        turn_id: str = "",
+        response_metadata: dict[str, Any] | None = None,
+        has_safety_override: bool = False,
+    ) -> tuple[bool, str]:
+        normalized_kind = str(emission_kind or "").strip().lower() or "unknown"
+        normalized_name = str(emission_name or "").strip().lower() or "unknown"
+        normalized_origin = str(origin or "").strip().lower() or "unknown"
+        normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
+        metadata = response_metadata if isinstance(response_metadata, dict) else {}
         ledger = self._continuity_ledger_instance()
         owner_turn_id = str(ledger.compound_owner_turn_id() or "").strip() or "turn-unknown"
-        current_turn_id = str(self._current_turn_id_or_unknown() or "").strip() or "turn-unknown"
-        open_non_report_steps = bool(ledger.compound_has_open_non_report_steps())
-        if open_non_report_steps:
-            return True, (
-                f"followthrough_execution_active owner_turn_id={owner_turn_id} "
-                f"current_turn_id={current_turn_id}"
-            )
-        owner_turn_unsettled = False
-        if owner_turn_id and owner_turn_id != "turn-unknown":
-            owner_turn_unsettled = bool(
-                self._turn_followthrough_chain_remaining(
-                    turn_id=owner_turn_id,
-                    include_report_followup=True,
+        if not owner_turn_id or owner_turn_id == "turn-unknown":
+            return False, ""
+        if bool(ledger.compound_has_open_non_report_steps()):
+            if normalized_kind in {"response_create"}:
+                tool_followup = str(metadata.get("tool_followup") or "").strip().lower() in {"1", "true", "yes"}
+                if tool_followup or has_safety_override or normalized_origin in {"interrupt", "safety"}:
+                    return False, ""
+            if normalized_kind == "gesture":
+                current_turn_id = str(self._current_turn_id_or_unknown() or "").strip() or "turn-unknown"
+                return True, (
+                    "followthrough_exclusivity_nonessential_runtime_suppressed "
+                    f"owner_turn_id={owner_turn_id} current_turn_id={current_turn_id} "
+                    f"emission_kind={normalized_kind} emission_name={normalized_name}"
                 )
+            if normalized_kind == "response_create":
+                return True, (
+                    "followthrough_exclusivity_nonessential_runtime_suppressed "
+                    f"owner_turn_id={owner_turn_id} emitting_turn_id={normalized_turn_id} "
+                    f"emission_kind={normalized_kind} emission_origin={normalized_origin}"
+                )
+            return False, ""
+        owner_turn_unsettled = bool(
+            self._turn_followthrough_chain_remaining(
+                turn_id=owner_turn_id,
+                include_report_followup=True,
             )
+        )
         if not owner_turn_unsettled:
             return False, ""
-        if owner_turn_id != current_turn_id:
+        if normalized_kind == "response_create":
+            tool_followup = str(metadata.get("tool_followup") or "").strip().lower() in {"1", "true", "yes"}
+            if tool_followup or has_safety_override:
+                return False, ""
+            if normalized_origin in {"interrupt", "safety"}:
+                return False, ""
+        if normalized_kind == "gesture":
+            current_turn_id = str(self._current_turn_id_or_unknown() or "").strip() or "turn-unknown"
+            return True, (
+                "followthrough_exclusivity_nonessential_runtime_suppressed "
+                f"owner_turn_id={owner_turn_id} current_turn_id={current_turn_id} "
+                f"emission_kind={normalized_kind} emission_name={normalized_name}"
+            )
+        if normalized_kind not in {"gesture", "response_create"}:
             return False, ""
         return True, (
-            f"followthrough_owner_turn_unsettled owner_turn_id={owner_turn_id} "
-            f"current_turn_id={current_turn_id}"
+            "followthrough_exclusivity_nonessential_runtime_suppressed "
+            f"owner_turn_id={owner_turn_id} emitting_turn_id={normalized_turn_id} "
+            f"emission_kind={normalized_kind} emission_origin={normalized_origin}"
         )
 
     def _should_block_non_owner_followthrough_gesture_call(

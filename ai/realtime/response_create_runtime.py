@@ -541,6 +541,29 @@ class ResponseCreateRuntime:
         response-path arbitration seam explicit for current contenders only.
         """
         api = self.api
+        suppress_nonessential_runtime = getattr(
+            api,
+            "_should_suppress_nonessential_runtime_emission_during_followthrough",
+            None,
+        )
+        if callable(suppress_nonessential_runtime):
+            blocked_for_followthrough, followthrough_reason = suppress_nonessential_runtime(
+                emission_kind="response_create",
+                origin=prepared_snapshot.normalized_origin,
+                turn_id=prepared_snapshot.turn_id,
+                response_metadata=prepared_snapshot.response_metadata,
+                has_safety_override=prepared_snapshot.has_safety_override,
+            )
+            if blocked_for_followthrough:
+                return self._build_execution_decision(
+                    action=ResponseCreateOutcomeAction.BLOCK,
+                    reason_code="followthrough_exclusivity_nonessential_runtime_suppressed",
+                    explanation=(
+                        "Response.create blocked: non-essential runtime emission suppressed during active "
+                        f"followthrough ({followthrough_reason})."
+                    ),
+                    selected_candidate_id="single_flight_block",
+                ), None
         canonical_audio_started = (
             api._canonical_first_audio_started(prepared_snapshot.canonical_key)
             and not prepared_snapshot.allow_audio_started_upgrade
