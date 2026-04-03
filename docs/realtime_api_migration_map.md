@@ -1,5 +1,9 @@
 # Realtime API Migration Map
 
+> **Status (2026-04-03): Living migration map.**
+> This file tracks extraction ownership and slice sequencing. Any hard metrics
+> (for example LOC counts) are date-stamped snapshots, not evergreen values.
+
 This map decomposes `ai/realtime_api.py` into explicit ownership regions, documents what has already been extracted, and lays out a prioritized slice plan for the remaining work.
 
 ## 1) Responsibility map of `ai/realtime_api.py` (functional regions + function pointers)

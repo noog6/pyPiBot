@@ -1,5 +1,10 @@
 # Realtime API Surgery Plan (Theo)
 
+> **Status (2026-04-03): Point-in-time implementation plan/report artifact.**
+> This document captures one extraction pass and its measured outcomes. Treat it
+> as migration history, not a canonical runtime contract. For current ownership
+> boundaries, use `docs/architecture/README.md` and linked architecture docs.
+
 ## Phase 0 — Baseline + Cut List
 
 - Baseline LOC (`ai/realtime_api.py`): **9545**.
