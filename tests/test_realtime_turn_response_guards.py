@@ -2904,6 +2904,75 @@ def test_turn_followthrough_chain_remaining_releases_after_gesture_motion_comple
     )
 
 
+def test_turn_followthrough_chain_remaining_uses_trace_motion_truth_for_guard_logs(monkeypatch) -> None:
+    api = _make_api()
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
+        compound_request=types.SimpleNamespace(
+            final_followup_pending=True,
+            steps=(types.SimpleNamespace(kind="report", status="pending"),),
+        )
+    )
+    api._continuity_ledger = types.SimpleNamespace(
+        build_turn_settlement=lambda _brief: types.SimpleNamespace(
+            settlement_state="followthrough_remaining",
+            has_commitments=True,
+        )
+    )
+    api.get_gesture_motion_state = lambda *, tool_call_id: {"status": "started"} if tool_call_id == "call_1" else None
+    api._response_trace_context_by_id = {"resp_tool_1": {"tool_call_id": "call_1"}}
+
+    info_logs: list[str] = []
+    monkeypatch.setattr(logger, "info", lambda msg, *args, **_kwargs: info_logs.append(msg % args if args else msg))
+
+    decision = api._turn_followthrough_chain_remaining(
+        turn_id="turn_2",
+        include_report_followup=False,
+        response_id="resp_tool_1",
+    )
+
+    assert decision is True
+    combined_output = "\n".join(info_logs)
+    assert "response_done_followthrough_guard_decision" in combined_output
+    assert "gesture_motion_status=started" in combined_output
+    assert "gesture_motion_status=unknown" not in combined_output
+
+
+def test_response_done_followthrough_chain_remaining_releases_when_trace_motion_completed() -> None:
+    api = _make_api()
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
+        compound_request=types.SimpleNamespace(
+            final_followup_pending=True,
+            steps=(types.SimpleNamespace(kind="report", status="pending"),),
+        )
+    )
+    api._continuity_ledger = types.SimpleNamespace(
+        build_turn_settlement=lambda _brief: types.SimpleNamespace(
+            settlement_state="followthrough_remaining",
+            has_commitments=True,
+        )
+    )
+    api.get_gesture_motion_state = (
+        lambda *, tool_call_id: {"status": "completed"} if tool_call_id == "call_done" else None
+    )
+    api._response_trace_context_by_id = {
+        "resp_tool_done": {
+            "tool_call_id": "call_done",
+            "origin": "tool_output",
+            "parent_turn_id": "turn_parent",
+        }
+    }
+
+    assert (
+        api._response_done_followthrough_chain_remaining(
+            turn_id="turn_parent",
+            origin="tool_output",
+            response_id="resp_tool_done",
+            include_report_followup=False,
+        )
+        is False
+    )
+
+
 def test_should_hold_turn_for_non_substantive_talk_over_requires_followthrough_chain() -> None:
     api = _make_api()
     api._current_response_turn_id = "turn_2"
