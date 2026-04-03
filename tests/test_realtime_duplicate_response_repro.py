@@ -5116,6 +5116,194 @@ def test_execute_function_call_skips_response_create_for_completed_non_report_ge
     )
 
 
+def test_execute_function_call_blocks_non_owner_followthrough_gesture(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_turn_id_or_unknown = lambda: "turn_3"
+    api._current_response_turn_id = "turn_3"
+    api._active_input_event_key_by_turn_id["turn_3"] = "item_turn_3"
+    api._active_input_event_key_by_turn_id["turn_2"] = "item_turn_2"
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._intent_ledger = {}
+    api._apply_continuity_event(
+        "transcript_final",
+        text="look right, then left, then return to center and report done",
+        source="input_audio_transcription",
+        turn_id="turn_2",
+    )
+    api._apply_continuity_event(
+        "tool_result_received",
+        tool_name="gesture_look_right",
+        call_id="call-owning",
+        turn_id="turn_2",
+    )
+    executed = {"count": 0}
+
+    async def _fake_gesture(**_kwargs):
+        executed["count"] += 1
+        return {"ok": True}
+
+    monkeypatch.setitem(
+        __import__("ai.tools", fromlist=["function_map"]).function_map,
+        "gesture_look_left",
+        _fake_gesture,
+    )
+
+    asyncio.run(api.execute_function_call("gesture_look_left", "call_owner_block", {"target": "left"}, ws))
+
+    assert executed["count"] == 0
+    response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert response_create_events == []
+    canonical_key = api._canonical_utterance_key(
+        turn_id="turn_3",
+        input_event_key="tool:call_owner_block",
+    )
+    assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
+    output_items = [event for event in ws.sent if event.get("type") == "conversation.item.create"]
+    assert output_items
+    output_payload = json.loads(str(output_items[0]["item"]["output"]))
+    assert output_payload["result"]["reason"] == "followthrough_owner_turn_mismatch"
+
+
+def test_execute_function_call_non_owning_empty_and_clarify_turns_do_not_inherit_followthrough_owner(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_response_turn_id = "turn_2"
+    api._active_input_event_key_by_turn_id["turn_2"] = "item_turn_2"
+    api._active_input_event_key_by_turn_id["turn_3"] = "item_turn_3_empty"
+    api._active_input_event_key_by_turn_id["turn_4"] = "item_turn_4_clarify"
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._intent_ledger = {}
+    api._apply_continuity_event(
+        "transcript_final",
+        text="look right, then left, then return to center and report done",
+        source="input_audio_transcription",
+        turn_id="turn_2",
+    )
+    api._apply_continuity_event(
+        "tool_result_received",
+        tool_name="gesture_look_right",
+        call_id="call-owning",
+        turn_id="turn_2",
+    )
+    executed = {"count": 0}
+
+    async def _fake_gesture(**_kwargs):
+        executed["count"] += 1
+        return {"ok": True}
+
+    monkeypatch.setitem(
+        __import__("ai.tools", fromlist=["function_map"]).function_map,
+        "gesture_look_center",
+        _fake_gesture,
+    )
+
+    api._current_turn_id_or_unknown = lambda: "turn_3"
+    asyncio.run(api.execute_function_call("gesture_look_center", "call_turn_3", {"target": "center"}, ws))
+    api._current_turn_id_or_unknown = lambda: "turn_4"
+    asyncio.run(api.execute_function_call("gesture_look_center", "call_turn_4", {"target": "center"}, ws))
+
+    assert executed["count"] == 0
+    canonical_turn_3 = api._canonical_utterance_key(turn_id="turn_3", input_event_key="tool:call_turn_3")
+    canonical_turn_4 = api._canonical_utterance_key(turn_id="turn_4", input_event_key="tool:call_turn_4")
+    assert api._tool_followup_state(canonical_key=canonical_turn_3) == "dropped"
+    assert api._tool_followup_state(canonical_key=canonical_turn_4) == "dropped"
+
+
+def test_execute_function_call_same_owner_followthrough_gesture_still_executes(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_turn_id_or_unknown = lambda: "turn_2"
+    api._current_response_turn_id = "turn_2"
+    api._active_input_event_key_by_turn_id["turn_2"] = "item_turn_2"
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._intent_ledger = {}
+    api._apply_continuity_event(
+        "transcript_final",
+        text="look right, then left, then return to center and report done",
+        source="input_audio_transcription",
+        turn_id="turn_2",
+    )
+    api._apply_continuity_event(
+        "tool_result_received",
+        tool_name="gesture_look_right",
+        call_id="call-owning",
+        turn_id="turn_2",
+    )
+    executed = {"count": 0}
+
+    async def _fake_gesture(**_kwargs):
+        executed["count"] += 1
+        return {"ok": True}
+
+    monkeypatch.setitem(
+        __import__("ai.tools", fromlist=["function_map"]).function_map,
+        "gesture_look_left",
+        _fake_gesture,
+    )
+
+    asyncio.run(api.execute_function_call("gesture_look_left", "call_owner_ok", {"target": "left"}, ws))
+
+    assert executed["count"] == 1
+
+
+def test_execute_function_call_explicit_cross_turn_rebind_allows_non_owner_followthrough(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_turn_id_or_unknown = lambda: "turn_3"
+    api._current_response_turn_id = "turn_3"
+    api._active_input_event_key_by_turn_id["turn_2"] = "item_turn_2"
+    api._active_input_event_key_by_turn_id["turn_3"] = "item_turn_3"
+    api._active_response_id = "resp_tool_followup"
+    api._response_trace_context_by_id = {
+        "resp_tool_followup": {
+            "origin": "tool_output",
+            "turn_id": "turn_3",
+            "parent_turn_id": "turn_2",
+            "semantic_owner_turn_id": "turn_2",
+            "allow_cross_turn_rebind": "true",
+            "cross_turn_rebind_reason": "semantic_owner_parent_promoted",
+        }
+    }
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._intent_ledger = {}
+    api._apply_continuity_event(
+        "transcript_final",
+        text="look right, then left, then return to center and report done",
+        source="input_audio_transcription",
+        turn_id="turn_2",
+    )
+    api._apply_continuity_event(
+        "tool_result_received",
+        tool_name="gesture_look_right",
+        call_id="call-owning",
+        turn_id="turn_2",
+    )
+    executed = {"count": 0}
+
+    async def _fake_gesture(**_kwargs):
+        executed["count"] += 1
+        return {"ok": True}
+
+    monkeypatch.setitem(
+        __import__("ai.tools", fromlist=["function_map"]).function_map,
+        "gesture_look_left",
+        _fake_gesture,
+    )
+
+    asyncio.run(api.execute_function_call("gesture_look_left", "call_rebind_ok", {"target": "left"}, ws))
+
+    assert executed["count"] == 1
+
+
 def test_low_risk_gesture_followup_payload_preserves_distinct_motion_state() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
