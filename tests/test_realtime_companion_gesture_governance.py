@@ -245,3 +245,32 @@ def test_companion_gesture_tool_request_suppressed_during_followthrough_executio
     assert result["executed"] is False
     assert result["reason"].startswith("followthrough_execution_active")
     api._execute_action.assert_not_awaited()
+
+
+def test_companion_gesture_tool_request_suppressed_for_owner_turn_report_only_followthrough() -> None:
+    api = _setup_api()
+    api._current_turn_id_or_unknown = lambda: "turn_owner"
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True: (
+        turn_id == "turn_owner" and include_report_followup
+    )
+    api._continuity_ledger = SimpleNamespace(
+        compound_has_open_non_report_steps=lambda: False,
+        compound_owner_turn_id=lambda: "turn_owner",
+    )
+
+    result = asyncio.run(
+        RealtimeAPI._submit_companion_gesture_tool_request(
+            api,
+            tool_name="gesture_look_around",
+            tool_args={},
+            websocket=object(),
+            source="preference_recall_companion_gesture",
+            turn_id="turn_owner",
+            query="look around",
+        )
+    )
+
+    assert result["outcome"] == "suppress"
+    assert result["executed"] is False
+    assert result["reason"].startswith("followthrough_owner_turn_unsettled")
+    api._execute_action.assert_not_awaited()

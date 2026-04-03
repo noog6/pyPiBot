@@ -10316,11 +10316,30 @@ class RealtimeAPI:
         if normalized_gesture_name in _FOLLOWTHROUGH_RUNTIME_GESTURE_INTERRUPT_ALLOWLIST:
             return False, ""
         ledger = self._continuity_ledger_instance()
-        if not ledger.compound_has_open_non_report_steps():
-            return False, ""
         owner_turn_id = str(ledger.compound_owner_turn_id() or "").strip() or "turn-unknown"
         current_turn_id = str(self._current_turn_id_or_unknown() or "").strip() or "turn-unknown"
-        return True, f"followthrough_execution_active owner_turn_id={owner_turn_id} current_turn_id={current_turn_id}"
+        open_non_report_steps = bool(ledger.compound_has_open_non_report_steps())
+        if open_non_report_steps:
+            return True, (
+                f"followthrough_execution_active owner_turn_id={owner_turn_id} "
+                f"current_turn_id={current_turn_id}"
+            )
+        owner_turn_unsettled = False
+        if owner_turn_id and owner_turn_id != "turn-unknown":
+            owner_turn_unsettled = bool(
+                self._turn_followthrough_chain_remaining(
+                    turn_id=owner_turn_id,
+                    include_report_followup=True,
+                )
+            )
+        if not owner_turn_unsettled:
+            return False, ""
+        if owner_turn_id != current_turn_id:
+            return False, ""
+        return True, (
+            f"followthrough_owner_turn_unsettled owner_turn_id={owner_turn_id} "
+            f"current_turn_id={current_turn_id}"
+        )
 
     def _should_block_non_owner_followthrough_gesture_call(
         self,
