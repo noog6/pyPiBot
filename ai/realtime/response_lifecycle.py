@@ -297,18 +297,12 @@ class ResponseLifecycleTracker:
             return False
         response_trace_by_id = getattr(self._api, "_response_trace_by_id", None)
         trace_context = response_trace_by_id().get(response_id, {}) if callable(response_trace_by_id) else {}
-        tool_followup_silent = str(
-            trace_context.get("tool_followup_silent_user_facing_output")
-            or trace_context.get("tool_followup_silent_audio")
-            or ""
-        ).strip().lower() in {"true", "1", "yes"}
-        tool_followup_status_only = str(trace_context.get("tool_followup_status_only") or "").strip().lower() in {
-            "true",
-            "1",
-            "yes",
-        }
-        if tool_followup_silent or tool_followup_status_only:
-            return False
+        # Silent/status-only intermediate tool followups are still eligible for
+        # followthrough bridge materialization when the chain remains open. The
+        # terminal handler suppresses retries while pending followups still
+        # exist; this gate is specifically for the "baton handoff" seam once an
+        # empty intermediate terminal has completed and no pending followup state
+        # remains.
         selection_store = getattr(self._api, "_terminal_deliverable_selection_store", None)
         if not callable(selection_store):
             return False
