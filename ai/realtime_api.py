@@ -9121,7 +9121,7 @@ class RealtimeAPI:
                 tool_name=normalized_tool_name,
             )
             if not keep_status_only and motion_status in {"queued", "started"}:
-                keep_status_only = True
+                keep_status_only = self._gesture_followthrough_chain_remaining(turn_id=turn_id)
             self._log_gesture_followup_truth_snapshot(
                 turn_id=turn_id,
                 tool_call_id=tool_call_id,
