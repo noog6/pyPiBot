@@ -95,6 +95,8 @@ def _make_api() -> RealtimeAPI:
     api._gesture_cooldowns_s = {}
     api.rate_limits = {}
     api._last_response_metadata = {}
+    api._intent_ledger = {}
+    api._intent_state_ttl_s = 300.0
     return api
 
 
@@ -153,7 +155,7 @@ def test_runtime_gesture_suppressed_during_active_followthrough_execution() -> N
     )
 
     assert blocked is True
-    assert "followthrough_execution_active" in reason
+    assert "followthrough_exclusivity_nonessential_runtime_suppressed" in reason
 
 
 def test_attention_interrupt_gesture_not_suppressed_during_active_followthrough_execution() -> None:
@@ -187,7 +189,7 @@ def test_runtime_gesture_suppressed_for_owner_turn_when_only_report_followup_rem
     )
 
     assert blocked is True
-    assert reason.startswith("followthrough_owner_turn_unsettled")
+    assert reason.startswith("followthrough_exclusivity_nonessential_runtime_suppressed")
 
 
 def test_runtime_gesture_resumes_after_owner_turn_followthrough_settles() -> None:
@@ -236,7 +238,7 @@ def test_attention_interrupt_gesture_allowlist_still_applies_when_owner_turn_rep
     assert reason == ""
 
 
-def test_report_only_followthrough_window_does_not_block_non_owner_runtime_turn() -> None:
+def test_report_only_followthrough_window_blocks_non_owner_runtime_turn() -> None:
     api = _make_api()
     api._current_turn_id_or_unknown = lambda: "turn_other"
     api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True: (
@@ -251,8 +253,154 @@ def test_report_only_followthrough_window_does_not_block_non_owner_runtime_turn(
         gesture_name="gesture_curious_tilt"
     )
 
-    assert blocked is False
-    assert reason == ""
+    assert blocked is True
+    assert "followthrough_exclusivity_nonessential_runtime_suppressed" in reason
+
+
+def test_companion_gesture_suppressed_during_unresolved_followthrough() -> None:
+    api = _make_api()
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True: (
+        turn_id == "turn_owner" and include_report_followup
+    )
+    api._continuity_ledger = types.SimpleNamespace(
+        compound_has_open_non_report_steps=lambda: False,
+        compound_owner_turn_id=lambda: "turn_owner",
+    )
+
+    result = asyncio.run(
+        api._submit_companion_gesture_tool_request(
+            tool_name="gesture_idle",
+            tool_args={},
+            websocket=object(),
+            source="test",
+            turn_id="turn_other",
+            query="hello",
+        )
+    )
+
+    assert result["outcome"] == "suppress"
+    assert result["executed"] is False
+    assert "followthrough_exclusivity_nonessential_runtime_suppressed" in str(result["reason"])
+
+
+def test_nonessential_server_auto_response_create_blocked_during_unresolved_followthrough() -> None:
+    api = _make_api()
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True: (
+        turn_id == "turn_owner" and include_report_followup
+    )
+    api._continuity_ledger = types.SimpleNamespace(
+        compound_has_open_non_report_steps=lambda: False,
+        compound_owner_turn_id=lambda: "turn_owner",
+    )
+
+    runtime = ResponseCreateRuntime(api)
+    _snapshot, decision = runtime.evaluate_response_create_attempt(
+        response_create_event={
+            "type": "response.create",
+            "response": {"metadata": {"turn_id": "turn_other", "input_event_key": "synthetic_server_auto_1"}},
+        },
+        origin="server_auto",
+        utterance_context=None,
+        memory_brief_note=None,
+    )
+
+    assert decision.action.value == "BLOCK"
+    assert decision.reason_code == "followthrough_exclusivity_nonessential_runtime_suppressed"
+
+
+def test_nonessential_opportunistic_response_create_blocked_during_unresolved_followthrough() -> None:
+    api = _make_api()
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True: (
+        turn_id == "turn_owner" and include_report_followup
+    )
+    api._continuity_ledger = types.SimpleNamespace(
+        compound_has_open_non_report_steps=lambda: False,
+        compound_owner_turn_id=lambda: "turn_owner",
+    )
+
+    runtime = ResponseCreateRuntime(api)
+    _snapshot, decision = runtime.evaluate_response_create_attempt(
+        response_create_event={
+            "type": "response.create",
+            "response": {"metadata": {"turn_id": "turn_other", "input_event_key": "item_9", "trigger": "opportunistic"}},
+        },
+        origin="assistant_message",
+        utterance_context=None,
+        memory_brief_note=None,
+    )
+
+    assert decision.action.value == "BLOCK"
+    assert decision.reason_code == "followthrough_exclusivity_nonessential_runtime_suppressed"
+
+
+def test_final_owed_report_tool_followup_still_allowed_during_report_only_followthrough() -> None:
+    api = _make_api()
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True: (
+        turn_id == "turn_owner" and include_report_followup
+    )
+    api._continuity_ledger = types.SimpleNamespace(
+        compound_has_open_non_report_steps=lambda: False,
+        compound_owner_turn_id=lambda: "turn_owner",
+    )
+
+    runtime = ResponseCreateRuntime(api)
+    _snapshot, decision = runtime.evaluate_response_create_attempt(
+        response_create_event={
+            "type": "response.create",
+            "response": {
+                "metadata": {
+                    "turn_id": "turn_owner",
+                    "input_event_key": "item_2",
+                    "tool_followup": "true",
+                    "tool_followup_release": "true",
+                }
+            },
+        },
+        origin="tool_output",
+        utterance_context=None,
+        memory_brief_note=None,
+    )
+
+    assert decision.action.value in {"SEND", "SCHEDULE"}
+
+
+def test_nonessential_response_create_suppression_clears_after_followthrough_settles() -> None:
+    api = _make_api()
+    followthrough_open = {"active": True}
+
+    def _followthrough(*, turn_id, include_report_followup=True):
+        return turn_id == "turn_owner" and include_report_followup and followthrough_open["active"]
+
+    api._turn_followthrough_chain_remaining = _followthrough
+    api._continuity_ledger = types.SimpleNamespace(
+        compound_has_open_non_report_steps=lambda: False,
+        compound_owner_turn_id=lambda: "turn_owner",
+    )
+
+    runtime = ResponseCreateRuntime(api)
+    event = {
+        "type": "response.create",
+        "response": {"metadata": {"turn_id": "turn_other", "input_event_key": "item_11", "trigger": "opportunistic"}},
+    }
+    _snapshot_blocked, blocked = runtime.evaluate_response_create_attempt(
+        response_create_event=event,
+        origin="assistant_message",
+        utterance_context=None,
+        memory_brief_note=None,
+    )
+    followthrough_open["active"] = False
+    _snapshot_released, released = runtime.evaluate_response_create_attempt(
+        response_create_event={
+            "type": "response.create",
+            "response": {"metadata": {"turn_id": "turn_other", "input_event_key": "item_12", "trigger": "opportunistic"}},
+        },
+        origin="assistant_message",
+        utterance_context=None,
+        memory_brief_note=None,
+    )
+
+    assert blocked.reason_code == "followthrough_exclusivity_nonessential_runtime_suppressed"
+    assert released.reason_code != "followthrough_exclusivity_nonessential_runtime_suppressed"
 
 
 def test_arbitrate_server_auto_response_created_defers_for_followthrough_owner_mismatch() -> None:
