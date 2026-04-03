@@ -458,6 +458,15 @@ class ServerAutoArbitrationOutcome(str, Enum):
     DEFER = "defer"
 
 
+_FOLLOWTHROUGH_RUNTIME_GESTURE_INTERRUPT_ALLOWLIST = frozenset(
+    {
+        "gesture_attention_hold",
+        "gesture_attention_release",
+        "gesture_attention_snap",
+    }
+)
+
+
 @dataclass(frozen=True)
 class StartupDependencyOutcome:
     component: str
@@ -4370,6 +4379,18 @@ class RealtimeAPI:
         enforce_motion_guards: bool,
     ) -> bool:
         now = time.monotonic()
+        suppress_for_followthrough, followthrough_reason = self._should_suppress_nonessential_runtime_gesture_during_followthrough(
+            gesture_name=gesture_name
+        )
+        if suppress_for_followthrough:
+            logger.info(
+                "runtime_gesture_suppressed_during_followthrough run_id=%s state=%s gesture=%s reason=%s",
+                self._current_run_id() or "",
+                state.value,
+                gesture_name,
+                followthrough_reason,
+            )
+            return False
         try:
             controller = MotionController.get_instance()
         except Exception as exc:
@@ -10283,6 +10304,23 @@ class RealtimeAPI:
         if allow_rebind and reason_allows:
             return True, raw_reason
         return False, raw_reason
+
+    def _should_suppress_nonessential_runtime_gesture_during_followthrough(
+        self,
+        *,
+        gesture_name: str,
+    ) -> tuple[bool, str]:
+        normalized_gesture_name = str(gesture_name or "").strip().lower()
+        if not normalized_gesture_name:
+            return False, ""
+        if normalized_gesture_name in _FOLLOWTHROUGH_RUNTIME_GESTURE_INTERRUPT_ALLOWLIST:
+            return False, ""
+        ledger = self._continuity_ledger_instance()
+        if not ledger.compound_has_open_non_report_steps():
+            return False, ""
+        owner_turn_id = str(ledger.compound_owner_turn_id() or "").strip() or "turn-unknown"
+        current_turn_id = str(self._current_turn_id_or_unknown() or "").strip() or "turn-unknown"
+        return True, f"followthrough_execution_active owner_turn_id={owner_turn_id} current_turn_id={current_turn_id}"
 
     def _should_block_non_owner_followthrough_gesture_call(
         self,
@@ -16634,6 +16672,23 @@ class RealtimeAPI:
             suppression_by_input_event=suppression_by_input_event,
             obligation_replacement=obligation_replacement,
         )
+        if normalized_origin == "server_auto":
+            ledger = self._continuity_ledger_instance()
+            owner_turn_id = str(ledger.compound_owner_turn_id() or "").strip()
+            owner_mismatch = bool(
+                ledger.compound_has_open_non_report_steps()
+                and owner_turn_id
+                and owner_turn_id != normalized_turn_id
+            )
+            if owner_mismatch:
+                logger.info(
+                    "server_auto_followthrough_owner_mismatch_defer run_id=%s owner_turn_id=%s incoming_turn_id=%s canonical_key=%s",
+                    self._current_run_id() or "",
+                    owner_turn_id,
+                    normalized_turn_id or "turn-unknown",
+                    normalized_canonical_key or "unknown",
+                )
+                return ServerAutoArbitrationOutcome.DEFER, "followthrough_owner_turn_mismatch"
         logger.info(
             "arbitration_decision surface=server_auto_created action=%s reason_code=%s selected_candidate_id=%s turn_id=%s canonical_key=%s",
             policy_decision.action.value,
@@ -18984,6 +19039,12 @@ class RealtimeAPI:
         turn_id: str,
         query: str,
     ) -> dict[str, Any]:
+        suppress_for_followthrough, followthrough_reason = self._should_suppress_nonessential_runtime_gesture_during_followthrough(
+            gesture_name=tool_name
+        )
+        if suppress_for_followthrough:
+            self._record_intent_state(tool_name, tool_args, "denied")
+            return {"outcome": "suppress", "reason": followthrough_reason, "executed": False}
         call_id = f"compgest_{uuid.uuid4().hex[:23]}"
         action = self._governance.build_action_packet(
             tool_name,
