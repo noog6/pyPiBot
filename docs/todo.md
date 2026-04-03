@@ -14,8 +14,8 @@
 
 ## Security investigations
 
-- Review subprocess usage that shells out to system tools (e.g., `amixer`) and confirm inputs are fully controlled/validated to prevent command injection or unexpected device access.【F:services/output_volume.py†L14-L84】
-- Validate outbound network endpoints and TLS usage for realtime/HTTP API calls to ensure no plaintext or untrusted endpoints are reachable in production builds.【F:ai/realtime_api.py†L160-L260】【F:ai/realtime_api.py†L840-L900】
+- Review subprocess usage that shells out to system tools (e.g., `amixer`) and confirm inputs are fully controlled/validated to prevent command injection or unexpected device access.
+- Validate outbound network endpoints and TLS usage for realtime/HTTP API calls to ensure no plaintext or untrusted endpoints are reachable in production builds.
 
 ## Test-suite maintainability follow-ups
 

@@ -34,31 +34,31 @@ The entrypoint in `main.py` builds and launches the following components:
   lifecycle and emits phase-transition logs for observability. On interaction-state
   transitions, it also refreshes Quiet Intent (consultative posture-bias snapshot)
   and emits deduped quiet-intent diagnostics; this does not alter arbitration,
-  governance, or execution authority seams.【F:ai/realtime_api.py†L92-L208】【F:ai/realtime_api.py†L4461-L4668】【F:ai/orchestration.py†L1-L27】
+  governance, or execution authority seams.
 - **Governance layer**: Builds action packets for tool calls, applies tool tier
   policy (read-only vs. reversible vs. stateful/credentialed), enforces autonomy
-  windows, and decides whether approval is required before execution.【F:ai/governance.py†L13-L320】
+  windows, and decides whether approval is required before execution.
 - **Event bus (shared queue)**: Thread-safe queue that collects sensor events
-  and orders them by priority for injection into the realtime session.【F:ai/event_bus.py†L1-L94】
+  and orders them by priority for injection into the realtime session.
 - **Motion control loop thread**: A background loop that drives the servo
-  controller and executes queued gesture/motion actions.【F:motion/motion_controller.py†L90-L176】
+  controller and executes queued gesture/motion actions.
 - **Vision loop thread**: The camera controller captures frames, detects scene
-  changes, and sends images into the realtime agent when ready.【F:hardware/camera_controller.py†L109-L215】
+  changes, and sends images into the realtime agent when ready.
 - **IMU monitor thread**: Samples IMU data, derives motion events, and emits
-  event callbacks into the main runtime.【F:services/imu_monitor.py†L40-L210】
+  event callbacks into the main runtime.
 - **Battery monitor thread**: Samples the ADS1015 voltage, derives battery
-  events, and emits callbacks to the runtime.【F:services/battery_monitor.py†L31-L140】
+  events, and emits callbacks to the runtime.
 - **Ops orchestrator thread**: Runs a heartbeat loop that executes health
   probes, debounces health states, enforces rolling budgets, and emits health
-  snapshots/alerts onto the event bus.【F:services/ops_orchestrator.py†L1-L431】【F:services/health_probes.py†L1-L199】
+  snapshots/alerts onto the event bus.
 - **Event injector thread**: Drains the shared event bus, applies cooldown/TTL
   checks, and injects events into the realtime session when the websocket is
   ready. The injector is instantiated during `RealtimeAPI` construction and is
-  started when `RealtimeAPI.run()` begins.【F:ai/event_injector.py†L1-L79】【F:ai/realtime_api.py†L534-L4512】
+  started when `RealtimeAPI.run()` begins.
 
 `main.py` initializes `RealtimeAPI` and starts the sensor/service background
 threads before entering the async realtime loop, while the `EventInjector`
-thread itself is started by `RealtimeAPI.run()` at loop startup.【F:main.py†L110-L270】【F:ai/realtime_api.py†L534-L4512】
+thread itself is started by `RealtimeAPI.run()` at loop startup.
 
 ## System Map (Visual)
 
@@ -234,11 +234,11 @@ flowchart LR
 
 **Audio in** is captured by `AsyncMicrophone` via PyAudio’s callback, which
 buffers frames into a queue; the realtime loop drains that queue and sends audio
-frames to the websocket as `input_audio_buffer.append` events.【F:interaction/async_microphone.py†L15-L140】【F:ai/realtime_api.py†L468-L525】
+frames to the websocket as `input_audio_buffer.append` events.
 
 **Audio out** is driven by websocket events (`response.output_audio.delta`), which
 are accumulated and streamed to `AudioPlayer` for playback. When playback
-finishes, the microphone is resumed and the agent can accept new audio input.【F:ai/realtime_api.py†L352-L445】
+finishes, the microphone is resumed and the agent can accept new audio input.
 
 **Tool execution** is driven by realtime function call events
 (`response.function_call_arguments.done`). The realtime agent builds a structured
@@ -246,7 +246,7 @@ action packet (what/why/impact/rollback/cost/confidence/alternatives), asks for
 approval when required, and enforces autonomy windows before mapping the call
 through `function_map` and returning results as `function_call_output` items.
 Stop words immediately cancel pending actions and pause tool execution for a
-cooldown interval.【F:ai/realtime_api.py†L680-L840】【F:ai/governance.py†L38-L320】【F:ai/tools.py†L1-L72】
+cooldown interval.
 
 ### 2. Vision Thread → Realtime Agent
 
@@ -254,7 +254,7 @@ The camera controller’s vision loop captures low-res luma frames, detects moti
 or scene changes, and when a change is detected captures a full-resolution
 image. It then queues the image to the realtime agent for injection, using
 `send_image_to_assistant()` when the realtime loop is ready; otherwise, it
-buffers images until the agent is ready.【F:hardware/camera_controller.py†L146-L266】
+buffers images until the agent is ready.
 
 ### 3. IMU + Battery Monitor Threads → Realtime Agent
 
@@ -262,7 +262,7 @@ The IMU and battery monitors run independent loops and publish structured
 events to the shared `EventBus`. `main.py` registers handlers that convert
 sensor events into bus payloads, and the realtime agent’s `EventInjector`
 thread drains the bus when ready, applying cooldown/TTL logic before injecting
-messages into the websocket session.【F:services/imu_monitor.py†L109-L153】【F:services/battery_monitor.py†L76-L118】【F:ai/event_injector.py†L1-L79】【F:main.py†L110-L207】
+messages into the websocket session.
 
 ### 4. Ops Orchestrator → Event Bus
 
@@ -270,14 +270,14 @@ The ops orchestrator runs a periodic tick loop to execute health probes,
 calculate debounced health status, emit health snapshots, and publish alerts or
 budget warnings to the shared event bus. This provides a low-frequency
 operations heartbeat alongside the sensor loops and is started/stopped by
-`main.py` just like the other background services.【F:services/ops_orchestrator.py†L34-L431】【F:main.py†L174-L233】
+`main.py` just like the other background services.
 
 ### 5. Motion Loop and Realtime State Hooks
 
 Motion control is a continuous loop running in its own thread. The realtime
 agent uses an `InteractionStateManager` to interpret listening/speaking states
 and can emit gesture actions (e.g., nods) by pushing actions into the motion
-controller queue, assuming the control loop is running.【F:ai/realtime_api.py†L126-L208】【F:motion/motion_controller.py†L90-L272】
+controller queue, assuming the control loop is running.
 
 ### 6. Orchestration + Reflection Lifecycle
 
@@ -286,7 +286,7 @@ helper. Phases transition as the websocket events progress: speech start and
 injected text push the state into **sense**, `response.created` moves to
 **plan**, function calls enter **act**, and response completion marks
 **reflect** before returning to **idle**. Transitions are logged for runtime
-diagnostics.【F:ai/realtime_api.py†L493-L793】【F:ai/orchestration.py†L1-L27】
+diagnostics.
 
 Reflection generation is handled by `ReflectionCoordinator`, which is
 configured by `reflection_enabled` and `reflection_min_interval_s` and runs an
@@ -294,7 +294,7 @@ async task so the main loop stays responsive. Each reflection captures the last
 user input, assistant reply, tool calls, and response metadata, then stores a
 JSON payload into `StorageController` (with min-interval and in-flight task
 guards). The latest lessons are also pulled from `ReflectionManager` during
-session initialization to seed instructions for the next turn.【F:ai/realtime_api.py†L155-L748】【F:ai/reflection.py†L1-L184】【F:services/reflection_manager.py†L1-L88】
+session initialization to seed instructions for the next turn.
 
 ## Quick Reference: Threads + Responsibilities
 
