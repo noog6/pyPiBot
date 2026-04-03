@@ -308,6 +308,72 @@ def test_nonessential_server_auto_response_create_blocked_during_unresolved_foll
     assert decision.reason_code == "followthrough_exclusivity_nonessential_runtime_suppressed"
 
 
+def test_empty_retry_bridge_materialization_response_create_allowed_during_unresolved_followthrough() -> None:
+    api = _make_api()
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True: (
+        turn_id == "turn_owner" and include_report_followup
+    )
+    api._continuity_ledger = types.SimpleNamespace(
+        compound_has_open_non_report_steps=lambda: False,
+        compound_owner_turn_id=lambda: "turn_owner",
+    )
+
+    runtime = ResponseCreateRuntime(api)
+    _snapshot, decision = runtime.evaluate_response_create_attempt(
+        response_create_event={
+            "type": "response.create",
+            "response": {
+                "metadata": {
+                    "turn_id": "turn_owner",
+                    "input_event_key": "tool_call_1__empty_retry",
+                    "retry_reason": "empty_response_done",
+                    "empty_retry_materialization": "report_followup",
+                    "empty_retry_origin": "tool_output_followthrough_bridge",
+                }
+            },
+        },
+        origin="server_auto",
+        utterance_context=None,
+        memory_brief_note=None,
+    )
+
+    assert decision.action.value in {"SEND", "SCHEDULE"}
+    assert decision.reason_code != "followthrough_exclusivity_nonessential_runtime_suppressed"
+
+
+def test_empty_retry_bridge_materialization_still_blocked_for_non_owner_turn() -> None:
+    api = _make_api()
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True: (
+        turn_id == "turn_owner" and include_report_followup
+    )
+    api._continuity_ledger = types.SimpleNamespace(
+        compound_has_open_non_report_steps=lambda: False,
+        compound_owner_turn_id=lambda: "turn_owner",
+    )
+
+    runtime = ResponseCreateRuntime(api)
+    _snapshot, decision = runtime.evaluate_response_create_attempt(
+        response_create_event={
+            "type": "response.create",
+            "response": {
+                "metadata": {
+                    "turn_id": "turn_other",
+                    "input_event_key": "tool_call_1__empty_retry",
+                    "retry_reason": "empty_response_done",
+                    "empty_retry_materialization": "report_followup",
+                    "empty_retry_origin": "tool_output_followthrough_bridge",
+                }
+            },
+        },
+        origin="server_auto",
+        utterance_context=None,
+        memory_brief_note=None,
+    )
+
+    assert decision.action.value == "BLOCK"
+    assert decision.reason_code == "followthrough_exclusivity_nonessential_runtime_suppressed"
+
+
 def test_nonessential_opportunistic_response_create_blocked_during_unresolved_followthrough() -> None:
     api = _make_api()
     api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True: (
