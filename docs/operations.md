@@ -37,6 +37,26 @@ runbook parsing:
 - `status=starting|ready|warning|fatal`
 - Optional `detail=<error>` when failures occur
 
+## Startup Warmup Health Semantics
+
+On process start, the orchestrator enters a bounded **warmup** phase before
+normal health classification is enforced. Warmup starts when
+`OpsOrchestrator.start_loop()` begins a new loop and exits when either:
+
+- Realtime is connected/ready and required startup probes are settled/healthy
+  (while allowing configured startup transients), or
+- `health.warmup.grace_period_s` expires (default: `20s`).
+
+Warmup intentionally tolerates transient startup degradations for:
+
+- `realtime=degraded` during pre-connection/offline startup.
+- `audio=degraded` during partial/late device enumeration.
+
+During warmup, health snapshots emit `status=warmup` with probe-level details
+in metadata. After warmup, status derivation returns to normal (`ok`,
+`degraded`, `failing`) and one transition log is emitted:
+`[Ops] Warmup transition: warmup -> active reason=<criteria_met|timeout> elapsed_s=<...>`.
+
 ## Operational Models (ops_models)
 
 Operational state is captured by a set of lightweight data models:
@@ -52,7 +72,7 @@ Operational state is captured by a set of lightweight data models:
   probe results.
 
 These models give the orchestrator a consistent shape for health reporting,
-budget metrics, and event emission.【F:core/ops_models.py†L1-L65】
+budget metrics, and event emission.
 
 ## Ops Orchestrator Loop
 
@@ -69,7 +89,7 @@ The orchestrator runs a periodic tick loop that:
 
 The loop maintains session counters (`ticks`, `heartbeats`, and `errors`) in the
 `BudgetCounters` struct and exposes them via `get_counters()` for diagnostics or
-UI visibility.【F:services/ops_orchestrator.py†L34-L231】
+UI visibility.
 
 ## Health Probes & Debounce Logic
 
@@ -88,7 +108,7 @@ and structured details. Current probes include:
 Probe results are debounced for a configurable window so that transient probe
 failures do not immediately flip the overall health state. The orchestrator
 tracks both stable and pending statuses and only commits changes once the
-pending status exceeds the debounce interval.【F:services/health_probes.py†L1-L199】【F:services/ops_orchestrator.py†L116-L345】
+pending status exceeds the debounce interval.
 
 ## Session Counters
 
@@ -101,7 +121,6 @@ Two levels of counters are tracked:
   by the realtime session health probe.
 
 These counters provide a running view of runtime stability and connectivity.
-【F:core/ops_models.py†L24-L32】【F:services/ops_orchestrator.py†L122-L200】【F:services/health_probes.py†L149-L199】
 
 ## Ops Snapshot Runbook (Canonical Schema)
 
@@ -146,7 +165,6 @@ The ops layer emits alerts for two main cases:
 Alerts are routed through `AlertPolicy`, which enforces per-alert cooldowns,
 assigns severity-based priorities, and sets TTLs before publishing to the event
 bus. Default cooldowns and TTLs can be configured in `config/default.yaml`.
-【F:services/ops_orchestrator.py†L342-L392】【F:core/alert_policy.py†L1-L79】【F:config/default.yaml†L54-L61】
 
 ## Budget Windows
 
@@ -161,7 +179,6 @@ ops orchestrator applies these budgets to:
 Budgets are configured under `ops.budgets` in the default config and can be
 raised or set to `0` to disable limits entirely. The log budget additionally
 influences whether the ops loop emits heartbeat and health snapshot logs.
-【F:core/budgeting.py†L1-L62】【F:services/ops_orchestrator.py†L76-L431】【F:config/default.yaml†L37-L54】
 
 ## Configuration Summary
 
@@ -175,8 +192,6 @@ Relevant configuration keys include:
 - `alerts.cooldown_s` and `alerts.ttl_s` for alert throttling.
 
 See `config/default.yaml` for defaults and in-line comments on each field.
-【F:config/default.yaml†L37-L61】【F:config/default.yaml†L200-L219】
-
 
 ## Battery Event Lifecycle (Operator View)
 
