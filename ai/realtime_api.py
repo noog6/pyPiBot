@@ -9060,6 +9060,8 @@ class RealtimeAPI:
                 call_id=tool_call_id,
                 tool_name=normalized_tool_name,
             )
+            if not keep_status_only and motion_status in {"queued", "started"}:
+                keep_status_only = True
             self._log_gesture_followup_truth_snapshot(
                 turn_id=turn_id,
                 tool_call_id=tool_call_id,
@@ -9071,6 +9073,8 @@ class RealtimeAPI:
                     turn_id=turn_id,
                     include_report_followup=True,
                 )
+                if not followthrough_remaining and motion_status in {"queued", "started"}:
+                    followthrough_remaining = True
                 if not followthrough_remaining and not tool_result_has_distinct_info:
                     metadata["tool_followup_create_suppressed"] = "true"
                     metadata["tool_followup_create_suppression_reason"] = "followthrough_complete_non_report"
@@ -10002,7 +10006,14 @@ class RealtimeAPI:
             return False
         return active_status != "completed"
 
-    def _turn_followthrough_chain_remaining(self, *, turn_id: str, include_report_followup: bool = True) -> bool:
+    def _turn_followthrough_chain_remaining(
+        self,
+        *,
+        turn_id: str,
+        include_report_followup: bool = True,
+        gesture_tool_call_id: str | None = None,
+        gesture_tool_name: str | None = None,
+    ) -> bool:
         normalized_turn_id = str(turn_id or "").strip()
         if not normalized_turn_id:
             return False
@@ -10020,27 +10031,37 @@ class RealtimeAPI:
         final_followup_pending = bool(getattr(compound_state, "final_followup_pending", False))
         open_non_report_steps = False
         decision = False
+        gesture_motion_status = self._gesture_followup_motion_status(
+            call_id=str(gesture_tool_call_id or "").strip(),
+            tool_name=gesture_tool_name,
+        )
+        gesture_motion_open = gesture_motion_status in {"queued", "started"}
+
         if settlement_state == "followthrough_remaining":
             if include_report_followup:
                 decision = True
                 logger.info(
-                    "response_done_followthrough_guard_decision turn_id=%s include_report_followup=%s settlement_state=%s final_followup_pending=%s open_non_report_steps=%s decision=%s",
+                    "response_done_followthrough_guard_decision turn_id=%s include_report_followup=%s settlement_state=%s final_followup_pending=%s open_non_report_steps=%s gesture_motion_status=%s gesture_motion_open=%s decision=%s",
                     normalized_turn_id,
                     include_report_followup,
                     settlement_state or "unknown",
                     final_followup_pending,
                     open_non_report_steps,
+                    gesture_motion_status or "unknown",
+                    gesture_motion_open,
                     decision,
                 )
                 return decision
             if not final_followup_pending:
                 logger.info(
-                    "response_done_followthrough_guard_decision turn_id=%s include_report_followup=%s settlement_state=%s final_followup_pending=%s open_non_report_steps=%s decision=%s",
+                    "response_done_followthrough_guard_decision turn_id=%s include_report_followup=%s settlement_state=%s final_followup_pending=%s open_non_report_steps=%s gesture_motion_status=%s gesture_motion_open=%s decision=%s",
                     normalized_turn_id,
                     include_report_followup,
                     settlement_state or "unknown",
                     final_followup_pending,
                     open_non_report_steps,
+                    gesture_motion_status or "unknown",
+                    gesture_motion_open,
                     decision,
                 )
                 return decision
@@ -10050,37 +10071,43 @@ class RealtimeAPI:
                 and str(getattr(step, "status", "") or "").strip() != "completed"
                 for step in steps
             )
-            decision = open_non_report_steps
+            decision = open_non_report_steps or gesture_motion_open
             logger.info(
-                "response_done_followthrough_guard_decision turn_id=%s include_report_followup=%s settlement_state=%s final_followup_pending=%s open_non_report_steps=%s decision=%s",
+                "response_done_followthrough_guard_decision turn_id=%s include_report_followup=%s settlement_state=%s final_followup_pending=%s open_non_report_steps=%s gesture_motion_status=%s gesture_motion_open=%s decision=%s",
                 normalized_turn_id,
                 include_report_followup,
                 settlement_state or "unknown",
                 final_followup_pending,
                 open_non_report_steps,
+                gesture_motion_status or "unknown",
+                gesture_motion_open,
                 decision,
             )
             return decision
         if not final_followup_pending:
             logger.info(
-                "response_done_followthrough_guard_decision turn_id=%s include_report_followup=%s settlement_state=%s final_followup_pending=%s open_non_report_steps=%s decision=%s",
+                "response_done_followthrough_guard_decision turn_id=%s include_report_followup=%s settlement_state=%s final_followup_pending=%s open_non_report_steps=%s gesture_motion_status=%s gesture_motion_open=%s decision=%s",
                 normalized_turn_id,
                 include_report_followup,
                 settlement_state or "unknown",
                 final_followup_pending,
                 open_non_report_steps,
+                gesture_motion_status or "unknown",
+                gesture_motion_open,
                 decision,
             )
             return decision
         if include_report_followup:
             decision = True
             logger.info(
-                "response_done_followthrough_guard_decision turn_id=%s include_report_followup=%s settlement_state=%s final_followup_pending=%s open_non_report_steps=%s decision=%s",
+                "response_done_followthrough_guard_decision turn_id=%s include_report_followup=%s settlement_state=%s final_followup_pending=%s open_non_report_steps=%s gesture_motion_status=%s gesture_motion_open=%s decision=%s",
                 normalized_turn_id,
                 include_report_followup,
                 settlement_state or "unknown",
                 final_followup_pending,
                 open_non_report_steps,
+                gesture_motion_status or "unknown",
+                gesture_motion_open,
                 decision,
             )
             return decision
@@ -10090,14 +10117,16 @@ class RealtimeAPI:
             and str(getattr(step, "status", "") or "").strip() != "completed"
             for step in steps
         )
-        decision = open_non_report_steps
+        decision = open_non_report_steps or gesture_motion_open
         logger.info(
-            "response_done_followthrough_guard_decision turn_id=%s include_report_followup=%s settlement_state=%s final_followup_pending=%s open_non_report_steps=%s decision=%s",
+            "response_done_followthrough_guard_decision turn_id=%s include_report_followup=%s settlement_state=%s final_followup_pending=%s open_non_report_steps=%s gesture_motion_status=%s gesture_motion_open=%s decision=%s",
             normalized_turn_id,
             include_report_followup,
             settlement_state or "unknown",
             final_followup_pending,
             open_non_report_steps,
+            gesture_motion_status or "unknown",
+            gesture_motion_open,
             decision,
         )
         return decision
