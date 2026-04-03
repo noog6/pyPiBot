@@ -2850,6 +2850,60 @@ def test_turn_followthrough_chain_remaining_logs_guard_decision(monkeypatch) -> 
     assert "decision=False" in log_output
 
 
+def test_turn_followthrough_chain_remaining_keeps_non_report_open_while_gesture_motion_started() -> None:
+    api = _make_api()
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
+        compound_request=types.SimpleNamespace(
+            final_followup_pending=True,
+            steps=(types.SimpleNamespace(kind="report", status="pending"),),
+        )
+    )
+    api._continuity_ledger = types.SimpleNamespace(
+        build_turn_settlement=lambda _brief: types.SimpleNamespace(
+            settlement_state="followthrough_remaining",
+            has_commitments=True,
+        )
+    )
+    api.get_gesture_motion_state = lambda *, tool_call_id: {"status": "started"}
+
+    assert (
+        api._turn_followthrough_chain_remaining(
+            turn_id="turn_2",
+            include_report_followup=False,
+            gesture_tool_call_id="call_1",
+            gesture_tool_name="gesture_look_center",
+        )
+        is True
+    )
+
+
+def test_turn_followthrough_chain_remaining_releases_after_gesture_motion_completed() -> None:
+    api = _make_api()
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
+        compound_request=types.SimpleNamespace(
+            final_followup_pending=True,
+            steps=(types.SimpleNamespace(kind="report", status="pending"),),
+        )
+    )
+    api._continuity_ledger = types.SimpleNamespace(
+        build_turn_settlement=lambda _brief: types.SimpleNamespace(
+            settlement_state="followthrough_remaining",
+            has_commitments=True,
+        )
+    )
+    api.get_gesture_motion_state = lambda *, tool_call_id: {"status": "completed"}
+
+    assert (
+        api._turn_followthrough_chain_remaining(
+            turn_id="turn_2",
+            include_report_followup=False,
+            gesture_tool_call_id="call_1",
+            gesture_tool_name="gesture_look_center",
+        )
+        is False
+    )
+
+
 def test_should_hold_turn_for_non_substantive_talk_over_requires_followthrough_chain() -> None:
     api = _make_api()
     api._current_response_turn_id = "turn_2"
