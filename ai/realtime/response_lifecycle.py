@@ -317,6 +317,6 @@ class ResponseLifecycleTracker:
                 turn_id=turn_id,
                 origin=origin,
                 response_id=response_id,
-                include_report_followup=False,
+                include_report_followup=True,
             )
         )

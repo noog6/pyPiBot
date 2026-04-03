@@ -328,6 +328,61 @@ def test_tool_output_silent_intermediate_without_followthrough_does_not_schedule
     assert api._empty_response_retry_canonical_keys == set()
 
 
+def test_tool_output_report_only_followthrough_schedules_bridge_retry() -> None:
+    api = _make_api()
+    sent_events: list[tuple[dict, dict]] = []
+
+    async def _capture_send_response_create(_websocket, event, **kwargs):
+        sent_events.append((event, kwargs))
+        return True
+
+    response_id = "resp_tool_report_only"
+    selection_store = {
+        response_id: {
+            "selected": False,
+            "reason": "tool_followup_precedence",
+            "canonical_key": "turn_1::tool:call_report_only",
+        }
+    }
+    chain_remaining_calls: list[bool] = []
+
+    def _followthrough_chain_remaining(**kwargs):
+        chain_remaining_calls.append(bool(kwargs.get("include_report_followup")))
+        return bool(kwargs.get("include_report_followup"))
+
+    api._terminal_deliverable_selection_store = lambda: selection_store
+    api._response_done_followthrough_chain_remaining = _followthrough_chain_remaining
+    api._canonical_response_state = lambda _canonical_key: type(
+        "_State",
+        (),
+        {
+            "audio_started": False,
+            "deliverable_observed": False,
+            "deliverable_class": "non_deliverable",
+            "response_id": response_id,
+        },
+    )()
+    api._send_response_create = _capture_send_response_create
+    canonical_key = api._canonical_utterance_key(turn_id="turn_1", input_event_key="tool:call_report_only")
+
+    asyncio.run(
+        api._maybe_schedule_empty_response_retry(
+            websocket=object(),
+            turn_id="turn_1",
+            canonical_key=canonical_key,
+            input_event_key="tool:call_report_only",
+            origin="tool_output",
+            delivery_state_before_done="done",
+        )
+    )
+
+    assert len(sent_events) == 1
+    sent_event, sent_kwargs = sent_events[0]
+    assert sent_event["response"]["metadata"]["empty_retry_materialization"] == "report_followup"
+    assert sent_kwargs["origin"] == "server_auto"
+    assert chain_remaining_calls == [True]
+
+
 def test_tool_output_silent_intermediate_chain_materializes_multiple_owed_steps() -> None:
     api = _make_api()
     sent_events: list[tuple[dict, dict]] = []
