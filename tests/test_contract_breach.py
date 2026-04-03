@@ -89,3 +89,41 @@ def test_detect_contract_breach_recommended_action_deterministic_for_same_turn_o
 
     assert artifact is not None
     assert artifact.recommended_action is CorrectiveActionKind.DEFER_CLOSE
+
+
+def test_detect_contract_breach_suppresses_expected_tool_followthrough_handoff() -> None:
+    artifact = detect_contract_breach(
+        ContractBreachSnapshot(
+            source_seam="response_terminal_handlers",
+            turn_id="turn_3",
+            response_id="resp_mid_chain",
+            origin="tool_output",
+            canonical_key="turn_3::tool:call_middle",
+            reason_code="tool_followup_precedence",
+            is_terminal_event=True,
+            selected_deliverable=False,
+            followthrough_chain_remaining=True,
+        )
+    )
+
+    assert artifact is None
+
+
+def test_detect_contract_breach_keeps_followthrough_remaining_breach_for_unexpected_reason() -> None:
+    artifact = detect_contract_breach(
+        ContractBreachSnapshot(
+            source_seam="response_terminal_handlers",
+            turn_id="turn_3",
+            response_id="resp_mid_chain",
+            origin="tool_output",
+            canonical_key="turn_3::tool:call_middle",
+            reason_code="normal",
+            is_terminal_event=True,
+            selected_deliverable=False,
+            followthrough_chain_remaining=True,
+        )
+    )
+
+    assert artifact is not None
+    assert artifact.breach_type.value == "FOLLOWTHROUGH_REMAINING_WITH_NON_DELIVERABLE_OUTPUT"
+    assert artifact.recommended_action is CorrectiveActionKind.REOPEN_FOLLOWTHROUGH_LEDGER

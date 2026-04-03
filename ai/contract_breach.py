@@ -69,6 +69,10 @@ def detect_contract_breach(snapshot: ContractBreachSnapshot) -> ContractBreachAr
 
     origin = str(snapshot.origin or "unknown").strip() or "unknown"
     reason_code = str(snapshot.reason_code or "unknown").strip() or "unknown"
+    expected_followthrough_handoff_reasons = {
+        "tool_followup_precedence",
+        "empty_tool_followup_non_deliverable",
+    }
 
     # Dual-evidence terminal breach: empty tool-output done while followup is still pending.
     if (
@@ -103,6 +107,7 @@ def detect_contract_breach(snapshot: ContractBreachSnapshot) -> ContractBreachAr
         snapshot.is_terminal_event
         and snapshot.followthrough_chain_remaining is True
         and snapshot.selected_deliverable is False
+        and reason_code not in expected_followthrough_handoff_reasons
     ):
         evidence = (
             "terminal_event=response.done",
