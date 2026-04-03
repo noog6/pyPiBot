@@ -218,7 +218,7 @@ def test_tool_output_followthrough_bridge_empty_retry_uses_origin_override() -> 
     assert sent_kwargs["origin"] == "server_auto"
 
 
-def test_tool_output_silent_intermediate_followthrough_does_not_schedule_empty_retry() -> None:
+def test_tool_output_silent_intermediate_followthrough_schedules_bridge_retry() -> None:
     api = _make_api()
     sent_events: list[tuple[dict, dict]] = []
 
@@ -266,9 +266,140 @@ def test_tool_output_silent_intermediate_followthrough_does_not_schedule_empty_r
         )
     )
 
+    assert len(sent_events) == 1
+    sent_event, sent_kwargs = sent_events[0]
+    assert sent_event["response"]["metadata"]["retry_reason"] == "empty_response_done"
+    assert sent_event["response"]["metadata"]["empty_retry_materialization"] == "report_followup"
+    assert sent_kwargs["origin"] == "server_auto"
+    assert len(api._empty_response_retry_counts) == 1
+    assert len(api._empty_response_retry_canonical_keys) == 1
+
+
+def test_tool_output_silent_intermediate_without_followthrough_does_not_schedule_empty_retry() -> None:
+    api = _make_api()
+    sent_events: list[tuple[dict, dict]] = []
+
+    async def _capture_send_response_create(_websocket, event, **kwargs):
+        sent_events.append((event, kwargs))
+        return True
+
+    response_id = "resp_tool_silent_no_chain"
+    selection_store = {
+        response_id: {
+            "selected": False,
+            "reason": "tool_followup_precedence",
+            "canonical_key": "turn_1::tool:call_silent_no_chain",
+        }
+    }
+    api._terminal_deliverable_selection_store = lambda: selection_store
+    api._response_done_followthrough_chain_remaining = lambda **_kwargs: False
+    api._response_trace_context_by_id = {
+        response_id: {
+            "tool_followup_silent_user_facing_output": "true",
+            "tool_followup_status_only": "true",
+        }
+    }
+    api._canonical_response_state = lambda _canonical_key: type(
+        "_State",
+        (),
+        {
+            "audio_started": False,
+            "deliverable_observed": False,
+            "deliverable_class": "non_deliverable",
+            "response_id": response_id,
+        },
+    )()
+    api._send_response_create = _capture_send_response_create
+    canonical_key = api._canonical_utterance_key(turn_id="turn_1", input_event_key="tool:call_silent_no_chain")
+
+    asyncio.run(
+        api._maybe_schedule_empty_response_retry(
+            websocket=object(),
+            turn_id="turn_1",
+            canonical_key=canonical_key,
+            input_event_key="tool:call_silent_no_chain",
+            origin="tool_output",
+            delivery_state_before_done="done",
+        )
+    )
+
     assert sent_events == []
     assert api._empty_response_retry_counts == {}
     assert api._empty_response_retry_canonical_keys == set()
+
+
+def test_tool_output_silent_intermediate_chain_materializes_multiple_owed_steps() -> None:
+    api = _make_api()
+    sent_events: list[tuple[dict, dict]] = []
+
+    async def _capture_send_response_create(_websocket, event, **kwargs):
+        sent_events.append((event, kwargs))
+        return True
+
+    selection_store = {
+        "resp_tool_step_1": {
+            "selected": False,
+            "reason": "tool_followup_precedence",
+            "canonical_key": "turn_1::tool:call_step_1",
+        },
+        "resp_tool_step_2": {
+            "selected": False,
+            "reason": "tool_followup_precedence",
+            "canonical_key": "turn_1::tool:call_step_2",
+        },
+    }
+    api._terminal_deliverable_selection_store = lambda: selection_store
+    api._response_done_followthrough_chain_remaining = lambda **_kwargs: True
+    api._response_trace_context_by_id = {
+        "resp_tool_step_1": {
+            "tool_followup_silent_user_facing_output": "true",
+            "tool_followup_status_only": "true",
+        },
+        "resp_tool_step_2": {
+            "tool_followup_silent_user_facing_output": "true",
+            "tool_followup_status_only": "true",
+        },
+    }
+    response_ids_by_key = {
+        "turn_1::tool:call_step_1": "resp_tool_step_1",
+        "turn_1::tool:call_step_2": "resp_tool_step_2",
+    }
+    api._canonical_response_state = lambda canonical_key: type(
+        "_State",
+        (),
+        {
+            "audio_started": False,
+            "deliverable_observed": False,
+            "deliverable_class": "non_deliverable",
+            "response_id": response_ids_by_key[canonical_key],
+        },
+    )()
+    api._send_response_create = _capture_send_response_create
+
+    asyncio.run(
+        api._maybe_schedule_empty_response_retry(
+            websocket=object(),
+            turn_id="turn_1",
+            canonical_key="turn_1::tool:call_step_1",
+            input_event_key="tool:call_step_1",
+            origin="tool_output",
+            delivery_state_before_done="done",
+        )
+    )
+    asyncio.run(
+        api._maybe_schedule_empty_response_retry(
+            websocket=object(),
+            turn_id="turn_1",
+            canonical_key="turn_1::tool:call_step_2",
+            input_event_key="tool:call_step_2",
+            origin="tool_output",
+            delivery_state_before_done="done",
+        )
+    )
+
+    assert len(sent_events) == 2
+    assert sent_events[0][1]["origin"] == "server_auto"
+    assert sent_events[1][1]["origin"] == "server_auto"
 
 
 def test_empty_response_retry_exhausted_emits_fallback_without_scheduling_retry(caplog) -> None:
