@@ -171,6 +171,90 @@ def test_attention_interrupt_gesture_not_suppressed_during_active_followthrough_
     assert reason == ""
 
 
+def test_runtime_gesture_suppressed_for_owner_turn_when_only_report_followup_remains() -> None:
+    api = _make_api()
+    api._current_turn_id_or_unknown = lambda: "turn_owner"
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True: (
+        turn_id == "turn_owner" and include_report_followup
+    )
+    api._continuity_ledger = types.SimpleNamespace(
+        compound_has_open_non_report_steps=lambda: False,
+        compound_owner_turn_id=lambda: "turn_owner",
+    )
+
+    blocked, reason = api._should_suppress_nonessential_runtime_gesture_during_followthrough(
+        gesture_name="gesture_curious_tilt"
+    )
+
+    assert blocked is True
+    assert reason.startswith("followthrough_owner_turn_unsettled")
+
+
+def test_runtime_gesture_resumes_after_owner_turn_followthrough_settles() -> None:
+    api = _make_api()
+    api._current_turn_id_or_unknown = lambda: "turn_owner"
+    followthrough_open = {"active": True}
+
+    def _followthrough(*, turn_id, include_report_followup=True):
+        return turn_id == "turn_owner" and include_report_followup and followthrough_open["active"]
+
+    api._turn_followthrough_chain_remaining = _followthrough
+    api._continuity_ledger = types.SimpleNamespace(
+        compound_has_open_non_report_steps=lambda: False,
+        compound_owner_turn_id=lambda: "turn_owner",
+    )
+
+    blocked_active, _reason_active = api._should_suppress_nonessential_runtime_gesture_during_followthrough(
+        gesture_name="gesture_curious_tilt"
+    )
+    followthrough_open["active"] = False
+    blocked_settled, reason_settled = api._should_suppress_nonessential_runtime_gesture_during_followthrough(
+        gesture_name="gesture_curious_tilt"
+    )
+
+    assert blocked_active is True
+    assert blocked_settled is False
+    assert reason_settled == ""
+
+
+def test_attention_interrupt_gesture_allowlist_still_applies_when_owner_turn_report_followup_pending() -> None:
+    api = _make_api()
+    api._current_turn_id_or_unknown = lambda: "turn_owner"
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True: (
+        turn_id == "turn_owner" and include_report_followup
+    )
+    api._continuity_ledger = types.SimpleNamespace(
+        compound_has_open_non_report_steps=lambda: False,
+        compound_owner_turn_id=lambda: "turn_owner",
+    )
+
+    blocked, reason = api._should_suppress_nonessential_runtime_gesture_during_followthrough(
+        gesture_name="gesture_attention_release"
+    )
+
+    assert blocked is False
+    assert reason == ""
+
+
+def test_report_only_followthrough_window_does_not_block_non_owner_runtime_turn() -> None:
+    api = _make_api()
+    api._current_turn_id_or_unknown = lambda: "turn_other"
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True: (
+        turn_id == "turn_owner" and include_report_followup
+    )
+    api._continuity_ledger = types.SimpleNamespace(
+        compound_has_open_non_report_steps=lambda: False,
+        compound_owner_turn_id=lambda: "turn_owner",
+    )
+
+    blocked, reason = api._should_suppress_nonessential_runtime_gesture_during_followthrough(
+        gesture_name="gesture_curious_tilt"
+    )
+
+    assert blocked is False
+    assert reason == ""
+
+
 def test_arbitrate_server_auto_response_created_defers_for_followthrough_owner_mismatch() -> None:
     api = _make_api()
     api._continuity_ledger = types.SimpleNamespace(
