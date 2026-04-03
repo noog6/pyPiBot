@@ -1530,7 +1530,8 @@ def test_handle_response_done_parent_promoted_intermediate_tool_output_does_not_
         )
     )
 
-    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_tool_middle"}}))
+    with patch("ai.realtime.response_terminal_handlers.logger.info") as info_log:
+        asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_tool_middle"}}))
 
     response_done_calls = [call for call in apply_continuity_event.call_args_list if call.args and call.args[0] == "response_done"]
     assert len(response_done_calls) == 1
@@ -1541,6 +1542,8 @@ def test_handle_response_done_parent_promoted_intermediate_tool_output_does_not_
     apply_selection.assert_called_once()
     assert apply_selection.call_args.kwargs["selected"] is False
     assert apply_selection.call_args.kwargs["selection_reason"] == "tool_followup_precedence"
+    breach_logs = [call for call in info_log.call_args_list if call.args and "contract_breach_detected" in call.args[0]]
+    assert breach_logs == []
     parent_brief = api.get_continuity_brief("run-test", "turn_2", reason="post_cross_turn_intermediate_tool_output")
     assert parent_brief.compound_request is not None
     assert any(step.kind == "report" and step.status == "pending" for step in parent_brief.compound_request.steps)
