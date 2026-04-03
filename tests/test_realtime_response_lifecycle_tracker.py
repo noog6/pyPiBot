@@ -218,6 +218,59 @@ def test_tool_output_followthrough_bridge_empty_retry_uses_origin_override() -> 
     assert sent_kwargs["origin"] == "server_auto"
 
 
+def test_tool_output_silent_intermediate_followthrough_does_not_schedule_empty_retry() -> None:
+    api = _make_api()
+    sent_events: list[tuple[dict, dict]] = []
+
+    async def _capture_send_response_create(_websocket, event, **kwargs):
+        sent_events.append((event, kwargs))
+        return True
+
+    response_id = "resp_tool_silent_intermediate"
+    selection_store = {
+        response_id: {
+            "selected": False,
+            "reason": "tool_followup_precedence",
+            "canonical_key": "turn_1::tool:call_silent",
+        }
+    }
+    api._terminal_deliverable_selection_store = lambda: selection_store
+    api._response_done_followthrough_chain_remaining = lambda **_kwargs: True
+    api._response_trace_context_by_id = {
+        response_id: {
+            "tool_followup_silent_user_facing_output": "true",
+            "tool_followup_status_only": "true",
+        }
+    }
+    api._canonical_response_state = lambda _canonical_key: type(
+        "_State",
+        (),
+        {
+            "audio_started": False,
+            "deliverable_observed": False,
+            "deliverable_class": "non_deliverable",
+            "response_id": response_id,
+        },
+    )()
+    api._send_response_create = _capture_send_response_create
+    canonical_key = api._canonical_utterance_key(turn_id="turn_1", input_event_key="tool:call_silent")
+
+    asyncio.run(
+        api._maybe_schedule_empty_response_retry(
+            websocket=object(),
+            turn_id="turn_1",
+            canonical_key=canonical_key,
+            input_event_key="tool:call_silent",
+            origin="tool_output",
+            delivery_state_before_done="done",
+        )
+    )
+
+    assert sent_events == []
+    assert api._empty_response_retry_counts == {}
+    assert api._empty_response_retry_canonical_keys == set()
+
+
 def test_empty_response_retry_exhausted_emits_fallback_without_scheduling_retry(caplog) -> None:
     api = _make_api()
 
