@@ -10342,10 +10342,21 @@ class RealtimeAPI:
         owner_turn_id = str(ledger.compound_owner_turn_id() or "").strip() or "turn-unknown"
         if not owner_turn_id or owner_turn_id == "turn-unknown":
             return False, ""
+        allow_empty_retry_bridge_materialization = self._is_followthrough_bridge_materialization_response_create(
+            origin=normalized_origin,
+            turn_id=normalized_turn_id,
+            owner_turn_id=owner_turn_id,
+            response_metadata=metadata,
+        )
         if bool(ledger.compound_has_open_non_report_steps()):
             if normalized_kind in {"response_create"}:
                 tool_followup = str(metadata.get("tool_followup") or "").strip().lower() in {"1", "true", "yes"}
-                if tool_followup or has_safety_override or normalized_origin in {"interrupt", "safety"}:
+                if (
+                    tool_followup
+                    or allow_empty_retry_bridge_materialization
+                    or has_safety_override
+                    or normalized_origin in {"interrupt", "safety"}
+                ):
                     return False, ""
             if normalized_kind == "gesture":
                 current_turn_id = str(self._current_turn_id_or_unknown() or "").strip() or "turn-unknown"
@@ -10371,7 +10382,7 @@ class RealtimeAPI:
             return False, ""
         if normalized_kind == "response_create":
             tool_followup = str(metadata.get("tool_followup") or "").strip().lower() in {"1", "true", "yes"}
-            if tool_followup or has_safety_override:
+            if tool_followup or allow_empty_retry_bridge_materialization or has_safety_override:
                 return False, ""
             if normalized_origin in {"interrupt", "safety"}:
                 return False, ""
@@ -10388,6 +10399,30 @@ class RealtimeAPI:
             "followthrough_exclusivity_nonessential_runtime_suppressed "
             f"owner_turn_id={owner_turn_id} emitting_turn_id={normalized_turn_id} "
             f"emission_kind={normalized_kind} emission_origin={normalized_origin}"
+        )
+
+    def _is_followthrough_bridge_materialization_response_create(
+        self,
+        *,
+        origin: str,
+        turn_id: str,
+        owner_turn_id: str,
+        response_metadata: dict[str, Any] | None,
+    ) -> bool:
+        metadata = response_metadata if isinstance(response_metadata, dict) else {}
+        if not metadata:
+            return False
+        if str(origin or "").strip().lower() != "server_auto":
+            return False
+        if str(turn_id or "").strip() != str(owner_turn_id or "").strip():
+            return False
+        retry_reason = str(metadata.get("retry_reason") or "").strip().lower()
+        materialization = str(metadata.get("empty_retry_materialization") or "").strip().lower()
+        retry_origin = str(metadata.get("empty_retry_origin") or "").strip().lower()
+        return (
+            retry_reason == "empty_response_done"
+            and materialization == "report_followup"
+            and retry_origin == "tool_output_followthrough_bridge"
         )
 
     def _should_block_non_owner_followthrough_gesture_call(
