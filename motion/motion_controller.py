@@ -34,9 +34,11 @@ class MotionTuning:
     pan_step_min_deg: float = 0.2
     pan_step_max_deg: float = 1.2
     pan_step_scale_deg: float = 70.0
-    tilt_step_max_deg: float = 1.5
+    tilt_step_min_deg: float = 0.25
+    tilt_step_max_deg: float = 2.0
+    tilt_step_scale_deg: float = 45.0
     pan_a_max: float = 165.0
-    tilt_a_max: float = 400.0
+    tilt_a_max: float = 525.0
     v_max_smoothing_tau_s: float = 0.02
     position_eps_deg: float = 0.05
     at_dest_eps_deg: float = 0.5
@@ -99,6 +101,27 @@ def scaled_step(dist_deg: float, step_min: float, step_max: float, scale_deg: fl
     ratio = clamp01(abs(dist_deg) / max(scale_deg, 1e-6))
     ratio = smoothstep(ratio)
     return step_min + (step_max - step_min) * ratio
+
+
+def axis_step_v_max(axis: str, dist_deg: float, nominal_dt_s: float, tuning: MotionTuning) -> float:
+    if axis == "pan":
+        step_deg = scaled_step(
+            dist_deg,
+            tuning.pan_step_min_deg,
+            tuning.pan_step_max_deg,
+            tuning.pan_step_scale_deg,
+        )
+    elif axis == "tilt":
+        step_deg = scaled_step(
+            dist_deg,
+            tuning.tilt_step_min_deg,
+            tuning.tilt_step_max_deg,
+            tuning.tilt_step_scale_deg,
+        )
+    else:
+        raise ValueError(f"Unsupported axis for shaped step: {axis}")
+
+    return step_deg / max(nominal_dt_s, 1e-6)
 
 
 class MotionController:
@@ -227,16 +250,9 @@ class MotionController:
         desired_pan = new_frame.servo_destination["pan"]
         desired_tilt = new_frame.servo_destination["tilt"]
         pan_remaining = desired_pan - self.current_servo_position["pan"]
-        pan_v_max_raw = (
-            scaled_step(
-                pan_remaining,
-                TUNING.pan_step_min_deg,
-                TUNING.pan_step_max_deg,
-                TUNING.pan_step_scale_deg,
-            )
-            / nominal_dt_s
-        )
-        tilt_v_max_raw = TUNING.tilt_step_max_deg / nominal_dt_s
+        tilt_remaining = desired_tilt - self.current_servo_position["tilt"]
+        pan_v_max_raw = axis_step_v_max("pan", pan_remaining, nominal_dt_s, TUNING)
+        tilt_v_max_raw = axis_step_v_max("tilt", tilt_remaining, nominal_dt_s, TUNING)
         pan_v_max = self._smooth_v_max("pan", pan_v_max_raw, nominal_dt_s)
         tilt_v_max = self._smooth_v_max("tilt", tilt_v_max_raw, nominal_dt_s)
         pan_a_max = TUNING.pan_a_max
