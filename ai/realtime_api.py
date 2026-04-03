@@ -21,7 +21,7 @@ import signal
 import threading
 import time
 import uuid
-from typing import Any, Callable, Iterator, Literal
+from typing import Any, Callable, Iterator, Literal, Mapping
 from urllib import request
 from urllib.parse import urlparse
 
@@ -8844,14 +8844,53 @@ class RealtimeAPI:
             "gesture_attention_snap",
         }
 
-    def _gesture_followup_motion_status(self, *, call_id: str, tool_name: str | None) -> str | None:
-        if not self._is_low_risk_reversible_gesture_tool(tool_name=tool_name):
-            return None
-        motion_state = self.get_gesture_motion_state(tool_call_id=call_id)
+    def _resolve_gesture_motion_truth(
+        self,
+        *,
+        turn_id: str | None = None,
+        tool_call_id: str | None = None,
+        tool_name: str | None = None,
+        canonical_key: str | None = None,
+        response_id: str | None = None,
+        trace_context: Mapping[str, Any] | None = None,
+    ) -> tuple[str | None, bool]:
+        del canonical_key
+        normalized_call_id = str(tool_call_id or "").strip()
+        normalized_tool_name = str(tool_name or "").strip().lower()
+        normalized_response_id = str(response_id or "").strip()
+
+        resolved_trace_context: Mapping[str, Any] = trace_context or {}
+        if not resolved_trace_context and normalized_response_id:
+            resolved_trace_context = self._response_trace_by_id().get(normalized_response_id, {})
+
+        if not normalized_call_id:
+            normalized_call_id = str(resolved_trace_context.get("tool_call_id") or "").strip()
+        if not normalized_tool_name:
+            normalized_tool_name = str(resolved_trace_context.get("tool_name") or "").strip().lower()
+        if not normalized_call_id:
+            timing_state = self._tool_followup_timing_state(turn_id=str(turn_id or "").strip(), create=False)
+            normalized_call_id = str((timing_state or {}).get("tool_call_id") or "").strip()
+
+        is_known_gesture_tool = self._is_low_risk_reversible_gesture_tool(tool_name=normalized_tool_name)
+        if not normalized_call_id:
+            return None, False
+
+        motion_state = self.get_gesture_motion_state(tool_call_id=normalized_call_id)
         normalized_status = str((motion_state or {}).get("status") or "").strip().lower()
-        if normalized_status in {"queued", "started", "completed"}:
-            return normalized_status
-        return None
+        if normalized_status not in {"queued", "started", "completed"}:
+            return None, False
+        if is_known_gesture_tool:
+            return normalized_status, normalized_status in {"queued", "started"}
+        # If motion state is present for a tool call but tool_name lineage was omitted in this seam,
+        # trust the runtime motion controller as authoritative.
+        return normalized_status, normalized_status in {"queued", "started"}
+
+    def _gesture_followup_motion_status(self, *, call_id: str, tool_name: str | None) -> str | None:
+        status, _open = self._resolve_gesture_motion_truth(
+            tool_call_id=call_id,
+            tool_name=tool_name,
+        )
+        return status
 
     def _gesture_followup_instruction(self, *, motion_status: str | None) -> str:
         base_instruction = (
@@ -9955,9 +9994,16 @@ class RealtimeAPI:
         response_id: str | None,
         include_report_followup: bool = True,
     ) -> bool:
+        trace_context = (
+            self._response_trace_by_id().get(str(response_id or "").strip(), {})
+            if str(response_id or "").strip()
+            else {}
+        )
         current_turn_followthrough = self._turn_followthrough_chain_remaining(
             turn_id=turn_id,
             include_report_followup=include_report_followup,
+            response_id=response_id,
+            trace_context=trace_context,
         )
         if current_turn_followthrough:
             return True
@@ -9973,6 +10019,8 @@ class RealtimeAPI:
         return self._turn_followthrough_chain_remaining(
             turn_id=parent_turn_id,
             include_report_followup=include_report_followup,
+            response_id=response_id,
+            trace_context=trace_context,
         )
 
     def _gesture_followthrough_chain_remaining(self, *, turn_id: str) -> bool:
@@ -10013,6 +10061,9 @@ class RealtimeAPI:
         include_report_followup: bool = True,
         gesture_tool_call_id: str | None = None,
         gesture_tool_name: str | None = None,
+        response_id: str | None = None,
+        canonical_key: str | None = None,
+        trace_context: Mapping[str, Any] | None = None,
     ) -> bool:
         normalized_turn_id = str(turn_id or "").strip()
         if not normalized_turn_id:
@@ -10031,11 +10082,14 @@ class RealtimeAPI:
         final_followup_pending = bool(getattr(compound_state, "final_followup_pending", False))
         open_non_report_steps = False
         decision = False
-        gesture_motion_status = self._gesture_followup_motion_status(
-            call_id=str(gesture_tool_call_id or "").strip(),
+        gesture_motion_status, gesture_motion_open = self._resolve_gesture_motion_truth(
+            turn_id=normalized_turn_id,
+            tool_call_id=str(gesture_tool_call_id or "").strip(),
             tool_name=gesture_tool_name,
+            canonical_key=canonical_key,
+            response_id=response_id,
+            trace_context=trace_context,
         )
-        gesture_motion_open = gesture_motion_status in {"queued", "started"}
 
         if settlement_state == "followthrough_remaining":
             if include_report_followup:
