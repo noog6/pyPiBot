@@ -9067,6 +9067,16 @@ class RealtimeAPI:
                 motion_status=motion_status,
             )
             if keep_status_only:
+                followthrough_remaining = self._turn_followthrough_chain_remaining(
+                    turn_id=turn_id,
+                    include_report_followup=True,
+                )
+                if not followthrough_remaining and not tool_result_has_distinct_info:
+                    metadata["tool_followup_create_suppressed"] = "true"
+                    metadata["tool_followup_create_suppression_reason"] = "followthrough_complete_non_report"
+                    # Backward-compatible alias for existing diagnostics/tests.
+                    metadata["tool_followup_no_create"] = "true"
+                    metadata["tool_followup_no_create_reason"] = "followthrough_complete_non_report"
                 metadata["tool_followup_suppress_if_parent_covered"] = "true"
                 metadata["tool_followup_status_only"] = "true"
                 metadata["tool_followup_silent_audio"] = "true"
@@ -19117,6 +19127,38 @@ class RealtimeAPI:
                 result=result,
             ),
         )
+        response_metadata = self._extract_response_create_metadata(response_create_event)
+        create_suppressed = (
+            str(response_metadata.get("tool_followup_create_suppressed", "")).strip().lower() in {"true", "1", "yes"}
+            or str(response_metadata.get("tool_followup_no_create", "")).strip().lower() in {"true", "1", "yes"}
+        )
+        if create_suppressed:
+            suppression_reason = str(
+                response_metadata.get("tool_followup_create_suppression_reason")
+                or response_metadata.get("tool_followup_no_create_reason")
+                or "followthrough_complete_no_create"
+            )
+            self._set_tool_followup_state(
+                canonical_key=tool_followup_canonical_key,
+                state="dropped",
+                reason=suppression_reason,
+            )
+            logger.info(
+                "tool_followup_response_not_scheduled call_id=%s canonical_key=%s reason=%s",
+                call_id,
+                tool_followup_canonical_key,
+                suppression_reason,
+            )
+            self._mark_tool_followup_timing(
+                turn_id=self._current_turn_id_or_unknown(),
+                marker="tool_followup_response_not_scheduled",
+                call_id=call_id,
+                canonical_key=tool_followup_canonical_key,
+                is_tool_followup=True,
+            )
+            self.function_call = None
+            self.function_call_args = ""
+            return
         if force_no_tools_followup:
             response_payload = response_create_event.setdefault("response", {})
             if not isinstance(response_payload, dict):
