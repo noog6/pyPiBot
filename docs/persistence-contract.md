@@ -2,6 +2,11 @@
 
 This document defines the canonical persistence access patterns for runtime services.
 
+> **Status (2026-04-03): Canonical contract.**
+> Normative implementation anchors: `storage/controller.py`, `storage/factories.py`,
+> and service/store wiring that calls those helpers.
+> If persistence ownership/wiring changes in code, update this document in the same PR.
+
 ## 1) When to use `StorageController`
 
 Use `StorageController` when data must be tied to the shared runtime/logging database lifecycle (run-scoped DB file, shared lock, shared connection).

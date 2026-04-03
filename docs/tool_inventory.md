@@ -3,6 +3,10 @@
 `config/default.yaml -> governance.tool_specs` is the canonical source of tool governance metadata.
 This document is a derived representation for human review and should stay in parity with config.
 
+> **Status (2026-04-03): Derived reference (not canonical).**
+> Update this table in the same PR whenever `governance.tool_specs` changes.
+> If values differ, `config/default.yaml` wins.
+
 | Tool | Governance Tier | Side Effects | Sensitivity | Default Confirmation |
 |---|---|---|---|---|
 | `read_battery_voltage` | SAFE | NONE | LOW | NEVER |

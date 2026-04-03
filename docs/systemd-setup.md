@@ -2,6 +2,10 @@
 
 This guide describes how to run the Theo runtime as a systemd service.
 
+> **Status (2026-04-03): Operational reference for the Raspberry Pi deployment profile.**
+> Runtime truth for service behavior is the unit file + scripts (`systemd/pyPiBot.service`,
+> `scripts/install-systemd-service.sh`, `scripts/systemd-git-sync.sh`) and host config.
+
 ## Prerequisites
 
 - Repository checked out on the target Raspberry Pi.
@@ -184,6 +188,17 @@ Update the following fields in `systemd/pyPiBot.service` as needed:
 - `User` to the appropriate runtime user.
 - `EnvironmentFile` if you store API keys (`OPENAI_API_KEY`, optional `FIRECRAWL_API_KEY`) somewhere else.
 - Optional semantic startup override: `PYPIBOT_SEMANTIC_CANARY_BYPASS=1` (recommended only for explicit offline/testing scenarios).
+
+### Path-coupling guardrail (drift prevention)
+
+The default deployment intentionally uses matching absolute paths under
+`/home/pi/workarea/pyPiBot` across:
+
+- `systemd/pyPiBot.service` (`ExecStart`, `WorkingDirectory`, log file paths, `ExecStartPre` script path)
+- `ops/logrotate/pypibot` (rotated logfile paths)
+- `scripts/systemd-git-sync.sh` defaults (`REPO_DIR`, `LOG_FILE`)
+
+If you change one location root, update all three artifacts together in the same change.
 
 ## Auto-sync security considerations
 
