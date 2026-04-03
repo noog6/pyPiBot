@@ -5014,7 +5014,106 @@ def test_low_risk_gesture_followup_drops_status_only_when_only_report_followup_r
     assert metadata.get("tool_followup_suppress_if_parent_covered") is None
     assert metadata.get("tool_followup_silent_audio") is None
     assert metadata.get("tool_followup_silent_user_facing_output") is None
+    assert metadata.get("tool_followup_create_suppressed") is None
     assert "Final follow-up report is still owed for the parent turn." in instructions
+
+
+def test_low_risk_gesture_followup_marks_no_create_when_followthrough_complete() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    api._current_response_turn_id = "turn_gesture_complete"
+    api._active_input_event_key_by_turn_id["turn_gesture_complete"] = "item_parent_complete"
+    api.get_gesture_motion_state = lambda *, tool_call_id: {"status": "completed"}
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True: False
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
+        compound_request=types.SimpleNamespace(
+            steps=(
+                types.SimpleNamespace(step_id="step_1", kind="gesture", status="completed"),
+                types.SimpleNamespace(step_id="step_2", kind="gesture", status="completed"),
+                types.SimpleNamespace(step_id="step_3", kind="gesture", status="completed"),
+            ),
+            active_step_index=None,
+            recent_completed_step_id="step_3",
+            next_pending_step_id=None,
+            final_followup_pending=False,
+        )
+    )
+
+    response_create_event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_gesture_complete",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+
+    payload = response_create_event.get("response") or {}
+    metadata = payload.get("metadata") or {}
+
+    assert metadata.get("tool_followup_create_suppressed") == "true"
+    assert metadata.get("tool_followup_create_suppression_reason") == "followthrough_complete_non_report"
+
+
+def test_execute_function_call_skips_response_create_for_completed_non_report_gesture(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_response_turn_id = "turn_gesture_complete_exec"
+    api._current_input_event_key = "item_parent_complete_exec"
+    api._active_input_event_key_by_turn_id["turn_gesture_complete_exec"] = "item_parent_complete_exec"
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._intent_ledger = {}
+    api.get_gesture_motion_state = lambda *, tool_call_id: {"status": "completed"}
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True: False
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
+        compound_request=types.SimpleNamespace(
+            steps=(
+                types.SimpleNamespace(step_id="step_1", kind="gesture", status="completed"),
+                types.SimpleNamespace(step_id="step_2", kind="gesture", status="completed"),
+                types.SimpleNamespace(step_id="step_3", kind="gesture", status="completed"),
+            ),
+            active_step_index=None,
+            recent_completed_step_id="step_3",
+            next_pending_step_id=None,
+            final_followup_pending=False,
+        )
+    )
+
+    async def _fake_gesture(**_kwargs):
+        return {"ok": True, "motion_request_key": "mrk-gesture-complete"}
+
+    captured_logs: list[str] = []
+    original_info = logger.info
+
+    def _capture_info(message: str, *args, **kwargs):
+        rendered = str(message)
+        if args:
+            rendered = rendered % args
+        captured_logs.append(rendered)
+        return original_info(message, *args, **kwargs)
+
+    monkeypatch.setattr(logger, "info", _capture_info)
+    monkeypatch.setitem(
+        __import__("ai.tools", fromlist=["function_map"]).function_map,
+        "gesture_look_center",
+        _fake_gesture,
+    )
+
+    asyncio.run(api.execute_function_call("gesture_look_center", "call_gesture_complete_exec", {"target": "center"}, ws))
+
+    response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert response_create_events == []
+    canonical_key = api._canonical_utterance_key(
+        turn_id="turn_gesture_complete_exec",
+        input_event_key="tool:call_gesture_complete_exec",
+    )
+    assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
+    assert any(
+        "tool_followup_state" in entry
+        and f"canonical_key={canonical_key}" in entry
+        and "state=dropped" in entry
+        and "reason=followthrough_complete_non_report" in entry
+        for entry in captured_logs
+    )
 
 
 def test_low_risk_gesture_followup_payload_preserves_distinct_motion_state() -> None:
@@ -5037,6 +5136,27 @@ def test_low_risk_gesture_followup_payload_preserves_distinct_motion_state() -> 
 
     assert metadata.get("tool_followup_status_only") == "true"
     assert metadata.get("tool_result_has_distinct_info") == "true"
+    assert metadata.get("tool_followup_create_suppressed") is None
+
+
+def test_non_gesture_tool_followup_never_sets_no_create_marker() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    api._current_response_turn_id = "turn_non_gesture"
+    api._active_input_event_key_by_turn_id["turn_non_gesture"] = "item_parent_non_gesture"
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True: False
+
+    event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_non_gesture",
+        response_create_event={"type": "response.create"},
+        tool_name="perform_research",
+        tool_result_has_distinct_info=False,
+    )
+
+    metadata = ((event.get("response") or {}).get("metadata") or {})
+
+    assert metadata.get("tool_followup_create_suppressed") is None
+    assert metadata.get("tool_followup_create_suppression_reason") is None
 
 
 def test_tool_followup_queue_does_not_rebind_turn_active_key_to_tool_key() -> None:
