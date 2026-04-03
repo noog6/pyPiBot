@@ -111,7 +111,7 @@ See [docs/web-research.md](docs/web-research.md) and [`config/default.yaml`](con
 See [docs/systemd-setup.md](docs/systemd-setup.md) and the template unit in
 [systemd/pyPiBot.service](systemd/pyPiBot.service) for Raspberry Pi deployment
 instructions, including best-effort pre-start git sync logging and the
-logrotate template at `ops/logrotate/pypibot`.
+systemd log file configuration.
 
 For systemd deployments that use Firecrawl, operators can manage
 `FIRECRAWL_API_KEY` with `./scripts/update-firecrawl-key.sh` before restarting
