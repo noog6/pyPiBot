@@ -348,6 +348,17 @@ class ContinuityLedger:
         self._log_brief_if_material(run_id=run_id, turn_id=turn_id, brief=brief)
         return brief
 
+    def compound_owner_turn_id(self) -> str:
+        """Return the active compound request owner turn, if any."""
+        return self._clean_text(self._compound_owner_turn_id)
+
+    def compound_has_open_non_report_steps(self) -> bool:
+        """Return whether the active compound request has open non-report steps."""
+        state = self._compound_state
+        if state is None:
+            return False
+        return self._has_open_non_report_steps(state)
+
     def _log_brief_if_material(self, *, run_id: str, turn_id: str, brief: ContinuityBrief) -> None:
         fingerprint = self._brief_log_fingerprint(brief)
         now = float(self._time_source())

@@ -10170,6 +10170,65 @@ class RealtimeAPI:
             return normalized_fallback_turn_id, False, ""
         return owner_turn_id, True, "tool_followup_semantic_owner_handoff"
 
+    @staticmethod
+    def _is_explicit_followthrough_cross_turn_rebind_reason(reason: str) -> bool:
+        normalized_reason = str(reason or "").strip().lower()
+        return normalized_reason in {
+            "semantic_owner_parent_promoted",
+            "followup_adopted_after_user_ping",
+            "explicit_cross_turn_rebind",
+        }
+
+    def _active_tool_followthrough_rebind_decision(self) -> tuple[bool, str]:
+        active_response_id = str(getattr(self, "_active_response_id", "") or "").strip()
+        if not active_response_id:
+            return False, ""
+        trace_context = self._response_trace_by_id().get(active_response_id, {})
+        if not isinstance(trace_context, dict):
+            return False, ""
+        raw_reason = str(
+            trace_context.get("cross_turn_rebind_reason")
+            or trace_context.get("tool_followup_cross_turn_rebind_reason")
+            or ""
+        ).strip()
+        allow_rebind = str(
+            trace_context.get("allow_cross_turn_rebind")
+            or trace_context.get("tool_followup_allow_cross_turn_rebind")
+            or ""
+        ).strip().lower() in {"true", "1", "yes"}
+        reason_allows = self._is_explicit_followthrough_cross_turn_rebind_reason(raw_reason)
+        if allow_rebind and reason_allows:
+            return True, raw_reason
+        return False, raw_reason
+
+    def _should_block_non_owner_followthrough_gesture_call(
+        self,
+        *,
+        function_name: str,
+    ) -> tuple[bool, str, str]:
+        normalized_tool_name = str(function_name or "").strip().lower()
+        if not self._is_low_risk_reversible_gesture_tool(tool_name=normalized_tool_name):
+            return False, "", ""
+        ledger = self._continuity_ledger_instance()
+        if not ledger.compound_has_open_non_report_steps():
+            return False, "", ""
+        owner_turn_id = str(ledger.compound_owner_turn_id() or "").strip()
+        current_turn_id = str(self._current_turn_id_or_unknown() or "").strip() or "turn-unknown"
+        if not owner_turn_id or owner_turn_id == current_turn_id:
+            return False, owner_turn_id, ""
+        explicit_rebind_allowed, explicit_rebind_reason = self._active_tool_followthrough_rebind_decision()
+        if explicit_rebind_allowed:
+            logger.info(
+                "tool_followthrough_owner_rebind_accepted run_id=%s tool=%s owner_turn_id=%s incoming_turn_id=%s reason=%s",
+                self._current_run_id() or "",
+                normalized_tool_name,
+                owner_turn_id,
+                current_turn_id,
+                explicit_rebind_reason or "unspecified",
+            )
+            return False, owner_turn_id, ""
+        return True, owner_turn_id, "followthrough_owner_turn_mismatch"
+
     def _semantic_owner_decision_for_response(
         self,
         *,
@@ -19002,45 +19061,70 @@ class RealtimeAPI:
                 REALTIME_CALL_ID_MAX_LENGTH,
             )
         call_id = normalized_call_id
+        owner_mismatch_blocked = False
 
         if function_name in function_map:
             try:
-                result = await function_map[function_name](**args)
-                log_tool_call(function_name, args, result)
-                logger.info(
-                    "tool_result_received run_id=%s turn_id=%s call_id=%s",
-                    self._current_run_id() or "",
-                    self._current_turn_id_or_unknown(),
-                    call_id,
+                owner_blocked, owner_turn_id, owner_block_reason = self._should_block_non_owner_followthrough_gesture_call(
+                    function_name=function_name,
                 )
-                motion_request_key = ""
-                if isinstance(result, dict):
-                    motion_request_key = str(result.get("motion_request_key") or "").strip()
-                if function_name.startswith("gesture_") and motion_request_key:
-                    tool_runtime.register_tool_call_motion_request(
-                        tool_call_id=call_id,
-                        motion_request_key=motion_request_key,
+                if owner_blocked:
+                    owner_mismatch_blocked = True
+                    current_turn_id = self._current_turn_id_or_unknown()
+                    logger.info(
+                        "tool_followthrough_owner_mismatch_block run_id=%s tool=%s call_id=%s owner_turn_id=%s incoming_turn_id=%s reason=%s",
+                        self._current_run_id() or "",
+                        function_name,
+                        call_id,
+                        owner_turn_id or "none",
+                        current_turn_id or "turn-unknown",
+                        owner_block_reason,
                     )
-                self._record_intent_completion(function_name, args, idempotency_key=self._idempotency_key_for_action(action))
-                self._mark_tool_followup_timing(
-                    turn_id=self._current_turn_id_or_unknown(),
-                    marker="tool_result_received",
-                    call_id=call_id,
-                )
-                continuity_turn_id, continuity_rebind_allowed, continuity_rebind_reason = (
-                    self._resolve_continuity_tool_event_owner_turn(
-                        fallback_turn_id=self._current_turn_id_or_unknown(),
+                    self._record_intent_state(function_name, args, "denied")
+                    result = {
+                        "error": "Tool execution blocked: non-owning turn attempted followthrough gesture execution.",
+                        "reason": owner_block_reason,
+                        "owner_turn_id": owner_turn_id,
+                        "incoming_turn_id": current_turn_id,
+                        "blocked": True,
+                    }
+                else:
+                    result = await function_map[function_name](**args)
+                    log_tool_call(function_name, args, result)
+                    logger.info(
+                        "tool_result_received run_id=%s turn_id=%s call_id=%s",
+                        self._current_run_id() or "",
+                        self._current_turn_id_or_unknown(),
+                        call_id,
                     )
-                )
-                self._apply_continuity_event(
-                    "tool_result_received",
-                    run_id=self._current_run_id(),
-                    turn_id=continuity_turn_id,
-                    tool_name=function_name,
-                    call_id=call_id,
-                    allow_cross_turn_rebind="true" if continuity_rebind_allowed else "",
-                    cross_turn_rebind_reason=continuity_rebind_reason,
-                )
+                    motion_request_key = ""
+                    if isinstance(result, dict):
+                        motion_request_key = str(result.get("motion_request_key") or "").strip()
+                    if function_name.startswith("gesture_") and motion_request_key:
+                        tool_runtime.register_tool_call_motion_request(
+                            tool_call_id=call_id,
+                            motion_request_key=motion_request_key,
+                        )
+                    self._record_intent_completion(function_name, args, idempotency_key=self._idempotency_key_for_action(action))
+                    self._mark_tool_followup_timing(
+                        turn_id=self._current_turn_id_or_unknown(),
+                        marker="tool_result_received",
+                        call_id=call_id,
+                    )
+                    continuity_turn_id, continuity_rebind_allowed, continuity_rebind_reason = (
+                        self._resolve_continuity_tool_event_owner_turn(
+                            fallback_turn_id=self._current_turn_id_or_unknown(),
+                        )
+                    )
+                    self._apply_continuity_event(
+                        "tool_result_received",
+                        run_id=self._current_run_id(),
+                        turn_id=continuity_turn_id,
+                        tool_name=function_name,
+                        call_id=call_id,
+                        allow_cross_turn_rebind="true" if continuity_rebind_allowed else "",
+                        cross_turn_rebind_reason=continuity_rebind_reason,
+                    )
             except Exception as exc:
                 error_message = f"Error executing function '{function_name}': {exc}"
                 log_error(error_message)
@@ -19115,6 +19199,25 @@ class RealtimeAPI:
             await self._add_no_tools_follow_up_instruction(websocket)
         research_id = self._extract_research_id(result) if function_name == "perform_research" else None
         if self._mark_or_suppress_research_spoken_response(research_id):
+            self.function_call = None
+            self.function_call_args = ""
+            return
+        if owner_mismatch_blocked:
+            tool_followup_canonical_key = self._canonical_utterance_key(
+                turn_id=self._current_turn_id_or_unknown(),
+                input_event_key=self._tool_followup_input_event_key(call_id=call_id),
+            )
+            self._set_tool_followup_state(
+                canonical_key=tool_followup_canonical_key,
+                state="dropped",
+                reason="followthrough_owner_turn_mismatch",
+            )
+            logger.info(
+                "tool_followup_response_not_scheduled call_id=%s canonical_key=%s reason=%s",
+                call_id,
+                tool_followup_canonical_key,
+                "followthrough_owner_turn_mismatch",
+            )
             self.function_call = None
             self.function_call_args = ""
             return
