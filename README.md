@@ -139,16 +139,33 @@ pytest -q
 
 ## Documentation
 
-- [docs/architecture/README.md](docs/architecture/README.md)
-- [docs/agent-map.md](docs/agent-map.md)
+### Canonical runtime + architecture docs
+
+- [docs/architecture/README.md](docs/architecture/README.md) (architecture index)
 - [docs/architecture/theo_cognitive_stack.md](docs/architecture/theo_cognitive_stack.md)
-- [docs/coding-standards.md](docs/coding-standards.md)
-- [docs/hardware-setup.md](docs/hardware-setup.md)
-- [docs/installation.md](docs/installation.md)
+- [docs/agent-map.md](docs/agent-map.md)
 - [docs/interaction-states.md](docs/interaction-states.md)
 - [docs/operations.md](docs/operations.md)
-- [docs/personalization.md](docs/personalization.md)
-- [docs/requirements.md](docs/requirements.md)
-- [docs/systemd-setup.md](docs/systemd-setup.md)
-- [docs/todo.md](docs/todo.md)
 - [docs/web-research.md](docs/web-research.md)
+- [docs/personalization.md](docs/personalization.md)
+- [docs/persistence-contract.md](docs/persistence-contract.md) (canonical persistence wiring contract)
+
+### Setup + project baseline
+
+- [docs/installation.md](docs/installation.md)
+- [docs/hardware-setup.md](docs/hardware-setup.md)
+- [docs/systemd-setup.md](docs/systemd-setup.md)
+- [docs/requirements.md](docs/requirements.md)
+- [docs/coding-standards.md](docs/coding-standards.md)
+- [docs/todo.md](docs/todo.md)
+
+### Derived/reference inventories (source of truth elsewhere)
+
+- [docs/tool_inventory.md](docs/tool_inventory.md) (derived from `config/default.yaml`)
+
+### Migration/audit reports and historical analysis
+
+- [docs/reports/README.md](docs/reports/README.md) (report index + status labels)
+- [docs/realtime_api_migration_map.md](docs/realtime_api_migration_map.md) (active migration map; includes dated measurements)
+- [docs/realtime_api_surgery_plan.md](docs/realtime_api_surgery_plan.md) (point-in-time extraction plan/report)
+- [docs/preference_recall_audit.md](docs/preference_recall_audit.md) (runtime audit notes)

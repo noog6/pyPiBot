@@ -1,5 +1,10 @@
 # Preference Recall Runtime Audit
 
+> **Status (2026-04-03): Point-in-time runtime audit artifact.**
+> This document summarizes a specific preference-recall behavior pass and
+> corrective findings. Treat it as audit/report context; canonical behavior
+> contracts live in architecture and runtime docs.
+
 ## Trigger conditions
 - `memory_intent=true` is set from `_is_memory_intent(...)` during transcript-final handling in `RealtimeAPI`; this then routes into `_maybe_handle_preference_recall_intent(...)`. 
 - Preference recall is entered when `_is_preference_recall_intent(...)` matches either:

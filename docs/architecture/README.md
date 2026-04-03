@@ -15,6 +15,12 @@ references.
 
 - [Decision Arbitration Authority Map (Implemented Runtime)](decision_arbitration_authority_map.md)
 - [Agent + Thread Map](../agent-map.md)
-- [Realtime API Migration Map](../realtime_api_migration_map.md)
-- [Realtime API Surgery Plan](../realtime_api_surgery_plan.md)
+- [Realtime API Migration Map (Living plan; metrics are date-stamped)](../realtime_api_migration_map.md)
+- [Realtime API Surgery Plan (Point-in-time extraction report)](../realtime_api_surgery_plan.md)
+- [Preference Recall Runtime Audit (Point-in-time behavior audit)](../preference_recall_audit.md)
 - [Theo Realtime Lifecycle Audit (Historical: run-413)](../reports/theo_realtime_lifecycle_audit.md)
+
+## Contracts and derived references
+
+- [Persistence Access Contract (Canonical)](../persistence-contract.md)
+- [Tool Inventory (Derived from `config/default.yaml`)](../tool_inventory.md)
