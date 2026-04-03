@@ -1,3 +1,12 @@
+# Theo Realtime Lifecycle Audit (Historical: run-413 investigation)
+
+> **Status (2026-04-03): Historical analysis artifact.**
+> This report captures a point-in-time investigation around the run-413
+> duplicate-response failure pattern and proposed remediation paths. Treat this
+> as incident context, not current architecture contract. For active ownership
+> and current extraction plan, use `docs/realtime_api_migration_map.md` and
+> `docs/realtime_api_surgery_plan.md`.
+
 # EXECUTIVE SUMMARY (1–2 pages)
 
 ## What’s broken or risky today
