@@ -833,7 +833,7 @@ class ContinuityLedger:
                 if step.kind != "report":
                     updated = self._replace_compound_step_status(updated, idx, "completed")
         if (
-            (close_unresolved or complete_final_report)
+            complete_final_report
             and updated.final_followup_pending
             and not self._has_open_non_report_steps(updated)
         ):
