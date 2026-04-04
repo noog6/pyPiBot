@@ -262,22 +262,6 @@ class ResponseCreateRuntime:
                 explanation="Tool followup dropped because the parent turn already has a final deliverable.",
                 selected_candidate_id="tool_followup_final_deliverable",
             )
-        metadata = prepared_snapshot.response_metadata
-        intermediate_non_report_followthrough = (
-            str(metadata.get("tool_followup_silent_user_facing_output", "")).strip().lower() in {"true", "1", "yes"}
-            and str(metadata.get("tool_followup_tool_choice_reason", "")).strip().lower()
-            == "gesture_chain_non_report_remaining"
-        )
-        if intermediate_non_report_followthrough:
-            return self._build_execution_decision(
-                action=ResponseCreateOutcomeAction.DROP,
-                reason_code="intermediate_non_report_followthrough_suppressed_no_create",
-                explanation=(
-                    "Tool followup dropped because it is an intermediate non-report followthrough "
-                    "with fully suppressed user-facing output."
-                ),
-                selected_candidate_id="tool_followup_intermediate_non_report_followthrough",
-            )
         current_state = self.api._tool_followup_state(canonical_key=prepared_snapshot.canonical_key)
         if execution_path == "send":
             if prepared_snapshot.tool_followup_release and current_state in {

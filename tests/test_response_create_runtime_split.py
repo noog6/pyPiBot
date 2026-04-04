@@ -599,55 +599,6 @@ def test_post_decision_finalizer_returns_same_existing_state_drop_for_send_and_s
     assert finalized_schedule.reason_code == finalized_send.reason_code
 
 
-def test_post_decision_finalizer_drops_intermediate_non_report_silent_tool_followup() -> None:
-    api = _make_api_stub()
-    runtime = api._response_create_runtime
-    event = {
-        "type": "response.create",
-        "response": {
-            "metadata": {
-                "turn_id": "turn_followthrough",
-                "input_event_key": "tool:call_intermediate",
-                "parent_turn_id": "turn_followthrough",
-                "parent_input_event_key": "item_parent",
-                "tool_followup": "true",
-                "tool_call_id": "call_intermediate",
-                "tool_followup_silent_user_facing_output": "true",
-                "tool_followup_tool_choice_reason": "gesture_chain_non_report_remaining",
-            }
-        },
-    }
-    snapshot = runtime.prepare_response_create_snapshot(
-        response_create_event=event,
-        origin="tool_output",
-        utterance_context=None,
-        memory_brief_note=None,
-        now=1.0,
-    )
-    selected = runtime._build_execution_decision(
-        action=ResponseCreateOutcomeAction.SCHEDULE,
-        reason_code="active_response",
-        explanation="queued while response active",
-        selected_candidate_id="active_response",
-    )
-
-    finalized_send = runtime._finalize_response_create_execution_decision(
-        prepared_snapshot=snapshot,
-        decision=selected,
-        execution_path="send",
-    )
-    finalized_schedule = runtime._finalize_response_create_execution_decision(
-        prepared_snapshot=snapshot,
-        decision=selected,
-        execution_path="schedule",
-    )
-
-    assert finalized_send.action is ResponseCreateOutcomeAction.DROP
-    assert finalized_send.reason_code == "intermediate_non_report_followthrough_suppressed_no_create"
-    assert finalized_schedule.action is ResponseCreateOutcomeAction.DROP
-    assert finalized_schedule.reason_code == finalized_send.reason_code
-
-
 def test_tool_followup_final_deliverable_drop_logs_outcome_and_leaves_no_zombie_retry(monkeypatch) -> None:
     api = _make_api_stub()
     api._tool_followup_state_by_canonical_key = {}
@@ -681,72 +632,6 @@ def test_tool_followup_final_deliverable_drop_logs_outcome_and_leaves_no_zombie_
         and "reason_code=tool_followup_final_deliverable_already_sent" in message
         for message in info_messages
     )
-
-
-def test_send_response_create_drops_intermediate_non_report_silent_tool_followup_without_emitting_response_create() -> None:
-    api = _make_api_stub()
-    ws = _Ws()
-    tool_event = {
-        "type": "response.create",
-        "response": {
-            "metadata": {
-                "turn_id": "turn_followthrough",
-                "input_event_key": "tool:call_intermediate_send",
-                "parent_turn_id": "turn_followthrough",
-                "parent_input_event_key": "item_parent",
-                "tool_followup": "true",
-                "tool_call_id": "call_intermediate_send",
-                "tool_followup_silent_user_facing_output": "true",
-                "tool_followup_tool_choice_reason": "gesture_chain_non_report_remaining",
-            }
-        },
-    }
-
-    sent = asyncio.run(
-        api._send_response_create(
-            ws,
-            tool_event,
-            origin="tool_output",
-        )
-    )
-
-    canonical_key = api._canonical_utterance_key(
-        turn_id="turn_followthrough",
-        input_event_key="tool:call_intermediate_send",
-    )
-    assert sent is False
-    assert ws.events == []
-    assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
-    assert int(getattr(api, "_silent_turn_incident_count", 0)) == 0
-
-
-def test_send_response_create_keeps_final_deliverable_tool_followup_path() -> None:
-    api = _make_api_stub()
-    ws = _Ws()
-    tool_event = {
-        "type": "response.create",
-        "response": {
-            "metadata": {
-                "turn_id": "turn_followthrough",
-                "input_event_key": "tool:call_final_report",
-                "parent_turn_id": "turn_followthrough",
-                "parent_input_event_key": "item_parent",
-                "tool_followup": "true",
-                "tool_call_id": "call_final_report",
-            }
-        },
-    }
-
-    sent = asyncio.run(
-        api._send_response_create(
-            ws,
-            tool_event,
-            origin="tool_output",
-        )
-    )
-
-    assert sent is True
-    assert [event["type"] for event in ws.events] == ["response.create"]
 
 
 def test_schedule_pending_tool_followup_final_deliverable_overrides_schedule_and_leaves_no_retry(monkeypatch) -> None:
