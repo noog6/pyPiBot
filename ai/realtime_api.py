@@ -9814,23 +9814,6 @@ class RealtimeAPI:
             if state_entry is None or resolved_parent_origin in {"micro_ack", "tool_output"}:
                 state_entry = parent_key_entry
                 resolved_from = "parent_key"
-        if state_entry is not None:
-            resolved_parent_origin = str(getattr(state_entry[1], "origin", "") or "").strip().lower()
-            if resolved_parent_origin in {"micro_ack", "tool_output"} and parent_turn_id:
-                for canonical_key, candidate in self._canonical_response_state_store().items():
-                    if not isinstance(candidate, CanonicalResponseState):
-                        continue
-                    if str(candidate.turn_id or "").strip() != parent_turn_id:
-                        continue
-                    candidate_input_event_key = str(candidate.input_event_key or "").strip()
-                    if not candidate_input_event_key or candidate_input_event_key.startswith("tool:"):
-                        continue
-                    candidate_origin = str(candidate.origin or "").strip().lower()
-                    if candidate_origin in {"", "micro_ack", "tool_output"}:
-                        continue
-                    state_entry = (canonical_key, candidate)
-                    resolved_from = "turn_scan_non_tool_parent"
-                    break
         if not state_entry and parent_turn_id:
             for canonical_key, candidate in self._canonical_response_state_store().items():
                 if not isinstance(candidate, CanonicalResponseState):
