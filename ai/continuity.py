@@ -241,6 +241,16 @@ class ContinuityBriefLogFingerprint:
     compound_signature: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class DeterministicFollowthroughStepDescriptor:
+    """Authoritative descriptor for runtime-executable deterministic gesture steps."""
+
+    request_id: str
+    step_id: str
+    tool_name: str
+    tool_args: tuple[tuple[str, str], ...]
+
+
 class ContinuityLedger:
     """Small in-memory continuity ledger.
 
@@ -358,6 +368,41 @@ class ContinuityLedger:
         if state is None:
             return False
         return self._has_open_non_report_steps(state)
+
+    def deterministic_followthrough_step(self) -> DeterministicFollowthroughStepDescriptor | None:
+        """Return a deterministic runtime descriptor for the active gesture followthrough step.
+
+        This remains bookkeeping-derived metadata. It is intentionally narrow and
+        only emits descriptors for unambiguous low-risk gesture directions.
+        """
+
+        state = self._compound_state
+        if state is None:
+            return None
+        active_idx = state.active_step_index
+        if not isinstance(active_idx, int) or not (0 <= active_idx < len(state.steps)):
+            return None
+        step = state.steps[active_idx]
+        if step.kind != "gesture":
+            return None
+        if bool(step.requires_perception):
+            return None
+        direction = self._gesture_direction_from_text(step.summary)
+        tool_name = {
+            "left": "gesture_look_left",
+            "right": "gesture_look_right",
+            "up": "gesture_look_up",
+            "down": "gesture_look_down",
+            "center": "gesture_look_center",
+        }.get(direction)
+        if not tool_name:
+            return None
+        return DeterministicFollowthroughStepDescriptor(
+            request_id=state.request_id,
+            step_id=step.step_id,
+            tool_name=tool_name,
+            tool_args=(),
+        )
 
     def _log_brief_if_material(self, *, run_id: str, turn_id: str, brief: ContinuityBrief) -> None:
         fingerprint = self._brief_log_fingerprint(brief)

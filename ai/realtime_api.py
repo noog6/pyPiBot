@@ -9167,15 +9167,36 @@ class RealtimeAPI:
                     response_payload["tool_choice"] = "required"
                     metadata["tool_followup_tool_choice"] = "required"
                     metadata["tool_followup_tool_choice_reason"] = "gesture_chain_non_report_remaining"
+                    runtime_step_descriptor = self._deterministic_followthrough_runtime_descriptor(
+                        turn_id=turn_id
+                    )
+                    if runtime_step_descriptor is not None:
+                        metadata["followthrough_runtime_contract_version"] = "1"
+                        metadata["followthrough_runtime_step_available"] = "true"
+                        metadata["followthrough_runtime_step_id"] = runtime_step_descriptor["step_id"]
+                        metadata["followthrough_runtime_tool_name"] = runtime_step_descriptor["tool_name"]
+                        metadata["followthrough_runtime_tool_args"] = json.dumps(
+                            runtime_step_descriptor.get("tool_args", {}),
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        )
                 if motion_status:
                     metadata["gesture_motion_status"] = motion_status
                 response_payload["instructions"] = self._gesture_followup_instruction(motion_status=motion_status)
+                if not non_report_followthrough_remaining:
+                    catchup_payload = self._consume_followthrough_catchup_payload(turn_id=turn_id)
+                    if catchup_payload:
+                        metadata["followthrough_catchup_payload"] = catchup_payload
             else:
                 existing_instructions = str(response_payload.get("instructions") or "").strip()
                 report_instruction = (
                     "Final follow-up report is still owed for the parent turn. "
                     "Now deliver that completion report in one concise sentence."
                 )
+                catchup_payload = self._consume_followthrough_catchup_payload(turn_id=turn_id)
+                if catchup_payload:
+                    metadata["followthrough_catchup_payload"] = catchup_payload
+                    report_instruction = f"{report_instruction} Runtime catch-up: {catchup_payload}."
                 response_payload["instructions"] = (
                     f"{existing_instructions} {report_instruction}".strip()
                     if existing_instructions
@@ -9193,6 +9214,63 @@ class RealtimeAPI:
         canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_input_event_key)
         self._record_tool_followup_metadata(canonical_key=canonical_key, metadata=metadata)
         return event, canonical_key
+
+    def _deterministic_followthrough_runtime_descriptor(self, *, turn_id: str) -> dict[str, Any] | None:
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return None
+        ledger = self._continuity_ledger_instance()
+        owner_turn_id = str(getattr(ledger, "compound_owner_turn_id", lambda: "")() or "").strip()
+        if owner_turn_id and owner_turn_id != normalized_turn_id:
+            return None
+        descriptor = getattr(ledger, "deterministic_followthrough_step", lambda: None)()
+        if descriptor is None:
+            return None
+        return {
+            "request_id": str(getattr(descriptor, "request_id", "") or "").strip(),
+            "step_id": str(getattr(descriptor, "step_id", "") or "").strip(),
+            "tool_name": str(getattr(descriptor, "tool_name", "") or "").strip(),
+            "tool_args": dict(getattr(descriptor, "tool_args", ()) or ()),
+        }
+
+    def _followthrough_catchup_buffer_store(self) -> dict[str, list[dict[str, str]]]:
+        store = getattr(self, "_followthrough_catchup_buffer_by_turn", None)
+        if not isinstance(store, dict):
+            store = {}
+            self._followthrough_catchup_buffer_by_turn = store
+        return store
+
+    def _buffer_followthrough_completion_fact(
+        self,
+        *,
+        turn_id: str,
+        tool_name: str,
+        call_id: str,
+    ) -> None:
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return
+        record = {
+            "tool_name": str(tool_name or "").strip().lower(),
+            "call_id": str(call_id or "").strip(),
+            "ts": datetime.utcnow().isoformat(),
+        }
+        buffer_store = self._followthrough_catchup_buffer_store()
+        facts = buffer_store.setdefault(normalized_turn_id, [])
+        facts.append(record)
+        if len(facts) > 8:
+            del facts[:-8]
+
+    def _consume_followthrough_catchup_payload(self, *, turn_id: str) -> str:
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return ""
+        buffer_store = self._followthrough_catchup_buffer_store()
+        facts = buffer_store.pop(normalized_turn_id, None)
+        if not facts:
+            return ""
+        payload = {"turn_id": normalized_turn_id, "completed_steps": facts}
+        return json.dumps(payload, separators=(",", ":"), sort_keys=True)
 
     def _parent_input_event_key_for_tool_followup(self, *, turn_id: str) -> str:
         parent_input_event_key = self._active_input_event_key_for_turn(turn_id)
@@ -19394,6 +19472,16 @@ class RealtimeAPI:
                         allow_cross_turn_rebind="true" if continuity_rebind_allowed else "",
                         cross_turn_rebind_reason=continuity_rebind_reason,
                     )
+                    if function_name.startswith("gesture_"):
+                        if self._turn_followthrough_chain_remaining(
+                            turn_id=continuity_turn_id,
+                            include_report_followup=False,
+                        ):
+                            self._buffer_followthrough_completion_fact(
+                                turn_id=continuity_turn_id,
+                                tool_name=function_name,
+                                call_id=call_id,
+                            )
             except Exception as exc:
                 error_message = f"Error executing function '{function_name}': {exc}"
                 log_error(error_message)

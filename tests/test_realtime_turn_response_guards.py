@@ -2564,6 +2564,66 @@ def test_tool_followup_status_only_gesture_requires_tool_choice_when_non_report_
     assert response_payload.get("tool_choice") == "required"
 
 
+def test_tool_followup_status_only_gesture_emits_runtime_step_descriptor_metadata() -> None:
+    api = _make_api()
+    api._current_turn_id_or_unknown = lambda: "turn_1"
+    api._resolve_continuity_tool_event_owner_turn = lambda *, fallback_turn_id: (fallback_turn_id, False, "")
+    api._parent_input_event_key_for_tool_followup = lambda *, turn_id: "item_1"
+    api._gesture_followup_should_remain_status_only = lambda *, turn_id: True
+    api._gesture_followup_motion_status = lambda *, call_id, tool_name: "started"
+    api._gesture_followthrough_chain_remaining = lambda *, turn_id: True
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True, **_kwargs: (
+        turn_id == "turn_1" and include_report_followup in {True, False}
+    )
+    api._continuity_ledger = types.SimpleNamespace(
+        compound_owner_turn_id=lambda: "turn_1",
+        deterministic_followthrough_step=lambda: types.SimpleNamespace(
+            request_id="req-1",
+            step_id="step_2",
+            tool_name="gesture_look_right",
+            tool_args=(),
+        ),
+    )
+    event, _canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_1",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_left",
+    )
+    metadata = ((event.get("response") or {}).get("metadata") or {})
+    assert metadata.get("followthrough_runtime_contract_version") == "1"
+    assert metadata.get("followthrough_runtime_step_available") == "true"
+    assert metadata.get("followthrough_runtime_step_id") == "step_2"
+    assert metadata.get("followthrough_runtime_tool_name") == "gesture_look_right"
+
+
+def test_tool_followup_report_boundary_consumes_catchup_payload() -> None:
+    api = _make_api()
+    api._current_turn_id_or_unknown = lambda: "turn_1"
+    api._resolve_continuity_tool_event_owner_turn = lambda *, fallback_turn_id: (fallback_turn_id, False, "")
+    api._parent_input_event_key_for_tool_followup = lambda *, turn_id: "item_1"
+    api._gesture_followup_should_remain_status_only = lambda *, turn_id: True
+    api._gesture_followup_motion_status = lambda *, call_id, tool_name: "completed"
+    api._gesture_followthrough_chain_remaining = lambda *, turn_id: False
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True, **_kwargs: (
+        turn_id == "turn_1" and include_report_followup
+    )
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(compound_request=None)
+    api._buffer_followthrough_completion_fact(
+        turn_id="turn_1",
+        tool_name="gesture_look_left",
+        call_id="call_1",
+    )
+    event, _canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_2",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_right",
+    )
+    metadata = ((event.get("response") or {}).get("metadata") or {})
+    assert "followthrough_catchup_payload" in metadata
+    assert "gesture_look_left" in metadata.get("followthrough_catchup_payload", "")
+    assert api._consume_followthrough_catchup_payload(turn_id="turn_1") == ""
+
+
 def test_silent_tool_followup_suppresses_text_delta_events() -> None:
     api = _make_api()
     response_id = "resp_silent_tool_followup_text"
