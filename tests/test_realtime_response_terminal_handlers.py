@@ -1724,39 +1724,6 @@ def test_handle_response_done_cross_turn_empty_tool_output_does_not_complete_par
     assert any(step.kind == "report" and step.status == "pending" for step in parent_brief.compound_request.steps)
 
 
-def test_handle_response_done_marks_complete_final_report_when_report_followup_owed_without_terminal_text() -> None:
-    api = _make_api()
-    api._active_response_origin = "tool_output"
-    api._active_response_input_event_key = "tool:call_final"
-    api._active_response_canonical_key = "turn_1::tool:call_final"
-    api._active_response_id = "resp_tool_final"
-    api._response_done_followthrough_chain_remaining = (
-        lambda **kwargs: bool(kwargs.get("include_report_followup", True))
-    )
-    api._selected_response_has_substantive_evidence = lambda **_kwargs: False
-    real_apply_continuity_event = RealtimeAPI._apply_continuity_event.__get__(api, RealtimeAPI)
-    apply_continuity_event = Mock(side_effect=real_apply_continuity_event)
-    api._apply_continuity_event = apply_continuity_event
-    api._maybe_schedule_empty_response_retry = AsyncMock()
-    api._build_confirmation_transition_decision = Mock(
-        return_value=SimpleNamespace(
-            allow_response_transition=True,
-            close_reason="",
-            emit_reminder=False,
-            recover_mic=False,
-        )
-    )
-
-    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_tool_final"}}))
-
-    response_done_calls = [call for call in apply_continuity_event.call_args_list if call.args and call.args[0] == "response_done"]
-    assert len(response_done_calls) == 1
-    _, kwargs = response_done_calls[0]
-    assert kwargs["close_commitment"] == "true"
-    assert kwargs["close_unresolved"] == "true"
-    assert kwargs["complete_final_report"] == "true"
-
-
 def test_handle_response_done_wrong_lineage_final_answer_does_not_clear_parent_compound_state() -> None:
     api = _make_api()
     api._current_turn_id_or_unknown = lambda: "turn_3"

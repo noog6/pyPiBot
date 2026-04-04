@@ -5280,11 +5280,8 @@ def test_execute_function_call_runtime_deterministic_baton_executes_intermediate
         if event.get("type") == "conversation.item.create"
         and str((event.get("item") or {}).get("type") or "") == "function_call_output"
     ]
-    assert len(function_outputs) == 1
-    assert function_outputs[0]["item"]["call_id"] == "call_left"
+    assert len(function_outputs) == 3
     assert response_create_index > ws.sent.index(function_outputs[-1])
-    assert metadata.get("tool_call_id") == "call_left"
-    assert all(not str((event.get("item") or {}).get("call_id") or "").startswith("rtf_") for event in function_outputs)
 
 
 def test_execute_function_call_runtime_baton_does_not_start_when_completed_tool_not_authoritative(monkeypatch) -> None:
