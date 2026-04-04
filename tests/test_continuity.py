@@ -122,6 +122,31 @@ def test_compound_parser_exact_phrase_family_preserves_expected_summaries() -> N
     ]
 
 
+def test_deterministic_followthrough_step_descriptor_tracks_active_directional_gesture() -> None:
+    ledger = ContinuityLedger()
+    ledger.update_from_event(
+        "transcript_final",
+        text="look left then look right and tell me what you see",
+        source="input_audio_transcription",
+        turn_id="turn_1",
+    )
+
+    descriptor = ledger.deterministic_followthrough_step()
+    assert descriptor is not None
+    assert descriptor.step_id == "step_1"
+    assert descriptor.tool_name == "gesture_look_left"
+
+    ledger.update_from_event(
+        "tool_result_received",
+        tool_name="gesture_look_left",
+        turn_id="turn_1",
+    )
+    descriptor = ledger.deterministic_followthrough_step()
+    assert descriptor is not None
+    assert descriptor.step_id == "step_2"
+    assert descriptor.tool_name == "gesture_look_right"
+
+
 def test_compound_parser_ignores_plain_declarative_description() -> None:
     ledger = ContinuityLedger()
 
