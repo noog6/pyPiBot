@@ -465,15 +465,6 @@ _FOLLOWTHROUGH_RUNTIME_GESTURE_INTERRUPT_ALLOWLIST = frozenset(
         "gesture_attention_snap",
     }
 )
-_RUNTIME_DETERMINISTIC_GESTURE_BATON_ALLOWLIST = frozenset(
-    {
-        "gesture_look_left",
-        "gesture_look_right",
-        "gesture_look_up",
-        "gesture_look_down",
-        "gesture_look_center",
-    }
-)
 
 
 @dataclass(frozen=True)
@@ -9242,149 +9233,6 @@ class RealtimeAPI:
             "tool_args": dict(getattr(descriptor, "tool_args", ()) or ()),
         }
 
-    def _resolve_runtime_executable_followthrough_step(
-        self,
-        *,
-        turn_id: str,
-        executed_step_ids: set[str] | None = None,
-    ) -> tuple[dict[str, Any] | None, str]:
-        normalized_turn_id = str(turn_id or "").strip()
-        if not normalized_turn_id:
-            return None, "missing_turn_id"
-        if self._pending_action is not None or self._pending_confirmation_token is not None:
-            return None, "confirmation_or_pending_action_active"
-        if self._pending_interrupted_tool_output_candidates_for_turn(interruption_turn_id=normalized_turn_id):
-            return None, "interruption_candidates_active"
-        owner_turn_id = str(self._continuity_ledger_instance().compound_owner_turn_id() or "").strip()
-        if owner_turn_id and owner_turn_id != normalized_turn_id:
-            return None, "owner_turn_mismatch"
-        if not self._turn_followthrough_chain_remaining(
-            turn_id=normalized_turn_id,
-            include_report_followup=False,
-        ):
-            return None, "non_report_followthrough_not_remaining"
-        descriptor = self._deterministic_followthrough_runtime_descriptor(turn_id=normalized_turn_id)
-        if descriptor is None:
-            return None, "descriptor_unavailable"
-        step_id = str(descriptor.get("step_id") or "").strip()
-        if not step_id:
-            return None, "descriptor_missing_step_id"
-        seen_step_ids = executed_step_ids if isinstance(executed_step_ids, set) else set()
-        if step_id in seen_step_ids:
-            return None, "descriptor_step_already_executed"
-        tool_name = str(descriptor.get("tool_name") or "").strip().lower()
-        if not self._is_low_risk_reversible_gesture_tool(tool_name=tool_name):
-            return None, "descriptor_tool_not_low_risk_gesture"
-        if tool_name not in _RUNTIME_DETERMINISTIC_GESTURE_BATON_ALLOWLIST:
-            return None, "descriptor_tool_not_runtime_baton_allowlisted"
-        owner_blocked, _owner_turn_id, owner_block_reason = self._should_block_non_owner_followthrough_gesture_call(
-            function_name=tool_name,
-        )
-        if owner_blocked:
-            return None, owner_block_reason or "owner_turn_mismatch"
-        tool_args = descriptor.get("tool_args")
-        if not isinstance(tool_args, dict):
-            return None, "descriptor_tool_args_not_mapping"
-        if tool_args:
-            return None, "descriptor_tool_args_not_empty"
-        logger.info(
-            "runtime_deterministic_followthrough_descriptor_resolved run_id=%s turn_id=%s request_id=%s step_id=%s tool_name=%s",
-            self._current_run_id() or "",
-            normalized_turn_id,
-            str(descriptor.get("request_id") or "").strip() or "unknown",
-            step_id,
-            tool_name,
-        )
-        return descriptor, ""
-
-    async def _execute_runtime_deterministic_followthrough_segment(
-        self,
-        *,
-        websocket: Any,
-        turn_id: str,
-    ) -> tuple[str | None, int]:
-        normalized_turn_id = str(turn_id or "").strip()
-        if not normalized_turn_id:
-            return None, 0
-        executed_step_ids: set[str] = set()
-        last_call_id: str | None = None
-        executed_count = 0
-        while True:
-            descriptor, reason = self._resolve_runtime_executable_followthrough_step(
-                turn_id=normalized_turn_id,
-                executed_step_ids=executed_step_ids,
-            )
-            if descriptor is None:
-                logger.info(
-                    "runtime_deterministic_followthrough_baton_skipped run_id=%s turn_id=%s reason=%s executed_count=%s",
-                    self._current_run_id() or "",
-                    normalized_turn_id,
-                    reason or "unspecified",
-                    executed_count,
-                )
-                return last_call_id, executed_count
-            step_id = str(descriptor.get("step_id") or "").strip()
-            tool_name = str(descriptor.get("tool_name") or "").strip().lower()
-            tool_args = descriptor.get("tool_args") if isinstance(descriptor.get("tool_args"), dict) else {}
-            call_id = self._normalize_realtime_call_id(f"rtf_{uuid.uuid4().hex[:24]}")
-            logger.info(
-                "runtime_deterministic_followthrough_baton_accepted run_id=%s turn_id=%s step_id=%s tool_name=%s call_id=%s",
-                self._current_run_id() or "",
-                normalized_turn_id,
-                step_id,
-                tool_name,
-                call_id,
-            )
-            result = await function_map[tool_name](**tool_args)
-            log_tool_call(tool_name, tool_args, result)
-            self._record_intent_completion(tool_name, tool_args, idempotency_key=None)
-            self._mark_tool_followup_timing(
-                turn_id=normalized_turn_id,
-                marker="tool_result_received",
-                call_id=call_id,
-            )
-            self._apply_continuity_event(
-                "tool_result_received",
-                run_id=self._current_run_id(),
-                turn_id=normalized_turn_id,
-                tool_name=tool_name,
-                call_id=call_id,
-            )
-            self._buffer_followthrough_completion_fact(
-                turn_id=normalized_turn_id,
-                tool_name=tool_name,
-                call_id=call_id,
-            )
-            output_payload: dict[str, Any] = {"result": result}
-            function_call_output = {
-                "type": "conversation.item.create",
-                "item": {
-                    "type": "function_call_output",
-                    "call_id": call_id,
-                    "output": json.dumps(output_payload),
-                },
-            }
-            log_ws_event("Outgoing", function_call_output)
-            self._track_outgoing_event(function_call_output)
-            transport = self._get_or_create_transport()
-            await transport.send_json(websocket, function_call_output)
-            self._tool_call_records.append(
-                {
-                    "name": tool_name,
-                    "call_id": call_id,
-                    "args": tool_args,
-                    "result": result,
-                    "turn_id": normalized_turn_id,
-                    "action_packet": None,
-                    "staging": None,
-                    "timestamp": datetime.utcnow().isoformat(),
-                }
-            )
-            self._last_tool_call_results = list(self._tool_call_records)
-            executed_step_ids.add(step_id)
-            last_call_id = call_id
-            executed_count += 1
-
     def _followthrough_catchup_buffer_store(self) -> dict[str, list[dict[str, str]]]:
         store = getattr(self, "_followthrough_catchup_buffer_by_turn", None)
         if not isinstance(store, dict):
@@ -9412,14 +9260,6 @@ class RealtimeAPI:
         facts.append(record)
         if len(facts) > 8:
             del facts[:-8]
-        logger.info(
-            "runtime_deterministic_followthrough_catchup_buffered run_id=%s turn_id=%s tool_name=%s call_id=%s buffered_count=%s",
-            self._current_run_id() or "",
-            normalized_turn_id,
-            record["tool_name"] or "unknown",
-            record["call_id"] or "unknown",
-            len(facts),
-        )
 
     def _consume_followthrough_catchup_payload(self, *, turn_id: str) -> str:
         normalized_turn_id = str(turn_id or "").strip()
@@ -9430,12 +9270,6 @@ class RealtimeAPI:
         if not facts:
             return ""
         payload = {"turn_id": normalized_turn_id, "completed_steps": facts}
-        logger.info(
-            "runtime_deterministic_followthrough_catchup_flushed run_id=%s turn_id=%s step_count=%s",
-            self._current_run_id() or "",
-            normalized_turn_id,
-            len(facts),
-        )
         return json.dumps(payload, separators=(",", ":"), sort_keys=True)
 
     def _parent_input_event_key_for_tool_followup(self, *, turn_id: str) -> str:
@@ -19725,7 +19559,6 @@ class RealtimeAPI:
             self.function_call = None
             self.function_call_args = ""
             return
-        followup_call_id = call_id
         if owner_mismatch_blocked:
             tool_followup_canonical_key = self._canonical_utterance_key(
                 turn_id=self._current_turn_id_or_unknown(),
@@ -19745,29 +19578,8 @@ class RealtimeAPI:
             self.function_call = None
             self.function_call_args = ""
             return
-        if (
-            function_name.startswith("gesture_")
-            and isinstance(result, dict)
-            and "error" not in result
-            and not force_no_tools_followup
-        ):
-            baton_turn_id = self._current_turn_id_or_unknown()
-            baton_last_call_id, baton_executed_count = await self._execute_runtime_deterministic_followthrough_segment(
-                websocket=websocket,
-                turn_id=baton_turn_id,
-            )
-            if baton_last_call_id:
-                followup_call_id = baton_last_call_id
-            logger.info(
-                "runtime_deterministic_followthrough_baton_summary run_id=%s turn_id=%s initial_call_id=%s followup_call_id=%s executed_count=%s",
-                self._current_run_id() or "",
-                baton_turn_id,
-                call_id,
-                followup_call_id,
-                baton_executed_count,
-            )
         response_create_event, tool_followup_canonical_key = self._build_tool_followup_response_create_event(
-            call_id=followup_call_id,
+            call_id=call_id,
             response_create_event={"type": "response.create"},
             tool_name=function_name,
             tool_result_has_distinct_info=self._tool_result_has_distinct_followup_info(
