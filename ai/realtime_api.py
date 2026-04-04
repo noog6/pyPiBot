@@ -9391,19 +9391,6 @@ class RealtimeAPI:
                 tool_name=tool_name,
                 call_id=call_id,
             )
-            output_payload: dict[str, Any] = {"result": result}
-            function_call_output = {
-                "type": "conversation.item.create",
-                "item": {
-                    "type": "function_call_output",
-                    "call_id": call_id,
-                    "output": json.dumps(output_payload),
-                },
-            }
-            log_ws_event("Outgoing", function_call_output)
-            self._track_outgoing_event(function_call_output)
-            transport = self._get_or_create_transport()
-            await transport.send_json(websocket, function_call_output)
             self._tool_call_records.append(
                 {
                     "name": tool_name,
@@ -19812,14 +19799,13 @@ class RealtimeAPI:
                     websocket=websocket,
                     turn_id=baton_turn_id,
                 )
-            if baton_last_call_id:
-                followup_call_id = baton_last_call_id
             logger.info(
-                "runtime_deterministic_followthrough_baton_summary run_id=%s turn_id=%s initial_call_id=%s followup_call_id=%s executed_count=%s",
+                "runtime_deterministic_followthrough_baton_summary run_id=%s turn_id=%s initial_call_id=%s provider_followup_call_id=%s internal_last_call_id=%s executed_count=%s",
                 self._current_run_id() or "",
                 baton_turn_id,
                 call_id,
                 followup_call_id,
+                baton_last_call_id or "",
                 baton_executed_count,
             )
         response_create_event, tool_followup_canonical_key = self._build_tool_followup_response_create_event(
