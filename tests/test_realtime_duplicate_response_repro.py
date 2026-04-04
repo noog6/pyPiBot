@@ -5961,6 +5961,63 @@ def test_tool_followup_parent_resolution_ignores_tool_parent_input_key() -> None
     assert parent_entry[0] == parent_key
 
 
+def test_tool_followup_parent_resolution_rebinds_to_non_tool_parent_when_blocked_parent_is_tool_output() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_tool_output_parent_rebind"
+    parent_input_event_key = "item_parent_tool_output_parent_rebind"
+    parent_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    tool_parent_input_event_key = "tool:call_parent_tool_output_parent_rebind"
+    tool_parent_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_parent_input_event_key)
+
+    api._canonical_response_state_mutate(
+        canonical_key=parent_canonical_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "assistant_message"),
+            setattr(record, "response_id", "resp-parent-tool-output-parent-rebind"),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "final"),
+            setattr(record, "done", True),
+        ),
+    )
+    api._canonical_response_state_mutate(
+        canonical_key=tool_parent_canonical_key,
+        turn_id=turn_id,
+        input_event_key=tool_parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "tool_output"),
+            setattr(record, "response_id", "resp-tool-parent-tool-output-parent-rebind"),
+            setattr(record, "deliverable_observed", False),
+            setattr(record, "deliverable_class", "unknown"),
+            setattr(record, "done", True),
+        ),
+    )
+
+    event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_tool_output_parent_rebind",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+    metadata = ((event.get("response") or {}).get("metadata") or {})
+    metadata["turn_id"] = turn_id
+    metadata["parent_turn_id"] = turn_id
+    metadata["parent_input_event_key"] = tool_parent_input_event_key
+    metadata["blocked_by_response_id"] = "resp-tool-parent-tool-output-parent-rebind"
+
+    should_drop, parent_entry, reason = api._should_suppress_queued_tool_followup_release(
+        response_metadata=metadata,
+        blocked_by_response_id="resp-tool-parent-tool-output-parent-rebind",
+    )
+
+    assert should_drop is True
+    assert reason == "parent_covered_tool_result"
+    assert parent_entry is not None
+    assert parent_entry[0] == parent_canonical_key
+
+
 def test_create_seam_parent_coverage_emits_single_info_source_of_truth(monkeypatch) -> None:
     api = _make_api_stub()
     _wire_runtime(api)
@@ -7148,7 +7205,7 @@ def test_upgraded_response_still_suppresses_redundant_tool_followup_after_pendin
     )
 
     assert should_drop is False
-    assert reason == "parent_terminal_selection_not_coverage_qualified"
+    assert reason == "parent_not_coverage_qualified"
     assert entry is not None
     parent_covered, coverage_source, _observed, _klass, _selected, _sel_reason = api._parent_response_coverage_state(
         parent_state=entry[1],
@@ -7516,7 +7573,7 @@ def test_tool_followup_parent_resolution_rebinds_third_sibling_to_canonical_non_
     )
 
     assert should_drop is False
-    assert reason == "parent_terminal_selection_not_coverage_qualified"
+    assert reason == "parent_not_coverage_qualified"
     assert parent_entry is not None
     assert parent_entry[0] == canonical_parent_key
     assert parent_entry[1].response_id == canonical_parent_response_id
