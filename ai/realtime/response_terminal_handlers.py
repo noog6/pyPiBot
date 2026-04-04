@@ -832,6 +832,12 @@ class ResponseTerminalHandlers:
             response_id=active_response_id_before_clear,
             include_report_followup=False,
         )
+        report_followup_owed_for_turn = api._response_done_followthrough_chain_remaining(
+            turn_id=continuity_candidate_turn_id,
+            origin=active_response_origin_before_clear,
+            response_id=active_response_id_before_clear,
+            include_report_followup=True,
+        )
         continuity_close_commitment = (
             continuity_close_allowed
             and continuity_origin == "tool_output"
@@ -846,8 +852,11 @@ class ResponseTerminalHandlers:
             continuity_close_commitment
             and selected
             and selection_reason == "normal"
-            and api._selected_response_has_substantive_evidence(
-                response_id=resolved_response_id or active_response_id_before_clear
+            and (
+                api._selected_response_has_substantive_evidence(
+                    response_id=resolved_response_id or active_response_id_before_clear
+                )
+                or report_followup_owed_for_turn
             )
         )
         continuity_turn_id = turn_id
