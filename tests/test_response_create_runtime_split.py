@@ -16,9 +16,11 @@ os.environ.setdefault("OPENAI_API_KEY", "test-key")
 
 from ai.realtime.response_create_runtime import ResponseCreateOutcomeAction, ResponseCreateRuntime
 from ai.realtime.transport import RealtimeTransport
+from ai.realtime.types import PendingResponseCreate
 from ai.realtime_api import RealtimeAPI
 from ai.interaction_lifecycle_policy import ResponseCreateDecision, ResponseCreateDecisionAction
 from core.logging import logger
+from interaction import InteractionState
 
 
 class _Ws:
@@ -717,6 +719,62 @@ def test_send_response_create_drops_intermediate_non_report_silent_tool_followup
     assert sent is False
     assert ws.events == []
     assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
+    assert int(getattr(api, "_silent_turn_incident_count", 0)) == 0
+
+
+def test_drain_released_queue_drops_intermediate_non_report_silent_tool_followup_without_lifecycle() -> None:
+    api = _make_api_stub()
+    ws = _Ws()
+    tool_event = {
+        "type": "response.create",
+        "response": {
+            "metadata": {
+                "turn_id": "turn_followthrough_queue",
+                "input_event_key": "tool:call_intermediate_queue",
+                "parent_turn_id": "turn_followthrough_queue",
+                "parent_input_event_key": "item_parent",
+                "tool_followup": "true",
+                "tool_call_id": "call_intermediate_queue",
+                "tool_followup_silent_user_facing_output": "true",
+                "tool_followup_tool_choice_reason": "gesture_chain_non_report_remaining",
+            }
+        },
+    }
+    canonical_key = api._canonical_utterance_key(
+        turn_id="turn_followthrough_queue",
+        input_event_key="tool:call_intermediate_queue",
+    )
+
+    api._pending_response_create = PendingResponseCreate(
+        websocket=ws,
+        event=tool_event,
+        origin="tool_output",
+        turn_id="turn_followthrough_queue",
+        created_at=0.0,
+        reason="active_response",
+        record_ai_call=False,
+        debug_context=None,
+        memory_brief_note=None,
+        queued_reminder_key=None,
+        enqueued_done_serial=0,
+        enqueue_seq=1,
+    )
+    api._sync_pending_response_create_queue()
+    api._set_tool_followup_state(
+        canonical_key=canonical_key,
+        state="blocked_active_response",
+        reason="active_response response_id=resp_parent_active origin=assistant_message",
+    )
+    api.state_manager = SimpleNamespace(state=InteractionState.IDLE)
+    api._can_release_queued_response_create = lambda *_args, **_kwargs: True
+
+    api._release_blocked_tool_followups_for_response_done(response_id="resp_parent_active")
+    asyncio.run(api._drain_response_create_queue(source_trigger="response_done"))
+
+    assert ws.events == []
+    assert api._pending_response_create is None
+    assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
+    assert canonical_key not in api._response_created_canonical_keys
     assert int(getattr(api, "_silent_turn_incident_count", 0)) == 0
 
 
