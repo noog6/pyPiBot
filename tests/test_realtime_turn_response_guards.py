@@ -2538,6 +2538,79 @@ def test_response_done_decision_allows_upgraded_response_when_only_status_gestur
     assert reason == "normal"
 
 
+def test_tool_followup_status_only_gesture_requires_tool_choice_when_non_report_followthrough_remains() -> None:
+    api = _make_api()
+    api._current_turn_id_or_unknown = lambda: "turn_1"
+    api._resolve_continuity_tool_event_owner_turn = lambda *, fallback_turn_id: (fallback_turn_id, False, "")
+    api._parent_input_event_key_for_tool_followup = lambda *, turn_id: "item_1"
+    api._gesture_followup_should_remain_status_only = lambda *, turn_id: True
+    api._gesture_followup_motion_status = lambda *, call_id, tool_name: "started"
+    api._gesture_followthrough_chain_remaining = lambda *, turn_id: True
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True, **_kwargs: (
+        turn_id == "turn_1" and include_report_followup in {True, False}
+    )
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(compound_request=None)
+    event, canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_1",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_left",
+    )
+    metadata = ((event.get("response") or {}).get("metadata") or {})
+    response_payload = event.get("response") or {}
+    assert canonical_key.endswith("tool:call_1")
+    assert metadata.get("tool_followup_status_only") == "true"
+    assert metadata.get("tool_followup_tool_choice") == "required"
+    assert metadata.get("tool_followup_tool_choice_reason") == "gesture_chain_non_report_remaining"
+    assert response_payload.get("tool_choice") == "required"
+
+
+def test_silent_tool_followup_suppresses_text_delta_events() -> None:
+    api = _make_api()
+    response_id = "resp_silent_tool_followup_text"
+    canonical_key = api._canonical_utterance_key(turn_id="turn_1", input_event_key="tool:call_1")
+    api._record_response_trace_context(
+        response_id,
+        turn_id="turn_1",
+        input_event_key="tool:call_1",
+        canonical_key=canonical_key,
+        tool_followup="true",
+        tool_followup_silent_user_facing_output="true",
+        tool_call_id="call_1",
+    )
+
+    should_process = api._should_process_response_event_ingress(
+        {"type": "response.output_text.delta", "response_id": response_id},
+        source="test",
+    )
+
+    assert should_process is False
+
+
+def test_silent_tool_followup_text_done_marks_timing_for_diagnostics() -> None:
+    api = _make_api()
+    response_id = "resp_silent_tool_followup_text_done"
+    canonical_key = api._canonical_utterance_key(turn_id="turn_1", input_event_key="tool:call_2")
+    markers: list[str] = []
+    api._mark_tool_followup_timing = lambda **kwargs: markers.append(str(kwargs.get("marker") or ""))
+    api._record_response_trace_context(
+        response_id,
+        turn_id="turn_1",
+        input_event_key="tool:call_2",
+        canonical_key=canonical_key,
+        tool_followup="true",
+        tool_followup_silent_user_facing_output="true",
+        tool_call_id="call_2",
+    )
+
+    should_process = api._should_process_response_event_ingress(
+        {"type": "response.output_text.done", "response_id": response_id},
+        source="test",
+    )
+
+    assert should_process is False
+    assert "followup_output_text_done_suppressed" in markers
+
+
 def test_response_done_decision_keeps_precedence_for_non_status_tool_followup() -> None:
     api = _make_api()
     turn_id = "turn_1"

@@ -7321,23 +7321,37 @@ class RealtimeAPI:
             "response.output_audio_transcript.delta",
             "response.output_audio_transcript.done",
             "response.audio_transcript.done",
+            "response.text.delta",
+            "response.text.done",
+            "response.output_text.delta",
+            "response.output_text.done",
         }:
+            marker: str | None = None
             if event_type == "response.output_audio.done":
+                marker = "followup_output_audio_done_suppressed"
+            elif event_type in {"response.text.done", "response.output_text.done"}:
+                marker = "followup_output_text_done_suppressed"
+            if marker is not None:
                 self._mark_tool_followup_timing(
                     turn_id=str(trace_context.get("turn_id") or self._current_turn_id_or_unknown()).strip() or "turn-unknown",
-                    marker="followup_output_audio_done_suppressed",
+                    marker=marker,
                     call_id=str(trace_context.get("tool_call_id") or "").strip() or None,
                     canonical_key=str(trace_context.get("canonical_key") or "").strip() or None,
                     response_id=response_id or None,
                     is_tool_followup=True,
                     released=str(trace_context.get("tool_followup_release") or "").strip().lower() in {"true", "1", "yes"},
                 )
+            delta_len = 0
+            if event_type in {"response.text.delta", "response.output_text.delta"}:
+                delta_len = len(str(event.get("delta") or ""))
             logger.info(
-                "tool_followup_user_facing_output_suppressed run_id=%s response_id=%s canonical_key=%s event_type=%s reason=intermediate_non_report_followthrough",
+                "tool_followup_user_facing_output_suppressed run_id=%s response_id=%s canonical_key=%s event_type=%s delta_len=%s marker=%s reason=intermediate_non_report_followthrough",
                 self._current_run_id() or "",
                 response_id or "unknown",
                 str(trace_context.get("canonical_key") or "").strip() or "unknown",
                 event_type,
+                delta_len,
+                marker or "none",
             )
             return False
         cancelled_ids = getattr(self, "_cancelled_response_ids", set())
@@ -9133,6 +9147,10 @@ class RealtimeAPI:
                     turn_id=turn_id,
                     include_report_followup=True,
                 )
+                non_report_followthrough_remaining = self._turn_followthrough_chain_remaining(
+                    turn_id=turn_id,
+                    include_report_followup=False,
+                )
                 if not followthrough_remaining and motion_status in {"queued", "started"}:
                     followthrough_remaining = True
                 if not followthrough_remaining and not tool_result_has_distinct_info:
@@ -9145,6 +9163,10 @@ class RealtimeAPI:
                 metadata["tool_followup_status_only"] = "true"
                 metadata["tool_followup_silent_audio"] = "true"
                 metadata["tool_followup_silent_user_facing_output"] = "true"
+                if non_report_followthrough_remaining:
+                    response_payload["tool_choice"] = "required"
+                    metadata["tool_followup_tool_choice"] = "required"
+                    metadata["tool_followup_tool_choice_reason"] = "gesture_chain_non_report_remaining"
                 if motion_status:
                     metadata["gesture_motion_status"] = motion_status
                 response_payload["instructions"] = self._gesture_followup_instruction(motion_status=motion_status)
