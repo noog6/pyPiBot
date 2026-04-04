@@ -5225,6 +5225,115 @@ def test_execute_function_call_skips_response_create_for_completed_non_report_ge
     )
 
 
+def test_execute_function_call_runtime_deterministic_baton_executes_intermediate_gesture_chain(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_turn_id_or_unknown = lambda: "turn_baton"
+    api._current_response_turn_id = "turn_baton"
+    api._current_input_event_key = "item_turn_baton"
+    api._active_input_event_key_by_turn_id["turn_baton"] = "item_turn_baton"
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._intent_ledger = {}
+    api._apply_continuity_event(
+        "transcript_final",
+        text="look left, look right, come back to center, then report done",
+        source="input_audio_transcription",
+        turn_id="turn_baton",
+    )
+    api.get_gesture_motion_state = lambda *, tool_call_id: {"status": "completed"}
+    execution_order: list[str] = []
+
+    async def _fake_left(**_kwargs):
+        execution_order.append("gesture_look_left")
+        return {"ok": True}
+
+    async def _fake_right(**_kwargs):
+        execution_order.append("gesture_look_right")
+        return {"ok": True}
+
+    async def _fake_center(**_kwargs):
+        execution_order.append("gesture_look_center")
+        return {"ok": True}
+
+    tool_map = __import__("ai.tools", fromlist=["function_map"]).function_map
+    monkeypatch.setitem(tool_map, "gesture_look_left", _fake_left)
+    monkeypatch.setitem(tool_map, "gesture_look_right", _fake_right)
+    monkeypatch.setitem(tool_map, "gesture_look_center", _fake_center)
+
+    asyncio.run(api.execute_function_call("gesture_look_left", "call_left", {}, ws))
+
+    assert execution_order == ["gesture_look_left", "gesture_look_right", "gesture_look_center"]
+    response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert len(response_create_events) == 1
+    metadata = ((response_create_events[0].get("response") or {}).get("metadata") or {})
+    assert "followthrough_catchup_payload" in metadata
+    payload = str(metadata.get("followthrough_catchup_payload") or "")
+    assert "gesture_look_left" in payload
+    assert "gesture_look_right" in payload
+    assert "gesture_look_center" in payload
+    function_outputs = [
+        event
+        for event in ws.sent
+        if event.get("type") == "conversation.item.create"
+        and str((event.get("item") or {}).get("type") or "") == "function_call_output"
+    ]
+    assert len(function_outputs) == 3
+
+
+def test_runtime_deterministic_followthrough_step_rejected_when_interruption_candidate_active() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    api._current_turn_id_or_unknown = lambda: "turn_guard"
+    api._current_response_turn_id = "turn_guard"
+    api._active_input_event_key_by_turn_id["turn_guard"] = "item_turn_guard"
+    api._apply_continuity_event(
+        "transcript_final",
+        text="look left, look right, then report done",
+        source="input_audio_transcription",
+        turn_id="turn_guard",
+    )
+    api._apply_continuity_event(
+        "tool_result_received",
+        tool_name="gesture_look_left",
+        call_id="call_guard_left",
+        turn_id="turn_guard",
+    )
+    api._interrupted_tool_output_candidates_by_response_id = {
+        "resp_guard": {"interruption_turn_id": "turn_guard", "resolution": "pending"}
+    }
+
+    descriptor, reason = api._resolve_runtime_executable_followthrough_step(turn_id="turn_guard")
+
+    assert descriptor is None
+    assert reason == "interruption_candidates_active"
+
+
+def test_runtime_deterministic_followthrough_step_rejected_when_descriptor_has_tool_args() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    api._current_turn_id_or_unknown = lambda: "turn_guard"
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True, **_kwargs: (
+        turn_id == "turn_guard" and not include_report_followup
+    )
+    api._continuity_ledger = types.SimpleNamespace(
+        compound_owner_turn_id=lambda: "turn_guard",
+        compound_has_open_non_report_steps=lambda: True,
+        deterministic_followthrough_step=lambda: types.SimpleNamespace(
+            request_id="req-guard",
+            step_id="step-2",
+            tool_name="gesture_look_right",
+            tool_args=(("target", "right"),),
+        ),
+    )
+
+    descriptor, reason = api._resolve_runtime_executable_followthrough_step(turn_id="turn_guard")
+
+    assert descriptor is None
+    assert reason == "descriptor_tool_args_not_empty"
+
+
 def test_execute_function_call_blocks_non_owner_followthrough_gesture(monkeypatch) -> None:
     api = _make_api_stub()
     _wire_runtime(api)
