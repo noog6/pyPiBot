@@ -9248,52 +9248,88 @@ class RealtimeAPI:
         turn_id: str,
         executed_step_ids: set[str] | None = None,
     ) -> tuple[dict[str, Any] | None, str]:
-        normalized_turn_id = str(turn_id or "").strip()
-        if not normalized_turn_id:
-            return None, "missing_turn_id"
-        if self._pending_action is not None or self._pending_confirmation_token is not None:
-            return None, "confirmation_or_pending_action_active"
-        if self._pending_interrupted_tool_output_candidates_for_turn(interruption_turn_id=normalized_turn_id):
-            return None, "interruption_candidates_active"
-        owner_turn_id = str(self._continuity_ledger_instance().compound_owner_turn_id() or "").strip()
-        if owner_turn_id and owner_turn_id != normalized_turn_id:
-            return None, "owner_turn_mismatch"
-        if not self._turn_followthrough_chain_remaining(
-            turn_id=normalized_turn_id,
-            include_report_followup=False,
-        ):
-            return None, "non_report_followthrough_not_remaining"
-        descriptor = self._deterministic_followthrough_runtime_descriptor(turn_id=normalized_turn_id)
-        if descriptor is None:
-            return None, "descriptor_unavailable"
-        step_id = str(descriptor.get("step_id") or "").strip()
-        if not step_id:
-            return None, "descriptor_missing_step_id"
-        seen_step_ids = executed_step_ids if isinstance(executed_step_ids, set) else set()
-        if step_id in seen_step_ids:
-            return None, "descriptor_step_already_executed"
-        tool_name = str(descriptor.get("tool_name") or "").strip().lower()
-        if not self._is_low_risk_reversible_gesture_tool(tool_name=tool_name):
-            return None, "descriptor_tool_not_low_risk_gesture"
-        if tool_name not in _RUNTIME_DETERMINISTIC_GESTURE_BATON_ALLOWLIST:
-            return None, "descriptor_tool_not_runtime_baton_allowlisted"
-        owner_blocked, _owner_turn_id, owner_block_reason = self._should_block_non_owner_followthrough_gesture_call(
-            function_name=tool_name,
+        return self._runtime_baton_eligible_descriptor(
+            turn_id=turn_id,
+            executed_step_ids=executed_step_ids,
         )
-        if owner_blocked:
-            return None, owner_block_reason or "owner_turn_mismatch"
-        tool_args = descriptor.get("tool_args")
-        if not isinstance(tool_args, dict):
-            return None, "descriptor_tool_args_not_mapping"
-        if tool_args:
-            return None, "descriptor_tool_args_not_empty"
+
+    def _runtime_baton_eligible_descriptor(
+        self,
+        *,
+        turn_id: str,
+        executed_step_ids: set[str] | None = None,
+        expected_completed_tool_name: str = "",
+    ) -> tuple[dict[str, Any] | None, str]:
+        normalized_turn_id = str(turn_id or "").strip()
+        normalized_expected_tool_name = str(expected_completed_tool_name or "").strip().lower()
+        decision_reason = ""
+        descriptor: dict[str, Any] | None = None
+        if not normalized_turn_id:
+            decision_reason = "missing_turn_id"
+        elif self._pending_action is not None or self._pending_confirmation_token is not None:
+            decision_reason = "confirmation_or_pending_action_active"
+        elif self._pending_interrupted_tool_output_candidates_for_turn(interruption_turn_id=normalized_turn_id):
+            decision_reason = "interruption_candidates_active"
+        else:
+            owner_turn_id = str(self._continuity_ledger_instance().compound_owner_turn_id() or "").strip()
+            if owner_turn_id and owner_turn_id != normalized_turn_id:
+                decision_reason = "owner_turn_mismatch"
+            elif not self._turn_followthrough_chain_remaining(
+                turn_id=normalized_turn_id,
+                include_report_followup=False,
+            ):
+                decision_reason = "non_report_followthrough_not_remaining"
+            else:
+                descriptor = self._deterministic_followthrough_runtime_descriptor(turn_id=normalized_turn_id)
+                if descriptor is None:
+                    decision_reason = "descriptor_unavailable"
+                else:
+                    step_id = str(descriptor.get("step_id") or "").strip()
+                    if not step_id:
+                        decision_reason = "descriptor_missing_step_id"
+                    else:
+                        seen_step_ids = executed_step_ids if isinstance(executed_step_ids, set) else set()
+                        if step_id in seen_step_ids:
+                            decision_reason = "descriptor_step_already_executed"
+                        else:
+                            tool_name = str(descriptor.get("tool_name") or "").strip().lower()
+                            if not self._is_low_risk_reversible_gesture_tool(tool_name=tool_name):
+                                decision_reason = "descriptor_tool_not_low_risk_gesture"
+                            elif tool_name not in _RUNTIME_DETERMINISTIC_GESTURE_BATON_ALLOWLIST:
+                                decision_reason = "descriptor_tool_not_runtime_baton_allowlisted"
+                            elif normalized_expected_tool_name and tool_name != normalized_expected_tool_name:
+                                decision_reason = "completed_tool_not_authoritative_descriptor_step"
+                            else:
+                                owner_blocked, _owner_turn_id, owner_block_reason = (
+                                    self._should_block_non_owner_followthrough_gesture_call(
+                                        function_name=tool_name,
+                                    )
+                                )
+                                if owner_blocked:
+                                    decision_reason = owner_block_reason or "owner_turn_mismatch"
+                                else:
+                                    tool_args = descriptor.get("tool_args")
+                                    if not isinstance(tool_args, dict):
+                                        decision_reason = "descriptor_tool_args_not_mapping"
+                                    elif tool_args:
+                                        decision_reason = "descriptor_tool_args_not_empty"
+        if decision_reason:
+            logger.info(
+                "runtime_deterministic_followthrough_descriptor_rejected run_id=%s turn_id=%s reason=%s expected_completed_tool_name=%s",
+                self._current_run_id() or "",
+                normalized_turn_id or "turn-unknown",
+                decision_reason,
+                normalized_expected_tool_name or "none",
+            )
+            return None, decision_reason
+        descriptor = descriptor or {}
         logger.info(
             "runtime_deterministic_followthrough_descriptor_resolved run_id=%s turn_id=%s request_id=%s step_id=%s tool_name=%s",
             self._current_run_id() or "",
             normalized_turn_id,
             str(descriptor.get("request_id") or "").strip() or "unknown",
-            step_id,
-            tool_name,
+            str(descriptor.get("step_id") or "").strip() or "unknown",
+            str(descriptor.get("tool_name") or "").strip().lower() or "unknown",
         )
         return descriptor, ""
 
@@ -19575,9 +19611,17 @@ class RealtimeAPI:
             )
         call_id = normalized_call_id
         owner_mismatch_blocked = False
+        runtime_baton_start_reason = ""
+        runtime_baton_start_turn_id = ""
 
         if function_name in function_map:
             try:
+                if function_name.startswith("gesture_"):
+                    runtime_baton_start_turn_id = self._current_turn_id_or_unknown()
+                    _runtime_start_descriptor, runtime_baton_start_reason = self._runtime_baton_eligible_descriptor(
+                        turn_id=runtime_baton_start_turn_id,
+                        expected_completed_tool_name=function_name,
+                    )
                 owner_blocked, owner_turn_id, owner_block_reason = self._should_block_non_owner_followthrough_gesture_call(
                     function_name=function_name,
                 )
@@ -19751,11 +19795,23 @@ class RealtimeAPI:
             and "error" not in result
             and not force_no_tools_followup
         ):
-            baton_turn_id = self._current_turn_id_or_unknown()
-            baton_last_call_id, baton_executed_count = await self._execute_runtime_deterministic_followthrough_segment(
-                websocket=websocket,
-                turn_id=baton_turn_id,
-            )
+            baton_turn_id = runtime_baton_start_turn_id or self._current_turn_id_or_unknown()
+            baton_last_call_id = None
+            baton_executed_count = 0
+            if runtime_baton_start_reason:
+                logger.info(
+                    "runtime_deterministic_followthrough_baton_not_started run_id=%s turn_id=%s call_id=%s tool_name=%s reason=%s",
+                    self._current_run_id() or "",
+                    baton_turn_id or "turn-unknown",
+                    call_id,
+                    function_name,
+                    runtime_baton_start_reason,
+                )
+            else:
+                baton_last_call_id, baton_executed_count = await self._execute_runtime_deterministic_followthrough_segment(
+                    websocket=websocket,
+                    turn_id=baton_turn_id,
+                )
             if baton_last_call_id:
                 followup_call_id = baton_last_call_id
             logger.info(

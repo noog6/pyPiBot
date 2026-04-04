@@ -5267,6 +5267,7 @@ def test_execute_function_call_runtime_deterministic_baton_executes_intermediate
     assert execution_order == ["gesture_look_left", "gesture_look_right", "gesture_look_center"]
     response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
     assert len(response_create_events) == 1
+    response_create_index = ws.sent.index(response_create_events[0])
     metadata = ((response_create_events[0].get("response") or {}).get("metadata") or {})
     assert "followthrough_catchup_payload" in metadata
     payload = str(metadata.get("followthrough_catchup_payload") or "")
@@ -5280,6 +5281,60 @@ def test_execute_function_call_runtime_deterministic_baton_executes_intermediate
         and str((event.get("item") or {}).get("type") or "") == "function_call_output"
     ]
     assert len(function_outputs) == 3
+    assert response_create_index > ws.sent.index(function_outputs[-1])
+
+
+def test_execute_function_call_runtime_baton_does_not_start_when_completed_tool_not_authoritative(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_turn_id_or_unknown = lambda: "turn_baton_mismatch"
+    api._current_response_turn_id = "turn_baton_mismatch"
+    api._current_input_event_key = "item_turn_baton_mismatch"
+    api._active_input_event_key_by_turn_id["turn_baton_mismatch"] = "item_turn_baton_mismatch"
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._intent_ledger = {}
+    api._apply_continuity_event(
+        "transcript_final",
+        text="look left, look right, come back to center, then report done",
+        source="input_audio_transcription",
+        turn_id="turn_baton_mismatch",
+    )
+    api.get_gesture_motion_state = lambda *, tool_call_id: {"status": "completed"}
+    execution_order: list[str] = []
+
+    async def _fake_left(**_kwargs):
+        execution_order.append("gesture_look_left")
+        return {"ok": True}
+
+    async def _fake_right(**_kwargs):
+        execution_order.append("gesture_look_right")
+        return {"ok": True}
+
+    async def _fake_center(**_kwargs):
+        execution_order.append("gesture_look_center")
+        return {"ok": True}
+
+    tool_map = __import__("ai.tools", fromlist=["function_map"]).function_map
+    monkeypatch.setitem(tool_map, "gesture_look_left", _fake_left)
+    monkeypatch.setitem(tool_map, "gesture_look_right", _fake_right)
+    monkeypatch.setitem(tool_map, "gesture_look_center", _fake_center)
+
+    asyncio.run(api.execute_function_call("gesture_look_right", "call_right", {}, ws))
+
+    assert execution_order == ["gesture_look_right"]
+    response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert len(response_create_events) == 1
+    function_outputs = [
+        event
+        for event in ws.sent
+        if event.get("type") == "conversation.item.create"
+        and str((event.get("item") or {}).get("type") or "") == "function_call_output"
+    ]
+    assert len(function_outputs) == 1
+    metadata = ((response_create_events[0].get("response") or {}).get("metadata") or {})
+    assert "followthrough_catchup_payload" not in metadata
 
 
 def test_runtime_deterministic_followthrough_step_rejected_when_interruption_candidate_active() -> None:
