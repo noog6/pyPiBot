@@ -1023,7 +1023,7 @@ def test_handle_response_done_suppresses_empty_tool_followup_silent_incident_whe
     api._maybe_recover_mic_after_response_done.assert_not_called()
 
 
-def test_handle_response_done_bridges_followthrough_chain_without_pending_followup_state() -> None:
+def test_handle_response_done_bridges_followthrough_chain_without_pending_followup_state_and_skips_empty_retry() -> None:
     api = _make_api()
     api._active_response_origin = "tool_output"
     api._active_response_input_event_key = "tool:call_middle"
@@ -1048,7 +1048,7 @@ def test_handle_response_done_bridges_followthrough_chain_without_pending_follow
     asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_tool_middle"}}))
 
     record_silent.assert_not_called()
-    api._maybe_schedule_empty_response_retry.assert_awaited_once()
+    api._maybe_schedule_empty_response_retry.assert_not_awaited()
 
 
 def test_handle_response_done_bridge_skips_empty_retry_when_status_only_followup_pending() -> None:

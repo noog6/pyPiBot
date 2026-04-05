@@ -291,18 +291,23 @@ class ResponseLifecycleTracker:
             return False
         if hasattr(self._api, "_turn_has_pending_tool_followup") and self._api._turn_has_pending_tool_followup(turn_id=turn_id):
             return False
+        if hasattr(self._api, "_turn_has_pending_tool_followup"):
+            try:
+                if self._api._turn_has_pending_tool_followup(turn_id=turn_id, include_status_only=True):
+                    return False
+            except TypeError:
+                # Backward-compatible call sites may not accept include_status_only.
+                pass
         response_state = self._api._canonical_response_state(canonical_key)
         response_id = str(getattr(response_state, "response_id", "") or "").strip()
         if not response_id:
             return False
         response_trace_by_id = getattr(self._api, "_response_trace_by_id", None)
         trace_context = response_trace_by_id().get(response_id, {}) if callable(response_trace_by_id) else {}
-        # Silent/status-only intermediate tool followups are still eligible for
-        # followthrough bridge materialization when the chain remains open. The
-        # terminal handler suppresses retries while pending followups still
-        # exist; this gate is specifically for the "baton handoff" seam once an
-        # empty intermediate terminal has completed and no pending followup state
-        # remains.
+        # Empty tool-output retries are only eligible once followthrough has
+        # dead-ended for the turn. Intermediate bridge completions while the
+        # chain is still live are intentionally non-terminal and must not spawn
+        # synthetic server_auto retries.
         selection_store = getattr(self._api, "_terminal_deliverable_selection_store", None)
         if not callable(selection_store):
             return False
@@ -312,7 +317,7 @@ class ResponseLifecycleTracker:
             return False
         if not hasattr(self._api, "_response_done_followthrough_chain_remaining"):
             return False
-        return bool(
+        return not bool(
             self._api._response_done_followthrough_chain_remaining(
                 turn_id=turn_id,
                 origin=origin,

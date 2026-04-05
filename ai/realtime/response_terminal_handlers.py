@@ -832,6 +832,12 @@ class ResponseTerminalHandlers:
             response_id=active_response_id_before_clear,
             include_report_followup=False,
         )
+        followthrough_chain_remaining_for_retry = api._response_done_followthrough_chain_remaining(
+            turn_id=continuity_candidate_turn_id,
+            origin=active_response_origin_before_clear,
+            response_id=active_response_id_before_clear,
+            include_report_followup=True,
+        )
         continuity_close_commitment = (
             continuity_close_allowed
             and continuity_origin == "tool_output"
@@ -926,12 +932,19 @@ class ResponseTerminalHandlers:
             allow_cross_turn_rebind="true" if continuity_rebind_allowed else "",
             cross_turn_rebind_reason=continuity_rebind_reason,
         )
-        if interrupted_tool_output_candidate or (
-            followthrough_chain_bridge and pending_tool_followup_any_after_release
-        ):
+        followthrough_bridge_retry_block_reason = ""
+        if followthrough_chain_bridge and followthrough_chain_remaining_for_retry:
+            followthrough_bridge_retry_block_reason = "followthrough_chain_remaining"
+        elif followthrough_chain_bridge and pending_tool_followup_any_after_release:
+            followthrough_bridge_retry_block_reason = "pending_tool_followup_after_release"
+        if interrupted_tool_output_candidate or followthrough_bridge_retry_block_reason:
             logger.info(
                 "empty_response_retry_skipped reason=%s run_id=%s turn_id=%s response_id=%s",
-                "interrupted_tool_output_candidate" if interrupted_tool_output_candidate else "followthrough_chain_remaining",
+                (
+                    "interrupted_tool_output_candidate"
+                    if interrupted_tool_output_candidate
+                    else followthrough_bridge_retry_block_reason
+                ),
                 api._current_run_id() or "",
                 turn_id,
                 str(active_response_id_before_clear or "none"),
