@@ -169,7 +169,7 @@ def test_terminal_cancelled_state_skips_retry_with_reason() -> None:
     assert decision.reason_code == "delivery_state_terminal"
 
 
-def test_tool_output_followthrough_bridge_empty_retry_uses_origin_override() -> None:
+def test_tool_output_followthrough_bridge_empty_retry_skips_while_chain_still_active() -> None:
     api = _make_api()
     sent_events: list[tuple[dict, dict]] = []
 
@@ -211,14 +211,10 @@ def test_tool_output_followthrough_bridge_empty_retry_uses_origin_override() -> 
         )
     )
 
-    assert len(sent_events) == 1
-    sent_event, sent_kwargs = sent_events[0]
-    assert sent_event["response"]["metadata"]["retry_reason"] == "empty_response_done"
-    assert sent_event["response"]["metadata"]["empty_retry_materialization"] == "report_followup"
-    assert sent_kwargs["origin"] == "server_auto"
+    assert sent_events == []
 
 
-def test_tool_output_silent_intermediate_followthrough_schedules_bridge_retry() -> None:
+def test_tool_output_silent_intermediate_followthrough_skips_bridge_retry_while_chain_active() -> None:
     api = _make_api()
     sent_events: list[tuple[dict, dict]] = []
 
@@ -266,16 +262,12 @@ def test_tool_output_silent_intermediate_followthrough_schedules_bridge_retry() 
         )
     )
 
-    assert len(sent_events) == 1
-    sent_event, sent_kwargs = sent_events[0]
-    assert sent_event["response"]["metadata"]["retry_reason"] == "empty_response_done"
-    assert sent_event["response"]["metadata"]["empty_retry_materialization"] == "report_followup"
-    assert sent_kwargs["origin"] == "server_auto"
-    assert len(api._empty_response_retry_counts) == 1
-    assert len(api._empty_response_retry_canonical_keys) == 1
+    assert sent_events == []
+    assert api._empty_response_retry_counts == {}
+    assert api._empty_response_retry_canonical_keys == set()
 
 
-def test_tool_output_silent_intermediate_without_followthrough_does_not_schedule_empty_retry() -> None:
+def test_tool_output_silent_intermediate_without_followthrough_uses_stale_empty_safeguard() -> None:
     api = _make_api()
     sent_events: list[tuple[dict, dict]] = []
 
@@ -323,12 +315,16 @@ def test_tool_output_silent_intermediate_without_followthrough_does_not_schedule
         )
     )
 
-    assert sent_events == []
-    assert api._empty_response_retry_counts == {}
-    assert api._empty_response_retry_canonical_keys == set()
+    assert len(sent_events) == 1
+    sent_event, sent_kwargs = sent_events[0]
+    assert sent_event["response"]["metadata"]["retry_reason"] == "empty_response_done"
+    assert sent_event["response"]["metadata"]["empty_retry_materialization"] == "report_followup"
+    assert sent_kwargs["origin"] == "server_auto"
+    assert len(api._empty_response_retry_counts) == 1
+    assert len(api._empty_response_retry_canonical_keys) == 1
 
 
-def test_tool_output_report_only_followthrough_schedules_bridge_retry() -> None:
+def test_tool_output_report_only_followthrough_skips_bridge_retry_while_chain_active() -> None:
     api = _make_api()
     sent_events: list[tuple[dict, dict]] = []
 
@@ -376,14 +372,11 @@ def test_tool_output_report_only_followthrough_schedules_bridge_retry() -> None:
         )
     )
 
-    assert len(sent_events) == 1
-    sent_event, sent_kwargs = sent_events[0]
-    assert sent_event["response"]["metadata"]["empty_retry_materialization"] == "report_followup"
-    assert sent_kwargs["origin"] == "server_auto"
+    assert sent_events == []
     assert chain_remaining_calls == [True]
 
 
-def test_tool_output_silent_intermediate_chain_materializes_multiple_owed_steps() -> None:
+def test_tool_output_silent_intermediate_chain_does_not_materialize_retry_while_steps_owed() -> None:
     api = _make_api()
     sent_events: list[tuple[dict, dict]] = []
 
@@ -452,9 +445,7 @@ def test_tool_output_silent_intermediate_chain_materializes_multiple_owed_steps(
         )
     )
 
-    assert len(sent_events) == 2
-    assert sent_events[0][1]["origin"] == "server_auto"
-    assert sent_events[1][1]["origin"] == "server_auto"
+    assert sent_events == []
 
 
 def test_empty_response_retry_exhausted_emits_fallback_without_scheduling_retry(caplog) -> None:
