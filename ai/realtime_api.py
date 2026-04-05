@@ -9608,6 +9608,14 @@ class RealtimeAPI:
             if semantic_owner_entry:
                 state_entry = semantic_owner_entry
                 resolved_from = "semantic_owner_response_id"
+                semantic_owner_origin = str(getattr(semantic_owner_entry[1], "origin", "") or "").strip().lower()
+                if semantic_owner_origin in {"micro_ack", "tool_output"}:
+                    canonical_parent_entry = self._tool_followup_canonical_parent_entry(
+                        canonical_key=semantic_owner_entry[0],
+                    )
+                    if canonical_parent_entry is not None:
+                        state_entry = canonical_parent_entry
+                        resolved_from = "semantic_owner_tool_parent_metadata"
             else:
                 candidate = self._canonical_state_for_response_id(response_id=normalized_blocked_by)
                 if candidate:
