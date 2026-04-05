@@ -108,6 +108,8 @@ class ResponseCreateExecutionDecision:
 
 @dataclass
 class ResponseCreateRuntime:
+    _PROVIDER_METADATA_MAX_PROPERTIES = 16
+
     api: ResponseCreateRuntimeAPI
 
     def _apply_memory_intent_instruction_guardrail(
@@ -204,6 +206,75 @@ class ResponseCreateRuntime:
             blocked_by_terminal_state=decision.blocked_by_terminal_state,
             should_log_arbitration=decision.should_log_arbitration,
         )
+
+    def _enforce_tool_followup_metadata_limit(
+        self,
+        *,
+        response_create_event: dict[str, Any],
+        canonical_key: str,
+    ) -> None:
+        """Cap tool-followup response.create metadata for provider limits."""
+        api = self.api
+        metadata = api._extract_response_create_metadata(response_create_event)
+        if str(metadata.get("tool_followup") or "").strip().lower() not in {"true", "1", "yes"}:
+            return
+        if len(metadata) <= self._PROVIDER_METADATA_MAX_PROPERTIES:
+            return
+
+        drop_priority = (
+            "tool_name",
+            "tool_followup_tool_choice",
+            "tool_followup_tool_choice_reason",
+            "followthrough_runtime_contract_version",
+            "followthrough_runtime_step_available",
+            "followthrough_runtime_step_id",
+            "followthrough_runtime_tool_name",
+            "followthrough_runtime_tool_args",
+            "followthrough_catchup_payload",
+            "gesture_motion_status",
+            "tool_result_has_distinct_info",
+            "tool_followup_no_create",
+            "tool_followup_no_create_reason",
+            "tool_followup_create_suppressed",
+            "tool_followup_create_suppression_reason",
+        )
+        dropped_keys: list[str] = []
+        for key in drop_priority:
+            if len(metadata) <= self._PROVIDER_METADATA_MAX_PROPERTIES:
+                break
+            if key in metadata:
+                metadata.pop(key, None)
+                dropped_keys.append(key)
+
+        if len(metadata) > self._PROVIDER_METADATA_MAX_PROPERTIES:
+            required_keys = {
+                "turn_id",
+                "input_event_key",
+                "tool_followup",
+                "tool_call_id",
+                "tool_followup_release",
+                "blocked_by_response_id",
+                "parent_turn_id",
+                "parent_input_event_key",
+                "tool_followup_suppress_if_parent_covered",
+                "tool_followup_status_only",
+                "tool_followup_silent_audio",
+                "tool_followup_silent_user_facing_output",
+            }
+            for key in tuple(metadata.keys()):
+                if len(metadata) <= self._PROVIDER_METADATA_MAX_PROPERTIES:
+                    break
+                if key not in required_keys:
+                    metadata.pop(key, None)
+                    dropped_keys.append(key)
+
+        if dropped_keys:
+            logger.info(
+                "tool_followup_metadata_capped canonical_key=%s kept=%s dropped=%s",
+                canonical_key,
+                len(metadata),
+                ",".join(dropped_keys),
+            )
 
     def _normalize_execution_decision(
         self,
@@ -1240,6 +1311,10 @@ class ResponseCreateRuntime:
                     state="creating",
                     reason="released_on_response_done",
                 )
+        self._enforce_tool_followup_metadata_limit(
+            response_create_event=response_create_event,
+            canonical_key=canonical_key,
+        )
         log_ws_event("Outgoing", response_create_event)
         api._track_outgoing_event(response_create_event, origin=origin)
         transport = api._get_or_create_transport()

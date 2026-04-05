@@ -49,6 +49,7 @@ def _make_api() -> RealtimeAPI:
     api._response_create_queue = deque()
     api._queued_confirmation_reminder_keys = set()
     api._response_done_serial = 0
+    api._pending_response_create_origins = deque()
     api._response_schedule_logged_turn_ids = set()
     api._conversation_efficiency_by_turn = {}
     api._conversation_efficiency_logged_turns = set()
@@ -70,6 +71,8 @@ def _make_api() -> RealtimeAPI:
     api._curiosity_surface_max_turns = 2
     api._curiosity_surface_candidate_by_turn_id = {}
     api._response_create_runtime = ResponseCreateRuntime(api)
+    api._last_response_create_ts = None
+    api._response_create_debug_trace = False
     api._current_run_id = lambda: "run-395"
     api._extract_confirmation_reminder_dedupe_key = lambda event: None
     api._sync_pending_response_create_queue = lambda: None
@@ -98,6 +101,35 @@ def _make_api() -> RealtimeAPI:
     api._intent_ledger = {}
     api._intent_state_ttl_s = 300.0
     return api
+
+
+def _build_overflow_tool_followup_event(api: RealtimeAPI, *, call_id: str = "call_1") -> dict[str, object]:
+    api._current_turn_id_or_unknown = lambda: "turn_1"
+    api._resolve_continuity_tool_event_owner_turn = lambda *, fallback_turn_id: (fallback_turn_id, False, "")
+    api._parent_input_event_key_for_tool_followup = lambda *, turn_id: "item_1"
+    api._gesture_followup_should_remain_status_only = lambda *, turn_id: True
+    api._gesture_followup_motion_status = lambda *, call_id, tool_name: "started"
+    api._gesture_followthrough_chain_remaining = lambda *, turn_id: True
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True, **_kwargs: (
+        turn_id == "turn_1" and include_report_followup in {True, False}
+    )
+    api._continuity_ledger = types.SimpleNamespace(
+        compound_owner_turn_id=lambda: "turn_1",
+        compound_has_open_non_report_steps=lambda: False,
+        deterministic_followthrough_step=lambda: types.SimpleNamespace(
+            request_id="req-1",
+            step_id="step_2",
+            tool_name="gesture_look_right",
+            tool_args=(),
+        ),
+    )
+    event, _canonical_key = api._build_tool_followup_response_create_event(
+        call_id=call_id,
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_left",
+        tool_result_has_distinct_info=True,
+    )
+    return event
 
 
 def test_turn_contract_parse_detects_exact_phrase_and_no_gesture() -> None:
@@ -2622,6 +2654,92 @@ def test_tool_followup_report_boundary_consumes_catchup_payload() -> None:
     assert "followthrough_catchup_payload" in metadata
     assert "gesture_look_left" in metadata.get("followthrough_catchup_payload", "")
     assert api._consume_followthrough_catchup_payload(turn_id="turn_1") == ""
+
+
+def test_tool_followup_direct_send_caps_provider_metadata_to_limit() -> None:
+    api = _make_api()
+    sent: list[dict[str, object]] = []
+
+    class _Transport:
+        async def send_json(self, _websocket, payload):
+            sent.append(payload)
+
+    api._get_or_create_transport = lambda: _Transport()
+    event = _build_overflow_tool_followup_event(api, call_id="call_direct")
+    assert len(((event.get("response") or {}).get("metadata") or {})) > 16
+
+    sent_ok = asyncio.run(api._send_response_create(object(), event, origin="tool_output"))
+
+    assert sent_ok is True
+    assert len(sent) == 1
+    metadata = ((sent[0].get("response") or {}).get("metadata") or {})
+    assert len(metadata) <= 16
+    assert metadata.get("tool_followup") == "true"
+    assert metadata.get("tool_call_id") == "call_direct"
+
+
+def test_tool_followup_queued_release_caps_provider_metadata_to_limit() -> None:
+    api = _make_api()
+    sent: list[dict[str, object]] = []
+
+    class _Transport:
+        async def send_json(self, _websocket, payload):
+            sent.append(payload)
+
+    api._get_or_create_transport = lambda: _Transport()
+    api._active_response_id = "resp_active"
+    api._active_response_origin = "assistant_message"
+    api._response_in_flight = True
+    event = _build_overflow_tool_followup_event(api, call_id="call_queued")
+
+    queued = asyncio.run(api._send_response_create(object(), event, origin="tool_output"))
+    assert queued is False
+    assert api._pending_response_create is not None
+    assert len(sent) == 0
+
+    api._response_in_flight = False
+    api._active_response_id = None
+    api._response_done_serial += 1
+    asyncio.run(api._drain_response_create_queue(source_trigger="response_done"))
+
+    assert len(sent) == 1
+    metadata = ((sent[0].get("response") or {}).get("metadata") or {})
+    assert len(metadata) <= 16
+    assert metadata.get("tool_followup") == "true"
+    assert metadata.get("tool_followup_release") == "true"
+
+
+def test_final_owed_report_followup_still_sends_under_metadata_cap() -> None:
+    api = _make_api()
+    sent: list[dict[str, object]] = []
+
+    class _Transport:
+        async def send_json(self, _websocket, payload):
+            sent.append(payload)
+
+    api._get_or_create_transport = lambda: _Transport()
+    api._current_turn_id_or_unknown = lambda: "turn_1"
+    api._resolve_continuity_tool_event_owner_turn = lambda *, fallback_turn_id: (fallback_turn_id, False, "")
+    api._parent_input_event_key_for_tool_followup = lambda *, turn_id: "item_1"
+    api._gesture_followup_should_remain_status_only = lambda *, turn_id: False
+    api._gesture_followup_motion_status = lambda *, call_id, tool_name: "completed"
+    api._gesture_followthrough_chain_remaining = lambda *, turn_id: False
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True, **_kwargs: (
+        turn_id == "turn_1" and include_report_followup
+    )
+    event, _canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_report",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_left",
+    )
+
+    sent_ok = asyncio.run(api._send_response_create(object(), event, origin="tool_output"))
+
+    assert sent_ok is True
+    assert len(sent) == 1
+    metadata = ((sent[0].get("response") or {}).get("metadata") or {})
+    assert len(metadata) <= 16
+    assert metadata.get("tool_followup") == "true"
 
 
 def test_silent_tool_followup_suppresses_text_delta_events() -> None:
