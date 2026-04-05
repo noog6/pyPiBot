@@ -7462,6 +7462,108 @@ def test_tool_followup_parent_resolution_prefers_semantic_owner_promotion_for_la
     )
 
 
+def test_tool_followup_parent_resolution_rebinds_semantic_owner_tool_output_via_tool_parent_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_tool_chain_semantic_owner_tool_parent"
+    canonical_parent_input_event_key = "item_tool_chain_semantic_owner_tool_parent"
+    canonical_parent_response_id = "resp-tool-chain-semantic-owner-tool-parent"
+    api._current_response_turn_id = turn_id
+    api._active_input_event_key_by_turn_id[turn_id] = canonical_parent_input_event_key
+    canonical_parent_key = api._canonical_utterance_key(
+        turn_id=turn_id,
+        input_event_key=canonical_parent_input_event_key,
+    )
+    api._canonical_response_state_mutate(
+        canonical_key=canonical_parent_key,
+        turn_id=turn_id,
+        input_event_key=canonical_parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "server_auto"),
+            setattr(record, "response_id", canonical_parent_response_id),
+            setattr(record, "deliverable_observed", False),
+            setattr(record, "deliverable_class", "unknown"),
+            setattr(record, "done", True),
+        ),
+    )
+
+    tool_b_input_event_key = "tool:call_tool_chain_semantic_owner_tool_parent_b"
+    tool_b_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_b_input_event_key)
+    tool_b_response_id = "resp-tool-chain-semantic-owner-tool-parent-b"
+    api._canonical_response_state_mutate(
+        canonical_key=tool_b_key,
+        turn_id=turn_id,
+        input_event_key=tool_b_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "tool_output"),
+            setattr(record, "response_id", tool_b_response_id),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "unknown"),
+            setattr(record, "done", True),
+        ),
+    )
+    api._record_tool_followup_metadata(
+        canonical_key=tool_b_key,
+        metadata={
+            "tool_name": "gesture_look_center",
+            "tool_followup_status_only": "true",
+            "parent_turn_id": turn_id,
+            "parent_input_event_key": canonical_parent_input_event_key,
+        },
+    )
+    api._apply_terminal_deliverable_selection(
+        canonical_key=tool_b_key,
+        semantic_owner_canonical_key=tool_b_key,
+        response_id=tool_b_response_id,
+        turn_id=turn_id,
+        input_event_key=tool_b_input_event_key,
+        selected=True,
+        selection_reason="tool_followup_precedence",
+    )
+
+    tool_c_event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_tool_chain_semantic_owner_tool_parent_c",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_idle",
+    )
+    tool_c_metadata = ((tool_c_event.get("response") or {}).get("metadata") or {})
+    tool_c_metadata["turn_id"] = turn_id
+    tool_c_metadata["parent_turn_id"] = turn_id
+    tool_c_metadata["parent_input_event_key"] = tool_b_input_event_key
+
+    captured_logs: list[str] = []
+    original_info = logger.info
+
+    def _capture_info(message: str, *args, **kwargs):
+        rendered = str(message)
+        if args:
+            rendered = rendered % args
+        captured_logs.append(rendered)
+        return original_info(message, *args, **kwargs)
+
+    monkeypatch.setattr(logger, "info", _capture_info)
+
+    should_drop, parent_entry, reason = api._should_suppress_queued_tool_followup_release(
+        response_metadata=tool_c_metadata,
+        blocked_by_response_id=tool_b_response_id,
+    )
+
+    assert should_drop is False
+    assert reason == "parent_not_coverage_qualified"
+    assert parent_entry is not None
+    assert parent_entry[0] == canonical_parent_key
+    assert any(
+        "tool_followup_parent_resolution" in entry
+        and f"resolved_parent_canonical_key={canonical_parent_key}" in entry
+        and "resolved_from=semantic_owner_tool_parent_metadata" in entry
+        for entry in captured_logs
+    )
+    assert not any("reason=parent_origin_excluded" in entry for entry in captured_logs)
+
+
 def test_tool_followup_uncovered_parent_release_uses_canonical_lineage_instead_of_excluded_origin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
