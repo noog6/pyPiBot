@@ -15060,7 +15060,6 @@ class RealtimeAPI:
         self,
         from_state: ConfirmationState,
         to_state: ConfirmationState,
-        *,
         reason: str,
         token: PendingConfirmationToken | None = None,
     ) -> None:
