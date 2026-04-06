@@ -130,3 +130,43 @@ def test_transition_callback_still_logs_non_research_confirmation() -> None:
     assert log_info.call_args.args[3] == "tok-g"
     assert log_info.call_args.args[4] == "tool_governance"
     assert isinstance(token.metadata.get("awaiting_decision_since"), float)
+
+
+def test_timeout_check_callback_accepts_coordinator_positional_shape() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._confirmation_timeout_check_log_interval_s = 1.0
+    api._confirmation_timeout_check_last_logged_at = {}
+    api._confirmation_timeout_check_last_pause_reason = {}
+    coordinator = ConfirmationCoordinator(
+        reminder_interval_s=6.0,
+        reminder_max_count=2,
+        awaiting_decision_timeout_s=20.0,
+        research_permission_timeout_s=60.0,
+        timeout_check_log_interval_s=1.0,
+        on_timeout_check=api._log_confirmation_timeout_check,
+    )
+    token = _Token(id="tok-timeout", kind="research_permission", created_at=0.0, metadata={})
+    coordinator.on_token_started(token, now=0.0)
+    coordinator.state = ConfirmationState.AWAITING_DECISION
+
+    with (
+        patch("ai.realtime_api.time.monotonic", side_effect=[100.0, 100.5]),
+        patch("ai.realtime_api.logger.debug") as log_debug,
+        patch("ai.realtime_api.logger.info") as log_info,
+    ):
+        first = coordinator.check_timeout(now=10.0)
+        coordinator.speech_active = True
+        second = coordinator.check_timeout(now=11.0)
+
+    assert first.expired is False
+    assert round(first.remaining_s, 2) == 50.0
+    assert second.expired is False
+    assert second.pause_reason == "speech_active"
+    assert log_debug.call_count == 1
+    assert log_info.call_count == 1
+    first_log = log_debug.call_args_list[0].args
+    assert first_log[0].startswith("CONFIRMATION_TIMEOUT_CHECK token=%s kind=%s remaining_s=%.1f paused_reason=%s")
+    assert first_log[1:] == ("tok-timeout", "research_permission", 50.0, "none")
+    second_log = log_info.call_args_list[0].args
+    assert second_log[0].startswith("CONFIRMATION_PAUSE_REASON_CHANGED token=%s kind=%s paused_reason=%s remaining_s=%.1f")
+    assert second_log[1:] == ("tok-timeout", "research_permission", "speech_active", 49.0)
