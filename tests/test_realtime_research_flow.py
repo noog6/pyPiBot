@@ -42,6 +42,7 @@ def _make_api_stub() -> RealtimeAPI:
     api = RealtimeAPI.__new__(RealtimeAPI)
     api.orchestration_state = type("S", (), {"transition": lambda *args, **kwargs: None})()
     api._research_enabled = True
+    api._research_openai_enabled = True
     api._pending_action = None
     api._pending_research_request = None
     api._pending_confirmation_token = None
@@ -62,6 +63,63 @@ def _make_api_stub() -> RealtimeAPI:
     api._research_service = _FakeService(ResearchPacket(status="ok", answer_summary="ok"))
     api.send_assistant_message = lambda *args, **kwargs: None
     return api
+
+
+def test_research_disabled_skips_admission_without_token_or_dispatch() -> None:
+    api = _make_api_stub()
+    api._research_enabled = False
+    api._research_provider = "openai"
+    api._research_firecrawl_enabled = False
+    api._research_firecrawl_allowlist_mode = "public"
+    api._research_firecrawl_allowlist_domains = set()
+
+    calls: list[str] = []
+
+    async def _dispatch(request: ResearchRequest, websocket: object) -> None:
+        calls.append(request.prompt)
+
+    api._dispatch_research_request = _dispatch
+
+    handled = asyncio.run(
+        api._maybe_process_research_intent(
+            "search online for pizza menu prices",
+            websocket=object(),
+            source="input_audio_transcription",
+        )
+    )
+
+    assert handled is False
+    assert calls == []
+    assert api._pending_confirmation_token is None
+
+
+def test_provider_disabled_skips_admission_without_token_or_dispatch() -> None:
+    api = _make_api_stub()
+    api._research_enabled = True
+    api._research_provider = "openai"
+    api._research_openai_enabled = False
+    api._research_firecrawl_enabled = False
+    api._research_firecrawl_allowlist_mode = "public"
+    api._research_firecrawl_allowlist_domains = set()
+
+    calls: list[str] = []
+
+    async def _dispatch(request: ResearchRequest, websocket: object) -> None:
+        calls.append(request.prompt)
+
+    api._dispatch_research_request = _dispatch
+
+    handled = asyncio.run(
+        api._maybe_process_research_intent(
+            "search online for Little Caesars menu",
+            websocket=object(),
+            source="input_audio_transcription",
+        )
+    )
+
+    assert handled is False
+    assert calls == []
+    assert api._pending_confirmation_token is None
 
 
 def test_auto_approved_research_intent_short_circuits_normal_flow() -> None:

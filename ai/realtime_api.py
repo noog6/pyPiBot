@@ -1118,6 +1118,8 @@ class RealtimeAPI:
                 "ask_on_assistant_or_unknown" if self._research_permission_required else "auto"
             )
         self._research_provider = str(research_cfg.get("provider", "null")).strip().lower()
+        openai_cfg = research_cfg.get("openai") or {}
+        self._research_openai_enabled = bool(openai_cfg.get("enabled", False))
         firecrawl_cfg = research_cfg.get("firecrawl") or {}
         self._research_firecrawl_enabled = bool(firecrawl_cfg.get("enabled", False))
         self._research_firecrawl_allowlist_mode = str(
@@ -15830,6 +15832,19 @@ class RealtimeAPI:
             return bool(checker())
         except Exception:  # pragma: no cover - defensive fallback
             return True
+
+    def _research_intent_admission_enabled(self) -> bool:
+        if not bool(getattr(self, "_research_enabled", False)):
+            return False
+
+        provider = str(getattr(self, "_research_provider", "")).strip().lower()
+        openai_enabled = bool(getattr(self, "_research_openai_enabled", False))
+        firecrawl_enabled = bool(getattr(self, "_research_firecrawl_enabled", False))
+        if provider == "openai":
+            return openai_enabled
+        if provider == "firecrawl":
+            return firecrawl_enabled
+        return openai_enabled or firecrawl_enabled
 
     def _classify_research_initiator(self, source: str | None) -> str:
         normalized = str(source or "").strip().lower()
