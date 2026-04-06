@@ -930,9 +930,70 @@ def test_handle_response_done_closes_plain_tool_output_commitment_when_only_sett
     _event_name, kwargs = apply_continuity_event.call_args
     assert kwargs["close_ongoing"] == "true"
     assert kwargs["close_commitment"] == "true"
-    assert kwargs["close_unresolved"] == "true"
+    assert kwargs["close_unresolved"] == ""
     # Legacy name, broader contract: plain substantive terminal completion still
     # emits complete_final_report even with no compound report step in scope.
+    assert kwargs["complete_final_report"] == "true"
+
+
+def test_handle_response_done_plain_terminal_tool_output_without_followthrough_closes_unresolved() -> None:
+    api = _make_api()
+    api._active_response_origin = "tool_output"
+    api._active_response_input_event_key = "tool:call_solo"
+    api._active_response_canonical_key = "turn_1::tool:call_solo"
+    api._active_response_id = "resp_tool_solo"
+    api._record_terminal_response_text(response_id="resp_tool_solo", text="Done.")
+    api._response_done_followthrough_chain_remaining = lambda **_kwargs: False
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    apply_continuity_event = Mock()
+    api._apply_continuity_event = apply_continuity_event
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_tool_solo"}}))
+
+    apply_continuity_event.assert_called_once()
+    _event_name, kwargs = apply_continuity_event.call_args
+    assert kwargs["close_commitment"] == "true"
+    assert kwargs["close_unresolved"] == "true"
+    assert kwargs["complete_final_report"] == "true"
+
+
+def test_handle_response_done_report_followup_tail_does_not_mark_unresolved_closed() -> None:
+    api = _make_api()
+    api._active_response_origin = "tool_output"
+    api._active_response_input_event_key = "tool:call_center"
+    api._active_response_canonical_key = "turn_1::tool:call_center"
+    api._active_response_id = "resp_tool_center"
+    api._record_terminal_response_text(response_id="resp_tool_center", text="I came back to center.")
+    api._response_done_followthrough_chain_remaining = (
+        lambda **kwargs: bool(kwargs.get("include_report_followup", True))
+    )
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    apply_continuity_event = Mock()
+    api._apply_continuity_event = apply_continuity_event
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_tool_center"}}))
+
+    apply_continuity_event.assert_called_once()
+    _event_name, kwargs = apply_continuity_event.call_args
+    assert kwargs["close_ongoing"] == "true"
+    assert kwargs["close_commitment"] == "true"
+    assert kwargs["close_unresolved"] == ""
     assert kwargs["complete_final_report"] == "true"
 
 
@@ -1370,9 +1431,7 @@ def test_handle_response_done_parent_promoted_followthrough_guard_uses_parent_tu
         turn_id = str(kwargs.get("turn_id") or "")
         include_report_followup = bool(kwargs.get("include_report_followup", True))
         checked_turn_ids.append(turn_id)
-        if not include_report_followup:
-            return False
-        return turn_id == "turn_3"
+        return include_report_followup
 
     api._response_done_followthrough_chain_remaining = _followthrough
     api._terminal_response_text_by_response_id = {"resp_tool_final": "I'm back to center. Diagnostics are connected."}
@@ -1403,7 +1462,7 @@ def test_handle_response_done_parent_promoted_followthrough_guard_uses_parent_tu
     _, kwargs = response_done_calls[0]
     assert kwargs["turn_id"] == "turn_2"
     assert kwargs["close_commitment"] == "true"
-    assert kwargs["close_unresolved"] == "true"
+    assert kwargs["close_unresolved"] == ""
     assert kwargs["complete_final_report"] == "true"
     assert kwargs["allow_cross_turn_rebind"] == "true"
     assert kwargs["cross_turn_rebind_reason"] == "semantic_owner_parent_promoted"
