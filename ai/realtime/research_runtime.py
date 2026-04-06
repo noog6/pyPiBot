@@ -204,6 +204,8 @@ class ResearchRuntime:
 
     async def maybe_process_research_intent(self, text: str, websocket: Any, *, source: str) -> bool:
         api = self.api
+        if not api._research_intent_admission_enabled():
+            return False
         if not has_research_intent(text):
             return False
     
