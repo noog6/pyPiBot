@@ -14916,7 +14916,6 @@ class RealtimeAPI:
     def _log_confirmation_timeout_check(
         self,
         token: PendingConfirmationToken,
-        *,
         remaining_s: float,
         pause_reason: str | None,
     ) -> None:
