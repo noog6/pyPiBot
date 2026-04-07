@@ -31,3 +31,15 @@ This document is a derived representation for human review and should stay in pa
 | `recall_memories` | SAFE | NONE | MEDIUM | NEVER |
 | `forget_memory` | PRIVILEGED | PERSISTENT_DELETE | HIGH | ALWAYS |
 | `perform_research` | GUARDED | NETWORK_IO | MEDIUM | ASK |
+
+## Availability outcomes convention
+
+Tools may be callable even when temporarily unavailable. In those cases, the tool should return a structured unavailable result instead of disappearing from the harness contract:
+
+- `status` (`disabled`, `unavailable`, `blocked`, or `deferred`)
+- `reason_code`
+- `message`
+- `retryable`
+- optional `user_action`, `provider`, and `details`
+
+`perform_research` is the reference implementation for this pattern.

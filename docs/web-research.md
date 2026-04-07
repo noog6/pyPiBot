@@ -88,6 +88,26 @@ All keys below are under the top-level `research:` block.
 - If research is disabled (`research.enabled: false`), the tool path returns a disabled packet and Theo responds without web lookup.
 - If permission is required and denied, no research request is dispatched.
 
+## Tool availability contract (Theo convention)
+
+Theo uses a callable-but-unavailable tool contract for normal service availability issues.
+
+- The harness can still expose a tool.
+- The tool itself owns availability and returns a structured unavailable result when it cannot execute.
+- Harness-level hard blocking remains reserved for safety-sensitive side effects, not ordinary service downtime/config disablement.
+
+For unavailable outcomes, tools should return:
+
+- `status` (`disabled|unavailable|blocked|deferred`)
+- `reason_code` (stable machine code)
+- `message` (user-safe summary)
+- `retryable` (`true|false`)
+- optional `user_action` (specific next step)
+- optional `provider` (upstream provider id)
+- optional `details` (diagnostic context)
+
+`perform_research` follows this contract. When research is disabled in config, it remains callable and returns a structured `status=disabled` result so the model can clearly state that no web lookup was completed.
+
 ## Quick Enablement Example
 
 ```yaml
