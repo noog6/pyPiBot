@@ -30,6 +30,7 @@ function_map: dict[str, ToolFn] = {}
 
 tools: list[dict[str, Any]] = []
 _research_service: ResearchService | None = None
+_TOOL_UNAVAILABLE_STATUSES = {"disabled", "unavailable", "blocked", "deferred"}
 
 
 def _get_research_service() -> ResearchService:
@@ -38,6 +39,34 @@ def _get_research_service() -> ResearchService:
         config = ConfigController.get_instance().get_config()
         _research_service = build_openai_service_or_null(config)
     return _research_service
+
+
+def _build_tool_unavailable_result(
+    *,
+    status: str,
+    reason_code: str,
+    message: str,
+    retryable: bool,
+    user_action: str | None = None,
+    provider: str | None = None,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a standardized callable-but-unavailable tool result."""
+
+    result: dict[str, Any] = {
+        "status": str(status or "unavailable"),
+        "reason_code": str(reason_code or "unknown_unavailable"),
+        "message": str(message or "This capability is currently unavailable."),
+        "retryable": bool(retryable),
+        "tool_result_has_distinct_info": True,
+    }
+    if user_action:
+        result["user_action"] = str(user_action)
+    if provider:
+        result["provider"] = str(provider)
+    if details:
+        result["details"] = dict(details)
+    return result
 
 
 async def read_battery_voltage() -> dict[str, Any]:
@@ -437,7 +466,7 @@ async def perform_research(query: str, context: dict[str, Any] | None = None) ->
         answer_summary = build_unverified_sources_only_response(packet)
         extracted_facts = []
 
-    return {
+    result: dict[str, Any] = {
         "research_id": research_id,
         "schema": packet.schema,
         "status": packet.status,
@@ -449,6 +478,28 @@ async def perform_research(query: str, context: dict[str, Any] | None = None) ->
         "metadata": dict(packet.metadata),
         "transcript_path": str(transcript_path) if transcript_path is not None else None,
     }
+    normalized_status = str(packet.status or "").strip().lower()
+    if normalized_status in _TOOL_UNAVAILABLE_STATUSES:
+        metadata = dict(packet.metadata)
+        unavailable_result = _build_tool_unavailable_result(
+            status=normalized_status,
+            reason_code=(
+                str(metadata.get("reason") or "")
+                or str(metadata.get("content_fetch_skip_reason") or "")
+                or f"research_{normalized_status}"
+            ),
+            message=str(answer_summary or "Research is currently unavailable."),
+            retryable=False,
+            user_action=(
+                "Enable research in config or adjust research.budget.daily_limit, then retry."
+                if str(metadata.get("reason") or "").strip().lower() == "research_disabled"
+                else None
+            ),
+            provider=str(metadata.get("provider") or "") or None,
+            details={"metadata": metadata, "safety_notes": list(payload["safety_notes"])},
+        )
+        result.update(unavailable_result)
+    return result
 
 
 tools.append(
@@ -929,7 +980,9 @@ tools.append(
             "research packet summary with facts and sources. Use this only when the user clearly names a searchable "
             "object, topic, question, or information target, such as 'look up the weather', 'look up Sectigo', "
             "or 'look up what this means'. Do not use it for stand-alone embodied direction requests like 'look up', "
-            "'look up please', or 'look up and then right'."
+            "'look up please', or 'look up and then right'. If this tool returns status=disabled/unavailable/blocked/"
+            "deferred, treat it as no completed research: explain the capability is unavailable, include user_action "
+            "if present, and do not imply research findings were gathered."
         ),
         "parameters": {
             "type": "object",

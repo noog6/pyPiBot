@@ -9313,6 +9313,15 @@ class RealtimeAPI:
     def _tool_result_has_distinct_followup_info(self, *, tool_name: str, result: Any) -> bool:
         normalized_tool_name = str(tool_name or "").strip().lower()
         if normalized_tool_name == "perform_research" and isinstance(result, dict):
+            status = str(result.get("status") or "").strip().lower()
+            if status in {"disabled", "unavailable", "blocked", "deferred"}:
+                return True
+            message = str(result.get("message") or "").strip()
+            if message:
+                return True
+            answer_summary = str(result.get("answer_summary") or "").strip()
+            if answer_summary:
+                return True
             sources = result.get("sources")
             findings = result.get("findings")
             summary = str(result.get("summary") or "").strip()

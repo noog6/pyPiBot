@@ -122,6 +122,23 @@ def test_provider_disabled_skips_admission_without_token_or_dispatch() -> None:
     assert api._pending_confirmation_token is None
 
 
+def test_tool_followup_marks_disabled_research_result_as_distinct() -> None:
+    api = _make_api_stub()
+
+    assert (
+        api._tool_result_has_distinct_followup_info(
+            tool_name="perform_research",
+            result={
+                "status": "disabled",
+                "reason_code": "research_disabled",
+                "message": "Research subsystem disabled",
+                "retryable": False,
+            },
+        )
+        is True
+    )
+
+
 def test_auto_approved_research_intent_short_circuits_normal_flow() -> None:
     api = _make_api_stub()
     api._research_mode = "auto"
