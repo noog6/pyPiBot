@@ -147,3 +147,60 @@ def test_extended_phatic_acknowledgements_do_not_route_to_clarify() -> None:
 
         assert clarify is False
         assert reason == "phatic_acknowledgement"
+
+
+def test_web_search_phrasing_does_not_set_visual_question_flag() -> None:
+    for transcript_text in (
+        "search online for Little Caesars menu",
+        "see if you can find the Little Caesars menu online",
+    ):
+        snapshot = build_utterance_trust_snapshot(
+            run_id="run-910",
+            turn_id="turn-search",
+            input_event_key=f"evt-{transcript_text}",
+            transcript_text=transcript_text,
+            utterance_duration_ms=2200,
+            asr_meta={"confidence": 0.95},
+            short_utterance_ms=450,
+        )
+
+        clarify, reason = should_clarify(
+            transcript_text=snapshot.transcript_text,
+            snapshot=snapshot,
+            min_confidence=0.65,
+            camera_available=False,
+            camera_recent=False,
+        )
+
+        assert snapshot.visual_question is False
+        assert clarify is False
+        assert reason == "none"
+
+
+def test_true_visual_requests_still_set_visual_question_flag() -> None:
+    for transcript_text in (
+        "What do you see?",
+        "Can you look at this?",
+        "Is anything in front of you?",
+    ):
+        snapshot = build_utterance_trust_snapshot(
+            run_id="run-911",
+            turn_id="turn-vision",
+            input_event_key=f"evt-{transcript_text}",
+            transcript_text=transcript_text,
+            utterance_duration_ms=1800,
+            asr_meta={"confidence": 0.95},
+            short_utterance_ms=450,
+        )
+
+        clarify, reason = should_clarify(
+            transcript_text=snapshot.transcript_text,
+            snapshot=snapshot,
+            min_confidence=0.65,
+            camera_available=False,
+            camera_recent=False,
+        )
+
+        assert snapshot.visual_question is True
+        assert clarify is True
+        assert reason == "visual_unavailable"
