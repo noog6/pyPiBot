@@ -127,6 +127,27 @@ Reference: `docs/architecture/decision_arbitration_authority_map.md` is the seam
 
 ---
 
+### Layer 6.5 — Initiative posture recommendation (**implemented, bounded consultative seam**)
+
+**Owns:** reason-coded recommendation for immediate conversational stance
+(`answer_directly`, `clarify_first`, `continue_followthrough`, `await_user`,
+`observe_only`).
+
+**Anchors:** `ai/initiative_posture.py`, runtime refresh + metadata attachment in
+`ai/realtime_api.py`, consultative metadata handoff in
+`ai/realtime/response_create_runtime.py`.
+
+**Now true in code:**
+- Selector is deterministic and emits confidence band + explicit reason codes.
+- Refresh is low-rate at interaction-state transitions with deduped logging.
+- Output can be attached to `response.create` metadata as consultative context.
+
+**Boundary:** this seam is consultative only. It does not arbitrate response
+create winners, tool execution, governance, terminal selection, semantic owner,
+or tool-followup release.
+
+---
+
 ### Layers not yet implemented as full architecture
 
 - Global multi-turn planner / explicit long-horizon goals.
@@ -143,6 +164,7 @@ Reference: `docs/architecture/decision_arbitration_authority_map.md` is the seam
 | Perception/memory | Partial | Improve relevance/discipline before adding broad new policy. |
 | Continuity ledger | Implemented narrow | Use as context/diagnostic signal, not control authority. |
 | Quiet Intent posture biasing | Implemented consultative | Treat as posture/diagnostic signal; not an authority seam. |
+| Initiative posture recommendation | Implemented consultative | Bounded stance hint only; no direct authority. |
 | Governance | Implemented partial | Keep fail-closed and confirmation semantics explicit. |
 | Higher cognition (planner/cost/persona/ecosystem) | Aspirational/backlog | Do not imply these are already present. |
 

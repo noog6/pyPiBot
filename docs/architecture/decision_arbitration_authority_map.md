@@ -170,7 +170,7 @@ This is a code-aligned map, not a redesign proposal. It describes distributed ar
 
 ### 9) Consultative/context seams (consultative only)
 
-- Examples: continuity (`ai/continuity.py` integration), quiet intent (`ai/quiet_intent.py`), attention continuity (`ai/attention_continuity.py`).
+- Examples: continuity (`ai/continuity.py` integration), quiet intent (`ai/quiet_intent.py`), attention continuity (`ai/attention_continuity.py`), initiative posture (`ai/initiative_posture.py` + runtime integration).
 
 **Owns**
 - Context enrichment, bookkeeping, and posture/diagnostic hints.
