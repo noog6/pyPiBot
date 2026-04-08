@@ -9,6 +9,7 @@ references.
 - [Theo Curiosity Engine](curiosity_engine.md)
 - [Theo Continuity / Presence (Current-State Audit)](continuity_presence.md)
 - [Theo Quiet Intent (Current-State Audit)](quiet_intent.md)
+- [Theo Initiative Posture (Current-State Audit)](initiative_posture.md)
 - [Theo Conversation Stack Plateau](theo_conversation_stack_plateau.md)
 
 ## Runtime / lifecycle architecture references

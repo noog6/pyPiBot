@@ -438,6 +438,9 @@ class ResponseCreateRuntime:
             origin=origin,
             turn_id=turn_id,
         )
+        attach_initiative_metadata = getattr(api, "_attach_initiative_posture_metadata", None)
+        if callable(attach_initiative_metadata):
+            attach_initiative_metadata(response_create_event=response_create_event)
         response_metadata = api._extract_response_create_metadata(response_create_event)
         canonical_origin = api._canonical_response_create_origin(
             origin=origin,

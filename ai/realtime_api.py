@@ -107,6 +107,11 @@ from ai.quiet_intent import (
     normalize_continuity_stance,
     normalize_ops_severity,
 )
+from ai.initiative_posture import (
+    InitiativePostureDecision,
+    InitiativePostureInputs,
+    InitiativePostureSelector,
+)
 from ai.semantic_owner_arbitration import SemanticOwnerDecision, decide_semantic_owner
 from ai.embodiment_policy import (
     EMBODIMENT_PRIORITY_ALLOW,
@@ -823,6 +828,9 @@ class RealtimeAPI:
         self._quiet_intent_selector = QuietIntentSelector()
         self._latest_quiet_intent_decision: QuietIntentDecision | None = None
         self._latest_quiet_intent_log_fingerprint: str | None = None
+        self._initiative_posture_selector = InitiativePostureSelector()
+        self._latest_initiative_posture_decision: InitiativePostureDecision | None = None
+        self._latest_initiative_posture_log_fingerprint: str | None = None
         self._latest_ops_severity = "unknown"
         continuity_cfg = config.get("continuity") or {}
         self._continuity_debug_summary_on_turn_close = bool(
@@ -4515,6 +4523,7 @@ class RealtimeAPI:
 
         snapshot = self._attention_continuity.snapshot(now_s=now) if getattr(self, "_attention_continuity", None) is not None else AttentionSnapshot(active=False, user_speaking=False, acquired_at_s=None, hold_until_s=None, release_reason="uninitialized")
         self._refresh_quiet_intent(state=state, attention=snapshot)
+        self._refresh_initiative_posture(state=state)
 
         decision = self._embodiment_policy.decide_state_cue(
             state=state,
@@ -4639,6 +4648,27 @@ class RealtimeAPI:
         ordered = ("calm_context", "observation_context", "curiosity_signal", "anomaly_signal")
         return tuple(flag for flag in ordered if flag in flags)
 
+    def _classify_initiative_utterance_flags(self) -> tuple[str, ...]:
+        text = str(getattr(self, "_last_user_input_text", "") or "").strip().lower()
+        if not text:
+            return ()
+        flags: list[str] = []
+        if any(marker in text for marker in ("?", "can you", "could you", "would you", "please", "tell me", "what is", "how do")):
+            flags.append("direct_question")
+        ambiguous_markers = (
+            "maybe",
+            "not sure",
+            "something",
+            "kind of",
+            "sort of",
+            "whatever works",
+            "i guess",
+        )
+        if any(marker in text for marker in ambiguous_markers):
+            flags.append("ambiguous_request")
+        ordered = ("direct_question", "ambiguous_request")
+        return tuple(flag for flag in ordered if flag in flags)
+
     def _quiet_intent_inputs(self, *, state: InteractionState, attention: AttentionSnapshot) -> QuietIntentInputs:
         now = time.monotonic()
         last_input = getattr(self, "_last_user_input_time", None)
@@ -4724,6 +4754,120 @@ class RealtimeAPI:
             float(payload["interruption_tolerance"]),
             float(payload["observation_threshold"]),
             ",".join(str(flag) for flag in payload["recent_utterance_flags"]) or "none",
+        )
+
+    def _initiative_posture_inputs(self, *, state: InteractionState) -> InitiativePostureInputs:
+        now = time.monotonic()
+        last_input = getattr(self, "_last_user_input_time", None)
+        recent_input = bool(isinstance(last_input, (int, float)) and (now - float(last_input)) <= 120.0)
+        conversation_active = bool(recent_input or self.response_in_progress or self._response_in_flight)
+        run_id = self._current_run_id()
+        turn_id = self._current_turn_id_or_unknown()
+        continuity_stance = "idle"
+        followthrough_active = False
+        try:
+            brief = self.get_continuity_brief(
+                run_id=str(run_id or ""),
+                turn_id=str(turn_id or "turn-unknown"),
+                reason="initiative_posture_state_transition",
+            )
+            continuity_stance = str(getattr(brief, "stance", "idle") or "idle").strip() or "idle"
+            settlement = self.get_continuity_turn_settlement(
+                run_id=str(run_id or ""),
+                turn_id=str(turn_id or "turn-unknown"),
+                reason="initiative_posture_state_transition",
+            )
+            followthrough_active = str(getattr(settlement, "settlement_state", "") or "").strip().lower() == "followthrough_remaining"
+        except Exception:
+            continuity_stance = "idle"
+            followthrough_active = False
+        latest_quiet_intent = getattr(self, "_latest_quiet_intent_decision", None)
+        quiet_intent_mode = (
+            str(getattr(getattr(latest_quiet_intent, "mode", None), "value", "") or "").strip().lower() or "observer"
+        )
+        confirmation_runtime = getattr(self, "_confirmation_runtime", None)
+        confirmation_pending = bool(
+            hasattr(confirmation_runtime, "is_confirmation_pending")
+            and confirmation_runtime.is_confirmation_pending()
+        )
+        return InitiativePostureInputs(
+            interaction_state=state,
+            conversation_active=conversation_active,
+            continuity_stance=continuity_stance,
+            recent_utterance_flags=self._classify_initiative_utterance_flags(),
+            followthrough_active=followthrough_active,
+            confirmation_pending=confirmation_pending,
+            response_in_flight=bool(self._response_in_flight),
+            quiet_intent_mode=quiet_intent_mode,
+        )
+
+    def _refresh_initiative_posture(self, *, state: InteractionState) -> None:
+        selector = getattr(self, "_initiative_posture_selector", None)
+        if not isinstance(selector, InitiativePostureSelector):
+            return
+        decision = selector.select(self._initiative_posture_inputs(state=state))
+        self._latest_initiative_posture_decision = decision
+        payload = decision.to_diagnostic_snapshot()
+        fingerprint = "|".join(
+            (
+                str(payload["initiative_posture"]),
+                str(payload["confidence_band"]),
+                ",".join(str(code) for code in payload["reason_codes"]),
+                str(payload["followthrough_active"]).lower(),
+                str(payload["confirmation_pending"]).lower(),
+            )
+        )
+        if fingerprint == getattr(self, "_latest_initiative_posture_log_fingerprint", None):
+            logger.debug(
+                "initiative_posture_decision_unchanged initiative_posture=%s confidence_band=%s reason_codes=%s",
+                payload["initiative_posture"],
+                payload["confidence_band"],
+                ",".join(str(code) for code in payload["reason_codes"]) or "none",
+            )
+            return
+        self._latest_initiative_posture_log_fingerprint = fingerprint
+        logger.info(
+            "initiative_posture_decision initiative_posture=%s confidence=%.2f confidence_band=%s reason_codes=%s "
+            "interaction_state=%s conversation_active=%s continuity_stance=%s followthrough_active=%s "
+            "confirmation_pending=%s response_in_flight=%s quiet_intent_mode=%s flags=%s",
+            payload["initiative_posture"],
+            float(payload["confidence"]),
+            payload["confidence_band"],
+            ",".join(str(code) for code in payload["reason_codes"]) or "none",
+            payload["interaction_state"],
+            str(payload["conversation_active"]).lower(),
+            payload["continuity_stance"] or "idle",
+            str(payload["followthrough_active"]).lower(),
+            str(payload["confirmation_pending"]).lower(),
+            str(payload["response_in_flight"]).lower(),
+            payload["quiet_intent_mode"],
+            ",".join(str(flag) for flag in payload["recent_utterance_flags"]) or "none",
+        )
+
+    def _attach_initiative_posture_metadata(self, *, response_create_event: dict[str, Any]) -> None:
+        """Attach consultative initiative posture metadata to response.create events.
+
+        This method is intentionally non-authoritative: metadata is diagnostic/
+        consultative only and must not alter governance, tool authority, or
+        response-create arbitration winners.
+        """
+        decision = getattr(self, "_latest_initiative_posture_decision", None)
+        if decision is None:
+            return
+        response_payload = response_create_event.setdefault("response", {})
+        if not isinstance(response_payload, dict):
+            response_payload = {}
+            response_create_event["response"] = response_payload
+        metadata = response_payload.setdefault("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+            response_payload["metadata"] = metadata
+        consultative = decision.to_consultative_hint()
+        metadata.setdefault("initiative_posture", str(consultative["initiative_posture"]))
+        metadata.setdefault("initiative_confidence_band", str(consultative["confidence_band"]))
+        metadata.setdefault(
+            "initiative_reason_codes",
+            ",".join(str(code) for code in consultative.get("reason_codes") or ()) or "none",
         )
 
     def _continuity_ledger_instance(self) -> ContinuityLedger:
