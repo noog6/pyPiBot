@@ -15,6 +15,7 @@ if "audioop" not in sys.modules:
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
 
 from ai.realtime.response_create_runtime import ResponseCreateOutcomeAction, ResponseCreateRuntime
+from ai.realtime.types import CanonicalResponseState
 from ai.realtime.transport import RealtimeTransport
 from ai.realtime_api import RealtimeAPI
 from ai.interaction_lifecycle_policy import ResponseCreateDecision, ResponseCreateDecisionAction
@@ -610,6 +611,66 @@ def test_post_decision_finalizer_returns_same_tool_followup_deliverable_drop_for
     assert finalized_send.reason_code == "tool_followup_final_deliverable_already_sent"
     assert finalized_schedule.action is ResponseCreateOutcomeAction.DROP
     assert finalized_schedule.reason_code == finalized_send.reason_code
+
+
+def test_post_decision_finalizer_allows_tool_followup_when_parent_turn_followthrough_still_open() -> None:
+    api = _make_api_stub()
+    runtime = api._response_create_runtime
+    api._tool_followup_state_by_canonical_key = {}
+    parent_canonical_key = api._canonical_utterance_key(
+        turn_id="turn_finalizer_parent_open_followthrough",
+        input_event_key="item_parent",
+    )
+    api._canonical_response_state_by_key = {
+        parent_canonical_key: CanonicalResponseState(
+            created=True,
+            done=True,
+            deliverable_observed=True,
+            deliverable_class="final",
+            origin="assistant_message",
+            response_id="resp-parent",
+            turn_id="turn_finalizer_parent_open_followthrough",
+            input_event_key="item_parent",
+        )
+    }
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True: (
+        turn_id == "turn_finalizer_parent_open_followthrough" and include_report_followup
+    )
+    event = {
+        "type": "response.create",
+        "response": {
+            "metadata": {
+                "turn_id": "turn_finalizer_parent_open_followthrough",
+                "input_event_key": "item_tool_followup",
+                "parent_turn_id": "turn_finalizer_parent_open_followthrough",
+                "parent_input_event_key": "item_parent",
+                "tool_followup": "true",
+                "tool_call_id": "call-finalizer-open",
+            }
+        },
+    }
+    snapshot = runtime.prepare_response_create_snapshot(
+        response_create_event=event,
+        origin="tool_output",
+        utterance_context=None,
+        memory_brief_note=None,
+        now=1.0,
+    )
+    selected = runtime._build_execution_decision(
+        action=ResponseCreateOutcomeAction.SCHEDULE,
+        reason_code="active_response",
+        explanation="queued while response active",
+        selected_candidate_id="active_response",
+    )
+
+    finalized_schedule = runtime._finalize_response_create_execution_decision(
+        prepared_snapshot=snapshot,
+        decision=selected,
+        execution_path="schedule",
+    )
+
+    assert finalized_schedule.action is ResponseCreateOutcomeAction.SCHEDULE
+    assert finalized_schedule.reason_code == "active_response"
 
 
 def test_post_decision_finalizer_returns_same_existing_state_drop_for_send_and_schedule() -> None:

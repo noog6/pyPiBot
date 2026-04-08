@@ -9638,6 +9638,11 @@ class RealtimeAPI:
         normalized_turn_id = str(turn_id or "").strip()
         if not normalized_turn_id:
             return False
+        if self._turn_followthrough_chain_remaining(
+            turn_id=normalized_turn_id,
+            include_report_followup=True,
+        ):
+            return False
         normalized_parent_key = str(parent_input_event_key or "").strip()
         for state in self._canonical_response_state_store().values():
             if not isinstance(state, CanonicalResponseState):
