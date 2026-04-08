@@ -535,16 +535,21 @@ class ResponseCreateRuntime:
         )
         same_turn_owner_reason = None
         if normalized_origin == "assistant_message":
-            owner_fn = getattr(api, "_assistant_message_same_turn_owner_reason", None)
-            if callable(owner_fn):
-                same_turn_owner_reason = str(
-                    owner_fn(
-                        turn_id=turn_id,
-                        input_event_key=current_input_event_key,
-                        canonical_key=canonical_key,
-                    )
-                    or ""
-                ).strip() or None
+            allowlisted = False
+            allowlist_fn = getattr(api, "_assistant_message_same_turn_ownership_allowlisted", None)
+            if callable(allowlist_fn):
+                allowlisted = bool(allowlist_fn(metadata=response_metadata))
+            if not allowlisted:
+                owner_fn = getattr(api, "_assistant_message_same_turn_owner_reason", None)
+                if callable(owner_fn):
+                    same_turn_owner_reason = str(
+                        owner_fn(
+                            turn_id=turn_id,
+                            input_event_key=current_input_event_key,
+                            canonical_key=canonical_key,
+                        )
+                        or ""
+                    ).strip() or None
         already_delivered = api._is_response_already_delivered(
             turn_id=turn_id,
             input_event_key=current_input_event_key,
