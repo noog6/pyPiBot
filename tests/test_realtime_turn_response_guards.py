@@ -3447,6 +3447,62 @@ def test_turn_followthrough_chain_remaining_logs_guard_decision(monkeypatch) -> 
     assert "decision=False" in log_output
 
 
+def test_tool_followup_final_deliverable_suppression_disabled_while_followthrough_open() -> None:
+    api = _make_api()
+    turn_id = "turn_followthrough_open"
+    parent_key = "item_parent_followthrough_open"
+    canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_key)
+    api._canonical_response_state_by_key = {
+        canonical_key: CanonicalResponseState(
+            created=True,
+            done=True,
+            deliverable_observed=True,
+            deliverable_class="final",
+            origin="assistant_message",
+            response_id="resp-followthrough-open",
+            turn_id=turn_id,
+            input_event_key=parent_key,
+        )
+    }
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True, **_kwargs: (
+        turn_id == "turn_followthrough_open" and include_report_followup
+    )
+
+    suppressed = api._should_suppress_tool_followup_after_turn_deliverable(
+        turn_id=turn_id,
+        parent_input_event_key=parent_key,
+    )
+
+    assert suppressed is False
+
+
+def test_tool_followup_final_deliverable_suppression_still_applies_when_followthrough_closed() -> None:
+    api = _make_api()
+    turn_id = "turn_followthrough_closed"
+    parent_key = "item_parent_followthrough_closed"
+    canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_key)
+    api._canonical_response_state_by_key = {
+        canonical_key: CanonicalResponseState(
+            created=True,
+            done=True,
+            deliverable_observed=True,
+            deliverable_class="final",
+            origin="assistant_message",
+            response_id="resp-followthrough-closed",
+            turn_id=turn_id,
+            input_event_key=parent_key,
+        )
+    }
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True, **_kwargs: False
+
+    suppressed = api._should_suppress_tool_followup_after_turn_deliverable(
+        turn_id=turn_id,
+        parent_input_event_key=parent_key,
+    )
+
+    assert suppressed is True
+
+
 def test_turn_followthrough_chain_remaining_keeps_non_report_open_while_gesture_motion_started() -> None:
     api = _make_api()
     api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
