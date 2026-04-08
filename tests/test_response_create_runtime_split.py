@@ -370,6 +370,66 @@ def test_response_create_arbitration_drops_same_turn_owned_assistant_message() -
     assert decision.reason_code == "same_turn_already_owned"
 
 
+def test_response_create_arbitration_bounded_clarify_allowlist_bypasses_same_turn_owner_drop() -> None:
+    api = _make_api_stub()
+    runtime = api._response_create_runtime
+    api._assistant_message_same_turn_owner_reason = lambda **_kwargs: "terminal_deliverable_owned"
+    event = {
+        "type": "response.create",
+        "response": {
+            "metadata": {
+                "turn_id": "turn_owner",
+                "input_event_key": "item_owner:clarify",
+                "trigger": "asr_verify_on_risk",
+                "reason": "visual_unavailable",
+                "clarify_mode": "bounded",
+            }
+        },
+    }
+
+    snapshot = runtime.prepare_response_create_snapshot(
+        response_create_event=event,
+        origin="assistant_message",
+        utterance_context=None,
+        memory_brief_note=None,
+        now=1.0,
+    )
+    decision = runtime.decide_response_create_action(snapshot)
+
+    assert snapshot.same_turn_owner_present is False
+    assert decision.action is not ResponseCreateOutcomeAction.DROP
+    assert decision.reason_code != "same_turn_already_owned"
+
+
+def test_response_create_arbitration_non_clarify_assistant_message_still_drops_on_same_turn_owner() -> None:
+    api = _make_api_stub()
+    runtime = api._response_create_runtime
+    api._assistant_message_same_turn_owner_reason = lambda **_kwargs: "terminal_deliverable_owned"
+    event = {
+        "type": "response.create",
+        "response": {
+            "metadata": {
+                "turn_id": "turn_owner",
+                "input_event_key": "item_owner",
+                "trigger": "assistant_message",
+            }
+        },
+    }
+
+    snapshot = runtime.prepare_response_create_snapshot(
+        response_create_event=event,
+        origin="assistant_message",
+        utterance_context=None,
+        memory_brief_note=None,
+        now=1.0,
+    )
+    decision = runtime.decide_response_create_action(snapshot)
+
+    assert snapshot.same_turn_owner_present is True
+    assert decision.action is ResponseCreateOutcomeAction.DROP
+    assert decision.reason_code == "same_turn_already_owned"
+
+
 def test_response_create_terminal_state_is_block_not_drop() -> None:
     api = _make_api_stub()
     runtime = api._response_create_runtime
