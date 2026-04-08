@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import re
 from typing import Any
 
+from services.research.intent import has_research_intent
+
 _STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "do", "for", "from", "how", "i", "in", "is",
     "it", "know", "me", "my", "of", "on", "or", "that", "the", "to", "what", "where", "who", "you",
@@ -31,6 +33,14 @@ _PHATIC_ACKNOWLEDGEMENTS = {
 _CLEAR_MOTION_TERMS = {"look", "center", "left", "right", "up", "down", "back"}
 _COMPOUND_MOTION_TERMS = {"move", "turn", "look", "return", "go"}
 _DIRECTION_TERMS = {"center", "left", "right", "up", "down", "back", "front", "forward"}
+_VISUAL_PHRASE_PATTERNS = (
+    re.compile(r"\bwhat do you see\b"),
+    re.compile(r"\bcan you see\b"),
+    re.compile(r"\bwhat you see\b"),
+    re.compile(r"\bwhat(?:'s| is) in (?:my|the|this|that)\b"),
+    re.compile(r"\b(?:look|looking) at (?:this|that|it|me)\b"),
+    re.compile(r"\bin front of you\b"),
+)
 
 
 def extract_topic_anchors(text: str, *, top_k: int = 5) -> list[str]:
@@ -63,6 +73,19 @@ def _normalize_acknowledgement_text(text: str) -> str:
 def is_phatic_acknowledgement_text(text: str) -> bool:
     normalized = _normalize_acknowledgement_text(text)
     return normalized in _PHATIC_ACKNOWLEDGEMENTS
+
+
+def _is_visual_question(text: str) -> bool:
+    normalized = (text or "").strip().lower()
+    if not normalized:
+        return False
+    if has_research_intent(normalized):
+        return False
+
+    token_set = set(re.findall(r"[a-zA-Z0-9']+", normalized))
+    if bool(token_set & (_VISUAL_TERMS - {"see"})):
+        return True
+    return any(pattern.search(normalized) is not None for pattern in _VISUAL_PHRASE_PATTERNS)
 
 
 @dataclass(slots=True)
@@ -102,8 +125,7 @@ def build_utterance_trust_snapshot(
     avg_logprob = meta.get("avg_logprob") if isinstance(meta.get("avg_logprob"), (int, float)) else None
     no_speech_prob = meta.get("no_speech_prob") if isinstance(meta.get("no_speech_prob"), (int, float)) else None
     anchors = extract_topic_anchors(cleaned)
-    token_set = set(re.findall(r"[a-zA-Z0-9']+", cleaned.lower()))
-    visual_question = bool(token_set & _VISUAL_TERMS)
+    visual_question = _is_visual_question(cleaned)
     duration = int(utterance_duration_ms) if isinstance(utterance_duration_ms, (int, float)) else None
     return UtteranceTrustSnapshot(
         run_id=run_id,
