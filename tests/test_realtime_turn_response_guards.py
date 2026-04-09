@@ -3447,6 +3447,76 @@ def test_turn_followthrough_chain_remaining_logs_guard_decision(monkeypatch) -> 
     assert "decision=False" in log_output
 
 
+def test_turn_followthrough_chain_remaining_demotes_repeated_identical_guard_logs(monkeypatch) -> None:
+    api = _make_api()
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
+        compound_request=types.SimpleNamespace(
+            final_followup_pending=True,
+            steps=(types.SimpleNamespace(kind="report", status="pending"),),
+        )
+    )
+    api._continuity_ledger = types.SimpleNamespace(
+        build_turn_settlement=lambda _brief: types.SimpleNamespace(
+            settlement_state="followthrough_remaining",
+            has_commitments=True,
+        )
+    )
+
+    info_logs: list[str] = []
+    debug_logs: list[str] = []
+    monkeypatch.setattr(logger, "info", lambda msg, *args, **_kwargs: info_logs.append(msg % args if args else msg))
+    monkeypatch.setattr(
+        logger,
+        "debug",
+        lambda msg, *args, **_kwargs: debug_logs.append(msg % args if args else msg),
+    )
+
+    first = api._turn_followthrough_chain_remaining(turn_id="turn_2", include_report_followup=False)
+    second = api._turn_followthrough_chain_remaining(turn_id="turn_2", include_report_followup=False)
+
+    assert first is False
+    assert second is False
+    assert len(info_logs) == 1
+    assert len(debug_logs) == 1
+    assert "response_done_followthrough_guard_decision" in info_logs[0]
+    assert "response_done_followthrough_guard_decision_repeat" in debug_logs[0]
+
+
+def test_turn_followthrough_chain_remaining_logs_distinct_contexts_at_info(monkeypatch) -> None:
+    api = _make_api()
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
+        compound_request=types.SimpleNamespace(
+            final_followup_pending=True,
+            steps=(types.SimpleNamespace(kind="report", status="pending"),),
+        )
+    )
+    api._continuity_ledger = types.SimpleNamespace(
+        build_turn_settlement=lambda _brief: types.SimpleNamespace(
+            settlement_state="followthrough_remaining",
+            has_commitments=True,
+        )
+    )
+
+    info_logs: list[str] = []
+    debug_logs: list[str] = []
+    monkeypatch.setattr(logger, "info", lambda msg, *args, **_kwargs: info_logs.append(msg % args if args else msg))
+    monkeypatch.setattr(
+        logger,
+        "debug",
+        lambda msg, *args, **_kwargs: debug_logs.append(msg % args if args else msg),
+    )
+
+    include_report_decision = api._turn_followthrough_chain_remaining(turn_id="turn_2", include_report_followup=True)
+    non_report_decision = api._turn_followthrough_chain_remaining(turn_id="turn_2", include_report_followup=False)
+
+    assert include_report_decision is True
+    assert non_report_decision is False
+    assert len(info_logs) == 2
+    assert not debug_logs
+    assert "include_report_followup=True" in info_logs[0]
+    assert "include_report_followup=False" in info_logs[1]
+
+
 def test_tool_followup_final_deliverable_suppression_disabled_while_followthrough_open() -> None:
     api = _make_api()
     turn_id = "turn_followthrough_open"
