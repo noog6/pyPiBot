@@ -5055,6 +5055,49 @@ def test_low_risk_gesture_followup_started_motion_yields_report_bridge_when_only
     assert "Final follow-up report is still owed for the parent turn." in instructions
 
 
+def test_low_risk_gesture_followup_started_motion_only_report_remaining_pivots_out_of_status_only_when_non_report_truth_is_conflated() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    api._current_response_turn_id = "turn_gesture_started_report_only_no_override"
+    api._active_input_event_key_by_turn_id["turn_gesture_started_report_only_no_override"] = (
+        "item_parent_started_report_only_no_override"
+    )
+    api.get_gesture_motion_state = lambda *, tool_call_id: {"status": "started"}
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
+        compound_request=types.SimpleNamespace(
+            steps=(
+                types.SimpleNamespace(step_id="step_1", kind="gesture", status="completed"),
+                types.SimpleNamespace(step_id="step_2", kind="gesture", status="completed"),
+                types.SimpleNamespace(step_id="step_3", kind="report", status="pending"),
+            ),
+            active_step_index=None,
+            recent_completed_step_id="step_2",
+            next_pending_step_id="step_3",
+            final_followup_pending=True,
+        )
+    )
+    api._gesture_followthrough_chain_remaining = lambda *, turn_id: True
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True: True
+
+    response_create_event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_gesture_started_report_only_no_override",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+
+    payload = response_create_event.get("response") or {}
+    metadata = payload.get("metadata") or {}
+    instructions = str(payload.get("instructions") or "")
+
+    assert metadata.get("tool_followup_status_only") is None
+    assert metadata.get("tool_followup_suppress_if_parent_covered") is None
+    assert metadata.get("tool_followup_silent_audio") is None
+    assert metadata.get("tool_followup_silent_user_facing_output") is None
+    assert metadata.get("tool_followup_tool_choice") is None
+    assert metadata.get("tool_followup_tool_choice_reason") is None
+    assert "Final follow-up report is still owed for the parent turn." in instructions
+
+
 def test_low_risk_gesture_followup_started_motion_stays_status_only_for_true_intermediate_step() -> None:
     api = _make_api_stub()
     _wire_runtime(api)

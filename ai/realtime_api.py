@@ -9299,43 +9299,51 @@ class RealtimeAPI:
                     turn_id=followthrough_turn_id,
                     include_report_followup=False,
                 )
+                open_non_report_steps_remaining = self._gesture_followup_should_remain_status_only(
+                    turn_id=followthrough_turn_id
+                )
                 if not followthrough_remaining and motion_status in {"queued", "started"}:
                     followthrough_remaining = True
-                if not followthrough_remaining and not tool_result_has_distinct_info:
-                    metadata["tool_followup_create_suppressed"] = "true"
-                    metadata["tool_followup_create_suppression_reason"] = "followthrough_complete_non_report"
-                    # Backward-compatible alias for existing diagnostics/tests.
-                    metadata["tool_followup_no_create"] = "true"
-                    metadata["tool_followup_no_create_reason"] = "followthrough_complete_non_report"
-                metadata["tool_followup_suppress_if_parent_covered"] = "true"
-                metadata["tool_followup_status_only"] = "true"
-                metadata["tool_followup_silent_audio"] = "true"
-                metadata["tool_followup_silent_user_facing_output"] = "true"
-                if non_report_followthrough_remaining:
-                    response_payload["tool_choice"] = "required"
-                    metadata["tool_followup_tool_choice"] = "required"
-                    metadata["tool_followup_tool_choice_reason"] = "gesture_chain_non_report_remaining"
-                    runtime_step_descriptor = self._deterministic_followthrough_runtime_descriptor(
-                        turn_id=followthrough_turn_id
-                    )
-                    if runtime_step_descriptor is not None:
-                        metadata["followthrough_runtime_contract_version"] = "1"
-                        metadata["followthrough_runtime_step_available"] = "true"
-                        metadata["followthrough_runtime_step_id"] = runtime_step_descriptor["step_id"]
-                        metadata["followthrough_runtime_tool_name"] = runtime_step_descriptor["tool_name"]
-                        metadata["followthrough_runtime_tool_args"] = json.dumps(
-                            runtime_step_descriptor.get("tool_args", {}),
-                            separators=(",", ":"),
-                            sort_keys=True,
+                if followthrough_remaining and not open_non_report_steps_remaining:
+                    keep_status_only = False
+                if not keep_status_only:
+                    non_report_followthrough_remaining = False
+                if keep_status_only:
+                    if not followthrough_remaining and not tool_result_has_distinct_info:
+                        metadata["tool_followup_create_suppressed"] = "true"
+                        metadata["tool_followup_create_suppression_reason"] = "followthrough_complete_non_report"
+                        # Backward-compatible alias for existing diagnostics/tests.
+                        metadata["tool_followup_no_create"] = "true"
+                        metadata["tool_followup_no_create_reason"] = "followthrough_complete_non_report"
+                    metadata["tool_followup_suppress_if_parent_covered"] = "true"
+                    metadata["tool_followup_status_only"] = "true"
+                    metadata["tool_followup_silent_audio"] = "true"
+                    metadata["tool_followup_silent_user_facing_output"] = "true"
+                    if non_report_followthrough_remaining:
+                        response_payload["tool_choice"] = "required"
+                        metadata["tool_followup_tool_choice"] = "required"
+                        metadata["tool_followup_tool_choice_reason"] = "gesture_chain_non_report_remaining"
+                        runtime_step_descriptor = self._deterministic_followthrough_runtime_descriptor(
+                            turn_id=followthrough_turn_id
                         )
-                if motion_status:
-                    metadata["gesture_motion_status"] = motion_status
-                response_payload["instructions"] = self._gesture_followup_instruction(motion_status=motion_status)
-                if not non_report_followthrough_remaining:
-                    catchup_payload = self._consume_followthrough_catchup_payload(turn_id=followthrough_turn_id)
-                    if catchup_payload:
-                        metadata["followthrough_catchup_payload"] = catchup_payload
-            else:
+                        if runtime_step_descriptor is not None:
+                            metadata["followthrough_runtime_contract_version"] = "1"
+                            metadata["followthrough_runtime_step_available"] = "true"
+                            metadata["followthrough_runtime_step_id"] = runtime_step_descriptor["step_id"]
+                            metadata["followthrough_runtime_tool_name"] = runtime_step_descriptor["tool_name"]
+                            metadata["followthrough_runtime_tool_args"] = json.dumps(
+                                runtime_step_descriptor.get("tool_args", {}),
+                                separators=(",", ":"),
+                                sort_keys=True,
+                            )
+                    if motion_status:
+                        metadata["gesture_motion_status"] = motion_status
+                    response_payload["instructions"] = self._gesture_followup_instruction(motion_status=motion_status)
+                    if not non_report_followthrough_remaining:
+                        catchup_payload = self._consume_followthrough_catchup_payload(turn_id=followthrough_turn_id)
+                        if catchup_payload:
+                            metadata["followthrough_catchup_payload"] = catchup_payload
+            if not keep_status_only:
                 existing_instructions = str(response_payload.get("instructions") or "").strip()
                 report_instruction = (
                     "Final follow-up report is still owed for the parent turn. "
