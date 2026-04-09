@@ -9860,7 +9860,10 @@ class RealtimeAPI:
         ).strip()
         followthrough_chain_remaining = False
         if followthrough_turn_id and is_low_risk_reversible_gesture_tool:
-            followthrough_chain_remaining = self._gesture_followthrough_chain_remaining(turn_id=followthrough_turn_id)
+            followthrough_chain_remaining = self._turn_followthrough_chain_remaining(
+                turn_id=followthrough_turn_id,
+                include_report_followup=True,
+            )
         state_entry = self._resolve_parent_state_for_tool_followup(
             response_metadata=response_metadata,
             blocked_by_response_id=blocked_by_response_id,
