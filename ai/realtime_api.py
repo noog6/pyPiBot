@@ -9276,26 +9276,27 @@ class RealtimeAPI:
             parent_input_event_key=parent_input_event_key,
         )
         if self._is_low_risk_reversible_gesture_tool(tool_name=normalized_tool_name) and not descriptive_visual_instruction:
-            keep_status_only = self._gesture_followup_should_remain_status_only(turn_id=turn_id)
+            followthrough_turn_id = str(parent_turn_id or turn_id).strip() or turn_id
+            keep_status_only = self._gesture_followup_should_remain_status_only(turn_id=followthrough_turn_id)
             motion_status = self._gesture_followup_motion_status(
                 call_id=tool_call_id,
                 tool_name=normalized_tool_name,
             )
             if not keep_status_only and motion_status in {"queued", "started"}:
-                keep_status_only = self._gesture_followthrough_chain_remaining(turn_id=turn_id)
+                keep_status_only = self._gesture_followthrough_chain_remaining(turn_id=followthrough_turn_id)
             self._log_gesture_followup_truth_snapshot(
-                turn_id=turn_id,
+                turn_id=followthrough_turn_id,
                 tool_call_id=tool_call_id,
                 tool_name=normalized_tool_name,
                 motion_status=motion_status,
             )
             if keep_status_only:
                 followthrough_remaining = self._turn_followthrough_chain_remaining(
-                    turn_id=turn_id,
+                    turn_id=followthrough_turn_id,
                     include_report_followup=True,
                 )
                 non_report_followthrough_remaining = self._turn_followthrough_chain_remaining(
-                    turn_id=turn_id,
+                    turn_id=followthrough_turn_id,
                     include_report_followup=False,
                 )
                 if not followthrough_remaining and motion_status in {"queued", "started"}:
@@ -9315,7 +9316,7 @@ class RealtimeAPI:
                     metadata["tool_followup_tool_choice"] = "required"
                     metadata["tool_followup_tool_choice_reason"] = "gesture_chain_non_report_remaining"
                     runtime_step_descriptor = self._deterministic_followthrough_runtime_descriptor(
-                        turn_id=turn_id
+                        turn_id=followthrough_turn_id
                     )
                     if runtime_step_descriptor is not None:
                         metadata["followthrough_runtime_contract_version"] = "1"
@@ -9331,7 +9332,7 @@ class RealtimeAPI:
                     metadata["gesture_motion_status"] = motion_status
                 response_payload["instructions"] = self._gesture_followup_instruction(motion_status=motion_status)
                 if not non_report_followthrough_remaining:
-                    catchup_payload = self._consume_followthrough_catchup_payload(turn_id=turn_id)
+                    catchup_payload = self._consume_followthrough_catchup_payload(turn_id=followthrough_turn_id)
                     if catchup_payload:
                         metadata["followthrough_catchup_payload"] = catchup_payload
             else:
@@ -9340,7 +9341,7 @@ class RealtimeAPI:
                     "Final follow-up report is still owed for the parent turn. "
                     "Now deliver that completion report in one concise sentence."
                 )
-                catchup_payload = self._consume_followthrough_catchup_payload(turn_id=turn_id)
+                catchup_payload = self._consume_followthrough_catchup_payload(turn_id=followthrough_turn_id)
                 if catchup_payload:
                     metadata["followthrough_catchup_payload"] = catchup_payload
                     report_instruction = f"{report_instruction} Runtime catch-up: {catchup_payload}."
