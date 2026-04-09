@@ -5527,6 +5527,60 @@ def test_build_tool_followup_event_preserves_parent_owner_on_cross_turn_split() 
     assert metadata["parent_input_event_key"] == semantic_parent_input_event_key
 
 
+def test_build_tool_followup_event_uses_parent_turn_followthrough_truth_for_final_report_bridge() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    execution_turn = "turn_3"
+    semantic_owner_turn = "turn_2"
+    semantic_parent_input_event_key = "item_parent_2"
+    api._current_turn_id_or_unknown = lambda: execution_turn
+    api._active_input_event_key_by_turn_id[semantic_owner_turn] = semantic_parent_input_event_key
+    api._active_input_event_key_by_turn_id[execution_turn] = "tool:call_prev"
+    api._active_response_id = "resp_tool_followup_split_report"
+    api._response_trace_context_by_id = {
+        "resp_tool_followup_split_report": {
+            "origin": "tool_output",
+            "turn_id": execution_turn,
+            "parent_turn_id": semantic_owner_turn,
+            "semantic_owner_turn_id": semantic_owner_turn,
+        }
+    }
+    api.get_gesture_motion_state = lambda *, tool_call_id: {"status": "completed"}
+
+    def continuity_brief(*, turn_id: str, **_kwargs):
+        if turn_id == semantic_owner_turn:
+            return types.SimpleNamespace(
+                compound_request=types.SimpleNamespace(
+                    steps=(
+                        types.SimpleNamespace(step_id="step_1", kind="gesture", status="completed"),
+                        types.SimpleNamespace(step_id="step_2", kind="gesture", status="completed"),
+                        types.SimpleNamespace(step_id="step_3", kind="report", status="pending"),
+                    ),
+                    active_step_index=None,
+                    recent_completed_step_id="step_2",
+                    next_pending_step_id="step_3",
+                    final_followup_pending=True,
+                )
+            )
+        return types.SimpleNamespace(compound_request=None)
+
+    api.get_continuity_brief = continuity_brief
+
+    event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_split_owner_report",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+
+    response_payload = event.get("response") or {}
+    metadata = response_payload.get("metadata") or {}
+    instructions = str(response_payload.get("instructions") or "")
+
+    assert metadata.get("tool_followup_create_suppressed") is None
+    assert metadata.get("tool_followup_status_only") is None
+    assert "Final follow-up report is still owed for the parent turn." in instructions
+
+
 def test_catalog_only_descriptive_tool_followup_adds_uncertainty_guardrail_instruction() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
