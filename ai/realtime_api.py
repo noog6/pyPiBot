@@ -1223,6 +1223,7 @@ class RealtimeAPI:
         self._already_scheduled_for_input_event_key: set[str] = set()
         self._tool_followup_state_by_canonical_key: dict[str, str] = {}
         self._info_log_dedupe_signatures: set[tuple[str, tuple[Any, ...]]] = set()
+        self._followthrough_guard_log_counts: dict[tuple[Any, ...], int] = {}
         self._active_response_input_event_key: str | None = None
         self._active_response_canonical_key: str | None = None
         self._sync_active_response_legacy_fields()
@@ -10383,29 +10384,29 @@ class RealtimeAPI:
         if settlement_state == "followthrough_remaining":
             if include_report_followup:
                 decision = True
-                logger.info(
-                    "response_done_followthrough_guard_decision turn_id=%s include_report_followup=%s settlement_state=%s final_followup_pending=%s open_non_report_steps=%s gesture_motion_status=%s gesture_motion_open=%s decision=%s",
-                    normalized_turn_id,
-                    include_report_followup,
-                    settlement_state or "unknown",
-                    final_followup_pending,
-                    open_non_report_steps,
-                    gesture_motion_status or "unknown",
-                    gesture_motion_open,
-                    decision,
+                self._log_followthrough_guard_decision(
+                    turn_id=normalized_turn_id,
+                    include_report_followup=include_report_followup,
+                    settlement_state=settlement_state or "unknown",
+                    final_followup_pending=final_followup_pending,
+                    open_non_report_steps=open_non_report_steps,
+                    gesture_motion_status=gesture_motion_status or "unknown",
+                    gesture_motion_open=gesture_motion_open,
+                    decision=decision,
+                    response_id=response_id,
                 )
                 return decision
             if not final_followup_pending:
-                logger.info(
-                    "response_done_followthrough_guard_decision turn_id=%s include_report_followup=%s settlement_state=%s final_followup_pending=%s open_non_report_steps=%s gesture_motion_status=%s gesture_motion_open=%s decision=%s",
-                    normalized_turn_id,
-                    include_report_followup,
-                    settlement_state or "unknown",
-                    final_followup_pending,
-                    open_non_report_steps,
-                    gesture_motion_status or "unknown",
-                    gesture_motion_open,
-                    decision,
+                self._log_followthrough_guard_decision(
+                    turn_id=normalized_turn_id,
+                    include_report_followup=include_report_followup,
+                    settlement_state=settlement_state or "unknown",
+                    final_followup_pending=final_followup_pending,
+                    open_non_report_steps=open_non_report_steps,
+                    gesture_motion_status=gesture_motion_status or "unknown",
+                    gesture_motion_open=gesture_motion_open,
+                    decision=decision,
+                    response_id=response_id,
                 )
                 return decision
             steps = getattr(compound_state, "steps", ()) or ()
@@ -10415,43 +10416,43 @@ class RealtimeAPI:
                 for step in steps
             )
             decision = open_non_report_steps or gesture_motion_open
-            logger.info(
-                "response_done_followthrough_guard_decision turn_id=%s include_report_followup=%s settlement_state=%s final_followup_pending=%s open_non_report_steps=%s gesture_motion_status=%s gesture_motion_open=%s decision=%s",
-                normalized_turn_id,
-                include_report_followup,
-                settlement_state or "unknown",
-                final_followup_pending,
-                open_non_report_steps,
-                gesture_motion_status or "unknown",
-                gesture_motion_open,
-                decision,
+            self._log_followthrough_guard_decision(
+                turn_id=normalized_turn_id,
+                include_report_followup=include_report_followup,
+                settlement_state=settlement_state or "unknown",
+                final_followup_pending=final_followup_pending,
+                open_non_report_steps=open_non_report_steps,
+                gesture_motion_status=gesture_motion_status or "unknown",
+                gesture_motion_open=gesture_motion_open,
+                decision=decision,
+                response_id=response_id,
             )
             return decision
         if not final_followup_pending:
-            logger.info(
-                "response_done_followthrough_guard_decision turn_id=%s include_report_followup=%s settlement_state=%s final_followup_pending=%s open_non_report_steps=%s gesture_motion_status=%s gesture_motion_open=%s decision=%s",
-                normalized_turn_id,
-                include_report_followup,
-                settlement_state or "unknown",
-                final_followup_pending,
-                open_non_report_steps,
-                gesture_motion_status or "unknown",
-                gesture_motion_open,
-                decision,
+            self._log_followthrough_guard_decision(
+                turn_id=normalized_turn_id,
+                include_report_followup=include_report_followup,
+                settlement_state=settlement_state or "unknown",
+                final_followup_pending=final_followup_pending,
+                open_non_report_steps=open_non_report_steps,
+                gesture_motion_status=gesture_motion_status or "unknown",
+                gesture_motion_open=gesture_motion_open,
+                decision=decision,
+                response_id=response_id,
             )
             return decision
         if include_report_followup:
             decision = True
-            logger.info(
-                "response_done_followthrough_guard_decision turn_id=%s include_report_followup=%s settlement_state=%s final_followup_pending=%s open_non_report_steps=%s gesture_motion_status=%s gesture_motion_open=%s decision=%s",
-                normalized_turn_id,
-                include_report_followup,
-                settlement_state or "unknown",
-                final_followup_pending,
-                open_non_report_steps,
-                gesture_motion_status or "unknown",
-                gesture_motion_open,
-                decision,
+            self._log_followthrough_guard_decision(
+                turn_id=normalized_turn_id,
+                include_report_followup=include_report_followup,
+                settlement_state=settlement_state or "unknown",
+                final_followup_pending=final_followup_pending,
+                open_non_report_steps=open_non_report_steps,
+                gesture_motion_status=gesture_motion_status or "unknown",
+                gesture_motion_open=gesture_motion_open,
+                decision=decision,
+                response_id=response_id,
             )
             return decision
         steps = getattr(compound_state, "steps", ()) or ()
@@ -10461,18 +10462,79 @@ class RealtimeAPI:
             for step in steps
         )
         decision = open_non_report_steps or gesture_motion_open
-        logger.info(
-            "response_done_followthrough_guard_decision turn_id=%s include_report_followup=%s settlement_state=%s final_followup_pending=%s open_non_report_steps=%s gesture_motion_status=%s gesture_motion_open=%s decision=%s",
-            normalized_turn_id,
+        self._log_followthrough_guard_decision(
+            turn_id=normalized_turn_id,
+            include_report_followup=include_report_followup,
+            settlement_state=settlement_state or "unknown",
+            final_followup_pending=final_followup_pending,
+            open_non_report_steps=open_non_report_steps,
+            gesture_motion_status=gesture_motion_status or "unknown",
+            gesture_motion_open=gesture_motion_open,
+            decision=decision,
+            response_id=response_id,
+        )
+        return decision
+
+    def _log_followthrough_guard_decision(
+        self,
+        *,
+        turn_id: str,
+        include_report_followup: bool,
+        settlement_state: str,
+        final_followup_pending: bool,
+        open_non_report_steps: bool,
+        gesture_motion_status: str,
+        gesture_motion_open: bool,
+        decision: bool,
+        response_id: str | None,
+    ) -> None:
+        normalized_response_id = str(response_id or "").strip()
+        dedupe_key = (
+            str(self._current_run_id() or "").strip() or "none",
+            turn_id,
+            normalized_response_id or "none",
             include_report_followup,
-            settlement_state or "unknown",
+            settlement_state,
             final_followup_pending,
             open_non_report_steps,
-            gesture_motion_status or "unknown",
+            gesture_motion_status,
             gesture_motion_open,
             decision,
         )
-        return decision
+        seen_counts = getattr(self, "_followthrough_guard_log_counts", None)
+        if not isinstance(seen_counts, dict):
+            seen_counts = {}
+            self._followthrough_guard_log_counts = seen_counts
+        prior_count = seen_counts.get(dedupe_key, 0)
+        if len(seen_counts) >= 1024 and dedupe_key not in seen_counts:
+            seen_counts.clear()
+            prior_count = 0
+        seen_counts[dedupe_key] = prior_count + 1
+        if prior_count == 0:
+            logger.info(
+                "response_done_followthrough_guard_decision turn_id=%s include_report_followup=%s settlement_state=%s final_followup_pending=%s open_non_report_steps=%s gesture_motion_status=%s gesture_motion_open=%s decision=%s",
+                turn_id,
+                include_report_followup,
+                settlement_state,
+                final_followup_pending,
+                open_non_report_steps,
+                gesture_motion_status,
+                gesture_motion_open,
+                decision,
+            )
+            return
+        logger.debug(
+            "response_done_followthrough_guard_decision_repeat turn_id=%s include_report_followup=%s settlement_state=%s final_followup_pending=%s open_non_report_steps=%s gesture_motion_status=%s gesture_motion_open=%s decision=%s repeat_count=%s",
+            turn_id,
+            include_report_followup,
+            settlement_state,
+            final_followup_pending,
+            open_non_report_steps,
+            gesture_motion_status,
+            gesture_motion_open,
+            decision,
+            prior_count + 1,
+        )
 
     def _resolve_parent_trace_context(
         self,
