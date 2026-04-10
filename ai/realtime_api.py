@@ -9309,12 +9309,21 @@ class RealtimeAPI:
                 if not keep_status_only:
                     non_report_followthrough_remaining = False
                 if keep_status_only:
+                    create_suppression_reason = ""
                     if not followthrough_remaining and not tool_result_has_distinct_info:
+                        create_suppression_reason = "followthrough_complete_non_report"
+                    elif (
+                        non_report_followthrough_remaining
+                        and not tool_result_has_distinct_info
+                        and bool(getattr(self, "_response_in_flight", False))
+                    ):
+                        create_suppression_reason = "gesture_intermediate_inject_only"
+                    if create_suppression_reason:
                         metadata["tool_followup_create_suppressed"] = "true"
-                        metadata["tool_followup_create_suppression_reason"] = "followthrough_complete_non_report"
+                        metadata["tool_followup_create_suppression_reason"] = create_suppression_reason
                         # Backward-compatible alias for existing diagnostics/tests.
                         metadata["tool_followup_no_create"] = "true"
-                        metadata["tool_followup_no_create_reason"] = "followthrough_complete_non_report"
+                        metadata["tool_followup_no_create_reason"] = create_suppression_reason
                     metadata["tool_followup_suppress_if_parent_covered"] = "true"
                     metadata["tool_followup_status_only"] = "true"
                     metadata["tool_followup_silent_audio"] = "true"
