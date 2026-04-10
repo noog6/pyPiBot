@@ -8812,6 +8812,11 @@ class RealtimeAPI:
     def _tool_followup_input_event_key(self, *, call_id: str) -> str:
         return f"tool:{str(call_id or '').strip() or 'unknown'}"
 
+    @staticmethod
+    def _is_local_companion_tool_call_id(call_id: str) -> bool:
+        normalized_call_id = str(call_id or "").strip().lower()
+        return normalized_call_id.startswith("compgest_") or normalized_call_id.startswith("compges_")
+
     def get_gesture_motion_state(self, *, tool_call_id: str | None) -> dict[str, Any] | None:
         """Return local physical motion state for a gesture tool call.
 
@@ -8872,6 +8877,31 @@ class RealtimeAPI:
                 canonical_key=normalized_canonical_key,
                 state=normalized_state,
             )
+
+    def _strip_tool_followup_metadata_for_local_runtime_call(
+        self,
+        *,
+        response_create_event: dict[str, Any],
+        turn_id: str,
+    ) -> None:
+        response_payload = response_create_event.setdefault("response", {})
+        if not isinstance(response_payload, dict):
+            response_payload = {}
+            response_create_event["response"] = response_payload
+        metadata = response_payload.setdefault("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+            response_payload["metadata"] = metadata
+        for key in tuple(metadata.keys()):
+            if key == "tool_followup" or key.startswith("tool_followup_") or key in {"tool_call_id", "tool_name"}:
+                metadata.pop(key, None)
+        normalized_turn_id = str(turn_id or "").strip() or self._current_turn_id_or_unknown()
+        metadata["turn_id"] = normalized_turn_id
+        parent_input_event_key = self._parent_input_event_key_for_tool_followup(turn_id=normalized_turn_id)
+        if parent_input_event_key:
+            metadata["input_event_key"] = parent_input_event_key
+            metadata["parent_input_event_key"] = parent_input_event_key
+        metadata["local_runtime_followthrough"] = "true"
 
     def _clear_stale_assistant_message_creates_for_tool_followup(
         self,
@@ -19833,6 +19863,15 @@ class RealtimeAPI:
                 len(sources),
             )
 
+        local_companion_runtime_call = self._is_local_companion_tool_call_id(call_id)
+        if local_companion_runtime_call:
+            logger.info(
+                "local_companion_tool_result_runtime_only run_id=%s turn_id=%s call_id=%s tool=%s",
+                self._current_run_id() or "",
+                self._current_turn_id_or_unknown(),
+                call_id,
+                function_name,
+            )
         function_call_output = {
             "type": "conversation.item.create",
             "item": {
@@ -19841,15 +19880,16 @@ class RealtimeAPI:
                 "output": json.dumps(output_payload),
             },
         }
-        log_ws_event("Outgoing", function_call_output)
-        self._track_outgoing_event(function_call_output)
         transport = self._get_or_create_transport()
-        await transport.send_json(websocket, function_call_output)
-        logger.info(
-            "tool_result_enqueued_to_realtime call_id=%s conversation_item_id=%s",
-            call_id,
-            None,
-        )
+        if not local_companion_runtime_call:
+            log_ws_event("Outgoing", function_call_output)
+            self._track_outgoing_event(function_call_output)
+            await transport.send_json(websocket, function_call_output)
+            logger.info(
+                "tool_result_enqueued_to_realtime call_id=%s conversation_item_id=%s",
+                call_id,
+                None,
+            )
         self._mark_utterance_info_summary(deliverable_seen=True)
         if inject_no_tools_instruction:
             await self._add_no_tools_follow_up_instruction(websocket)
@@ -19863,11 +19903,12 @@ class RealtimeAPI:
                 turn_id=self._current_turn_id_or_unknown(),
                 input_event_key=self._tool_followup_input_event_key(call_id=call_id),
             )
-            self._set_tool_followup_state(
-                canonical_key=tool_followup_canonical_key,
-                state="dropped",
-                reason="followthrough_owner_turn_mismatch",
-            )
+            if not local_companion_runtime_call:
+                self._set_tool_followup_state(
+                    canonical_key=tool_followup_canonical_key,
+                    state="dropped",
+                    reason="followthrough_owner_turn_mismatch",
+                )
             logger.info(
                 "tool_followup_response_not_scheduled call_id=%s canonical_key=%s reason=%s",
                 call_id,
@@ -19887,34 +19928,43 @@ class RealtimeAPI:
             ),
         )
         response_metadata = self._extract_response_create_metadata(response_create_event)
+        source_followup_metadata = dict(response_metadata)
         create_suppressed = (
-            str(response_metadata.get("tool_followup_create_suppressed", "")).strip().lower() in {"true", "1", "yes"}
-            or str(response_metadata.get("tool_followup_no_create", "")).strip().lower() in {"true", "1", "yes"}
+            str(source_followup_metadata.get("tool_followup_create_suppressed", "")).strip().lower() in {"true", "1", "yes"}
+            or str(source_followup_metadata.get("tool_followup_no_create", "")).strip().lower() in {"true", "1", "yes"}
         )
+        if local_companion_runtime_call:
+            self._strip_tool_followup_metadata_for_local_runtime_call(
+                response_create_event=response_create_event,
+                turn_id=self._current_turn_id_or_unknown(),
+            )
+            response_metadata = self._extract_response_create_metadata(response_create_event)
         if create_suppressed:
             suppression_reason = str(
-                response_metadata.get("tool_followup_create_suppression_reason")
-                or response_metadata.get("tool_followup_no_create_reason")
+                source_followup_metadata.get("tool_followup_create_suppression_reason")
+                or source_followup_metadata.get("tool_followup_no_create_reason")
                 or "followthrough_complete_no_create"
             )
-            self._set_tool_followup_state(
-                canonical_key=tool_followup_canonical_key,
-                state="dropped",
-                reason=suppression_reason,
-            )
+            if not local_companion_runtime_call:
+                self._set_tool_followup_state(
+                    canonical_key=tool_followup_canonical_key,
+                    state="dropped",
+                    reason=suppression_reason,
+                )
             logger.info(
                 "tool_followup_response_not_scheduled call_id=%s canonical_key=%s reason=%s",
                 call_id,
                 tool_followup_canonical_key,
                 suppression_reason,
             )
-            self._mark_tool_followup_timing(
-                turn_id=self._current_turn_id_or_unknown(),
-                marker="tool_followup_response_not_scheduled",
-                call_id=call_id,
-                canonical_key=tool_followup_canonical_key,
-                is_tool_followup=True,
-            )
+            if not local_companion_runtime_call:
+                self._mark_tool_followup_timing(
+                    turn_id=self._current_turn_id_or_unknown(),
+                    marker="tool_followup_response_not_scheduled",
+                    call_id=call_id,
+                    canonical_key=tool_followup_canonical_key,
+                    is_tool_followup=True,
+                )
             await self._maybe_continue_deterministic_followthrough_after_inject_only(
                 websocket=websocket,
                 triggering_tool_name=function_name,
@@ -19934,13 +19984,14 @@ class RealtimeAPI:
             call_id,
             tool_followup_canonical_key,
         )
-        self._mark_tool_followup_timing(
-            turn_id=self._current_turn_id_or_unknown(),
-            marker="tool_followup_response_scheduled",
-            call_id=call_id,
-            canonical_key=tool_followup_canonical_key,
-            is_tool_followup=True,
-        )
+        if not local_companion_runtime_call:
+            self._mark_tool_followup_timing(
+                turn_id=self._current_turn_id_or_unknown(),
+                marker="tool_followup_response_scheduled",
+                call_id=call_id,
+                canonical_key=tool_followup_canonical_key,
+                is_tool_followup=True,
+            )
         await self._send_response_create(
             websocket,
             response_create_event,
