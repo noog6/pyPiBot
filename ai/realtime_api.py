@@ -20113,6 +20113,7 @@ class RealtimeAPI:
             await self._maybe_continue_deterministic_followthrough_after_inject_only(
                 websocket=websocket,
                 triggering_tool_name=function_name,
+                triggering_call_id=call_id,
                 suppression_reason=suppression_reason,
             )
             self.function_call = None
@@ -20156,6 +20157,7 @@ class RealtimeAPI:
         *,
         websocket: Any,
         triggering_tool_name: str,
+        triggering_call_id: str = "",
         suppression_reason: str,
     ) -> None:
         if str(suppression_reason or "").strip().lower() != "gesture_intermediate_inject_only":
@@ -20171,10 +20173,19 @@ class RealtimeAPI:
             return
         runtime_step_descriptor = self._deterministic_followthrough_runtime_descriptor(turn_id=normalized_turn_id)
         if runtime_step_descriptor is None:
+            fallback_outcome = "not_applicable"
+            if self._turn_has_active_required_deliverable_step(turn_id=normalized_turn_id):
+                fallback_outcome = await self._maybe_dispatch_required_deliverable_after_motion_completion(
+                    websocket=websocket,
+                    turn_id=normalized_turn_id,
+                    triggering_tool_name=normalized_trigger_tool,
+                    triggering_call_id=triggering_call_id,
+                )
             logger.info(
-                "deterministic_followthrough_dispatch_skipped run_id=%s turn_id=%s reason=no_runtime_step_descriptor",
+                "deterministic_followthrough_dispatch_skipped run_id=%s turn_id=%s reason=no_runtime_step_descriptor fallback_outcome=%s",
                 self._current_run_id() or "",
                 normalized_turn_id,
+                fallback_outcome,
             )
             return
         step_id = str(runtime_step_descriptor.get("step_id") or "").strip()
@@ -20224,6 +20235,127 @@ class RealtimeAPI:
         if bool((dispatch_outcome or {}).get("executed")):
             dispatch_registry.add(dispatch_key)
         self._prune_deterministic_followthrough_dispatch_registry()
+
+    async def _maybe_dispatch_required_deliverable_after_motion_completion(
+        self,
+        *,
+        websocket: Any,
+        turn_id: str,
+        triggering_tool_name: str,
+        triggering_call_id: str,
+    ) -> str:
+        normalized_call_id = str(triggering_call_id or "").strip()
+        motion_status = ""
+        if normalized_call_id:
+            motion_state = self.get_gesture_motion_state(tool_call_id=normalized_call_id)
+            motion_status = str((motion_state or {}).get("status") or "").strip().lower()
+        motion_open = motion_status in {"queued", "started"}
+        if motion_open and self._is_low_risk_reversible_gesture_tool(tool_name=triggering_tool_name):
+            watchers = getattr(self, "_deterministic_followthrough_required_report_watchers", None)
+            if not isinstance(watchers, dict):
+                watchers = {}
+                self._deterministic_followthrough_required_report_watchers = watchers
+            existing = watchers.get(turn_id)
+            if existing is not None and not existing.done():
+                return "watcher_already_active"
+            watchers[turn_id] = asyncio.create_task(
+                self._await_motion_settle_and_dispatch_required_deliverable(
+                    websocket=websocket,
+                    turn_id=turn_id,
+                    triggering_call_id=normalized_call_id,
+                )
+            )
+            logger.info(
+                "deterministic_followthrough_required_deliverable_deferred run_id=%s turn_id=%s call_id=%s reason=gesture_motion_open motion_status=%s",
+                self._current_run_id() or "",
+                turn_id,
+                normalized_call_id or "none",
+                motion_status or "unknown",
+            )
+            return "deferred_watcher_started"
+        if self._turn_followthrough_chain_remaining(turn_id=turn_id, include_report_followup=False):
+            return "deferred_non_report_followthrough_remaining"
+        if normalized_call_id and motion_status not in {"completed"}:
+            return "deferred_motion_not_completed"
+        dispatched = await self._dispatch_required_deliverable_followthrough_response_create(
+            websocket=websocket,
+            turn_id=turn_id,
+        )
+        return "dispatched" if dispatched else "dispatch_not_sent"
+
+    async def _await_motion_settle_and_dispatch_required_deliverable(
+        self,
+        *,
+        websocket: Any,
+        turn_id: str,
+        triggering_call_id: str,
+    ) -> None:
+        try:
+            for _ in range(80):
+                motion_state = self.get_gesture_motion_state(tool_call_id=triggering_call_id)
+                motion_status = str((motion_state or {}).get("status") or "").strip().lower()
+                if motion_status == "completed" and not self._turn_followthrough_chain_remaining(
+                    turn_id=turn_id,
+                    include_report_followup=False,
+                ):
+                    await self._dispatch_required_deliverable_followthrough_response_create(
+                        websocket=websocket,
+                        turn_id=turn_id,
+                    )
+                    return
+                await asyncio.sleep(0.1)
+        finally:
+            watchers = getattr(self, "_deterministic_followthrough_required_report_watchers", None)
+            if isinstance(watchers, dict):
+                current = asyncio.current_task()
+                existing = watchers.get(turn_id)
+                if existing is current:
+                    watchers.pop(turn_id, None)
+
+    async def _dispatch_required_deliverable_followthrough_response_create(
+        self,
+        *,
+        websocket: Any,
+        turn_id: str,
+    ) -> bool:
+        dispatched = getattr(self, "_deterministic_followthrough_required_report_dispatched_turns", None)
+        if not isinstance(dispatched, set):
+            dispatched = set()
+            self._deterministic_followthrough_required_report_dispatched_turns = dispatched
+        if turn_id in dispatched:
+            return False
+        if not self._turn_has_active_required_deliverable_step(turn_id=turn_id):
+            return False
+        parent_input_event_key = self._parent_input_event_key_for_tool_followup(turn_id=turn_id)
+        if not parent_input_event_key:
+            return False
+        response_event = {
+            "type": "response.create",
+            "response": {
+                "metadata": {
+                    "turn_id": turn_id,
+                    "input_event_key": parent_input_event_key,
+                    "parent_input_event_key": parent_input_event_key,
+                    "local_runtime_followthrough": "true",
+                    "followthrough_step_output_policy": "required_deliverable",
+                    "followthrough_post_completion_reason": "required_deliverable_owed",
+                    "followthrough_dispatch_source": "deterministic_followthrough_motion_gate",
+                },
+                "instructions": (
+                    "Required user deliverable is still owed for the parent turn. "
+                    "Now deliver that completion report in one concise sentence."
+                ),
+            },
+        }
+        sent = await self._send_response_create(
+            websocket,
+            response_event,
+            origin="tool_output",
+        )
+        if sent:
+            dispatched.add(turn_id)
+            return True
+        return False
 
     def _prune_deterministic_followthrough_dispatch_registry(self) -> None:
         dispatch_registry = getattr(self, "_deterministic_followthrough_dispatched_steps", None)
