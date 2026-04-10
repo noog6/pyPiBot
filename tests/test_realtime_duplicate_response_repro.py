@@ -5134,6 +5134,42 @@ def test_low_risk_gesture_followup_started_motion_stays_status_only_for_true_int
     assert metadata.get("tool_followup_silent_user_facing_output") == "true"
 
 
+def test_low_risk_gesture_followup_marks_inject_only_no_create_for_intermediate_inflight_step() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    api._response_in_flight = True
+    api._current_response_turn_id = "turn_gesture_intermediate_inflight"
+    api._active_input_event_key_by_turn_id["turn_gesture_intermediate_inflight"] = "item_parent_intermediate_inflight"
+    api.get_gesture_motion_state = lambda *, tool_call_id: {"status": "started"}
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True: True
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
+        compound_request=types.SimpleNamespace(
+            steps=(
+                types.SimpleNamespace(step_id="step_1", kind="gesture", status="completed"),
+                types.SimpleNamespace(step_id="step_2", kind="gesture", status="active"),
+                types.SimpleNamespace(step_id="step_3", kind="report", status="pending"),
+            ),
+            active_step_index=1,
+            recent_completed_step_id="step_1",
+            next_pending_step_id="step_2",
+            final_followup_pending=True,
+        )
+    )
+
+    response_create_event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_gesture_intermediate_inflight",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+
+    payload = response_create_event.get("response") or {}
+    metadata = payload.get("metadata") or {}
+
+    assert metadata.get("tool_followup_status_only") == "true"
+    assert metadata.get("tool_followup_create_suppressed") == "true"
+    assert metadata.get("tool_followup_create_suppression_reason") == "gesture_intermediate_inject_only"
+
+
 def test_low_risk_gesture_followup_marks_no_create_when_followthrough_complete() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
@@ -5202,6 +5238,55 @@ def test_low_risk_gesture_followup_does_not_mark_no_create_while_motion_started(
     assert metadata.get("tool_followup_create_suppression_reason") is None
     assert metadata.get("tool_followup_status_only") == "true"
     assert metadata.get("gesture_motion_status") == "started"
+
+
+def test_execute_function_call_skips_response_create_for_intermediate_inflight_gesture(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._response_in_flight = True
+    api._current_response_turn_id = "turn_gesture_intermediate_exec"
+    api._current_input_event_key = "item_parent_intermediate_exec"
+    api._active_input_event_key_by_turn_id["turn_gesture_intermediate_exec"] = "item_parent_intermediate_exec"
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._intent_ledger = {}
+    api.get_gesture_motion_state = lambda *, tool_call_id: {"status": "started"}
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True: True
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
+        compound_request=types.SimpleNamespace(
+            steps=(
+                types.SimpleNamespace(step_id="step_1", kind="gesture", status="completed"),
+                types.SimpleNamespace(step_id="step_2", kind="gesture", status="active"),
+                types.SimpleNamespace(step_id="step_3", kind="report", status="pending"),
+            ),
+            active_step_index=1,
+            recent_completed_step_id="step_1",
+            next_pending_step_id="step_2",
+            final_followup_pending=True,
+        )
+    )
+
+    async def _fake_gesture(**_kwargs):
+        return {"ok": True, "motion_request_key": "mrk-gesture-intermediate"}
+
+    monkeypatch.setitem(
+        __import__("ai.tools", fromlist=["function_map"]).function_map,
+        "gesture_look_center",
+        _fake_gesture,
+    )
+
+    asyncio.run(api.execute_function_call("gesture_look_center", "call_gesture_intermediate_exec", {"target": "center"}, ws))
+
+    response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert response_create_events == []
+    function_output_events = [event for event in ws.sent if event.get("type") == "conversation.item.create"]
+    assert len(function_output_events) == 1
+    canonical_key = api._canonical_utterance_key(
+        turn_id="turn_gesture_intermediate_exec",
+        input_event_key="tool:call_gesture_intermediate_exec",
+    )
+    assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
 
 
 def test_execute_function_call_skips_response_create_for_completed_non_report_gesture(monkeypatch) -> None:
