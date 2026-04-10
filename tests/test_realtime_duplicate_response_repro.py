@@ -5028,8 +5028,10 @@ def test_low_risk_gesture_followup_drops_status_only_when_only_report_followup_r
 
     assert metadata.get("tool_followup_status_only") is None
     assert metadata.get("tool_followup_step_output_policy") == "required_deliverable"
+    assert metadata.get("followthrough_step_output_policy") == "required_deliverable"
     assert metadata.get("tool_followup_post_completion_bucket") == "final_required_deliverable"
     assert metadata.get("tool_followup_post_completion_reason") == "required_deliverable_owed"
+    assert metadata.get("followthrough_post_completion_reason") == "required_deliverable_owed"
     assert metadata.get("tool_followup_suppress_if_parent_covered") is None
     assert metadata.get("tool_followup_silent_audio") is None
     assert metadata.get("tool_followup_silent_user_facing_output") is None
@@ -5520,7 +5522,9 @@ def test_execute_function_call_local_companion_call_schedules_plain_response_cre
                     "metadata": {
                         "tool_followup": "true",
                         "tool_call_id": "compgest_chain_final",
+                        "tool_followup_step_output_policy": "required_deliverable",
                         "tool_followup_post_completion_bucket": "final_required_deliverable",
+                        "tool_followup_post_completion_reason": "required_deliverable_owed",
                     },
                     "instructions": "Final follow-up report is still owed.",
                 },
@@ -5551,6 +5555,8 @@ def test_execute_function_call_local_companion_call_schedules_plain_response_cre
     assert metadata.get("tool_followup") is None
     assert metadata.get("tool_call_id") is None
     assert metadata.get("local_runtime_followthrough") == "true"
+    assert metadata.get("followthrough_step_output_policy") == "required_deliverable"
+    assert metadata.get("followthrough_post_completion_reason") == "required_deliverable_owed"
     assert metadata.get("input_event_key") == "item_parent_local_compgest_final"
 
 

@@ -8892,9 +8892,21 @@ class RealtimeAPI:
         if not isinstance(metadata, dict):
             metadata = {}
             response_payload["metadata"] = metadata
+        step_output_policy = str(metadata.get("followthrough_step_output_policy") or "").strip().lower()
+        if not step_output_policy:
+            step_output_policy = str(metadata.get("tool_followup_step_output_policy") or "").strip().lower()
+        post_completion_reason = str(metadata.get("followthrough_post_completion_reason") or "").strip().lower()
+        if not post_completion_reason:
+            post_completion_reason = str(metadata.get("tool_followup_post_completion_reason") or "").strip().lower()
         for key in tuple(metadata.keys()):
             if key == "tool_followup" or key.startswith("tool_followup_") or key in {"tool_call_id", "tool_name"}:
                 metadata.pop(key, None)
+        # Preserve post-completion classification breadcrumbs after stripping tool-followup identity
+        # metadata for local runtime calls. This keeps output-policy visibility at arbitration.
+        if step_output_policy:
+            metadata["followthrough_step_output_policy"] = step_output_policy
+        if post_completion_reason:
+            metadata["followthrough_post_completion_reason"] = post_completion_reason
         normalized_turn_id = str(turn_id or "").strip() or self._current_turn_id_or_unknown()
         metadata["turn_id"] = normalized_turn_id
         parent_input_event_key = self._parent_input_event_key_for_tool_followup(turn_id=normalized_turn_id)
@@ -9384,10 +9396,12 @@ class RealtimeAPI:
                         tool_result_has_distinct_info=tool_result_has_distinct_info,
                     )
                     metadata["tool_followup_step_output_policy"] = post_tool_bucket
+                    metadata["followthrough_step_output_policy"] = post_tool_bucket
                     metadata["tool_followup_post_completion_bucket"] = self._legacy_bucket_for_step_output_policy(
                         post_tool_bucket
                     )
                     metadata["tool_followup_post_completion_reason"] = bucket_reason
+                    metadata["followthrough_post_completion_reason"] = bucket_reason
                     create_suppression_reason = ""
                     if post_tool_bucket in {"execution_state_update", "model_context_injection_only"}:
                         create_suppression_reason = bucket_reason
@@ -9427,10 +9441,12 @@ class RealtimeAPI:
                             metadata["followthrough_catchup_payload"] = catchup_payload
             if not keep_status_only:
                 metadata["tool_followup_step_output_policy"] = "required_deliverable"
+                metadata["followthrough_step_output_policy"] = "required_deliverable"
                 metadata["tool_followup_post_completion_bucket"] = self._legacy_bucket_for_step_output_policy(
                     "required_deliverable"
                 )
                 metadata["tool_followup_post_completion_reason"] = "required_deliverable_owed"
+                metadata["followthrough_post_completion_reason"] = "required_deliverable_owed"
                 existing_instructions = str(response_payload.get("instructions") or "").strip()
                 report_instruction = (
                     "Required user deliverable is still owed for the parent turn. "
@@ -10771,6 +10787,13 @@ class RealtimeAPI:
         owner_turn_id = str(ledger.compound_owner_turn_id() or "").strip() or "turn-unknown"
         if not owner_turn_id or owner_turn_id == "turn-unknown":
             return False, ""
+        required_deliverable_owed = self._is_required_deliverable_followthrough_response_create(
+            emission_kind=normalized_kind,
+            origin=normalized_origin,
+            turn_id=normalized_turn_id,
+            owner_turn_id=owner_turn_id,
+            response_metadata=metadata,
+        )
         allow_empty_retry_bridge_materialization = self._is_followthrough_bridge_materialization_response_create(
             origin=normalized_origin,
             turn_id=normalized_turn_id,
@@ -10782,6 +10805,7 @@ class RealtimeAPI:
                 tool_followup = str(metadata.get("tool_followup") or "").strip().lower() in {"1", "true", "yes"}
                 if (
                     tool_followup
+                    or required_deliverable_owed
                     or allow_empty_retry_bridge_materialization
                     or has_safety_override
                     or normalized_origin in {"interrupt", "safety"}
@@ -10811,7 +10835,7 @@ class RealtimeAPI:
             return False, ""
         if normalized_kind == "response_create":
             tool_followup = str(metadata.get("tool_followup") or "").strip().lower() in {"1", "true", "yes"}
-            if tool_followup or allow_empty_retry_bridge_materialization or has_safety_override:
+            if tool_followup or required_deliverable_owed or allow_empty_retry_bridge_materialization or has_safety_override:
                 return False, ""
             if normalized_origin in {"interrupt", "safety"}:
                 return False, ""
@@ -10829,6 +10853,65 @@ class RealtimeAPI:
             f"owner_turn_id={owner_turn_id} emitting_turn_id={normalized_turn_id} "
             f"emission_kind={normalized_kind} emission_origin={normalized_origin}"
         )
+
+    def _is_required_deliverable_followthrough_response_create(
+        self,
+        *,
+        emission_kind: str,
+        origin: str,
+        turn_id: str,
+        owner_turn_id: str,
+        response_metadata: dict[str, Any] | None,
+    ) -> bool:
+        if str(emission_kind or "").strip().lower() != "response_create":
+            return False
+        if str(origin or "").strip().lower() != "tool_output":
+            return False
+        metadata = response_metadata if isinstance(response_metadata, dict) else {}
+        if str(turn_id or "").strip() != str(owner_turn_id or "").strip():
+            return False
+        if str(metadata.get("tool_followup_step_output_policy") or "").strip().lower() == "required_deliverable":
+            return True
+        if str(metadata.get("followthrough_step_output_policy") or "").strip().lower() == "required_deliverable":
+            return True
+        if str(metadata.get("tool_followup_post_completion_reason") or "").strip().lower() == "required_deliverable_owed":
+            return True
+        if str(metadata.get("followthrough_post_completion_reason") or "").strip().lower() == "required_deliverable_owed":
+            return True
+        local_runtime_followthrough = str(metadata.get("local_runtime_followthrough") or "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        if local_runtime_followthrough:
+            return self._turn_has_active_required_deliverable_step(turn_id=owner_turn_id)
+        return False
+
+    def _turn_has_active_required_deliverable_step(self, *, turn_id: str) -> bool:
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return False
+        run_id = str(self._current_run_id() or "").strip()
+        if not run_id:
+            return False
+        brief = self.get_continuity_brief(
+            run_id=run_id,
+            turn_id=normalized_turn_id,
+            reason="followthrough_required_deliverable_guard",
+        )
+        compound_state = getattr(brief, "compound_request", None)
+        if compound_state is None:
+            return False
+        steps = tuple(getattr(compound_state, "steps", ()) or ())
+        active_step_index = getattr(compound_state, "active_step_index", None)
+        if not isinstance(active_step_index, int) or not (0 <= active_step_index < len(steps)):
+            return False
+        active_step = steps[active_step_index]
+        active_status = str(getattr(active_step, "status", "") or "").strip().lower()
+        if active_status == "completed":
+            return False
+        active_policy = str(getattr(active_step, "step_output_policy", "") or "").strip().lower()
+        return active_policy == "required_deliverable"
 
     def _is_followthrough_bridge_materialization_response_create(
         self,
