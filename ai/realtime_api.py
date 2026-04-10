@@ -9380,8 +9380,12 @@ class RealtimeAPI:
                 call_id=tool_call_id,
                 tool_name=normalized_tool_name,
             )
-            if not keep_status_only and motion_status in {"queued", "started"}:
-                keep_status_only = self._gesture_followthrough_chain_remaining(turn_id=followthrough_turn_id)
+            motion_open = motion_status in {"queued", "started"}
+            if not keep_status_only and motion_open:
+                # Motion controller truth wins over continuity optimism at the report boundary:
+                # do not promote to user-facing required-deliverable while the final gesture
+                # is still physically queued/started.
+                keep_status_only = True
             self._log_gesture_followup_truth_snapshot(
                 turn_id=followthrough_turn_id,
                 tool_call_id=tool_call_id,
@@ -9402,7 +9406,7 @@ class RealtimeAPI:
                 )
                 if not followthrough_remaining and motion_status in {"queued", "started"}:
                     followthrough_remaining = True
-                if followthrough_remaining and not open_non_report_steps_remaining:
+                if followthrough_remaining and not open_non_report_steps_remaining and not motion_open:
                     keep_status_only = False
                 if not keep_status_only:
                     non_report_followthrough_remaining = False
