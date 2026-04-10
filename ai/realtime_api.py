@@ -9275,21 +9275,32 @@ class RealtimeAPI:
         non_report_followthrough_remaining: bool,
         tool_result_has_distinct_info: bool,
     ) -> tuple[str, str]:
-        """Classify post-tool completion handling into explicit runtime buckets.
+        """Classify post-tool completion handling into explicit step output-policy buckets.
 
         Buckets:
-        - execution_state_only: continuity/bookkeeping update only; no model follow-up response.
+        - execution_state_update: continuity/bookkeeping update only; no model response.
         - model_context_injection_only: preserve function_call_output for model context; no immediate response.
-        - silent_intermediate_response: allow text-only silent intermediate model follow-up.
-        - final_required_deliverable: normal user-facing follow-up response is owed.
+        - silent_intermediate: allow silent internal followthrough text when needed.
+        - required_deliverable: user-visible output is owed (mid-chain or terminal).
         """
         if keep_status_only:
             if not followthrough_remaining and not tool_result_has_distinct_info:
-                return "execution_state_only", "followthrough_complete_non_report"
+                return "execution_state_update", "followthrough_complete_non_report"
             if non_report_followthrough_remaining and not tool_result_has_distinct_info:
                 return "model_context_injection_only", "gesture_intermediate_inject_only"
-            return "silent_intermediate_response", "status_only_intermediate_response"
-        return "final_required_deliverable", "final_followup_report_owed"
+            return "silent_intermediate", "status_only_intermediate_response"
+        return "required_deliverable", "required_deliverable_owed"
+
+
+    @staticmethod
+    def _legacy_bucket_for_step_output_policy(step_output_policy: str) -> str:
+        mapping = {
+            "execution_state_update": "execution_state_only",
+            "model_context_injection_only": "model_context_injection_only",
+            "silent_intermediate": "silent_intermediate_response",
+            "required_deliverable": "final_required_deliverable",
+        }
+        return mapping.get(str(step_output_policy or "").strip(), "final_required_deliverable")
 
     def _build_tool_followup_response_create_event(
         self,
@@ -9372,10 +9383,13 @@ class RealtimeAPI:
                         non_report_followthrough_remaining=non_report_followthrough_remaining,
                         tool_result_has_distinct_info=tool_result_has_distinct_info,
                     )
-                    metadata["tool_followup_post_completion_bucket"] = post_tool_bucket
+                    metadata["tool_followup_step_output_policy"] = post_tool_bucket
+                    metadata["tool_followup_post_completion_bucket"] = self._legacy_bucket_for_step_output_policy(
+                        post_tool_bucket
+                    )
                     metadata["tool_followup_post_completion_reason"] = bucket_reason
                     create_suppression_reason = ""
-                    if post_tool_bucket in {"execution_state_only", "model_context_injection_only"}:
+                    if post_tool_bucket in {"execution_state_update", "model_context_injection_only"}:
                         create_suppression_reason = bucket_reason
                     if create_suppression_reason:
                         metadata["tool_followup_create_suppressed"] = "true"
@@ -9412,11 +9426,14 @@ class RealtimeAPI:
                         if catchup_payload:
                             metadata["followthrough_catchup_payload"] = catchup_payload
             if not keep_status_only:
-                metadata["tool_followup_post_completion_bucket"] = "final_required_deliverable"
-                metadata["tool_followup_post_completion_reason"] = "final_followup_report_owed"
+                metadata["tool_followup_step_output_policy"] = "required_deliverable"
+                metadata["tool_followup_post_completion_bucket"] = self._legacy_bucket_for_step_output_policy(
+                    "required_deliverable"
+                )
+                metadata["tool_followup_post_completion_reason"] = "required_deliverable_owed"
                 existing_instructions = str(response_payload.get("instructions") or "").strip()
                 report_instruction = (
-                    "Final follow-up report is still owed for the parent turn. "
+                    "Required user deliverable is still owed for the parent turn. "
                     "Now deliver that completion report in one concise sentence."
                 )
                 catchup_payload = self._consume_followthrough_catchup_payload(turn_id=followthrough_turn_id)

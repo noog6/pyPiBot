@@ -852,7 +852,7 @@ class ResponseTerminalHandlers:
         # marks that response.done delivered the final substantive fulfillment for
         # this terminal path (selected + normal + substantive evidence), which can
         # include non-compound tool-output completions.
-        continuity_complete_final_report = (
+        continuity_complete_required_deliverable = (
             continuity_close_commitment
             and selected
             and selection_reason == "normal"
@@ -907,14 +907,14 @@ class ResponseTerminalHandlers:
             )
 
         logger.info(
-            "continuity_response_done_handoff turn_id=%s continuity_turn_id=%s selected=%s selection_reason=%s close_commitment=%s close_unresolved=%s complete_final_report=%s followthrough_chain_remaining=%s allow_cross_turn_rebind=%s rebind_reason=%s semantic_parent_turn_id=%s done_canonical_key=%s semantic_owner_canonical_key=%s",
+            "continuity_response_done_handoff turn_id=%s continuity_turn_id=%s selected=%s selection_reason=%s close_commitment=%s close_unresolved=%s complete_required_deliverable=%s followthrough_chain_remaining=%s allow_cross_turn_rebind=%s rebind_reason=%s semantic_parent_turn_id=%s done_canonical_key=%s semantic_owner_canonical_key=%s",
             turn_id,
             continuity_turn_id,
             selected,
             str(selection_reason or "").strip() or "unknown",
             continuity_close_commitment,
             continuity_close_unresolved,
-            continuity_complete_final_report,
+            continuity_complete_required_deliverable,
             followthrough_chain_remaining_for_close,
             continuity_rebind_allowed,
             continuity_rebind_reason or "none",
@@ -932,7 +932,8 @@ class ResponseTerminalHandlers:
             close_ongoing="true" if continuity_close_allowed else "",
             close_commitment="true" if continuity_close_commitment else "",
             close_unresolved="true" if continuity_close_unresolved else "",
-            complete_final_report="true" if continuity_complete_final_report else "",
+            complete_required_deliverable="true" if continuity_complete_required_deliverable else "",
+            complete_final_report="true" if continuity_complete_required_deliverable else "",
             allow_cross_turn_rebind="true" if continuity_rebind_allowed else "",
             cross_turn_rebind_reason=continuity_rebind_reason,
         )
