@@ -5644,6 +5644,8 @@ def test_deterministic_inject_only_no_descriptor_dispatches_required_deliverable
     assert sent[0]["origin"] == "tool_output"
     assert metadata["followthrough_step_output_policy"] == "required_deliverable"
     assert metadata["followthrough_post_completion_reason"] == "required_deliverable_owed"
+    assert sent[0]["event"]["response"]["tool_choice"] == "none"
+    assert "Do not call tools." in sent[0]["event"]["response"]["instructions"]
 
 
 def test_deterministic_inject_only_no_descriptor_does_not_dispatch_when_motion_queued() -> None:
