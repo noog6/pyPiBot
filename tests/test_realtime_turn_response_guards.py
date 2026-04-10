@@ -2641,6 +2641,35 @@ def test_response_done_decision_allows_tool_output_when_tool_followup_pending() 
     assert reason == "normal"
 
 
+def test_response_done_decision_does_not_classify_required_deliverable_tool_followup_as_empty_non_deliverable() -> None:
+    api = _make_api()
+    api._is_empty_response_done = lambda **_kwargs: True
+    api._turn_has_pending_tool_followup = lambda **_kwargs: False
+    api._response_done_followthrough_chain_remaining = lambda **_kwargs: False
+    api._is_interrupted_tool_output_candidate = lambda **_kwargs: False
+    api._turn_contract_exact_phrase_open = lambda **_kwargs: False
+    api._is_descriptive_identification_turn = lambda **_kwargs: (False, {})
+    api._response_trace_context_by_id = {
+        "resp-final": {
+            "tool_followup_step_output_policy": "required_deliverable",
+            "tool_followup_post_completion_reason": "required_deliverable_owed",
+        }
+    }
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id="turn_1",
+        origin="tool_output",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id="turn_1", input_event_key="tool:call_1"),
+        transcript_final_seen=True,
+        response_id="resp-final",
+    )
+
+    assert selected is False
+    assert reason == "tool_followup_precedence"
+
+
 
 def test_response_done_decision_rejects_upgraded_response_when_tool_followup_pending() -> None:
     api = _make_api()

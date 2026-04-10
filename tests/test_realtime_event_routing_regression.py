@@ -334,6 +334,51 @@ def test_silent_tool_followup_audio_done_records_suppressed_timing_marker() -> N
     api.state_manager.update_state.assert_not_called()
 
 
+def test_required_deliverable_followup_output_not_suppressed_even_when_silent_marker_present() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._cancelled_response_ids = set()
+    api._suppressed_audio_response_ids = set()
+    api._superseded_response_ids = set()
+    api._stale_response_ids_set = set()
+    api._response_trace_context_by_id = {
+        "resp-final-followup": {
+            "tool_followup_silent_user_facing_output": "true",
+            "tool_followup_step_output_policy": "required_deliverable",
+            "tool_followup_post_completion_reason": "required_deliverable_owed",
+            "canonical_key": "run-123:turn-1:tool:call-final",
+        }
+    }
+    api._is_active_response_guarded = lambda: False
+    api._mark_utterance_info_summary = Mock()
+    api._mark_first_assistant_utterance_observed_if_needed = Mock()
+    api._append_assistant_reply_text = Mock()
+    api.state_manager = SimpleNamespace(state=InteractionState.THINKING, update_state=AsyncMock())
+    api._current_run_id = lambda: "run-123"
+
+    with patch("ai.realtime_api.logger.info") as info_log:
+        asyncio.run(
+            api._handle_event_legacy(
+                {
+                    "type": "response.output_audio_transcript.delta",
+                    "response_id": "resp-final-followup",
+                    "delta": "All done.",
+                },
+                None,
+            )
+        )
+
+    api._append_assistant_reply_text.assert_called_once_with(
+        "All done.",
+        allow_separator=False,
+        response_id="resp-final-followup",
+    )
+    assert not any(
+        call.args
+        and call.args[0] == "tool_followup_user_facing_output_suppressed run_id=%s response_id=%s canonical_key=%s event_type=%s delta_len=%s marker=%s reason=intermediate_non_report_followthrough"
+        for call in info_log.call_args_list
+    )
+
+
 def test_cancelled_audio_events_capture_timing_and_emit_race_log_once() -> None:
     api = RealtimeAPI.__new__(RealtimeAPI)
     api._cancelled_response_ids = {"resp-cancelled"}
