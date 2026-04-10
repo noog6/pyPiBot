@@ -7458,6 +7458,7 @@ class RealtimeAPI:
         if self._should_drop_stale_response_event(event):
             return False
         trace_context = self._response_trace_by_id().get(response_id, {}) if response_id else {}
+        required_deliverable_followthrough = self._trace_context_marks_required_deliverable_followthrough(trace_context)
         silent_tool_followup_output = (
             str(
                 trace_context.get("tool_followup_silent_user_facing_output")
@@ -7465,7 +7466,7 @@ class RealtimeAPI:
                 or ""
             ).strip().lower() in {"true", "1", "yes"}
         )
-        if silent_tool_followup_output and event_type in {
+        if not required_deliverable_followthrough and silent_tool_followup_output and event_type in {
             "response.output_audio.delta",
             "response.output_audio.done",
             "response.output_audio_transcript.delta",
@@ -8011,6 +8012,23 @@ class RealtimeAPI:
         if isinstance(cancelled_ids, set) and active_response_id in cancelled_ids:
             return False
         return True
+
+    @staticmethod
+    def _trace_context_marks_required_deliverable_followthrough(trace_context: Mapping[str, Any] | None) -> bool:
+        context = trace_context if isinstance(trace_context, Mapping) else {}
+        step_output_policy = str(
+            context.get("followthrough_step_output_policy")
+            or context.get("tool_followup_step_output_policy")
+            or ""
+        ).strip().lower()
+        if step_output_policy == "required_deliverable":
+            return True
+        post_completion_reason = str(
+            context.get("followthrough_post_completion_reason")
+            or context.get("tool_followup_post_completion_reason")
+            or ""
+        ).strip().lower()
+        return post_completion_reason == "required_deliverable_owed"
 
     def _clear_cancelled_response_blocking_state(self, *, response_id: str, reason: str) -> None:
         normalized_response_id = str(response_id or "").strip()
@@ -10351,6 +10369,15 @@ class RealtimeAPI:
                     str(gesture_only).lower(),
                     descriptive_context.get("effective_parent_input_event_key", "none"),
                 )
+        trace_context = (
+            self._response_trace_by_id().get(str(response_id or "").strip(), {})
+            if str(response_id or "").strip()
+            else {}
+        )
+        required_deliverable_followthrough = self._trace_context_marks_required_deliverable_followthrough(trace_context)
+        turn_has_pending_tool_followup = self._turn_has_pending_tool_followup(turn_id=turn_id)
+        if required_deliverable_followthrough:
+            turn_has_pending_tool_followup = True
 
         decision = arbitrate_terminal_deliverable_selection(
             delivery_state_before_done=delivery_state_before_done,
@@ -10362,7 +10389,7 @@ class RealtimeAPI:
                 canonical_key=done_canonical_key,
             ),
             transcript_final_seen=transcript_final_seen,
-            turn_has_pending_tool_followup=self._turn_has_pending_tool_followup(turn_id=turn_id),
+            turn_has_pending_tool_followup=turn_has_pending_tool_followup,
             followthrough_chain_remaining=self._response_done_followthrough_chain_remaining(
                 turn_id=turn_id,
                 origin=normalized_origin,
@@ -17757,6 +17784,16 @@ class RealtimeAPI:
                 or (response_metadata or {}).get("tool_followup_silent_audio")
                 or ""
             ).strip().lower()
+            metadata_tool_followup_step_output_policy = str(
+                (response_metadata or {}).get("followthrough_step_output_policy")
+                or (response_metadata or {}).get("tool_followup_step_output_policy")
+                or ""
+            ).strip().lower()
+            metadata_tool_followup_post_completion_reason = str(
+                (response_metadata or {}).get("followthrough_post_completion_reason")
+                or (response_metadata or {}).get("tool_followup_post_completion_reason")
+                or ""
+            ).strip().lower()
             metadata_trigger = str((response_metadata or {}).get("trigger") or "").strip().lower()
             metadata_reason = str((response_metadata or {}).get("reason") or "").strip().lower()
             self._record_response_trace_context(
@@ -17774,6 +17811,10 @@ class RealtimeAPI:
                 tool_followup_release=metadata_tool_followup_release,
                 tool_followup_silent_audio=metadata_tool_followup_silent_audio,
                 tool_followup_silent_user_facing_output=metadata_tool_followup_silent_user_facing_output,
+                tool_followup_step_output_policy=metadata_tool_followup_step_output_policy,
+                followthrough_step_output_policy=metadata_tool_followup_step_output_policy,
+                tool_followup_post_completion_reason=metadata_tool_followup_post_completion_reason,
+                followthrough_post_completion_reason=metadata_tool_followup_post_completion_reason,
                 tool_call_id=metadata_tool_call_id,
             )
             pref_payload = self._peek_pending_preference_memory_context_payload(

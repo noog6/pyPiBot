@@ -896,6 +896,48 @@ def test_evaluate_response_create_attempt_logs_turn_review_summary() -> None:
     assert payload["observational_only"] is True
 
 
+def test_tool_followup_metadata_cap_preserves_required_deliverable_markers() -> None:
+    api = _make_api_stub()
+    runtime = api._response_create_runtime
+    event = {
+        "type": "response.create",
+        "response": {
+            "metadata": {
+                "turn_id": "turn-cap",
+                "input_event_key": "tool:call-cap",
+                "tool_followup": "true",
+                "tool_call_id": "call-cap",
+                "tool_followup_release": "true",
+                "blocked_by_response_id": "resp-1",
+                "parent_turn_id": "turn-cap",
+                "parent_input_event_key": "item-parent",
+                "tool_followup_suppress_if_parent_covered": "true",
+                "tool_followup_status_only": "true",
+                "tool_followup_silent_audio": "true",
+                "tool_followup_silent_user_facing_output": "true",
+                "tool_followup_step_output_policy": "required_deliverable",
+                "followthrough_step_output_policy": "required_deliverable",
+                "tool_followup_post_completion_reason": "required_deliverable_owed",
+                "followthrough_post_completion_reason": "required_deliverable_owed",
+                "tool_name": "gesture_look_center",
+                "gesture_motion_status": "completed",
+            }
+        },
+    }
+
+    runtime._enforce_tool_followup_metadata_limit(
+        response_create_event=event,
+        canonical_key="run-1:turn-cap:tool:call-cap",
+    )
+
+    metadata = event["response"]["metadata"]
+    assert len(metadata) <= runtime._PROVIDER_METADATA_MAX_PROPERTIES
+    assert metadata.get("followthrough_step_output_policy") == "required_deliverable"
+    assert metadata.get("tool_followup_step_output_policy") == "required_deliverable"
+    assert metadata.get("followthrough_post_completion_reason") == "required_deliverable_owed"
+    assert metadata.get("tool_followup_post_completion_reason") == "required_deliverable_owed"
+
+
 def test_record_tool_followup_observation_logs_info_turn_summary_for_suspicious_partial_trace() -> None:
     api = _make_api_stub()
     api._current_run_id = lambda: "run-tool-info"
