@@ -322,6 +322,84 @@ def test_response_create_arbitration_blocks_already_delivered_and_already_create
     assert created_decision.reason_code == "canonical_response_already_created"
 
 
+def test_required_deliverable_motion_gate_followthrough_bypasses_already_done_and_created_guards() -> None:
+    api = _make_api_stub()
+    runtime = api._response_create_runtime
+    turn_id = "turn_motion_followthrough"
+    input_event_key = "item_motion_followthrough"
+    canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+    api._response_created_canonical_keys = {canonical_key}
+    api._set_response_delivery_state(turn_id=turn_id, input_event_key=input_event_key, state="done")
+    api._continuity_ledger_instance = lambda: SimpleNamespace(compound_owner_turn_id=lambda: turn_id)
+    api._should_suppress_nonessential_runtime_emission_during_followthrough = lambda **_kwargs: (False, "")
+    event = {
+        "type": "response.create",
+        "response": {
+            "metadata": {
+                "turn_id": turn_id,
+                "input_event_key": input_event_key,
+                "local_runtime_followthrough": "true",
+                "followthrough_step_output_policy": "required_deliverable",
+                "followthrough_post_completion_reason": "required_deliverable_owed",
+                "followthrough_dispatch_source": "deterministic_followthrough_motion_gate",
+            }
+        },
+    }
+
+    snapshot = runtime.prepare_response_create_snapshot(
+        response_create_event=event,
+        origin="tool_output",
+        utterance_context=None,
+        memory_brief_note=None,
+        now=1.0,
+    )
+    decision = runtime.decide_response_create_action(snapshot)
+
+    assert snapshot.single_flight_block_reason == ""
+    assert snapshot.already_created_for_canonical_key is False
+    assert decision.action is ResponseCreateOutcomeAction.SEND
+    assert decision.reason_code == "direct_send"
+
+
+def test_non_motion_gate_required_deliverable_followthrough_keeps_duplicate_guards() -> None:
+    api = _make_api_stub()
+    runtime = api._response_create_runtime
+    turn_id = "turn_no_override"
+    input_event_key = "item_no_override"
+    canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+    api._response_created_canonical_keys = {canonical_key}
+    api._set_response_delivery_state(turn_id=turn_id, input_event_key=input_event_key, state="done")
+    api._continuity_ledger_instance = lambda: SimpleNamespace(compound_owner_turn_id=lambda: turn_id)
+    api._should_suppress_nonessential_runtime_emission_during_followthrough = lambda **_kwargs: (False, "")
+    event = {
+        "type": "response.create",
+        "response": {
+            "metadata": {
+                "turn_id": turn_id,
+                "input_event_key": input_event_key,
+                "local_runtime_followthrough": "true",
+                "followthrough_step_output_policy": "required_deliverable",
+                "followthrough_post_completion_reason": "required_deliverable_owed",
+                "followthrough_dispatch_source": "other_source",
+            }
+        },
+    }
+
+    snapshot = runtime.prepare_response_create_snapshot(
+        response_create_event=event,
+        origin="tool_output",
+        utterance_context=None,
+        memory_brief_note=None,
+        now=1.0,
+    )
+    decision = runtime.decide_response_create_action(snapshot)
+
+    assert snapshot.single_flight_block_reason == "already_done"
+    assert snapshot.already_created_for_canonical_key is True
+    assert decision.action is ResponseCreateOutcomeAction.BLOCK
+    assert decision.reason_code == "already_delivered"
+
+
 def test_already_done_reason_normalization_stays_in_runtime_layer() -> None:
     api = _make_api_stub()
     runtime = api._response_create_runtime

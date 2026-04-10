@@ -506,6 +506,23 @@ class ResponseCreateRuntime:
         )
         suppression_turns = getattr(api, "_preference_recall_suppressed_turns", set())
         created_keys = getattr(api, "_response_created_canonical_keys", set())
+        continuity_owner_turn_id = str(api._continuity_ledger_instance().compound_owner_turn_id() or "").strip()
+        required_deliverable_followthrough = api._is_required_deliverable_followthrough_response_create(
+            emission_kind="response_create",
+            origin=normalized_origin,
+            turn_id=turn_id,
+            owner_turn_id=continuity_owner_turn_id,
+            response_metadata=response_metadata,
+        )
+        followthrough_dispatch_source = str(
+            response_metadata.get("followthrough_dispatch_source") or ""
+        ).strip().lower()
+        required_deliverable_motion_followthrough_override = bool(
+            required_deliverable_followthrough
+            and continuity_owner_turn_id
+            and turn_id == continuity_owner_turn_id
+            and followthrough_dispatch_source == "deterministic_followthrough_motion_gate"
+        )
         single_flight_block_reason = (
             ""
             if (not consumes_canonical_slot or transcript_upgrade_replacement)
@@ -514,6 +531,8 @@ class ResponseCreateRuntime:
                 input_event_key=current_input_event_key,
             )
         )
+        if required_deliverable_motion_followthrough_override:
+            single_flight_block_reason = ""
         suppression_active = (turn_id in suppression_turns) and (not str(current_input_event_key or "").strip())
         awaiting_transcript_final = False
         if normalized_origin == "server_auto":
@@ -571,6 +590,8 @@ class ResponseCreateRuntime:
             pending_server_auto_present = pending_server_auto_for_turn(turn_id=turn_id) is not None
         response_in_flight = api._is_active_response_blocking()
         created_for_key = canonical_key in created_keys
+        if required_deliverable_motion_followthrough_override:
+            created_for_key = False
         return ResponseCreatePreparedSnapshot(
             now=now,
             run_id=str(api._current_run_id() or "").strip(),
