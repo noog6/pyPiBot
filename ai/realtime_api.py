@@ -20358,9 +20358,11 @@ class RealtimeAPI:
                     "followthrough_post_completion_reason": "required_deliverable_owed",
                     "followthrough_dispatch_source": "deterministic_followthrough_motion_gate",
                 },
+                "tool_choice": "none",
                 "instructions": (
                     "Required user deliverable is still owed for the parent turn. "
-                    "Now deliver that completion report in one concise sentence."
+                    "Do not call tools. "
+                    "Now deliver a short spoken completion report in one concise sentence."
                 ),
             },
         }
