@@ -15282,6 +15282,23 @@ class RealtimeAPI:
             )
             return True
 
+        required_deliverable_followthrough = self._is_required_deliverable_followthrough_response_create(
+            emission_kind="response_create",
+            origin=str(origin or "").strip().lower(),
+            turn_id=turn_id,
+            owner_turn_id=turn_id,
+            response_metadata=response_metadata,
+        )
+        if required_deliverable_followthrough:
+            logger.info(
+                "response_terminal_state_override_required_deliverable run_id=%s turn_id=%s canonical_key=%s origin=%s",
+                self._current_run_id() or "",
+                turn_id,
+                terminal_state_canonical_key,
+                str(origin or "").strip().lower() or "unknown",
+            )
+            return False
+
         prior_state = self._lifecycle_controller().state_for(terminal_state_canonical_key)
         if prior_state not in {
             InteractionLifecycleState.DONE,

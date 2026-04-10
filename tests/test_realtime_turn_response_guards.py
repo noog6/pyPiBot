@@ -1643,6 +1643,31 @@ def test_empty_transcript_blocked_state_rejects_injection_response_attempts() ->
     assert all(entry["reason"] == "empty_transcript_blocked" for entry in outcomes)
 
 
+def test_required_deliverable_followthrough_not_dropped_even_when_canonical_terminal() -> None:
+    api = _make_api()
+    turn_id = "turn_2"
+    input_event_key = "item_parent_turn_2"
+    canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+    api._lifecycle_controller().on_response_done(canonical_key)
+    api._turn_has_active_required_deliverable_step = lambda *, turn_id: turn_id == "turn_2"
+
+    dropped = api._drop_response_create_for_terminal_state(
+        turn_id=turn_id,
+        input_event_key=input_event_key,
+        origin="tool_output",
+        response_metadata={
+            "turn_id": turn_id,
+            "input_event_key": input_event_key,
+            "local_runtime_followthrough": "true",
+            "followthrough_step_output_policy": "required_deliverable",
+            "followthrough_post_completion_reason": "required_deliverable_owed",
+            "followthrough_dispatch_source": "deterministic_followthrough_motion_gate",
+        },
+    )
+
+    assert dropped is False
+
+
 def test_tool_followup_done_clears_stale_pending_assistant_create() -> None:
     api = _make_api()
     input_event_key = "tool:call_123"
