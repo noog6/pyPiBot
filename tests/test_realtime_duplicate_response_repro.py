@@ -5011,6 +5011,8 @@ def test_low_risk_gesture_followup_drops_status_only_when_only_report_followup_r
     instructions = str(payload.get("instructions") or "")
 
     assert metadata.get("tool_followup_status_only") is None
+    assert metadata.get("tool_followup_post_completion_bucket") == "final_required_deliverable"
+    assert metadata.get("tool_followup_post_completion_reason") == "final_followup_report_owed"
     assert metadata.get("tool_followup_suppress_if_parent_covered") is None
     assert metadata.get("tool_followup_silent_audio") is None
     assert metadata.get("tool_followup_silent_user_facing_output") is None
@@ -5130,6 +5132,10 @@ def test_low_risk_gesture_followup_started_motion_stays_status_only_for_true_int
     metadata = payload.get("metadata") or {}
 
     assert metadata.get("tool_followup_status_only") == "true"
+    assert metadata.get("tool_followup_post_completion_bucket") == "model_context_injection_only"
+    assert metadata.get("tool_followup_post_completion_reason") == "gesture_intermediate_inject_only"
+    assert metadata.get("tool_followup_create_suppressed") == "true"
+    assert metadata.get("tool_followup_create_suppression_reason") == "gesture_intermediate_inject_only"
     assert metadata.get("tool_followup_silent_audio") == "true"
     assert metadata.get("tool_followup_silent_user_facing_output") == "true"
 
@@ -5166,6 +5172,8 @@ def test_low_risk_gesture_followup_marks_inject_only_no_create_for_intermediate_
     metadata = payload.get("metadata") or {}
 
     assert metadata.get("tool_followup_status_only") == "true"
+    assert metadata.get("tool_followup_post_completion_bucket") == "model_context_injection_only"
+    assert metadata.get("tool_followup_post_completion_reason") == "gesture_intermediate_inject_only"
     assert metadata.get("tool_followup_create_suppressed") == "true"
     assert metadata.get("tool_followup_create_suppression_reason") == "gesture_intermediate_inject_only"
 
@@ -5200,6 +5208,8 @@ def test_low_risk_gesture_followup_marks_no_create_when_followthrough_complete()
     payload = response_create_event.get("response") or {}
     metadata = payload.get("metadata") or {}
 
+    assert metadata.get("tool_followup_post_completion_bucket") == "execution_state_only"
+    assert metadata.get("tool_followup_post_completion_reason") == "followthrough_complete_non_report"
     assert metadata.get("tool_followup_create_suppressed") == "true"
     assert metadata.get("tool_followup_create_suppression_reason") == "followthrough_complete_non_report"
 
@@ -5285,6 +5295,58 @@ def test_execute_function_call_skips_response_create_for_intermediate_inflight_g
     canonical_key = api._canonical_utterance_key(
         turn_id="turn_gesture_intermediate_exec",
         input_event_key="tool:call_gesture_intermediate_exec",
+    )
+    assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
+
+
+def test_execute_function_call_skips_response_create_for_intermediate_gesture_without_inflight_timing(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_response_turn_id = "turn_gesture_intermediate_exec_no_inflight"
+    api._current_input_event_key = "item_parent_intermediate_exec_no_inflight"
+    api._active_input_event_key_by_turn_id["turn_gesture_intermediate_exec_no_inflight"] = (
+        "item_parent_intermediate_exec_no_inflight"
+    )
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._intent_ledger = {}
+    api.get_gesture_motion_state = lambda *, tool_call_id: {"status": "started"}
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True: True
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
+        compound_request=types.SimpleNamespace(
+            steps=(
+                types.SimpleNamespace(step_id="step_1", kind="gesture", status="completed"),
+                types.SimpleNamespace(step_id="step_2", kind="gesture", status="active"),
+                types.SimpleNamespace(step_id="step_3", kind="report", status="pending"),
+            ),
+            active_step_index=1,
+            recent_completed_step_id="step_1",
+            next_pending_step_id="step_2",
+            final_followup_pending=True,
+        )
+    )
+
+    async def _fake_gesture(**_kwargs):
+        return {"ok": True, "motion_request_key": "mrk-gesture-intermediate-no-inflight"}
+
+    monkeypatch.setitem(
+        __import__("ai.tools", fromlist=["function_map"]).function_map,
+        "gesture_look_center",
+        _fake_gesture,
+    )
+
+    asyncio.run(
+        api.execute_function_call("gesture_look_center", "call_gesture_intermediate_exec_no_inflight", {"target": "center"}, ws)
+    )
+
+    response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert response_create_events == []
+    function_output_events = [event for event in ws.sent if event.get("type") == "conversation.item.create"]
+    assert len(function_output_events) == 1
+    canonical_key = api._canonical_utterance_key(
+        turn_id="turn_gesture_intermediate_exec_no_inflight",
+        input_event_key="tool:call_gesture_intermediate_exec_no_inflight",
     )
     assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
 

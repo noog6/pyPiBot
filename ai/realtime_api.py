@@ -9234,6 +9234,30 @@ class RealtimeAPI:
         )
         return instruction
 
+    def _classify_tool_followup_post_completion_bucket(
+        self,
+        *,
+        keep_status_only: bool,
+        followthrough_remaining: bool,
+        non_report_followthrough_remaining: bool,
+        tool_result_has_distinct_info: bool,
+    ) -> tuple[str, str]:
+        """Classify post-tool completion handling into explicit runtime buckets.
+
+        Buckets:
+        - execution_state_only: continuity/bookkeeping update only; no model follow-up response.
+        - model_context_injection_only: preserve function_call_output for model context; no immediate response.
+        - silent_intermediate_response: allow text-only silent intermediate model follow-up.
+        - final_required_deliverable: normal user-facing follow-up response is owed.
+        """
+        if keep_status_only:
+            if not followthrough_remaining and not tool_result_has_distinct_info:
+                return "execution_state_only", "followthrough_complete_non_report"
+            if non_report_followthrough_remaining and not tool_result_has_distinct_info:
+                return "model_context_injection_only", "gesture_intermediate_inject_only"
+            return "silent_intermediate_response", "status_only_intermediate_response"
+        return "final_required_deliverable", "final_followup_report_owed"
+
     def _build_tool_followup_response_create_event(
         self,
         *,
@@ -9309,15 +9333,17 @@ class RealtimeAPI:
                 if not keep_status_only:
                     non_report_followthrough_remaining = False
                 if keep_status_only:
+                    post_tool_bucket, bucket_reason = self._classify_tool_followup_post_completion_bucket(
+                        keep_status_only=keep_status_only,
+                        followthrough_remaining=followthrough_remaining,
+                        non_report_followthrough_remaining=non_report_followthrough_remaining,
+                        tool_result_has_distinct_info=tool_result_has_distinct_info,
+                    )
+                    metadata["tool_followup_post_completion_bucket"] = post_tool_bucket
+                    metadata["tool_followup_post_completion_reason"] = bucket_reason
                     create_suppression_reason = ""
-                    if not followthrough_remaining and not tool_result_has_distinct_info:
-                        create_suppression_reason = "followthrough_complete_non_report"
-                    elif (
-                        non_report_followthrough_remaining
-                        and not tool_result_has_distinct_info
-                        and bool(getattr(self, "_response_in_flight", False))
-                    ):
-                        create_suppression_reason = "gesture_intermediate_inject_only"
+                    if post_tool_bucket in {"execution_state_only", "model_context_injection_only"}:
+                        create_suppression_reason = bucket_reason
                     if create_suppression_reason:
                         metadata["tool_followup_create_suppressed"] = "true"
                         metadata["tool_followup_create_suppression_reason"] = create_suppression_reason
@@ -9353,6 +9379,8 @@ class RealtimeAPI:
                         if catchup_payload:
                             metadata["followthrough_catchup_payload"] = catchup_payload
             if not keep_status_only:
+                metadata["tool_followup_post_completion_bucket"] = "final_required_deliverable"
+                metadata["tool_followup_post_completion_reason"] = "final_followup_report_owed"
                 existing_instructions = str(response_payload.get("instructions") or "").strip()
                 report_instruction = (
                     "Final follow-up report is still owed for the parent turn. "
