@@ -5039,7 +5039,7 @@ def test_low_risk_gesture_followup_drops_status_only_when_only_report_followup_r
     assert "Required user deliverable is still owed for the parent turn." in instructions
 
 
-def test_low_risk_gesture_followup_started_motion_yields_report_bridge_when_only_report_remains() -> None:
+def test_low_risk_gesture_followup_started_motion_stays_status_only_when_only_report_remains() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
     api._current_response_turn_id = "turn_gesture_started_report_only"
@@ -5059,6 +5059,7 @@ def test_low_risk_gesture_followup_started_motion_yields_report_bridge_when_only
         )
     )
     api._gesture_followthrough_chain_remaining = lambda *, turn_id: False
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True: include_report_followup
 
     response_create_event, _ = api._build_tool_followup_response_create_event(
         call_id="call_gesture_started_report_only",
@@ -5070,20 +5071,22 @@ def test_low_risk_gesture_followup_started_motion_yields_report_bridge_when_only
     metadata = payload.get("metadata") or {}
     instructions = str(payload.get("instructions") or "")
 
-    assert metadata.get("tool_followup_status_only") is None
-    assert metadata.get("tool_followup_silent_audio") is None
-    assert metadata.get("tool_followup_silent_user_facing_output") is None
-    assert "Required user deliverable is still owed for the parent turn." in instructions
+    assert metadata.get("tool_followup_status_only") == "true"
+    assert metadata.get("tool_followup_silent_audio") == "true"
+    assert metadata.get("tool_followup_silent_user_facing_output") == "true"
+    assert metadata.get("tool_followup_step_output_policy") == "silent_intermediate"
+    assert metadata.get("tool_followup_post_completion_reason") == "status_only_intermediate_response"
+    assert "Required user deliverable is still owed for the parent turn." not in instructions
 
 
-def test_low_risk_gesture_followup_started_motion_only_report_remaining_pivots_out_of_status_only_when_non_report_truth_is_conflated() -> None:
+def test_low_risk_gesture_followup_queued_motion_only_report_remaining_stays_status_only() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
     api._current_response_turn_id = "turn_gesture_started_report_only_no_override"
     api._active_input_event_key_by_turn_id["turn_gesture_started_report_only_no_override"] = (
         "item_parent_started_report_only_no_override"
     )
-    api.get_gesture_motion_state = lambda *, tool_call_id: {"status": "started"}
+    api.get_gesture_motion_state = lambda *, tool_call_id: {"status": "queued"}
     api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
         compound_request=types.SimpleNamespace(
             steps=(
@@ -5098,7 +5101,7 @@ def test_low_risk_gesture_followup_started_motion_only_report_remaining_pivots_o
         )
     )
     api._gesture_followthrough_chain_remaining = lambda *, turn_id: True
-    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True: True
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True: include_report_followup
 
     response_create_event, _ = api._build_tool_followup_response_create_event(
         call_id="call_gesture_started_report_only_no_override",
@@ -5110,13 +5113,15 @@ def test_low_risk_gesture_followup_started_motion_only_report_remaining_pivots_o
     metadata = payload.get("metadata") or {}
     instructions = str(payload.get("instructions") or "")
 
-    assert metadata.get("tool_followup_status_only") is None
-    assert metadata.get("tool_followup_suppress_if_parent_covered") is None
-    assert metadata.get("tool_followup_silent_audio") is None
-    assert metadata.get("tool_followup_silent_user_facing_output") is None
+    assert metadata.get("tool_followup_status_only") == "true"
+    assert metadata.get("tool_followup_suppress_if_parent_covered") == "true"
+    assert metadata.get("tool_followup_silent_audio") == "true"
+    assert metadata.get("tool_followup_silent_user_facing_output") == "true"
     assert metadata.get("tool_followup_tool_choice") is None
     assert metadata.get("tool_followup_tool_choice_reason") is None
-    assert "Required user deliverable is still owed for the parent turn." in instructions
+    assert metadata.get("tool_followup_step_output_policy") == "silent_intermediate"
+    assert metadata.get("tool_followup_post_completion_reason") == "status_only_intermediate_response"
+    assert "Required user deliverable is still owed for the parent turn." not in instructions
 
 
 def test_low_risk_gesture_followup_started_motion_stays_status_only_for_true_intermediate_step() -> None:
