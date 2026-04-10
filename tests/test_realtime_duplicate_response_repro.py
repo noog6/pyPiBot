@@ -5612,6 +5612,194 @@ def test_deterministic_inject_only_dispatch_dedupe_only_latches_after_executed()
     assert len(attempts) == 2
 
 
+def test_deterministic_inject_only_no_descriptor_dispatches_required_deliverable_when_motion_closed() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    api._current_turn_id_or_unknown = lambda: "turn_report_dispatch"
+    api._resolve_continuity_tool_event_owner_turn = lambda *, fallback_turn_id: ("turn_report_dispatch", False, "")
+    api._deterministic_followthrough_runtime_descriptor = lambda *, turn_id: None
+    api._turn_has_active_required_deliverable_step = lambda *, turn_id: True
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True, **_kwargs: False
+    api.get_gesture_motion_state = lambda *, tool_call_id: {"status": "completed"}
+    api._parent_input_event_key_for_tool_followup = lambda *, turn_id: "item_parent_report_dispatch"
+    sent: list[dict[str, object]] = []
+
+    async def _fake_send_response_create(websocket, event, origin, **_kwargs):
+        sent.append({"event": event, "origin": origin})
+        return True
+
+    api._send_response_create = _fake_send_response_create
+
+    asyncio.run(
+        api._maybe_continue_deterministic_followthrough_after_inject_only(
+            websocket=object(),
+            triggering_tool_name="gesture_look_center",
+            triggering_call_id="call_report_dispatch",
+            suppression_reason="gesture_intermediate_inject_only",
+        )
+    )
+
+    assert len(sent) == 1
+    metadata = sent[0]["event"]["response"]["metadata"]
+    assert sent[0]["origin"] == "tool_output"
+    assert metadata["followthrough_step_output_policy"] == "required_deliverable"
+    assert metadata["followthrough_post_completion_reason"] == "required_deliverable_owed"
+
+
+def test_deterministic_inject_only_no_descriptor_does_not_dispatch_when_motion_queued() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    api._current_turn_id_or_unknown = lambda: "turn_report_queued"
+    api._resolve_continuity_tool_event_owner_turn = lambda *, fallback_turn_id: ("turn_report_queued", False, "")
+    api._deterministic_followthrough_runtime_descriptor = lambda *, turn_id: None
+    api._turn_has_active_required_deliverable_step = lambda *, turn_id: True
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True, **_kwargs: (
+        False if include_report_followup is False else True
+    )
+    api.get_gesture_motion_state = lambda *, tool_call_id: {"status": "queued"}
+    api._parent_input_event_key_for_tool_followup = lambda *, turn_id: "item_parent_report_queued"
+    sent: list[dict[str, object]] = []
+
+    async def _fake_send_response_create(websocket, event, origin, **_kwargs):
+        sent.append({"event": event, "origin": origin})
+        return True
+
+    api._send_response_create = _fake_send_response_create
+
+    async def _run() -> None:
+        await api._maybe_continue_deterministic_followthrough_after_inject_only(
+            websocket=object(),
+            triggering_tool_name="gesture_look_center",
+            triggering_call_id="call_report_queued",
+            suppression_reason="gesture_intermediate_inject_only",
+        )
+        await asyncio.sleep(0.12)
+
+    asyncio.run(_run())
+    assert sent == []
+
+
+def test_deterministic_inject_only_no_descriptor_waits_for_motion_completion_before_dispatch() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    api._current_turn_id_or_unknown = lambda: "turn_report_wait"
+    api._resolve_continuity_tool_event_owner_turn = lambda *, fallback_turn_id: ("turn_report_wait", False, "")
+    api._deterministic_followthrough_runtime_descriptor = lambda *, turn_id: None
+    api._turn_has_active_required_deliverable_step = lambda *, turn_id: True
+    state = {"status": "started"}
+
+    def _chain_remaining(*, turn_id, include_report_followup=True, **_kwargs):
+        if include_report_followup:
+            return True
+        return state["status"] != "completed"
+
+    api._turn_followthrough_chain_remaining = _chain_remaining
+    api.get_gesture_motion_state = lambda *, tool_call_id: {"status": state["status"]}
+    api._parent_input_event_key_for_tool_followup = lambda *, turn_id: "item_parent_report_wait"
+    sent: list[dict[str, object]] = []
+
+    async def _fake_send_response_create(websocket, event, origin, **_kwargs):
+        sent.append({"event": event, "origin": origin})
+        return True
+
+    api._send_response_create = _fake_send_response_create
+
+    async def _run() -> None:
+        await api._maybe_continue_deterministic_followthrough_after_inject_only(
+            websocket=object(),
+            triggering_tool_name="gesture_look_center",
+            triggering_call_id="call_report_wait",
+            suppression_reason="gesture_intermediate_inject_only",
+        )
+        await asyncio.sleep(0.12)
+        assert sent == []
+        state["status"] = "completed"
+        await asyncio.sleep(0.12)
+
+    asyncio.run(_run())
+    assert len(sent) == 1
+
+
+def test_deterministic_inject_only_no_descriptor_required_deliverable_dispatch_dedupes() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    api._current_turn_id_or_unknown = lambda: "turn_report_dedupe"
+    api._resolve_continuity_tool_event_owner_turn = lambda *, fallback_turn_id: ("turn_report_dedupe", False, "")
+    api._deterministic_followthrough_runtime_descriptor = lambda *, turn_id: None
+    api._turn_has_active_required_deliverable_step = lambda *, turn_id: True
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True, **_kwargs: False
+    api.get_gesture_motion_state = lambda *, tool_call_id: {"status": "completed"}
+    api._parent_input_event_key_for_tool_followup = lambda *, turn_id: "item_parent_report_dedupe"
+    sent: list[dict[str, object]] = []
+
+    async def _fake_send_response_create(websocket, event, origin, **_kwargs):
+        sent.append({"event": event, "origin": origin})
+        return True
+
+    api._send_response_create = _fake_send_response_create
+
+    asyncio.run(
+        api._maybe_continue_deterministic_followthrough_after_inject_only(
+            websocket=object(),
+            triggering_tool_name="gesture_look_center",
+            triggering_call_id="call_report_dedupe",
+            suppression_reason="gesture_intermediate_inject_only",
+        )
+    )
+    asyncio.run(
+        api._maybe_continue_deterministic_followthrough_after_inject_only(
+            websocket=object(),
+            triggering_tool_name="gesture_look_center",
+            triggering_call_id="call_report_dedupe",
+            suppression_reason="gesture_intermediate_inject_only",
+        )
+    )
+
+    assert len(sent) == 1
+
+
+def test_deterministic_inject_only_required_deliverable_watcher_cleans_up_when_done() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    api._current_turn_id_or_unknown = lambda: "turn_report_watcher_cleanup"
+    api._resolve_continuity_tool_event_owner_turn = (
+        lambda *, fallback_turn_id: ("turn_report_watcher_cleanup", False, "")
+    )
+    api._deterministic_followthrough_runtime_descriptor = lambda *, turn_id: None
+    api._turn_has_active_required_deliverable_step = lambda *, turn_id: True
+    state = {"status": "queued"}
+
+    def _chain_remaining(*, turn_id, include_report_followup=True, **_kwargs):
+        if include_report_followup:
+            return True
+        return state["status"] != "completed"
+
+    api._turn_followthrough_chain_remaining = _chain_remaining
+    api.get_gesture_motion_state = lambda *, tool_call_id: {"status": state["status"]}
+    api._parent_input_event_key_for_tool_followup = lambda *, turn_id: "item_parent_report_watcher_cleanup"
+
+    async def _fake_send_response_create(websocket, event, origin, **_kwargs):
+        return True
+
+    api._send_response_create = _fake_send_response_create
+
+    async def _run() -> None:
+        await api._maybe_continue_deterministic_followthrough_after_inject_only(
+            websocket=object(),
+            triggering_tool_name="gesture_look_center",
+            triggering_call_id="call_report_watcher_cleanup",
+            suppression_reason="gesture_intermediate_inject_only",
+        )
+        watchers = getattr(api, "_deterministic_followthrough_required_report_watchers", {})
+        assert "turn_report_watcher_cleanup" in watchers
+        state["status"] = "completed"
+        await asyncio.sleep(0.15)
+        watchers = getattr(api, "_deterministic_followthrough_required_report_watchers", {})
+        assert "turn_report_watcher_cleanup" not in watchers
+
+    asyncio.run(_run())
+
+
 def test_prune_deterministic_followthrough_dispatch_registry_keeps_only_owner_and_current_turn() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
