@@ -5716,6 +5716,7 @@ def test_execute_function_call_explicit_cross_turn_rebind_allows_non_owner_follo
         turn_id="turn_2",
     )
     executed = {"count": 0}
+    dispatched: list[dict[str, object]] = []
 
     async def _fake_gesture(**_kwargs):
         executed["count"] += 1
@@ -5726,10 +5727,25 @@ def test_execute_function_call_explicit_cross_turn_rebind_allows_non_owner_follo
         "gesture_look_left",
         _fake_gesture,
     )
+    api._deterministic_followthrough_runtime_descriptor = lambda *, turn_id: {
+        "request_id": "req_rebind",
+        "step_id": "step_4",
+        "tool_name": "gesture_look_center",
+        "tool_args": {"target": "center"},
+    } if turn_id == "turn_2" else None
+
+    async def _fake_dispatch(**kwargs):
+        dispatched.append(kwargs)
+        return {"outcome": "allow", "executed": True}
+
+    api._submit_companion_gesture_tool_request = _fake_dispatch
 
     asyncio.run(api.execute_function_call("gesture_look_left", "call_rebind_ok", {"target": "left"}, ws))
 
     assert executed["count"] == 1
+    assert len(dispatched) == 1
+    assert dispatched[0]["turn_id"] == "turn_2"
+    assert dispatched[0]["allow_followthrough_execution"] is True
 
 
 def test_low_risk_gesture_followup_payload_preserves_distinct_motion_state() -> None:
