@@ -5351,6 +5351,135 @@ def test_execute_function_call_skips_response_create_for_intermediate_gesture_wi
     assert api._tool_followup_state(canonical_key=canonical_key) == "dropped"
 
 
+def test_execute_function_call_intermediate_inject_only_dispatches_next_deterministic_step(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_response_turn_id = "turn_chain_dispatch"
+    api._active_input_event_key_by_turn_id["turn_chain_dispatch"] = "item_parent_chain_dispatch"
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._intent_ledger = {}
+    api._last_user_input_text = "look right then left and report"
+    api._resolve_continuity_tool_event_owner_turn = lambda *, fallback_turn_id: ("turn_chain_dispatch", False, "")
+    api._deterministic_followthrough_runtime_descriptor = lambda *, turn_id: {
+        "request_id": "req_chain_dispatch",
+        "step_id": "step_2",
+        "tool_name": "gesture_look_left",
+        "tool_args": {},
+    }
+
+    def _fake_followup_event(**_kwargs):
+        return (
+            {
+                "type": "response.create",
+                "response": {
+                    "metadata": {
+                        "tool_followup_create_suppressed": "true",
+                        "tool_followup_create_suppression_reason": "gesture_intermediate_inject_only",
+                    }
+                },
+            },
+            api._canonical_utterance_key(
+                turn_id="turn_chain_dispatch",
+                input_event_key="tool:call_chain_step_1",
+            ),
+        )
+
+    api._build_tool_followup_response_create_event = _fake_followup_event
+    dispatched: list[dict[str, object]] = []
+
+    async def _fake_dispatch(**kwargs):
+        dispatched.append(kwargs)
+        return {"outcome": "allow", "executed": True}
+
+    api._submit_companion_gesture_tool_request = _fake_dispatch
+
+    async def _fake_gesture(**_kwargs):
+        return {"ok": True, "motion_request_key": "mrk-chain-step-1"}
+
+    monkeypatch.setitem(
+        __import__("ai.tools", fromlist=["function_map"]).function_map,
+        "gesture_look_right",
+        _fake_gesture,
+    )
+
+    asyncio.run(api.execute_function_call("gesture_look_right", "call_chain_step_1", {"target": "right"}, ws))
+
+    response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert response_create_events == []
+    assert len(dispatched) == 1
+    dispatch_call = dispatched[0]
+    assert dispatch_call["tool_name"] == "gesture_look_left"
+    assert dispatch_call["source"] == "deterministic_followthrough_inject_only"
+    assert dispatch_call["allow_followthrough_execution"] is True
+
+
+def test_deterministic_inject_only_dispatch_dedupe_only_latches_after_executed() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    api._current_turn_id_or_unknown = lambda: "turn_chain_dispatch_retry"
+    api._resolve_continuity_tool_event_owner_turn = lambda *, fallback_turn_id: ("turn_chain_dispatch_retry", False, "")
+    api._deterministic_followthrough_runtime_descriptor = lambda *, turn_id: {
+        "request_id": "req_chain_dispatch_retry",
+        "step_id": "step_2",
+        "tool_name": "gesture_look_left",
+        "tool_args": {},
+    }
+
+    attempts: list[dict[str, object]] = []
+
+    async def _fake_dispatch(**kwargs):
+        attempts.append(kwargs)
+        if len(attempts) == 1:
+            return {"outcome": "defer", "executed": False}
+        return {"outcome": "allow", "executed": True}
+
+    api._submit_companion_gesture_tool_request = _fake_dispatch
+
+    asyncio.run(
+        api._maybe_continue_deterministic_followthrough_after_inject_only(
+            websocket=object(),
+            triggering_tool_name="gesture_look_right",
+            suppression_reason="gesture_intermediate_inject_only",
+        )
+    )
+    asyncio.run(
+        api._maybe_continue_deterministic_followthrough_after_inject_only(
+            websocket=object(),
+            triggering_tool_name="gesture_look_right",
+            suppression_reason="gesture_intermediate_inject_only",
+        )
+    )
+    asyncio.run(
+        api._maybe_continue_deterministic_followthrough_after_inject_only(
+            websocket=object(),
+            triggering_tool_name="gesture_look_right",
+            suppression_reason="gesture_intermediate_inject_only",
+        )
+    )
+
+    assert len(attempts) == 2
+
+
+def test_prune_deterministic_followthrough_dispatch_registry_keeps_only_owner_and_current_turn() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    api._current_turn_id_or_unknown = lambda: "turn_current"
+    api._continuity_ledger = types.SimpleNamespace(compound_owner_turn_id=lambda: "turn_owner")
+    api._deterministic_followthrough_dispatched_steps = {
+        ("turn_owner", "step_owner"),
+        ("turn_current", "step_current"),
+        ("turn_old", "step_old"),
+    }
+
+    api._prune_deterministic_followthrough_dispatch_registry()
+
+    assert ("turn_owner", "step_owner") in api._deterministic_followthrough_dispatched_steps
+    assert ("turn_current", "step_current") in api._deterministic_followthrough_dispatched_steps
+    assert ("turn_old", "step_old") not in api._deterministic_followthrough_dispatched_steps
+
+
 def test_execute_function_call_skips_response_create_for_completed_non_report_gesture(monkeypatch) -> None:
     api = _make_api_stub()
     _wire_runtime(api)
