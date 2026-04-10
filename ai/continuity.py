@@ -31,6 +31,12 @@ ContinuityStatus = Literal["active", "blocked", "pending", "resolved", "expired"
 ContinuityPriority = Literal["low", "medium", "high"]
 CompoundStepKind = Literal["gesture", "diagnostics", "observation", "followup", "report"]
 CompoundStepStatus = Literal["pending", "active", "completed"]
+StepOutputPolicy = Literal[
+    "execution_state_update",
+    "model_context_injection_only",
+    "silent_intermediate",
+    "required_deliverable",
+]
 # Deterministic continuity stance labels used for bookkeeping and inspection.
 ContinuityStance = Literal[
     "idle",
@@ -181,6 +187,7 @@ class CompoundContinuityStep:
     perception_mode: Literal["visual", "auditory", "external_unknown", ""] = ""
     report_intent: Literal["describe", "identify", "verify", "status", ""] = ""
     implicit_observation_required: bool = False
+    step_output_policy: StepOutputPolicy = "execution_state_update"
 
 
 @dataclass(frozen=True)
@@ -190,6 +197,8 @@ class CompoundContinuityState:
     steps: tuple[CompoundContinuityStep, ...]
     active_step_index: int | None
     completed_step_ids: tuple[str, ...]
+    # Legacy alias retained for compatibility with existing runtime/test seams.
+    # Semantically: whether any required-deliverable step remains pending.
     final_followup_pending: bool
     recent_completed_step_id: str | None = None
     next_pending_step_id: str | None = None
@@ -748,7 +757,10 @@ class ContinuityLedger:
         close_ongoing = self._as_bool(payload.get("close_ongoing"))
         close_commitment = self._as_bool(payload.get("close_commitment"))
         close_unresolved = self._as_bool(payload.get("close_unresolved"))
+        complete_required_deliverable = self._as_bool(payload.get("complete_required_deliverable"))
+        # Backward-compatible alias for older callers/tests.
         complete_final_report = self._as_bool(payload.get("complete_final_report"))
+        complete_required_deliverable = complete_required_deliverable or complete_final_report
         keep_ongoing = self._as_bool(payload.get("keep_ongoing"))
         owner_turn_id = self._clean_text(payload.get("turn_id"))
         allow_rebind = self._as_bool(payload.get("allow_cross_turn_rebind"))
@@ -767,12 +779,12 @@ class ContinuityLedger:
         self._advance_compound_state_on_response_done(
             close_commitment=close_commitment,
             close_unresolved=close_unresolved,
-            complete_final_report=complete_final_report,
+            complete_required_deliverable=complete_required_deliverable,
             turn_id=owner_turn_id,
             allow_cross_turn_rebind=allow_rebind,
             rebind_reason=rebind_reason,
         )
-        self._stance = "idle" if close_ongoing or close_commitment or close_unresolved or complete_final_report else "awaiting_user"
+        self._stance = "idle" if close_ongoing or close_commitment or close_unresolved or complete_required_deliverable else "awaiting_user"
 
     def _advance_compound_state_on_tool_start(
         self,
@@ -853,7 +865,7 @@ class ContinuityLedger:
         *,
         close_commitment: bool,
         close_unresolved: bool,
-        complete_final_report: bool,
+        complete_required_deliverable: bool,
         turn_id: str,
         allow_cross_turn_rebind: bool,
         rebind_reason: str,
@@ -877,12 +889,8 @@ class ContinuityLedger:
                 step = updated.steps[idx]
                 if step.kind != "report":
                     updated = self._replace_compound_step_status(updated, idx, "completed")
-        if (
-            complete_final_report
-            and updated.final_followup_pending
-            and not self._has_open_non_report_steps(updated)
-        ):
-            idx = self._first_pending_step_index(updated, kinds={"report"})
+        if complete_required_deliverable and updated.final_followup_pending:
+            idx = self._active_or_pending_required_deliverable_step_index(updated)
             if idx is not None:
                 updated = self._replace_compound_step_status(updated, idx, "completed")
         self._compound_state = None if self._compound_state_resolved(updated) else updated
@@ -958,7 +966,9 @@ class ContinuityLedger:
         if status == "completed":
             for idx, step in enumerate(updated_steps):
                 if idx != step_index and step.status == "active":
-                    updated_steps[idx] = replace(step, status="completed")
+                    # Preserve safety under unexpected multi-active states: do not
+                    # silently auto-complete a sibling step.
+                    updated_steps[idx] = replace(step, status="pending")
         elif status == "active":
             for idx, step in enumerate(updated_steps):
                 if idx != step_index and step.status == "active":
@@ -971,13 +981,15 @@ class ContinuityLedger:
         next_pending_index = next((idx for idx, step in enumerate(updated_steps) if step.status == "pending"), None)
         if status == "completed" and next_pending_index is not None:
             next_step = updated_steps[next_pending_index]
-            if next_step.kind != "report":
-                updated_steps[next_pending_index] = replace(next_step, status="active")
+            updated_steps[next_pending_index] = replace(next_step, status="active")
         active_step_index = next((idx for idx, step in enumerate(updated_steps) if step.status == "active"), None)
         completed_ids = tuple(step.step_id for step in updated_steps if step.status == "completed")
         next_pending_id = next((step.step_id for step in updated_steps if step.status == "pending"), None)
         recent_completed = target.step_id if status == "completed" else state.recent_completed_step_id
-        final_followup_pending = any(step.kind == "report" and step.status != "completed" for step in updated_steps)
+        final_followup_pending = any(
+            step.step_output_policy == "required_deliverable" and step.status != "completed"
+            for step in updated_steps
+        )
         return replace(
             state,
             steps=tuple(updated_steps),
@@ -1010,6 +1022,23 @@ class ContinuityLedger:
                 continue
             return idx
         return None
+
+
+    def _first_pending_required_deliverable_step_index(self, state: CompoundContinuityState) -> int | None:
+        for idx, step in enumerate(state.steps):
+            if step.status != "pending":
+                continue
+            if step.step_output_policy == "required_deliverable":
+                return idx
+        return None
+
+    def _active_or_pending_required_deliverable_step_index(self, state: CompoundContinuityState) -> int | None:
+        for idx, step in enumerate(state.steps):
+            if step.step_output_policy != "required_deliverable":
+                continue
+            if step.status == "active":
+                return idx
+        return self._first_pending_required_deliverable_step_index(state)
 
     def _close_item(self, item_id: str) -> None:
         item = self._items.get(item_id)
@@ -1085,6 +1114,7 @@ class ContinuityLedger:
             "recently_completed_substep": None if recent_step is None else self._trim_text(recent_step.summary, 48),
             "next_substep": None if next_step is None else self._trim_text(next_step.summary, 48),
             "final_followup_pending": state.final_followup_pending,
+            "required_deliverable_pending": state.final_followup_pending,
             "steps": tuple(
                 {
                     "step_id": step.step_id,
@@ -1096,6 +1126,7 @@ class ContinuityLedger:
                     "perception_mode": step.perception_mode,
                     "report_intent": step.report_intent,
                     "implicit_observation_required": step.implicit_observation_required,
+                    "step_output_policy": step.step_output_policy,
                 }
                 for step in state.steps[:_MAX_COMPOUND_STEPS]
             ),
@@ -1226,14 +1257,12 @@ class ContinuityLedger:
         if len(clauses) <= 1:
             return None
         steps: list[CompoundContinuityStep] = []
-        followup_recorded = False
         for idx, clause in enumerate(clauses[:_MAX_COMPOUND_STEPS]):
             step = self._build_compound_step(
                 clause,
                 step_index=idx,
                 source=source,
                 unresolved_summary=unresolved_summary,
-                followup_recorded=followup_recorded,
                 prior_steps=tuple(steps),
             )
             if step is None:
@@ -1245,7 +1274,6 @@ class ContinuityLedger:
                 and not self._is_explicit_followthrough_request(clause)
             ):
                 continue
-            followup_recorded = followup_recorded or step.kind == "report"
             normalized_index = len(steps)
             if normalized_index != idx:
                 step = replace(step, step_id=f"step_{normalized_index + 1}", status="active" if normalized_index == 0 else "pending")
@@ -1254,7 +1282,10 @@ class ContinuityLedger:
             return None
         active_step_index = next((idx for idx, step in enumerate(steps) if step.status == "active"), None)
         next_pending_step_id = next((step.step_id for step in steps if step.status == "pending"), None)
-        final_followup_pending = any(step.kind == "report" and step.status != "completed" for step in steps)
+        final_followup_pending = any(
+            step.step_output_policy == "required_deliverable" and step.status != "completed"
+            for step in steps
+        )
         return CompoundContinuityState(
             request_id="request:current",
             summary=transcript,
@@ -1300,15 +1331,12 @@ class ContinuityLedger:
         step_index: int,
         source: str,
         unresolved_summary: str | None,
-        followup_recorded: bool,
         prior_steps: tuple[CompoundContinuityStep, ...],
     ) -> CompoundContinuityStep | None:
         normalized = clause.strip()
         if not normalized:
             return None
         kind = self._classify_compound_step_kind(normalized, unresolved_summary=unresolved_summary)
-        if kind == "report" and followup_recorded:
-            return None
         report_traits = self._classify_report_semantics(
             clause=normalized,
             kind=kind,
@@ -1325,7 +1353,17 @@ class ContinuityLedger:
             report_intent=report_traits["report_intent"],
             implicit_observation_required=bool(report_traits["requires_perception"])
             and report_traits["perception_mode"] == "visual",
+            step_output_policy=self._step_output_policy_for_kind(kind),
         )
+
+
+    @staticmethod
+    def _step_output_policy_for_kind(kind: CompoundStepKind) -> StepOutputPolicy:
+        if kind == "report":
+            return "required_deliverable"
+        if kind in {"observation", "followup"}:
+            return "model_context_injection_only"
+        return "execution_state_update"
 
     def _classify_report_semantics(
         self,

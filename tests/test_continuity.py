@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 import sys
 import types
 
@@ -35,6 +36,30 @@ def test_simple_single_step_request_does_not_create_compound_state() -> None:
     assert brief.compound_request is None
 
 
+
+
+
+
+def test_compound_status_replace_does_not_auto_complete_sibling_active_step() -> None:
+    ledger = ContinuityLedger()
+    ledger.update_from_event(
+        "transcript_final",
+        text="Look left, tell me status.",
+        source="input_audio_transcription",
+    )
+    state = ledger._compound_state
+    assert state is not None
+    steps = list(state.steps)
+    steps[1] = replace(steps[1], status="active")
+    ledger._compound_state = replace(
+        state,
+        steps=tuple(steps),
+        active_step_index=0,
+    )
+
+    patched_state = ledger._replace_compound_step_status(ledger._compound_state, 0, "completed")
+
+    assert [step.status for step in patched_state.steps] == ["completed", "active"]
 
 
 def test_compound_parser_keeps_action_plus_report_as_small_chain() -> None:
@@ -510,7 +535,7 @@ def test_compound_tool_result_center_matches_only_center_step() -> None:
     )
     correct_direction = ledger.build_brief("run-center", "turn-1", "center_match")
     assert correct_direction.compound_request is not None
-    assert [step.status for step in correct_direction.compound_request.steps] == ["completed", "pending"]
+    assert [step.status for step in correct_direction.compound_request.steps] == ["completed", "active"]
     assert correct_direction.compound_request.recent_completed_step_id == "step_1"
 
 
@@ -546,9 +571,9 @@ def test_compound_left_right_center_report_sequence_advances_in_order() -> None:
     ledger.update_from_event("tool_result_received", tool_name="gesture_look_center", call_id="call-3")
     after_center = ledger.build_brief("run-sequence", "turn-1", "after_center")
     assert after_center.compound_request is not None
-    assert [step.status for step in after_center.compound_request.steps] == ["completed", "completed", "completed", "pending"]
+    assert [step.status for step in after_center.compound_request.steps] == ["completed", "completed", "completed", "active"]
     assert after_center.compound_request.recent_completed_step_id == "step_3"
-    assert after_center.compound_request.next_pending_step_id == "step_4"
+    assert after_center.compound_request.next_pending_step_id is None
     assert after_center.compound_request.final_followup_pending is True
 
 
@@ -656,14 +681,14 @@ def test_compound_final_followup_stays_pending_until_explicitly_closed() -> None
     before_followup = ledger.build_brief("run-followup", "turn-1", "before_followup_close")
     assert before_followup.compound_request is not None
     assert before_followup.compound_request.final_followup_pending is True
-    assert before_followup.compound_request.steps[2].status == "pending"
+    assert before_followup.compound_request.steps[2].status == "active"
 
     ledger.update_from_event("response_done", close_unresolved="true")
 
     after_followup = ledger.build_brief("run-followup", "turn-1", "after_followup_close")
     assert after_followup.compound_request is not None
     assert after_followup.compound_request.final_followup_pending is True
-    assert after_followup.compound_request.steps[2].status == "pending"
+    assert after_followup.compound_request.steps[2].status == "active"
 
 
 def test_compound_response_done_does_not_complete_report_before_prior_non_report_step() -> None:
@@ -722,7 +747,7 @@ def test_compound_chain_closes_only_after_last_non_report_step_then_report() -> 
         "completed",
         "completed",
         "completed",
-        "pending",
+        "active",
     ]
     assert before_final_report_done.compound_request.final_followup_pending is True
 
@@ -734,13 +759,63 @@ def test_compound_chain_closes_only_after_last_non_report_step_then_report() -> 
         "completed",
         "completed",
         "completed",
-        "pending",
+        "active",
     ]
     assert after_non_final_response_done.compound_request.final_followup_pending is True
 
     ledger.update_from_event("response_done", complete_final_report="true")
     after_final_report_done = ledger.build_brief("run-order", "turn-1", "after_final_report_done")
     assert after_final_report_done.compound_request is None
+
+
+
+
+def test_compound_parser_preserves_multiple_required_deliverables_mid_chain() -> None:
+    ledger = ContinuityLedger()
+    ledger.update_from_event(
+        "transcript_final",
+        text="Look left, tell me status, look right, then tell me status.",
+        source="input_audio_transcription",
+    )
+
+    brief = ledger.build_brief("run-multi-deliverable", "turn-1", "initial")
+    assert brief.compound_request is not None
+    assert [step.kind for step in brief.compound_request.steps] == ["gesture", "report", "gesture", "report"]
+    assert [step.step_output_policy for step in brief.compound_request.steps] == [
+        "execution_state_update",
+        "required_deliverable",
+        "execution_state_update",
+        "required_deliverable",
+    ]
+
+
+def test_required_deliverable_can_complete_mid_chain_without_turn_closure() -> None:
+    ledger = ContinuityLedger()
+    ledger.update_from_event(
+        "transcript_final",
+        text="Look left, tell me status, look right, then tell me status.",
+        source="input_audio_transcription",
+    )
+
+    ledger.update_from_event("tool_result_received", tool_name="gesture_look_left", call_id="call-1")
+    after_step_1 = ledger.build_brief("run-mid-deliverable", "turn-1", "after_step_1")
+    assert after_step_1.compound_request is not None
+    assert [step.status for step in after_step_1.compound_request.steps] == ["completed", "active", "pending", "pending"]
+
+    ledger.update_from_event("response_done", complete_required_deliverable="true")
+    after_step_2 = ledger.build_brief("run-mid-deliverable", "turn-1", "after_step_2")
+    assert after_step_2.compound_request is not None
+    assert [step.status for step in after_step_2.compound_request.steps] == ["completed", "completed", "active", "pending"]
+    assert after_step_2.compound_request.final_followup_pending is True
+
+    ledger.update_from_event("tool_result_received", tool_name="gesture_look_right", call_id="call-2")
+    after_step_3 = ledger.build_brief("run-mid-deliverable", "turn-1", "after_step_3")
+    assert after_step_3.compound_request is not None
+    assert [step.status for step in after_step_3.compound_request.steps] == ["completed", "completed", "completed", "active"]
+
+    ledger.update_from_event("response_done", complete_required_deliverable="true")
+    after_step_4 = ledger.build_brief("run-mid-deliverable", "turn-1", "after_step_4")
+    assert after_step_4.compound_request is None
 
 
 def test_compound_response_done_with_close_commitment_does_not_skip_pending_followthrough_steps() -> None:

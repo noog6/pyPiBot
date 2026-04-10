@@ -4980,6 +4980,22 @@ def test_gesture_followup_payload_unknown_motion_avoids_completion_claims() -> N
     assert "avoid final completion claims" in instructions
 
 
+
+
+def test_tool_followup_post_completion_bucket_classifies_required_deliverable_independently_of_turn_tail() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    bucket, reason = api._classify_tool_followup_post_completion_bucket(
+        keep_status_only=False,
+        followthrough_remaining=True,
+        non_report_followthrough_remaining=True,
+        tool_result_has_distinct_info=False,
+    )
+
+    assert bucket == "required_deliverable"
+    assert reason == "required_deliverable_owed"
+
 def test_low_risk_gesture_followup_drops_status_only_when_only_report_followup_remains() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
@@ -5011,13 +5027,14 @@ def test_low_risk_gesture_followup_drops_status_only_when_only_report_followup_r
     instructions = str(payload.get("instructions") or "")
 
     assert metadata.get("tool_followup_status_only") is None
+    assert metadata.get("tool_followup_step_output_policy") == "required_deliverable"
     assert metadata.get("tool_followup_post_completion_bucket") == "final_required_deliverable"
-    assert metadata.get("tool_followup_post_completion_reason") == "final_followup_report_owed"
+    assert metadata.get("tool_followup_post_completion_reason") == "required_deliverable_owed"
     assert metadata.get("tool_followup_suppress_if_parent_covered") is None
     assert metadata.get("tool_followup_silent_audio") is None
     assert metadata.get("tool_followup_silent_user_facing_output") is None
     assert metadata.get("tool_followup_create_suppressed") is None
-    assert "Final follow-up report is still owed for the parent turn." in instructions
+    assert "Required user deliverable is still owed for the parent turn." in instructions
 
 
 def test_low_risk_gesture_followup_started_motion_yields_report_bridge_when_only_report_remains() -> None:
@@ -5054,7 +5071,7 @@ def test_low_risk_gesture_followup_started_motion_yields_report_bridge_when_only
     assert metadata.get("tool_followup_status_only") is None
     assert metadata.get("tool_followup_silent_audio") is None
     assert metadata.get("tool_followup_silent_user_facing_output") is None
-    assert "Final follow-up report is still owed for the parent turn." in instructions
+    assert "Required user deliverable is still owed for the parent turn." in instructions
 
 
 def test_low_risk_gesture_followup_started_motion_only_report_remaining_pivots_out_of_status_only_when_non_report_truth_is_conflated() -> None:
@@ -5097,7 +5114,7 @@ def test_low_risk_gesture_followup_started_motion_only_report_remaining_pivots_o
     assert metadata.get("tool_followup_silent_user_facing_output") is None
     assert metadata.get("tool_followup_tool_choice") is None
     assert metadata.get("tool_followup_tool_choice_reason") is None
-    assert "Final follow-up report is still owed for the parent turn." in instructions
+    assert "Required user deliverable is still owed for the parent turn." in instructions
 
 
 def test_low_risk_gesture_followup_started_motion_stays_status_only_for_true_intermediate_step() -> None:
@@ -5132,6 +5149,7 @@ def test_low_risk_gesture_followup_started_motion_stays_status_only_for_true_int
     metadata = payload.get("metadata") or {}
 
     assert metadata.get("tool_followup_status_only") == "true"
+    assert metadata.get("tool_followup_step_output_policy") == "model_context_injection_only"
     assert metadata.get("tool_followup_post_completion_bucket") == "model_context_injection_only"
     assert metadata.get("tool_followup_post_completion_reason") == "gesture_intermediate_inject_only"
     assert metadata.get("tool_followup_create_suppressed") == "true"
@@ -5172,6 +5190,7 @@ def test_low_risk_gesture_followup_marks_inject_only_no_create_for_intermediate_
     metadata = payload.get("metadata") or {}
 
     assert metadata.get("tool_followup_status_only") == "true"
+    assert metadata.get("tool_followup_step_output_policy") == "model_context_injection_only"
     assert metadata.get("tool_followup_post_completion_bucket") == "model_context_injection_only"
     assert metadata.get("tool_followup_post_completion_reason") == "gesture_intermediate_inject_only"
     assert metadata.get("tool_followup_create_suppressed") == "true"
@@ -5208,6 +5227,7 @@ def test_low_risk_gesture_followup_marks_no_create_when_followthrough_complete()
     payload = response_create_event.get("response") or {}
     metadata = payload.get("metadata") or {}
 
+    assert metadata.get("tool_followup_step_output_policy") == "execution_state_update"
     assert metadata.get("tool_followup_post_completion_bucket") == "execution_state_only"
     assert metadata.get("tool_followup_post_completion_reason") == "followthrough_complete_non_report"
     assert metadata.get("tool_followup_create_suppressed") == "true"
@@ -6032,7 +6052,7 @@ def test_build_tool_followup_event_uses_parent_turn_followthrough_truth_for_fina
 
     assert metadata.get("tool_followup_create_suppressed") is None
     assert metadata.get("tool_followup_status_only") is None
-    assert "Final follow-up report is still owed for the parent turn." in instructions
+    assert "Required user deliverable is still owed for the parent turn." in instructions
 
 
 def test_catalog_only_descriptive_tool_followup_adds_uncertainty_guardrail_instruction() -> None:

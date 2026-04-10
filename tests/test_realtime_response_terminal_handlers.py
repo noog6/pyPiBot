@@ -1534,7 +1534,7 @@ def test_handle_response_done_logs_continuity_handoff_fields(monkeypatch) -> Non
     assert "selection_reason=normal" in log_output
     assert "close_commitment=True" in log_output
     assert "close_unresolved=True" in log_output
-    assert "complete_final_report=True" in log_output
+    assert "complete_required_deliverable=True" in log_output
     assert "followthrough_chain_remaining=False" in log_output
     assert "allow_cross_turn_rebind=True" in log_output
     assert "rebind_reason=semantic_owner_parent_promoted" in log_output
