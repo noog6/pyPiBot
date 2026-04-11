@@ -171,6 +171,76 @@ def test_required_deliverable_done_fallback_uses_current_turn_only_as_last_resor
     assert result is True
 
 
+def test_required_deliverable_tool_execution_missing_accepts_parent_turn_tool_record() -> None:
+    api = _make_api()
+    api._response_trace_context_by_id = {
+        "resp_followthrough": {
+            "turn_id": "turn_child",
+            "parent_turn_id": "turn_parent",
+            "followthrough_required_tool_name": "get_current_time",
+        }
+    }
+    api._required_deliverable_step_requires_tool_execution = (
+        lambda *, turn_id: turn_id == "turn_parent"
+    )
+    api._tool_call_records = [
+        {
+            "name": "get_current_time",
+            "turn_id": "turn_parent",
+            "call_id": "call_time",
+        }
+    ]
+
+    missing = api._required_deliverable_tool_execution_missing(
+        turn_id="turn_child",
+        required_deliverable_followthrough=True,
+        response_id="resp_followthrough",
+        trace_context={
+            "turn_id": "turn_child",
+            "parent_turn_id": "turn_parent",
+            "followthrough_required_tool_name": "get_current_time",
+        },
+        stale_context={},
+    )
+
+    assert missing is False
+
+
+def test_required_deliverable_tool_execution_missing_still_blocks_without_required_tool_record() -> None:
+    api = _make_api()
+    api._response_trace_context_by_id = {
+        "resp_followthrough": {
+            "turn_id": "turn_child",
+            "parent_turn_id": "turn_parent",
+            "followthrough_required_tool_name": "get_current_time",
+        }
+    }
+    api._required_deliverable_step_requires_tool_execution = (
+        lambda *, turn_id: turn_id == "turn_parent"
+    )
+    api._tool_call_records = [
+        {
+            "name": "gesture_look_center",
+            "turn_id": "turn_parent",
+            "call_id": "call_center",
+        }
+    ]
+
+    missing = api._required_deliverable_tool_execution_missing(
+        turn_id="turn_child",
+        required_deliverable_followthrough=True,
+        response_id="resp_followthrough",
+        trace_context={
+            "turn_id": "turn_child",
+            "parent_turn_id": "turn_parent",
+            "followthrough_required_tool_name": "get_current_time",
+        },
+        stale_context={},
+    )
+
+    assert missing is True
+
+
 def test_handle_response_done_clears_terminal_response_text_store() -> None:
     api = _make_api()
     api._terminal_response_text_by_response_id = {"resp_1": "stale text"}

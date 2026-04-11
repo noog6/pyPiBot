@@ -395,6 +395,9 @@ class ResponseTerminalHandlers:
             and api._required_deliverable_tool_execution_missing(
                 turn_id=turn_id,
                 required_deliverable_followthrough=required_deliverable_followthrough,
+                response_id=active_response_id_before_clear,
+                trace_context=trace_context,
+                stale_context=stale_context,
             )
         )
         if required_deliverable_missing_substance:

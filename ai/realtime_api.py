@@ -20671,18 +20671,70 @@ class RealtimeAPI:
         *,
         turn_id: str,
         required_deliverable_followthrough: bool,
+        response_id: str | None = None,
+        trace_context: Mapping[str, Any] | None = None,
+        stale_context: Mapping[str, Any] | None = None,
     ) -> bool:
         if not required_deliverable_followthrough:
             return False
-        normalized_turn_id = str(turn_id or "").strip()
-        if not normalized_turn_id:
+
+        trace_candidate = trace_context if isinstance(trace_context, Mapping) else {}
+        stale_candidate = stale_context if isinstance(stale_context, Mapping) else {}
+        normalized_response_id = str(response_id or "").strip()
+        stored_trace: Mapping[str, Any] = {}
+        if normalized_response_id:
+            stored_trace = self._response_trace_by_id().get(normalized_response_id, {})
+
+        candidate_turn_ids: list[str] = []
+        for value in (
+            turn_id,
+            trace_candidate.get("turn_id"),
+            stale_candidate.get("turn_id"),
+            stored_trace.get("turn_id"),
+            trace_candidate.get("parent_turn_id"),
+            stale_candidate.get("parent_turn_id"),
+            stored_trace.get("parent_turn_id"),
+        ):
+            normalized_turn_id = str(value or "").strip()
+            if normalized_turn_id and normalized_turn_id not in candidate_turn_ids:
+                candidate_turn_ids.append(normalized_turn_id)
+
+        if not candidate_turn_ids:
             return False
-        if not self._required_deliverable_step_requires_tool_execution(turn_id=normalized_turn_id):
+
+        required_tool_name = ""
+        for context in (trace_candidate, stale_candidate, stored_trace):
+            tool_name = str(
+                context.get("followthrough_required_tool_name")
+                or context.get("tool_followup_required_tool_name")
+                or ""
+            ).strip().lower()
+            if tool_name:
+                required_tool_name = tool_name
+                break
+
+        requires_tool_execution = False
+        for candidate_turn_id in candidate_turn_ids:
+            if self._required_deliverable_step_requires_tool_execution(turn_id=candidate_turn_id):
+                requires_tool_execution = True
+                if not required_tool_name:
+                    inferred_tool_name = str(
+                        self._required_deliverable_required_tool_name(turn_id=candidate_turn_id) or ""
+                    ).strip().lower()
+                    if inferred_tool_name:
+                        required_tool_name = inferred_tool_name
+                break
+
+        if not requires_tool_execution:
             return False
+
+        tool_name_to_match = required_tool_name or "get_current_time"
+        candidate_turn_id_set = set(candidate_turn_ids)
         for record in reversed(tuple(getattr(self, "_tool_call_records", ()) or ())):
-            if str(record.get("turn_id") or "").strip() != normalized_turn_id:
+            record_turn_id = str(record.get("turn_id") or "").strip()
+            if record_turn_id and record_turn_id not in candidate_turn_id_set:
                 continue
-            if str(record.get("name") or "").strip().lower() == "get_current_time":
+            if str(record.get("name") or "").strip().lower() == tool_name_to_match:
                 return False
         return True
 
