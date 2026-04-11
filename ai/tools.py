@@ -84,6 +84,11 @@ async def read_runtime_diagnostics() -> dict[str, Any]:
     return tool_runtime.read_runtime_diagnostics()
 
 
+async def get_current_time(context: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return current local time/date grounding (read-only, on-demand)."""
+    return tool_runtime.get_current_time(context=context)
+
+
 async def read_imu_data() -> dict[str, Any]:
     """Return the latest IMU orientation and sensor readings."""
 
@@ -580,6 +585,37 @@ tools.append(
 )
 
 function_map["read_runtime_diagnostics"] = read_runtime_diagnostics
+
+tools.append(
+    {
+        "type": "function",
+        "name": "get_current_time",
+        "description": (
+            "Return your current local date/time grounding with explicit machine-readable fields, including "
+            "ISO local datetime, weekday, UTC offset, and unix_epoch_ms. Optional context supports "
+            "timezone (canonical) or tz (alias) and include_period_of_day (default true). "
+            "This is a read-only, on-demand grounding primitive; do not poll repeatedly, and normally call "
+            "at most once per turn unless the user explicitly asks for a refresh."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "context": {
+                    "type": "object",
+                    "properties": {
+                        "timezone": {"type": "string"},
+                        "tz": {"type": "string"},
+                        "include_period_of_day": {"type": "boolean", "default": True},
+                    },
+                    "required": [],
+                }
+            },
+            "required": [],
+        },
+    }
+)
+
+function_map["get_current_time"] = get_current_time
 
 tools.append(
     {

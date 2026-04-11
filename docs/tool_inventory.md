@@ -12,6 +12,7 @@ This document is a derived representation for human review and should stay in pa
 | `read_battery_voltage` | SAFE | NONE | LOW | NEVER |
 | `read_environment` | SAFE | NONE | LOW | NEVER |
 | `read_runtime_diagnostics` | SAFE | NONE | LOW | NEVER |
+| `get_current_time` | SAFE | NONE | LOW | NEVER |
 | `read_imu_data` | SAFE | NONE | LOW | NEVER |
 | `gesture_idle` | GUARDED | REVERSIBLE_MOTION | LOW | ASK |
 | `gesture_nod` | GUARDED | REVERSIBLE_MOTION | LOW | ASK |

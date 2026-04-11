@@ -359,6 +359,20 @@ governance:
       side_effects: "NONE"
       sensitivity: "LOW"
       default_confirmation: "NEVER"
+    get_current_time:
+      tier: 0
+      reversible: true
+      cost_hint: "cheap"
+      safety_tags: ["time", "diagnostics"]
+      confirm_required: false
+      confirm_reason: "read-only local time grounding query"
+      confirm_prompt: null
+      cooldown_seconds: 0
+      dry_run_supported: true
+      governance_tier: "SAFE"
+      side_effects: "NONE"
+      sensitivity: "LOW"
+      default_confirmation: "NEVER"
     read_imu_data:
       tier: 0
       reversible: true

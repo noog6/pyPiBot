@@ -10,8 +10,10 @@ import socket
 import subprocess
 import threading
 import time
+from datetime import datetime
 from collections.abc import Callable
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from hardware import ADS1015Sensor, LPS22HBSensor
 from motion import (
@@ -520,6 +522,76 @@ def read_environment() -> dict[str, Any]:
         "pressure_unit": "hPa",
         "temperature_unit": "C",
     }
+
+
+def get_current_time(context: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return read-only local time/date grounding for the current instant.
+
+    Usage policy: on-demand primitive only; do not poll repeatedly in a turn.
+    """
+
+    normalized_context = context if isinstance(context, dict) else {}
+    timezone_value = normalized_context.get("timezone", normalized_context.get("tz"))
+    timezone_requested = str(timezone_value).strip() if timezone_value is not None else ""
+    include_period_of_day = bool(normalized_context.get("include_period_of_day", True))
+
+    timezone_source = "system_local"
+    requested_timezone: str | None = None
+    try:
+        if timezone_requested:
+            tzinfo = ZoneInfo(timezone_requested)
+            requested_timezone = timezone_requested
+            timezone_source = "request"
+        else:
+            tzinfo = datetime.now().astimezone().tzinfo
+            if tzinfo is None:
+                return {
+                    "status": "error",
+                    "error_code": "timezone_unavailable",
+                    "message": "Unable to determine system local timezone.",
+                    "requested_timezone": None,
+                    "timezone_source": "system_local",
+                }
+    except ZoneInfoNotFoundError:
+        return {
+            "status": "error",
+            "error_code": "invalid_timezone",
+            "message": f"Unknown timezone: {timezone_requested}",
+            "requested_timezone": timezone_requested or None,
+            "timezone_source": "request",
+        }
+
+    now = datetime.now(tzinfo)
+    timezone_name = getattr(now.tzinfo, "key", None) or now.tzname() or "unknown"
+    utc_offset = now.strftime("%z")
+    formatted_utc_offset = (
+        f"{utc_offset[:3]}:{utc_offset[3:]}" if len(utc_offset) == 5 else "unknown"
+    )
+
+    result: dict[str, Any] = {
+        "status": "ok",
+        "local_datetime_iso": now.isoformat(timespec="seconds"),
+        "local_date": now.strftime("%Y-%m-%d"),
+        "local_time": now.strftime("%H:%M:%S"),
+        "timezone_name": timezone_name,
+        "utc_offset": formatted_utc_offset,
+        "weekday": now.strftime("%A"),
+        "timezone_source": timezone_source,
+        "unix_epoch_ms": int(now.timestamp() * 1000),
+    }
+    if requested_timezone:
+        result["requested_timezone"] = requested_timezone
+    if include_period_of_day:
+        hour = now.hour
+        if 5 <= hour < 12:
+            result["period_of_day"] = "morning"
+        elif 12 <= hour < 17:
+            result["period_of_day"] = "afternoon"
+        elif 17 <= hour < 21:
+            result["period_of_day"] = "evening"
+        else:
+            result["period_of_day"] = "night"
+    return result
 
 
 def enqueue_idle_gesture(delay_ms: int = 0, intensity: float = 1.0) -> dict[str, Any]:
