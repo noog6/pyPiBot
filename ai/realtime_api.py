@@ -1208,6 +1208,8 @@ class RealtimeAPI:
         self._empty_response_retry_counts: dict[str, int] = {}
         self._empty_response_retry_fallback_emitted: set[str] = set()
         self._empty_response_retry_max_attempts = 2
+        self._required_deliverable_materialization_retry_counts: dict[str, int] = {}
+        self._required_deliverable_materialization_retry_max_attempts = 2
         self._response_delivery_ledger: dict[str, str] = {}
         self._response_id_by_canonical_key: dict[str, str] = {}
         self._canonical_response_state_by_key: dict[str, CanonicalResponseState] = {}
@@ -18037,6 +18039,12 @@ class RealtimeAPI:
                 or (response_metadata or {}).get("tool_followup_post_completion_reason")
                 or ""
             ).strip().lower()
+            metadata_followthrough_dispatch_source = str(
+                (response_metadata or {}).get("followthrough_dispatch_source") or ""
+            ).strip().lower()
+            metadata_local_runtime_followthrough = str(
+                (response_metadata or {}).get("local_runtime_followthrough") or ""
+            ).strip().lower()
             metadata_trigger = str((response_metadata or {}).get("trigger") or "").strip().lower()
             metadata_reason = str((response_metadata or {}).get("reason") or "").strip().lower()
             self._record_response_trace_context(
@@ -18058,6 +18066,8 @@ class RealtimeAPI:
                 followthrough_step_output_policy=metadata_tool_followup_step_output_policy,
                 tool_followup_post_completion_reason=metadata_tool_followup_post_completion_reason,
                 followthrough_post_completion_reason=metadata_tool_followup_post_completion_reason,
+                followthrough_dispatch_source=metadata_followthrough_dispatch_source,
+                local_runtime_followthrough=metadata_local_runtime_followthrough,
                 tool_call_id=metadata_tool_call_id,
             )
             pref_payload = self._peek_pending_preference_memory_context_payload(
@@ -20629,6 +20639,48 @@ class RealtimeAPI:
             dispatched.add(turn_id)
             return True
         return False
+
+    def _release_required_deliverable_followthrough_dispatch_lock(
+        self,
+        *,
+        turn_id: str,
+        reason: str,
+    ) -> None:
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return
+        dispatched = getattr(self, "_deterministic_followthrough_required_report_dispatched_turns", None)
+        if isinstance(dispatched, set):
+            dispatched.discard(normalized_turn_id)
+        logger.info(
+            "required_deliverable_followthrough_dispatch_lock_released run_id=%s turn_id=%s reason=%s",
+            self._current_run_id() or "",
+            normalized_turn_id,
+            str(reason or "").strip() or "unspecified",
+        )
+
+    def _consume_required_deliverable_materialization_retry_budget(
+        self,
+        *,
+        turn_id: str,
+    ) -> tuple[bool, int, int]:
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return False, 0, 0
+        retries = getattr(self, "_required_deliverable_materialization_retry_counts", None)
+        if not isinstance(retries, dict):
+            retries = {}
+            self._required_deliverable_materialization_retry_counts = retries
+        max_attempts = max(
+            1,
+            int(getattr(self, "_required_deliverable_materialization_retry_max_attempts", 2) or 2),
+        )
+        attempts = int(retries.get(normalized_turn_id, 0) or 0)
+        if attempts >= max_attempts:
+            return False, attempts, max_attempts
+        attempts += 1
+        retries[normalized_turn_id] = attempts
+        return True, attempts, max_attempts
 
     def _required_deliverable_step_requires_tool_execution(self, *, turn_id: str) -> bool:
         return self._required_deliverable_required_tool_name(turn_id=turn_id) is not None
