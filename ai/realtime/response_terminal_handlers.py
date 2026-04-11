@@ -372,8 +372,12 @@ class ResponseTerminalHandlers:
         )
         selected = selection_decision.selected
         selection_reason = selection_decision.reason_code
-        required_deliverable_followthrough = api._trace_context_marks_required_deliverable_followthrough(
-            trace_context
+        required_deliverable_followthrough = api._response_done_marks_required_deliverable_followthrough(
+            origin=str(active_response_origin_before_clear or ""),
+            turn_id=turn_id,
+            response_id=active_response_id_before_clear,
+            trace_context=trace_context,
+            stale_context=stale_context,
         )
         selected_response_has_terminal_text_evidence = api._selected_response_has_terminal_text_evidence(
             response_id=active_response_id_before_clear
@@ -883,27 +887,38 @@ class ResponseTerminalHandlers:
             response_id=active_response_id_before_clear,
             include_report_followup=True,
         )
+        required_deliverable_path_pending = api._response_done_marks_required_deliverable_followthrough(
+            origin=active_response_origin_before_clear,
+            turn_id=continuity_candidate_turn_id,
+            response_id=active_response_id_before_clear,
+            trace_context=trace_context,
+            stale_context=stale_context,
+        )
+        selected_response_has_terminal_text = api._selected_response_has_terminal_text_evidence(
+            response_id=resolved_response_id or active_response_id_before_clear
+        )
+        continuity_completion_candidate = (
+            selected
+            and selection_reason == "normal"
+            and selected_response_has_terminal_text
+        )
         continuity_close_commitment = (
             continuity_close_allowed
             and continuity_origin == "tool_output"
             and not followthrough_chain_remaining_for_close
         )
+        if required_deliverable_path_pending and not continuity_completion_candidate:
+            continuity_close_commitment = False
         continuity_close_unresolved = (
             continuity_close_commitment
             and not obligation_open
             and not followthrough_chain_remaining_for_retry
         )
         # NOTE: This flag name is legacy compound-centric language. In practice this
-        # marks that response.done delivered the final substantive fulfillment for
-        # this terminal path (selected + normal + substantive evidence), which can
-        # include non-compound tool-output completions.
+        # marks that response.done delivered terminal substantive fulfillment
+        # (selected + normal + terminal text evidence).
         continuity_complete_required_deliverable = (
-            continuity_close_commitment
-            and selected
-            and selection_reason == "normal"
-            and api._selected_response_has_terminal_text_evidence(
-                response_id=resolved_response_id or active_response_id_before_clear
-            )
+            continuity_close_commitment and continuity_completion_candidate
         )
         continuity_turn_id = turn_id
         continuity_rebind_allowed = False
