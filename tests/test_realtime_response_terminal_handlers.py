@@ -333,6 +333,84 @@ def test_handle_response_done_skips_redrive_when_required_deliverable_retry_budg
     api._dispatch_required_deliverable_followthrough_response_create.assert_not_awaited()
 
 
+def test_handle_response_done_redrives_required_deliverable_without_trace_markers_when_continuity_still_open() -> None:
+    api = _make_api()
+    api._active_response_origin = "tool_output"
+    api._response_done_deliverable_arbitration = Mock(
+        return_value=TerminalDeliverableDecision(
+            selected=True,
+            reason_code="normal",
+            selected_candidate_id="terminal_selected",
+        )
+    )
+    api._response_done_marks_required_deliverable_followthrough = Mock(return_value=True)
+    api._selected_response_has_terminal_text_evidence = Mock(return_value=False)
+    api._required_deliverable_tool_execution_missing = Mock(return_value=False)
+    api._turn_has_active_required_deliverable_step = Mock(return_value=True)
+    api._response_trace_context_by_id = {"resp_1": {}}
+    api._stale_response_context = lambda _response_id: {}
+    api._should_admit_response_terminal_event = lambda **_kwargs: True
+    api._consume_required_deliverable_materialization_retry_budget = Mock(return_value=(True, 1, 2))
+    api._release_required_deliverable_followthrough_dispatch_lock = Mock()
+    api._dispatch_required_deliverable_followthrough_response_create = AsyncMock(return_value=True)
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_1"}}))
+
+    api._release_required_deliverable_followthrough_dispatch_lock.assert_called_once_with(
+        turn_id="turn_1",
+        reason="required_deliverable_missing_substantive_content",
+    )
+    api._dispatch_required_deliverable_followthrough_response_create.assert_awaited_once_with(
+        websocket=api.websocket,
+        turn_id="turn_1",
+    )
+
+
+def test_handle_response_done_skips_redrive_without_markers_when_continuity_not_open() -> None:
+    api = _make_api()
+    api._active_response_origin = "tool_output"
+    api._response_done_deliverable_arbitration = Mock(
+        return_value=TerminalDeliverableDecision(
+            selected=True,
+            reason_code="normal",
+            selected_candidate_id="terminal_selected",
+        )
+    )
+    api._response_done_marks_required_deliverable_followthrough = Mock(return_value=True)
+    api._selected_response_has_terminal_text_evidence = Mock(return_value=False)
+    api._required_deliverable_tool_execution_missing = Mock(return_value=False)
+    api._turn_has_active_required_deliverable_step = Mock(return_value=False)
+    api._response_trace_context_by_id = {"resp_1": {}}
+    api._stale_response_context = lambda _response_id: {}
+    api._should_admit_response_terminal_event = lambda **_kwargs: True
+    api._consume_required_deliverable_materialization_retry_budget = Mock(return_value=(True, 1, 2))
+    api._release_required_deliverable_followthrough_dispatch_lock = Mock()
+    api._dispatch_required_deliverable_followthrough_response_create = AsyncMock(return_value=True)
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_1"}}))
+
+    api._release_required_deliverable_followthrough_dispatch_lock.assert_not_called()
+    api._dispatch_required_deliverable_followthrough_response_create.assert_not_awaited()
+
+
 def test_handle_response_done_clears_terminal_response_text_store() -> None:
     api = _make_api()
     api._terminal_response_text_by_response_id = {"resp_1": "stale text"}
