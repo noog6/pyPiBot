@@ -126,6 +126,46 @@ def test_read_runtime_diagnostics_tool_description_mentions_continuity_diagnosti
     assert "Theo's current runtime diagnostics bundle" not in description
 
 
+def test_get_current_time_delegates_and_keeps_payload_shape(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_get_current_time(context: dict[str, object] | None = None) -> dict[str, object]:
+        captured["context"] = context
+        return {
+            "status": "ok",
+            "local_datetime_iso": "2026-04-11T14:38:12-07:00",
+            "local_date": "2026-04-11",
+            "local_time": "14:38:12",
+            "weekday": "Saturday",
+            "timezone_name": "America/Los_Angeles",
+            "utc_offset": "-07:00",
+            "timezone_source": "request",
+            "requested_timezone": "America/Los_Angeles",
+            "period_of_day": "afternoon",
+            "unix_epoch_ms": 1775924292000,
+        }
+
+    monkeypatch.setattr(ai_tools.tool_runtime, "get_current_time", fake_get_current_time)
+
+    payload = asyncio.run(ai_tools.get_current_time(context={"timezone": "America/Los_Angeles"}))
+
+    assert captured == {"context": {"timezone": "America/Los_Angeles"}}
+    assert payload["status"] == "ok"
+    assert payload["timezone_name"] == "America/Los_Angeles"
+    assert payload["unix_epoch_ms"] == 1775924292000
+
+
+def test_get_current_time_tool_registered_in_schema_and_function_map() -> None:
+    current_time_tool = next(tool for tool in ai_tools.tools if tool.get("name") == "get_current_time")
+    description = current_time_tool["description"]
+
+    assert current_time_tool["type"] == "function"
+    assert "read-only, on-demand grounding primitive" in description
+    assert "do not poll repeatedly" in description
+    assert "at most once per turn" in description
+    assert ai_tools.function_map["get_current_time"] is ai_tools.get_current_time
+
+
 def test_gesture_nod_delegates_and_keeps_payload_shape(monkeypatch) -> None:
     captured: dict[str, float | int] = {}
 
