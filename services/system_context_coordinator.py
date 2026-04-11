@@ -7,6 +7,7 @@ import time
 from typing import Any
 
 from core.logging import logger
+from services import tool_runtime
 
 
 class SystemContextCoordinator:
@@ -22,6 +23,7 @@ class SystemContextCoordinator:
         semantic_state: str,
         semantic_reason: str,
         battery_monitor: Any | None = None,
+        inject_startup_time_context: bool = True,
         poll_interval_s: float = 0.2,
     ) -> None:
         self._realtime_api = realtime_api
@@ -31,6 +33,7 @@ class SystemContextCoordinator:
         self._boot_time = boot_time
         self._semantic_state = semantic_state
         self._semantic_reason = semantic_reason
+        self._inject_startup_time_context = bool(inject_startup_time_context)
         self._poll_interval_s = max(0.05, poll_interval_s)
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -121,7 +124,7 @@ class SystemContextCoordinator:
             f"{battery_voltage:.3f}" if isinstance(battery_voltage, float) else "unknown",
         )
 
-        return {
+        payload: dict[str, Any] = {
             "source": "system_context",
             "run_id": self._run_id,
             "boot_time": self._boot_time,
@@ -134,6 +137,35 @@ class SystemContextCoordinator:
                 "reason": self._semantic_reason,
             },
             "battery_startup_v": battery_voltage,
+        }
+        if self._inject_startup_time_context:
+            startup_time_context = self._build_startup_time_context()
+            if startup_time_context:
+                payload["startup_time_context"] = startup_time_context
+        return payload
+
+    def _build_startup_time_context(self) -> dict[str, Any] | None:
+        """Build a one-shot startup time grounding note.
+
+        This payload is low-authority orientation context only and can become stale.
+        Live turn-time reasoning should still call get_current_time on demand.
+        """
+
+        time_payload = tool_runtime.get_current_time(context={"include_period_of_day": True})
+        if not isinstance(time_payload, dict) or str(time_payload.get("status")) != "ok":
+            return None
+        return {
+            "type": "startup_time_context",
+            "source": "startup_time_context",
+            "local_datetime_iso": time_payload.get("local_datetime_iso"),
+            "local_date": time_payload.get("local_date"),
+            "local_time": time_payload.get("local_time"),
+            "weekday": time_payload.get("weekday"),
+            "period_of_day": time_payload.get("period_of_day"),
+            "timezone_name": time_payload.get("timezone_name"),
+            "utc_offset": time_payload.get("utc_offset"),
+            "startup_unix_epoch_ms": time_payload.get("unix_epoch_ms"),
+            "freshness": "startup_only_snapshot_can_be_stale_use_get_current_time_for_live_reasoning",
         }
 
     def _build_ops_ok_transition_payload(self, health: Any) -> dict[str, Any]:

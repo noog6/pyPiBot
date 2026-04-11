@@ -594,6 +594,11 @@ tools.append(
             "Return your current local date/time grounding with explicit machine-readable fields, including "
             "ISO local datetime, weekday, UTC offset, and unix_epoch_ms. Optional context supports "
             "timezone (canonical) or tz (alias) and include_period_of_day (default true). "
+            "Use when the user asks for time/date/day, when relative-time phrasing needs grounding "
+            "(for example 'later today', 'tonight', 'tomorrow morning', or 'earlier today'), when elapsed-time "
+            "diagnostics need a stable now-anchor, or when current time materially improves phrasing. "
+            "Avoid for timeless answers, avoid repeated watch-checking in the same turn when no new ambiguity "
+            "exists, and never use as a fake scheduler or polling loop. "
             "This is a read-only, on-demand grounding primitive; do not poll repeatedly, and normally call "
             "at most once per turn unless the user explicitly asks for a refresh."
         ),

@@ -424,6 +424,7 @@ def main(argv: list[str] | None = None) -> int:
     # Optional dependency: ops/system-context is additive and may be skipped.
     ops_orchestrator = None
     system_context_coordinator = None
+    startup_cfg = config.get("startup") or {}
     try:
         log_startup_status("ops_orchestrator", "optional", "starting")
         ops_orchestrator = OpsOrchestrator.get_instance()
@@ -440,6 +441,7 @@ def main(argv: list[str] | None = None) -> int:
             boot_time=boot_time,
             semantic_state=semantic_state,
             semantic_reason=semantic_reason,
+            inject_startup_time_context=bool(startup_cfg.get("inject_time_context", True)),
         )
         system_context_coordinator.start()
         log_startup_status("ops_orchestrator", "optional", "ready")
