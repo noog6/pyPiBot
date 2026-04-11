@@ -132,6 +132,45 @@ def test_handle_response_done_still_schedules_empty_retry() -> None:
     api._maybe_schedule_empty_response_retry.assert_awaited_once()
 
 
+def test_required_deliverable_done_fallback_prefers_parent_turn_before_current_turn() -> None:
+    api = _make_api()
+    active_by_turn = {"turn_parent": True, "turn_1": False}
+    api._turn_has_active_required_deliverable_step = (
+        lambda *, turn_id: active_by_turn.get(turn_id, False)
+    )
+    api._response_trace_context_by_id = {
+        "resp_parent": {
+            "parent_turn_id": "turn_parent",
+        }
+    }
+
+    result = api._response_done_marks_required_deliverable_followthrough(
+        origin="tool_output",
+        turn_id="turn_1",
+        response_id="resp_parent",
+        trace_context={},
+        stale_context={},
+    )
+
+    assert result is True
+
+
+def test_required_deliverable_done_fallback_uses_current_turn_only_as_last_resort() -> None:
+    api = _make_api()
+    api._turn_has_active_required_deliverable_step = lambda *, turn_id: turn_id == "turn_1"
+    api._response_trace_context_by_id = {"resp_current": {}}
+
+    result = api._response_done_marks_required_deliverable_followthrough(
+        origin="tool_output",
+        turn_id="turn_1",
+        response_id="resp_current",
+        trace_context={},
+        stale_context={},
+    )
+
+    assert result is True
+
+
 def test_handle_response_done_clears_terminal_response_text_store() -> None:
     api = _make_api()
     api._terminal_response_text_by_response_id = {"resp_1": "stale text"}
@@ -1132,6 +1171,88 @@ def test_handle_response_done_required_deliverable_followthrough_with_terminal_t
     assert apply_selection.call_args.kwargs["selected"] is True
     assert apply_selection.call_args.kwargs["selection_reason"] == "normal"
     apply_continuity_event.assert_called_once()
+    _event_name, kwargs = apply_continuity_event.call_args
+    assert kwargs["close_commitment"] == "true"
+    assert kwargs["complete_required_deliverable"] == "true"
+    assert kwargs["complete_final_report"] == "true"
+
+
+def test_handle_response_done_required_deliverable_sparse_trace_still_blocks_normal_without_terminal_text() -> None:
+    api = _make_api()
+    api._active_response_origin = "tool_output"
+    api._active_response_input_event_key = "tool:call_final_report"
+    api._active_response_canonical_key = "turn_1::tool:call_final_report"
+    api._active_response_id = "resp_tool_required_sparse"
+    api._active_input_event_key_for_turn = lambda _turn_id: "item_parent"
+    api._is_empty_response_done = lambda **_kwargs: False
+    api._response_trace_context_by_id = {"resp_tool_required_sparse": {}}
+    api._turn_has_active_required_deliverable_step = lambda **_kwargs: True
+    api._selected_response_has_terminal_text_evidence = lambda **_kwargs: False
+    api._response_done_followthrough_chain_remaining = lambda **_kwargs: False
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    apply_selection = Mock()
+    apply_continuity_event = Mock()
+    api._apply_terminal_deliverable_selection = apply_selection
+    api._apply_continuity_event = apply_continuity_event
+
+    asyncio.run(
+        api.handle_response_done(
+            {"type": "response.done", "response": {"id": "resp_tool_required_sparse"}}
+        )
+    )
+
+    apply_selection.assert_called_once()
+    assert apply_selection.call_args.kwargs["selected"] is False
+    assert apply_selection.call_args.kwargs["selection_reason"] == "required_deliverable_missing_substantive_content"
+    _event_name, kwargs = apply_continuity_event.call_args
+    assert kwargs["close_commitment"] == ""
+    assert kwargs["complete_required_deliverable"] == ""
+
+
+def test_handle_response_done_required_deliverable_sparse_trace_can_complete_with_terminal_text() -> None:
+    api = _make_api()
+    api._active_response_origin = "tool_output"
+    api._active_response_input_event_key = "tool:call_final_report"
+    api._active_response_canonical_key = "turn_1::tool:call_final_report"
+    api._active_response_id = "resp_tool_required_sparse_complete"
+    api._active_input_event_key_for_turn = lambda _turn_id: "item_parent"
+    api._is_empty_response_done = lambda **_kwargs: False
+    api._response_trace_context_by_id = {"resp_tool_required_sparse_complete": {}}
+    api._turn_has_active_required_deliverable_step = lambda **_kwargs: True
+    api._selected_response_has_terminal_text_evidence = lambda **_kwargs: True
+    api._response_done_followthrough_chain_remaining = lambda **_kwargs: False
+    api._required_deliverable_tool_execution_missing = lambda **_kwargs: False
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    apply_selection = Mock()
+    apply_continuity_event = Mock()
+    api._apply_terminal_deliverable_selection = apply_selection
+    api._apply_continuity_event = apply_continuity_event
+
+    asyncio.run(
+        api.handle_response_done(
+            {"type": "response.done", "response": {"id": "resp_tool_required_sparse_complete"}}
+        )
+    )
+
+    apply_selection.assert_called_once()
+    assert apply_selection.call_args.kwargs["selected"] is True
+    assert apply_selection.call_args.kwargs["selection_reason"] == "normal"
     _event_name, kwargs = apply_continuity_event.call_args
     assert kwargs["close_commitment"] == "true"
     assert kwargs["complete_required_deliverable"] == "true"

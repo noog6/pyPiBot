@@ -8180,6 +8180,49 @@ class RealtimeAPI:
         ).strip().lower()
         return post_completion_reason == "required_deliverable_owed"
 
+    def _response_done_marks_required_deliverable_followthrough(
+        self,
+        *,
+        origin: str,
+        turn_id: str,
+        response_id: str | None,
+        trace_context: Mapping[str, Any] | None = None,
+        stale_context: Mapping[str, Any] | None = None,
+    ) -> bool:
+        normalized_origin = str(origin or "").strip().lower()
+        if normalized_origin != "tool_output":
+            return False
+        # Conservative precedence order:
+        # 1) response.done trace context
+        # 2) stale response context
+        # 3) stored trace by response id
+        # 4) parent-turn continuity fallback
+        # 5) current-turn continuity fallback (last resort)
+        trace_candidate = trace_context if isinstance(trace_context, Mapping) else {}
+        if self._trace_context_marks_required_deliverable_followthrough(trace_candidate):
+            return True
+        stale_candidate = stale_context if isinstance(stale_context, Mapping) else {}
+        if self._trace_context_marks_required_deliverable_followthrough(stale_candidate):
+            return True
+        stored_trace: Mapping[str, Any] = {}
+        normalized_response_id = str(response_id or "").strip()
+        if normalized_response_id:
+            stored_trace = self._response_trace_by_id().get(normalized_response_id, {})
+            if self._trace_context_marks_required_deliverable_followthrough(stored_trace):
+                return True
+        parent_turn_id = str(
+            trace_candidate.get("parent_turn_id")
+            or stale_candidate.get("parent_turn_id")
+            or stored_trace.get("parent_turn_id")
+            or ""
+        ).strip()
+        if parent_turn_id and self._turn_has_active_required_deliverable_step(turn_id=parent_turn_id):
+            return True
+        normalized_turn_id = str(turn_id or "").strip()
+        return bool(normalized_turn_id) and self._turn_has_active_required_deliverable_step(
+            turn_id=normalized_turn_id
+        )
+
     def _clear_cancelled_response_blocking_state(self, *, response_id: str, reason: str) -> None:
         normalized_response_id = str(response_id or "").strip()
         if not normalized_response_id:
@@ -10528,7 +10571,12 @@ class RealtimeAPI:
             if str(response_id or "").strip()
             else {}
         )
-        required_deliverable_followthrough = self._trace_context_marks_required_deliverable_followthrough(trace_context)
+        required_deliverable_followthrough = self._response_done_marks_required_deliverable_followthrough(
+            origin=normalized_origin,
+            turn_id=turn_id,
+            response_id=response_id,
+            trace_context=trace_context,
+        )
         required_deliverable_pending = False
         if normalized_origin != "tool_output":
             required_deliverable_pending = self._turn_has_active_required_deliverable_step(turn_id=turn_id)
