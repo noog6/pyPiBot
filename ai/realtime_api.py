@@ -4220,6 +4220,82 @@ class RealtimeAPI:
         transport = self._get_or_create_transport()
         await transport.send_json(self.websocket, event)
 
+    async def _send_followthrough_runtime_status_update(
+        self,
+        websocket: Any,
+        *,
+        turn_id: str,
+        step_id: str,
+        step_kind: str,
+        tool_name: str,
+        call_id: str,
+        completion_status: str = "completed",
+    ) -> None:
+        """Inject a one-way model-visible runtime followthrough status update.
+
+        This intentionally sends only a `conversation.item.create` system message and
+        never triggers `response.create`.
+        """
+
+        normalized_turn_id = str(turn_id or "").strip()
+        normalized_step_id = str(step_id or "").strip()
+        normalized_call_id = str(call_id or "").strip()
+        if not normalized_turn_id or not normalized_step_id or not normalized_call_id:
+            return
+
+        emitted = getattr(self, "_followthrough_runtime_status_emitted", None)
+        if not isinstance(emitted, set):
+            emitted = set()
+            self._followthrough_runtime_status_emitted = emitted
+        dedupe_key = (normalized_turn_id, normalized_step_id, normalized_call_id)
+        if dedupe_key in emitted:
+            return
+        emitted.add(dedupe_key)
+
+        payload = {
+            "type": "followthrough_runtime_status",
+            "contract_version": 1,
+            "turn_id": normalized_turn_id,
+            "step_id": normalized_step_id,
+            "kind": str(step_kind or "").strip() or "gesture",
+            "tool_name": str(tool_name or "").strip().lower(),
+            "call_id": normalized_call_id,
+            "status": str(completion_status or "").strip().lower() or "completed",
+            "summary": (
+                f"{str(tool_name or '').strip().lower() or 'gesture'} "
+                f"step {normalized_step_id} completed."
+            ),
+            "required_deliverable_owed": bool(
+                self._turn_has_active_required_deliverable_step(turn_id=normalized_turn_id)
+            ),
+        }
+        event = {
+            "type": "conversation.item.create",
+            "item": {
+                "type": "message",
+                "role": "system",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": json.dumps(payload, separators=(",", ":"), sort_keys=True),
+                    }
+                ],
+            },
+        }
+        log_ws_event("Outgoing", event)
+        self._track_outgoing_event(event, origin="followthrough_runtime_status")
+        transport = self._get_or_create_transport()
+        await transport.send_json(websocket, event)
+        logger.info(
+            "followthrough_runtime_status_injected run_id=%s turn_id=%s step_id=%s call_id=%s tool=%s required_deliverable_owed=%s",
+            self._current_run_id() or "",
+            normalized_turn_id,
+            normalized_step_id,
+            normalized_call_id,
+            str(tool_name or "").strip().lower() or "unknown",
+            str(payload["required_deliverable_owed"]).lower(),
+        )
+
     def _format_event_for_injection(self, event: Event) -> tuple[str, bool]:
         if event.content:
             default_response = event.source not in {"battery", "imu", "camera", "ops", "health"}
@@ -20051,6 +20127,23 @@ class RealtimeAPI:
                 call_id,
                 function_name,
             )
+            if function_name.startswith("gesture_"):
+                continuity_turn_id, _allow_rebind, _rebind_reason = self._resolve_continuity_tool_event_owner_turn(
+                    fallback_turn_id=self._current_turn_id_or_unknown(),
+                )
+                runtime_step_descriptor = self._deterministic_followthrough_runtime_descriptor(
+                    turn_id=continuity_turn_id
+                )
+                if runtime_step_descriptor is not None:
+                    await self._send_followthrough_runtime_status_update(
+                        websocket,
+                        turn_id=continuity_turn_id,
+                        step_id=str(runtime_step_descriptor.get("step_id") or "").strip(),
+                        step_kind="gesture",
+                        tool_name=function_name,
+                        call_id=call_id,
+                        completion_status="completed",
+                    )
         function_call_output = {
             "type": "conversation.item.create",
             "item": {
