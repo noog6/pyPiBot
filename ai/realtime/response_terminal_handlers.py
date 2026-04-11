@@ -372,6 +372,28 @@ class ResponseTerminalHandlers:
         )
         selected = selection_decision.selected
         selection_reason = selection_decision.reason_code
+        required_deliverable_followthrough = api._trace_context_marks_required_deliverable_followthrough(
+            trace_context
+        )
+        selected_response_has_substantive_evidence = api._selected_response_has_substantive_evidence(
+            response_id=active_response_id_before_clear
+        )
+        required_deliverable_missing_substance = (
+            required_deliverable_followthrough
+            and selected
+            and selection_reason == "normal"
+            and not selected_response_has_substantive_evidence
+        )
+        if required_deliverable_missing_substance:
+            selected = False
+            selection_reason = "required_deliverable_missing_substantive_content"
+            logger.info(
+                "required_deliverable_completion_rejected run_id=%s turn_id=%s response_id=%s canonical_key=%s action=defer_settlement reason=missing_substantive_content",
+                api._current_run_id() or "",
+                turn_id,
+                str(active_response_id_before_clear or "none"),
+                done_canonical_key,
+            )
         terminal_selection_observation = build_terminal_selection_observation(
             run_id=api._current_run_id() or "",
             turn_id=turn_id,
@@ -812,6 +834,8 @@ class ResponseTerminalHandlers:
         )
         if interrupted_tool_output_candidate:
             continuity_close_allowed = False
+        if required_deliverable_missing_substance:
+            continuity_close_allowed = False
         continuity_origin = str(active_response_origin_before_clear or "").strip().lower()
         semantic_parent_turn_id = str(getattr(semantic_owner_decision, "parent_turn_id", "") or "").strip()
         continuity_candidate_turn_id = turn_id
@@ -928,7 +952,7 @@ class ResponseTerminalHandlers:
             turn_id=continuity_turn_id,
             response_id=active_response_id_before_clear,
             origin=active_response_origin_before_clear,
-            keep_ongoing="true" if provisional_server_auto_close_deferred or exact_phrase_close_deferred or interrupted_tool_output_candidate or followthrough_chain_bridge else "",
+            keep_ongoing="true" if provisional_server_auto_close_deferred or exact_phrase_close_deferred or interrupted_tool_output_candidate or followthrough_chain_bridge or required_deliverable_missing_substance else "",
             close_ongoing="true" if continuity_close_allowed else "",
             close_commitment="true" if continuity_close_commitment else "",
             close_unresolved="true" if continuity_close_unresolved else "",
