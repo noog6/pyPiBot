@@ -5498,7 +5498,16 @@ def test_execute_function_call_local_companion_call_skips_provider_function_outp
 
     asyncio.run(api.execute_function_call("gesture_look_right", "compgest_chain_step_1", {"target": "right"}, ws))
 
-    assert [event for event in ws.sent if event.get("type") == "conversation.item.create"] == []
+    conversation_item_events = [event for event in ws.sent if event.get("type") == "conversation.item.create"]
+    assert len(conversation_item_events) == 1
+    runtime_status_event = conversation_item_events[0]
+    assert runtime_status_event["item"]["role"] == "system"
+    runtime_status_payload = json.loads(runtime_status_event["item"]["content"][0]["text"])
+    assert runtime_status_payload["type"] == "followthrough_runtime_status"
+    assert runtime_status_payload["turn_id"] == "turn_local_compgest"
+    assert runtime_status_payload["step_id"] == "step_2"
+    assert runtime_status_payload["status"] == "completed"
+    assert isinstance(runtime_status_payload["required_deliverable_owed"], bool)
     assert [event for event in ws.sent if event.get("type") == "response.create"] == []
     canonical_key = api._canonical_utterance_key(
         turn_id="turn_local_compgest",
@@ -5518,6 +5527,12 @@ def test_execute_function_call_local_companion_call_schedules_plain_response_cre
     api._mark_utterance_info_summary = lambda **_kwargs: None
     api._intent_ledger = {}
     api._resolve_continuity_tool_event_owner_turn = lambda *, fallback_turn_id: ("turn_local_compgest_final", False, "")
+    api._deterministic_followthrough_runtime_descriptor = lambda *, turn_id: {
+        "request_id": "req_local_compgest_final",
+        "step_id": "report_step",
+        "tool_name": "gesture_look_center",
+        "tool_args": {},
+    }
 
     def _fake_followup_event(**_kwargs):
         return (
@@ -5553,7 +5568,15 @@ def test_execute_function_call_local_companion_call_schedules_plain_response_cre
 
     asyncio.run(api.execute_function_call("gesture_look_center", "compgest_chain_final", {"target": "center"}, ws))
 
-    assert [event for event in ws.sent if event.get("type") == "conversation.item.create"] == []
+    conversation_item_events = [event for event in ws.sent if event.get("type") == "conversation.item.create"]
+    assert len(conversation_item_events) == 1
+    runtime_status_event = conversation_item_events[0]
+    assert runtime_status_event["item"]["role"] == "system"
+    runtime_status_payload = json.loads(runtime_status_event["item"]["content"][0]["text"])
+    assert runtime_status_payload["type"] == "followthrough_runtime_status"
+    assert runtime_status_payload["turn_id"] == "turn_local_compgest_final"
+    assert runtime_status_payload["step_id"] == "report_step"
+    assert isinstance(runtime_status_payload["required_deliverable_owed"], bool)
     response_creates = [event for event in ws.sent if event.get("type") == "response.create"]
     assert len(response_creates) == 1
     metadata = response_creates[0]["response"]["metadata"]
@@ -5563,6 +5586,40 @@ def test_execute_function_call_local_companion_call_schedules_plain_response_cre
     assert metadata.get("followthrough_step_output_policy") == "required_deliverable"
     assert metadata.get("followthrough_post_completion_reason") == "required_deliverable_owed"
     assert metadata.get("input_event_key") == "item_parent_local_compgest_final"
+
+
+def test_send_followthrough_runtime_status_update_deduplicates_per_step_call() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api._turn_has_active_required_deliverable_step = lambda *, turn_id: turn_id == "turn_dedupe"
+
+    asyncio.run(
+        api._send_followthrough_runtime_status_update(
+            ws,
+            turn_id="turn_dedupe",
+            step_id="step_5",
+            step_kind="gesture",
+            tool_name="gesture_look_left",
+            call_id="compgest_step_5",
+        )
+    )
+    asyncio.run(
+        api._send_followthrough_runtime_status_update(
+            ws,
+            turn_id="turn_dedupe",
+            step_id="step_5",
+            step_kind="gesture",
+            tool_name="gesture_look_left",
+            call_id="compgest_step_5",
+        )
+    )
+
+    conversation_item_events = [event for event in ws.sent if event.get("type") == "conversation.item.create"]
+    assert len(conversation_item_events) == 1
+    payload = json.loads(conversation_item_events[0]["item"]["content"][0]["text"])
+    assert payload["type"] == "followthrough_runtime_status"
+    assert payload["required_deliverable_owed"] is True
 
 
 def test_deterministic_inject_only_dispatch_dedupe_only_latches_after_executed() -> None:
