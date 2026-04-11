@@ -6467,6 +6467,54 @@ def test_build_tool_followup_event_uses_parent_turn_followthrough_truth_for_fina
     assert "Required user deliverable is still owed for the parent turn." in instructions
 
 
+def test_build_tool_followup_event_for_required_tool_result_forces_report_materialization() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    api._current_turn_id_or_unknown = lambda: "turn_1"
+    api._active_input_event_key_by_turn_id["turn_1"] = "item_parent_1"
+    api._turn_has_active_required_deliverable_step = lambda *, turn_id: turn_id == "turn_1"
+    api._required_deliverable_required_tool_name = lambda *, turn_id: "get_current_time" if turn_id == "turn_1" else None
+
+    event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_time_1",
+        response_create_event={"type": "response.create"},
+        tool_name="get_current_time",
+    )
+
+    response_payload = event.get("response") or {}
+    metadata = response_payload.get("metadata") or {}
+    instructions = str(response_payload.get("instructions") or "")
+
+    assert response_payload.get("tool_choice") == "none"
+    assert metadata.get("tool_followup_step_output_policy") == "required_deliverable"
+    assert metadata.get("followthrough_step_output_policy") == "required_deliverable"
+    assert metadata.get("tool_followup_required_tool_name") == "get_current_time"
+    assert "tool result is already available" in instructions
+    assert "Do not call tools again." in instructions
+
+
+def test_build_tool_followup_event_non_required_tool_does_not_force_no_tool_followup() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    api._current_turn_id_or_unknown = lambda: "turn_1"
+    api._active_input_event_key_by_turn_id["turn_1"] = "item_parent_1"
+    api._turn_has_active_required_deliverable_step = lambda *, turn_id: turn_id == "turn_1"
+    api._required_deliverable_required_tool_name = lambda *, turn_id: "get_current_time" if turn_id == "turn_1" else None
+
+    event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_weather_1",
+        response_create_event={"type": "response.create"},
+        tool_name="get_weather",
+    )
+
+    response_payload = event.get("response") or {}
+    metadata = response_payload.get("metadata") or {}
+
+    assert response_payload.get("tool_choice") != "none"
+    assert metadata.get("tool_followup_required_tool_name") is None
+    assert metadata.get("tool_followup_step_output_policy") is None
+
+
 def test_catalog_only_descriptive_tool_followup_adds_uncertainty_guardrail_instruction() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
