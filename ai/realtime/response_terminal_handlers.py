@@ -430,13 +430,17 @@ class ResponseTerminalHandlers:
             or stale_context.get("local_runtime_followthrough")
             or ""
         ).strip().lower() in {"true", "1", "yes"}
+        redrive_marker_present = (
+            followthrough_dispatch_source == "deterministic_followthrough_motion_gate"
+            or local_runtime_followthrough
+        )
+        continuity_required_deliverable_open = api._turn_has_active_required_deliverable_step(
+            turn_id=turn_id
+        )
         required_deliverable_materialization_redrive_eligible = (
             required_deliverable_followthrough
             and str(active_response_origin_before_clear or "").strip().lower() == "tool_output"
-            and (
-                followthrough_dispatch_source == "deterministic_followthrough_motion_gate"
-                or local_runtime_followthrough
-            )
+            and (redrive_marker_present or continuity_required_deliverable_open)
         )
         if (
             required_deliverable_materialization_redrive_eligible
@@ -474,6 +478,18 @@ class ResponseTerminalHandlers:
                     retry_attempt,
                     retry_max_attempts,
                 )
+        elif required_deliverable_missing_substance or required_deliverable_missing_tool_execution:
+            logger.info(
+                "required_deliverable_followthrough_materialization_redrive_not_eligible run_id=%s turn_id=%s response_id=%s reason=%s required_followthrough=%s origin=%s marker_present=%s continuity_required_deliverable_open=%s",
+                api._current_run_id() or "",
+                turn_id,
+                str(active_response_id_before_clear or "none"),
+                selection_reason,
+                str(required_deliverable_followthrough).lower(),
+                str(active_response_origin_before_clear or "").strip().lower() or "unknown",
+                str(redrive_marker_present).lower(),
+                str(continuity_required_deliverable_open).lower(),
+            )
         terminal_selection_observation = build_terminal_selection_observation(
             run_id=api._current_run_id() or "",
             turn_id=turn_id,
