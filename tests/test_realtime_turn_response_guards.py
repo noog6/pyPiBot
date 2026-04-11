@@ -245,8 +245,16 @@ def test_dispatch_required_deliverable_followthrough_requires_time_tool_when_rep
     metadata = response_payload["metadata"]
     assert response_payload["tool_choice"] == "required"
     assert "Call the get_current_time tool first." in response_payload["instructions"]
+    assert metadata["input_event_key"] == "item_1:required_deliverable_followthrough:0"
+    assert metadata["consumes_canonical_slot"] == "false"
+    assert metadata["explicit_multipart"] == "true"
+    assert metadata["tool_followup"] == "true"
+    assert metadata["tool_followup_release"] == "true"
+    assert metadata["tool_followup_step_output_policy"] == "required_deliverable"
+    assert metadata["tool_followup_post_completion_reason"] == "required_deliverable_owed"
     assert metadata["followthrough_required_tool_execution"] == "true"
     assert metadata["followthrough_required_tool_name"] == "get_current_time"
+    assert metadata["tool_followup_required_tool_name"] == "get_current_time"
 
 
 def test_dispatch_required_deliverable_followthrough_uses_no_tools_for_non_tool_report() -> None:
@@ -289,8 +297,51 @@ def test_dispatch_required_deliverable_followthrough_uses_no_tools_for_non_tool_
     metadata = response_payload["metadata"]
     assert response_payload["tool_choice"] == "none"
     assert "Do not call tools." in response_payload["instructions"]
+    assert metadata["input_event_key"] == "item_1:required_deliverable_followthrough:0"
+    assert metadata["tool_followup"] == "true"
+    assert metadata["tool_followup_release"] == "true"
     assert metadata["followthrough_required_tool_execution"] == "false"
     assert "followthrough_required_tool_name" not in metadata
+
+
+def test_dispatch_required_deliverable_followthrough_increments_input_event_key_with_retry_budget() -> None:
+    api = _make_api()
+    api._required_deliverable_materialization_retry_counts = {"turn_1": 2}
+    api._turn_has_active_required_deliverable_step = lambda *, turn_id: turn_id == "turn_1"
+    api._parent_input_event_key_for_tool_followup = lambda *, turn_id: "item_1"
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
+        compound_request=types.SimpleNamespace(
+            active_step_index=1,
+            steps=(
+                types.SimpleNamespace(kind="gesture", status="completed", step_output_policy="status_only", summary="look center"),
+                types.SimpleNamespace(
+                    kind="report",
+                    status="pending",
+                    step_output_policy="required_deliverable",
+                    summary="tell me the current time",
+                ),
+            ),
+        )
+    )
+
+    sent_events: list[dict[str, object]] = []
+
+    async def _fake_send_response_create(_websocket, response_event, **_kwargs):
+        sent_events.append(response_event)
+        return True
+
+    api._send_response_create = _fake_send_response_create
+
+    dispatched = asyncio.run(
+        api._dispatch_required_deliverable_followthrough_response_create(
+            websocket=None,
+            turn_id="turn_1",
+        )
+    )
+
+    assert dispatched is True
+    metadata = sent_events[0]["response"]["metadata"]
+    assert metadata["input_event_key"] == "item_1:required_deliverable_followthrough:2"
 
 
 def test_runtime_gesture_suppressed_for_owner_turn_when_only_report_followup_remains() -> None:

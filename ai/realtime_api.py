@@ -20595,6 +20595,13 @@ class RealtimeAPI:
         parent_input_event_key = self._parent_input_event_key_for_tool_followup(turn_id=turn_id)
         if not parent_input_event_key:
             return False
+        retry_attempt = 0
+        retry_counts = getattr(self, "_required_deliverable_materialization_retry_counts", None)
+        if isinstance(retry_counts, dict):
+            retry_attempt = int(retry_counts.get(turn_id, 0) or 0)
+        followthrough_input_event_key = (
+            f"{parent_input_event_key}:required_deliverable_followthrough:{retry_attempt}"
+        )
         required_tool_name = self._required_deliverable_required_tool_name(turn_id=turn_id)
         requires_tool_execution = bool(required_tool_name)
         tool_choice = "required" if requires_tool_execution else "none"
@@ -20616,8 +20623,14 @@ class RealtimeAPI:
             "response": {
                 "metadata": {
                     "turn_id": turn_id,
-                    "input_event_key": parent_input_event_key,
+                    "input_event_key": followthrough_input_event_key,
                     "parent_input_event_key": parent_input_event_key,
+                    "consumes_canonical_slot": "false",
+                    "explicit_multipart": "true",
+                    "tool_followup": "true",
+                    "tool_followup_release": "true",
+                    "tool_followup_step_output_policy": "required_deliverable",
+                    "tool_followup_post_completion_reason": "required_deliverable_owed",
                     "local_runtime_followthrough": "true",
                     "followthrough_step_output_policy": "required_deliverable",
                     "followthrough_post_completion_reason": "required_deliverable_owed",
@@ -20630,6 +20643,7 @@ class RealtimeAPI:
         }
         if requires_tool_execution and required_tool_name:
             response_event["response"]["metadata"]["followthrough_required_tool_name"] = required_tool_name
+            response_event["response"]["metadata"]["tool_followup_required_tool_name"] = required_tool_name
         sent = await self._send_response_create(
             websocket,
             response_event,
