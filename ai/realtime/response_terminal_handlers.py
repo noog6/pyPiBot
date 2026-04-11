@@ -420,6 +420,60 @@ class ResponseTerminalHandlers:
                 str(active_response_id_before_clear or "none"),
                 done_canonical_key,
             )
+        followthrough_dispatch_source = str(
+            trace_context.get("followthrough_dispatch_source")
+            or stale_context.get("followthrough_dispatch_source")
+            or ""
+        ).strip().lower()
+        local_runtime_followthrough = str(
+            trace_context.get("local_runtime_followthrough")
+            or stale_context.get("local_runtime_followthrough")
+            or ""
+        ).strip().lower() in {"true", "1", "yes"}
+        required_deliverable_materialization_redrive_eligible = (
+            required_deliverable_followthrough
+            and str(active_response_origin_before_clear or "").strip().lower() == "tool_output"
+            and (
+                followthrough_dispatch_source == "deterministic_followthrough_motion_gate"
+                or local_runtime_followthrough
+            )
+        )
+        if (
+            required_deliverable_materialization_redrive_eligible
+            and (required_deliverable_missing_substance or required_deliverable_missing_tool_execution)
+        ):
+            retry_allowed, retry_attempt, retry_max_attempts = (
+                api._consume_required_deliverable_materialization_retry_budget(turn_id=turn_id)
+            )
+            if retry_allowed:
+                api._release_required_deliverable_followthrough_dispatch_lock(
+                    turn_id=turn_id,
+                    reason=selection_reason,
+                )
+                redispatched = await api._dispatch_required_deliverable_followthrough_response_create(
+                    websocket=api.websocket,
+                    turn_id=turn_id,
+                )
+                logger.info(
+                    "required_deliverable_followthrough_materialization_redrive run_id=%s turn_id=%s response_id=%s reason=%s dispatched=%s retry_attempt=%s retry_max_attempts=%s",
+                    api._current_run_id() or "",
+                    turn_id,
+                    str(active_response_id_before_clear or "none"),
+                    selection_reason,
+                    str(bool(redispatched)).lower(),
+                    retry_attempt,
+                    retry_max_attempts,
+                )
+            else:
+                logger.info(
+                    "required_deliverable_followthrough_materialization_redrive_skipped run_id=%s turn_id=%s response_id=%s reason=%s retry_attempt=%s retry_max_attempts=%s",
+                    api._current_run_id() or "",
+                    turn_id,
+                    str(active_response_id_before_clear or "none"),
+                    selection_reason,
+                    retry_attempt,
+                    retry_max_attempts,
+                )
         terminal_selection_observation = build_terminal_selection_observation(
             run_id=api._current_run_id() or "",
             turn_id=turn_id,
