@@ -375,14 +375,14 @@ class ResponseTerminalHandlers:
         required_deliverable_followthrough = api._trace_context_marks_required_deliverable_followthrough(
             trace_context
         )
-        selected_response_has_substantive_evidence = api._selected_response_has_substantive_evidence(
+        selected_response_has_terminal_text_evidence = api._selected_response_has_terminal_text_evidence(
             response_id=active_response_id_before_clear
         )
         required_deliverable_missing_substance = (
             required_deliverable_followthrough
             and selected
             and selection_reason == "normal"
-            and not selected_response_has_substantive_evidence
+            and not selected_response_has_terminal_text_evidence
         )
         if required_deliverable_missing_substance:
             selected = False
@@ -880,7 +880,7 @@ class ResponseTerminalHandlers:
             continuity_close_commitment
             and selected
             and selection_reason == "normal"
-            and api._selected_response_has_substantive_evidence(
+            and api._selected_response_has_terminal_text_evidence(
                 response_id=resolved_response_id or active_response_id_before_clear
             )
         )
