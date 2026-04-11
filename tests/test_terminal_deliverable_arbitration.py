@@ -172,3 +172,4 @@ def test_terminal_deliverable_arbitration_allows_non_empty_tool_output_when_foll
         "normal",
         "terminal_selected",
     )
+

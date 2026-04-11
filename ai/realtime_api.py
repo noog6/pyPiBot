@@ -10472,8 +10472,15 @@ class RealtimeAPI:
             else {}
         )
         required_deliverable_followthrough = self._trace_context_marks_required_deliverable_followthrough(trace_context)
+        required_deliverable_pending = False
+        if normalized_origin != "tool_output":
+            required_deliverable_pending = self._turn_has_active_required_deliverable_step(turn_id=turn_id)
         turn_has_pending_tool_followup = self._turn_has_pending_tool_followup(turn_id=turn_id)
         if required_deliverable_followthrough:
+            turn_has_pending_tool_followup = True
+        elif required_deliverable_pending and normalized_origin != "tool_output":
+            # While a required-deliverable report step is still pending, only the
+            # dedicated tool-output followthrough path may become terminal.
             turn_has_pending_tool_followup = True
 
         decision = arbitrate_terminal_deliverable_selection(
