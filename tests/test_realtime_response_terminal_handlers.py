@@ -933,6 +933,66 @@ def test_handle_response_done_required_deliverable_missing_substance_keeps_follo
     assert kwargs["complete_final_report"] == ""
 
 
+def test_handle_response_done_required_deliverable_uses_terminal_text_seam_not_audio_only_evidence() -> None:
+    api = _make_api()
+    api._active_response_origin = "tool_output"
+    api._active_response_input_event_key = "tool:call_final_report"
+    api._active_response_canonical_key = "turn_1::tool:call_final_report"
+    api._active_response_id = "resp_tool_required_audio_only"
+    api._active_input_event_key_for_turn = lambda _turn_id: "item_parent"
+    api._is_empty_response_done = lambda **_kwargs: False
+    api._response_trace_context_by_id = {
+        "resp_tool_required_audio_only": {
+            "tool_followup_step_output_policy": "required_deliverable",
+            "tool_followup_post_completion_reason": "required_deliverable_owed",
+            "followthrough_step_output_policy": "required_deliverable",
+            "followthrough_post_completion_reason": "required_deliverable_owed",
+        }
+    }
+    # Regression seam: audio/deliverable-class evidence may look substantive, but
+    # required-deliverable report completion must require terminal text evidence.
+    api._selected_response_has_substantive_evidence = lambda **_kwargs: True
+    api._selected_response_has_terminal_text_evidence = lambda **_kwargs: False
+    api._response_done_followthrough_chain_remaining = lambda **_kwargs: False
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    api._response_done_deliverable_arbitration = RealtimeAPI._response_done_deliverable_arbitration.__get__(api, RealtimeAPI)
+    api._semantic_owner_decision_for_response = Mock(
+        return_value=SimpleNamespace(
+            semantic_owner_canonical_key="turn_1::item_parent",
+            parent_turn_id="turn_1",
+            parent_input_event_key="item_parent",
+            selected_candidate_id="semantic_owner_parent",
+            reason_code="parent_promoted_from_tool_output",
+        )
+    )
+    apply_selection = Mock()
+    apply_continuity_event = Mock()
+    api._apply_terminal_deliverable_selection = apply_selection
+    api._apply_continuity_event = apply_continuity_event
+
+    asyncio.run(
+        api.handle_response_done(
+            {"type": "response.done", "response": {"id": "resp_tool_required_audio_only"}}
+        )
+    )
+
+    apply_selection.assert_called_once()
+    assert apply_selection.call_args.kwargs["selected"] is False
+    assert apply_selection.call_args.kwargs["selection_reason"] == "required_deliverable_missing_substantive_content"
+    apply_continuity_event.assert_called_once()
+    _event_name, kwargs = apply_continuity_event.call_args
+    assert kwargs["keep_ongoing"] == "true"
+    assert kwargs["complete_required_deliverable"] == ""
+
+
 def test_handle_response_done_preserves_compound_followthrough_contract_on_non_empty_tool_output() -> None:
     api = _make_api()
     api._active_response_origin = "tool_output"

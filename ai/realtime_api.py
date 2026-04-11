@@ -2998,6 +2998,23 @@ class RealtimeAPI:
         deliverable_class = str(getattr(state, "deliverable_class", "") or "").strip().lower()
         return bool(getattr(state, "audio_started", False)) or deliverable_class in {"progress", "final"}
 
+    def _selected_response_has_terminal_text_evidence(
+        self,
+        *,
+        response_id: str | None,
+    ) -> bool:
+        """Return whether terminal user-facing text exists for the selected response.
+
+        Use this stricter seam where completion requires a spoken/textual report, not
+        merely transport-side/audio lifecycle evidence.
+        """
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            return False
+        if bool(str(self._terminal_response_text(normalized_response_id) or "").strip()):
+            return True
+        return bool(str(self._assistant_reply_text_for_response(normalized_response_id) or "").strip())
+
     def _reconcile_terminal_substantive_response(
         self,
         *,
