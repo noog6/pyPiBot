@@ -424,6 +424,77 @@ def test_response_created_syncs_helper_owned_fields_for_assistant_message() -> N
     assert api._active_server_auto_input_event_key is None
 
 
+def test_response_created_sparse_provider_metadata_backfills_required_deliverable_trace_markers() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    response_create_event = {
+        "type": "response.create",
+        "response": {
+            "metadata": {
+                "turn_id": "turn_req",
+                "input_event_key": "item_req",
+                "followthrough_step_output_policy": "required_deliverable",
+                "followthrough_post_completion_reason": "required_deliverable_owed",
+            }
+        },
+    }
+    api._track_outgoing_event(response_create_event, origin="tool_output")
+
+    asyncio.run(
+        api._handle_response_created_event(
+            {"type": "response.created", "response": {"id": "resp-req", "metadata": {}}},
+            ws,
+        )
+    )
+
+    trace_context = api._response_trace_context_by_id.get("resp-req", {})
+    assert trace_context.get("followthrough_step_output_policy") == "required_deliverable"
+    assert trace_context.get("tool_followup_step_output_policy") == "required_deliverable"
+    assert trace_context.get("followthrough_post_completion_reason") == "required_deliverable_owed"
+    assert trace_context.get("tool_followup_post_completion_reason") == "required_deliverable_owed"
+
+
+def test_response_created_provider_metadata_not_overwritten_by_origin_fallback() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    response_create_event = {
+        "type": "response.create",
+        "response": {
+            "metadata": {
+                "turn_id": "turn_provider",
+                "input_event_key": "item_provider",
+                "followthrough_step_output_policy": "required_deliverable",
+                "followthrough_post_completion_reason": "required_deliverable_owed",
+            }
+        },
+    }
+    api._track_outgoing_event(response_create_event, origin="tool_output")
+
+    asyncio.run(
+        api._handle_response_created_event(
+            {
+                "type": "response.created",
+                "response": {
+                    "id": "resp-provider",
+                    "metadata": {
+                        "followthrough_step_output_policy": "final_required_deliverable",
+                        "followthrough_post_completion_reason": "final_response_complete",
+                    },
+                },
+            },
+            ws,
+        )
+    )
+
+    trace_context = api._response_trace_context_by_id.get("resp-provider", {})
+    assert trace_context.get("followthrough_step_output_policy") == "final_required_deliverable"
+    assert trace_context.get("tool_followup_step_output_policy") == "final_required_deliverable"
+    assert trace_context.get("followthrough_post_completion_reason") == "final_response_complete"
+    assert trace_context.get("tool_followup_post_completion_reason") == "final_response_complete"
+
+
 
 def test_response_created_syncs_helper_owned_fields_for_server_auto_guarded_path() -> None:
     api = _make_api_stub()
@@ -482,6 +553,55 @@ def test_response_created_syncs_helper_owned_fields_for_server_auto_guarded_path
     assert api._active_response_consumes_canonical_slot is False
     assert api._active_response_confirmation_guarded is True
     assert api._active_server_auto_input_event_key == "synthetic_server_auto_4"
+
+
+def test_response_done_required_deliverable_trace_context_still_activates_guard_when_created_metadata_was_sparse(
+    monkeypatch,
+) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    turn_id = "turn_guard"
+    input_event_key = "item_guard"
+    response_id = "resp_guard"
+    _prime_response_done_api(
+        api,
+        turn_id=turn_id,
+        input_event_key=input_event_key,
+        response_id=response_id,
+        origin="tool_output",
+    )
+    api._response_trace_context_by_id[response_id].update(
+        {
+            "followthrough_step_output_policy": "required_deliverable",
+            "followthrough_post_completion_reason": "required_deliverable_owed",
+            "tool_followup_step_output_policy": "required_deliverable",
+            "tool_followup_post_completion_reason": "required_deliverable_owed",
+        }
+    )
+    api._response_done_deliverable_arbitration = lambda **_kwargs: types.SimpleNamespace(
+        selected=True,
+        reason_code="normal",
+        selected_candidate_id="terminal_selected",
+    )
+    api._selected_response_has_terminal_text_evidence = lambda **_kwargs: False
+    api._required_deliverable_tool_execution_missing = lambda **_kwargs: False
+    continuity_payload: dict[str, str] = {}
+    api._apply_continuity_event = lambda _event, **kwargs: continuity_payload.update(kwargs)
+    log_messages: list[str] = []
+
+    def _capture(message, *args, **kwargs) -> None:
+        rendered = message % args if args else str(message)
+        if "continuity_response_done_handoff" in rendered:
+            log_messages.append(rendered)
+
+    monkeypatch.setattr("ai.realtime.response_terminal_handlers.logger.info", _capture)
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": response_id}}))
+
+    assert any("selection_reason=required_deliverable_missing_substantive_content" in entry for entry in log_messages)
+    assert continuity_payload.get("keep_ongoing") == "true"
+    assert continuity_payload.get("close_commitment", "") == ""
+    assert continuity_payload.get("complete_required_deliverable", "") == ""
 
 
 def test_response_created_bridge_empty_retry_does_not_claim_pending_server_auto_owner() -> None:

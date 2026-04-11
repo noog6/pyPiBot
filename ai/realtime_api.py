@@ -3927,6 +3927,24 @@ class RealtimeAPI:
         metadata = response.get("metadata") if isinstance(response, dict) else None
         metadata_turn_id = str(metadata.get("turn_id") or "").strip() if isinstance(metadata, dict) else ""
         metadata_input_event_key = str(metadata.get("input_event_key") or "").strip() if isinstance(metadata, dict) else ""
+        followthrough_step_output_policy = (
+            str(
+                (metadata or {}).get("followthrough_step_output_policy")
+                or (metadata or {}).get("tool_followup_step_output_policy")
+                or ""
+            ).strip().lower()
+            if isinstance(metadata, dict)
+            else ""
+        )
+        followthrough_post_completion_reason = (
+            str(
+                (metadata or {}).get("followthrough_post_completion_reason")
+                or (metadata or {}).get("tool_followup_post_completion_reason")
+                or ""
+            ).strip().lower()
+            if isinstance(metadata, dict)
+            else ""
+        )
         consumes_canonical_slot = self._response_consumes_canonical_slot(metadata)
         is_micro_ack = isinstance(metadata, dict) and str(metadata.get("micro_ack", "")).strip().lower() == "true"
         pending_origin = {
@@ -3935,6 +3953,10 @@ class RealtimeAPI:
             "consumes_canonical_slot": "true" if consumes_canonical_slot else "false",
             "turn_id": metadata_turn_id,
             "input_event_key": metadata_input_event_key,
+            "followthrough_step_output_policy": followthrough_step_output_policy,
+            "tool_followup_step_output_policy": followthrough_step_output_policy,
+            "followthrough_post_completion_reason": followthrough_post_completion_reason,
+            "tool_followup_post_completion_reason": followthrough_post_completion_reason,
         }
         if metadata_turn_id and metadata_input_event_key:
             self._bind_active_input_event_key_for_turn(
@@ -3997,6 +4019,26 @@ class RealtimeAPI:
             self._last_consumed_response_origin_context = {
                 "turn_id": str(pending.get("turn_id") or "").strip(),
                 "input_event_key": str(pending.get("input_event_key") or "").strip(),
+                "followthrough_step_output_policy": str(
+                    pending.get("followthrough_step_output_policy")
+                    or pending.get("tool_followup_step_output_policy")
+                    or ""
+                ).strip().lower(),
+                "tool_followup_step_output_policy": str(
+                    pending.get("tool_followup_step_output_policy")
+                    or pending.get("followthrough_step_output_policy")
+                    or ""
+                ).strip().lower(),
+                "followthrough_post_completion_reason": str(
+                    pending.get("followthrough_post_completion_reason")
+                    or pending.get("tool_followup_post_completion_reason")
+                    or ""
+                ).strip().lower(),
+                "tool_followup_post_completion_reason": str(
+                    pending.get("tool_followup_post_completion_reason")
+                    or pending.get("followthrough_post_completion_reason")
+                    or ""
+                ).strip().lower(),
             }
             self._set_active_response_state(
                 consumes_canonical_slot=(
@@ -17537,6 +17579,22 @@ class RealtimeAPI:
         pending_origin_context = getattr(self, "_last_consumed_response_origin_context", {})
         if not isinstance(pending_origin_context, dict):
             pending_origin_context = {}
+        if not isinstance(response_metadata, dict):
+            response_metadata = {}
+            response["metadata"] = response_metadata
+        metadata_required_deliverable_fields = (
+            "followthrough_step_output_policy",
+            "tool_followup_step_output_policy",
+            "followthrough_post_completion_reason",
+            "tool_followup_post_completion_reason",
+        )
+        for field in metadata_required_deliverable_fields:
+            current_value = str(response_metadata.get(field) or "").strip()
+            if current_value:
+                continue
+            fallback_value = str(pending_origin_context.get(field) or "").strip()
+            if fallback_value:
+                response_metadata[field] = fallback_value
         pending_turn_id = str(pending_origin_context.get("turn_id") or "").strip()
         pending_input_event_key = str(pending_origin_context.get("input_event_key") or "").strip()
         response_id = response.get("id")
