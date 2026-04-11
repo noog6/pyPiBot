@@ -113,6 +113,7 @@ NormalizedCandidateId: TypeAlias = Literal[
     "exact_phrase_obligation_open",
     "tool_output_descriptive_gesture_only",
     "required_deliverable_missing_substantive_content",
+    "required_deliverable_missing_tool_execution",
     "semantic_owner_execution",
     "semantic_owner_parent",
     "tool_followup_uncovered",
@@ -538,6 +539,7 @@ def _terminal_selection_candidate_id(selection_reason: str, *, selected: bool) -
         "exact_phrase_obligation_open": "exact_phrase_obligation_open",
         "tool_output_descriptive_gesture_only": "tool_output_descriptive_gesture_only",
         "required_deliverable_missing_substantive_content": "required_deliverable_missing_substantive_content",
+        "required_deliverable_missing_tool_execution": "required_deliverable_missing_tool_execution",
         "normal": "terminal_selected",
     }
     if normalized_reason in mapping:
@@ -1700,6 +1702,7 @@ def _normalize_selected_candidate_id(candidate_id: str) -> NormalizedCandidateId
         "exact_phrase_obligation_open",
         "tool_output_descriptive_gesture_only",
         "required_deliverable_missing_substantive_content",
+        "required_deliverable_missing_tool_execution",
         "semantic_owner_execution",
         "semantic_owner_parent",
     }:

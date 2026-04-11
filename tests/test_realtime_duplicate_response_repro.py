@@ -5705,6 +5705,40 @@ def test_deterministic_inject_only_no_descriptor_dispatches_required_deliverable
     assert "Do not call tools." in sent[0]["event"]["response"]["instructions"]
 
 
+def test_deterministic_inject_only_required_deliverable_can_require_tool_execution() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    api._current_turn_id_or_unknown = lambda: "turn_report_tool_dispatch"
+    api._resolve_continuity_tool_event_owner_turn = lambda *, fallback_turn_id: ("turn_report_tool_dispatch", False, "")
+    api._deterministic_followthrough_runtime_descriptor = lambda *, turn_id: None
+    api._turn_has_active_required_deliverable_step = lambda *, turn_id: True
+    api._required_deliverable_step_requires_tool_execution = lambda *, turn_id: True
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True, **_kwargs: False
+    api.get_gesture_motion_state = lambda *, tool_call_id: {"status": "completed"}
+    api._parent_input_event_key_for_tool_followup = lambda *, turn_id: "item_parent_report_tool_dispatch"
+    sent: list[dict[str, object]] = []
+
+    async def _fake_send_response_create(websocket, event, origin, **_kwargs):
+        sent.append({"event": event, "origin": origin})
+        return True
+
+    api._send_response_create = _fake_send_response_create
+
+    asyncio.run(
+        api._maybe_continue_deterministic_followthrough_after_inject_only(
+            websocket=object(),
+            triggering_tool_name="gesture_look_center",
+            triggering_call_id="call_report_tool_dispatch",
+            suppression_reason="gesture_intermediate_inject_only",
+        )
+    )
+
+    assert len(sent) == 1
+    response = sent[0]["event"]["response"]
+    assert response["tool_choice"] == "auto"
+    assert "Execute the required tool call(s) first." in response["instructions"]
+
+
 def test_deterministic_inject_only_no_descriptor_does_not_dispatch_when_motion_queued() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
