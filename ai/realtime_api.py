@@ -5510,6 +5510,21 @@ class RealtimeAPI:
             "Exact phrase repair mode. Speak exactly this sentence and nothing else: "
             f"{phrase!r}."
         )
+        requires_tool_execution = self._required_deliverable_step_requires_tool_execution(turn_id=turn_id)
+        tool_choice = "auto" if requires_tool_execution else "none"
+        if requires_tool_execution:
+            instructions = (
+                "Required user deliverable is still owed for the parent turn. "
+                "Execute the required tool call(s) first. "
+                "Do not provide a bridge/progress sentence like 'I'll grab that now' as the final deliverable. "
+                "After tool results are available, deliver the final answer in one concise spoken sentence."
+            )
+        else:
+            instructions = (
+                "Required user deliverable is still owed for the parent turn. "
+                "Do not call tools. "
+                "Now deliver a short spoken completion report in one concise sentence."
+            )
         response_event = {
             "type": "response.create",
             "response": {
@@ -20463,6 +20478,21 @@ class RealtimeAPI:
         parent_input_event_key = self._parent_input_event_key_for_tool_followup(turn_id=turn_id)
         if not parent_input_event_key:
             return False
+        requires_tool_execution = self._required_deliverable_step_requires_tool_execution(turn_id=turn_id)
+        tool_choice = "auto" if requires_tool_execution else "none"
+        if requires_tool_execution:
+            instructions = (
+                "Required user deliverable is still owed for the parent turn. "
+                "Execute the required tool call(s) first. "
+                "Do not provide a bridge/progress sentence like 'I'll grab that now' as the final deliverable. "
+                "After tool results are available, deliver the final answer in one concise spoken sentence."
+            )
+        else:
+            instructions = (
+                "Required user deliverable is still owed for the parent turn. "
+                "Do not call tools. "
+                "Now deliver a short spoken completion report in one concise sentence."
+            )
         response_event = {
             "type": "response.create",
             "response": {
@@ -20475,12 +20505,8 @@ class RealtimeAPI:
                     "followthrough_post_completion_reason": "required_deliverable_owed",
                     "followthrough_dispatch_source": "deterministic_followthrough_motion_gate",
                 },
-                "tool_choice": "none",
-                "instructions": (
-                    "Required user deliverable is still owed for the parent turn. "
-                    "Do not call tools. "
-                    "Now deliver a short spoken completion report in one concise sentence."
-                ),
+                "tool_choice": tool_choice,
+                "instructions": instructions,
             },
         }
         sent = await self._send_response_create(
@@ -20492,6 +20518,57 @@ class RealtimeAPI:
             dispatched.add(turn_id)
             return True
         return False
+
+    def _required_deliverable_step_requires_tool_execution(self, *, turn_id: str) -> bool:
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return False
+        run_id = str(self._current_run_id() or "").strip()
+        if not run_id:
+            return False
+        brief = self.get_continuity_brief(
+            run_id=run_id,
+            turn_id=normalized_turn_id,
+            reason="required_deliverable_tool_requirement_eval",
+        )
+        compound_state = getattr(brief, "compound_request", None)
+        if compound_state is None:
+            return False
+        steps = tuple(getattr(compound_state, "steps", ()) or ())
+        active_step_index = getattr(compound_state, "active_step_index", None)
+        if not isinstance(active_step_index, int) or not (0 <= active_step_index < len(steps)):
+            return False
+        active_step = steps[active_step_index]
+        if str(getattr(active_step, "kind", "") or "").strip().lower() != "report":
+            return False
+        if str(getattr(active_step, "status", "") or "").strip().lower() == "completed":
+            return False
+        if str(getattr(active_step, "step_output_policy", "") or "").strip().lower() != "required_deliverable":
+            return False
+        summary = str(getattr(active_step, "summary", "") or "").strip().lower()
+        if not summary:
+            return False
+        return any(token in summary for token in ("time", "clock", "date", "day"))
+
+    def _required_deliverable_tool_execution_missing(
+        self,
+        *,
+        turn_id: str,
+        required_deliverable_followthrough: bool,
+    ) -> bool:
+        if not required_deliverable_followthrough:
+            return False
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return False
+        if not self._required_deliverable_step_requires_tool_execution(turn_id=normalized_turn_id):
+            return False
+        for record in reversed(tuple(getattr(self, "_tool_call_records", ()) or ())):
+            if str(record.get("turn_id") or "").strip() != normalized_turn_id:
+                continue
+            if str(record.get("name") or "").strip().lower() == "get_current_time":
+                return False
+        return True
 
     def _prune_deterministic_followthrough_dispatch_registry(self) -> None:
         dispatch_registry = getattr(self, "_deterministic_followthrough_dispatched_steps", None)
