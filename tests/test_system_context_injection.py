@@ -89,6 +89,28 @@ def test_system_context_payload_includes_run_id_and_startup_health() -> None:
     assert payload["run_id"] == "run-777"
     assert payload["startup_health"]["status"] == "degraded"
     assert payload["startup_health"]["summary"] == "Degraded: audio unavailable"
+    assert payload["startup_time_context"]["type"] == "startup_time_context"
+    assert payload["startup_time_context"]["source"] == "startup_time_context"
+    assert payload["startup_time_context"]["freshness"].startswith("startup_only_snapshot_can_be_stale")
+
+
+def test_system_context_payload_can_disable_startup_time_context() -> None:
+    coordinator = SystemContextCoordinator(
+        realtime_api=_RealtimeStub(),
+        ops_orchestrator=_OpsStub(
+            startup_emitted=True,
+            health=_Health("ok", "All systems nominal"),
+        ),
+        run_id="run-778",
+        boot_time="2026-01-01T00:00:00+00:00",
+        semantic_state="ready",
+        semantic_reason="provider_ready",
+        inject_startup_time_context=False,
+    )
+
+    payload = coordinator._build_startup_payload()
+
+    assert "startup_time_context" not in payload
 
 
 def test_system_context_coordinator_injects_second_update_on_transition_to_ok() -> None:

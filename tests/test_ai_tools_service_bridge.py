@@ -161,6 +161,9 @@ def test_get_current_time_tool_registered_in_schema_and_function_map() -> None:
 
     assert current_time_tool["type"] == "function"
     assert "read-only, on-demand grounding primitive" in description
+    assert "relative-time phrasing needs grounding" in description
+    assert "timeless answers" in description
+    assert "fake scheduler or polling loop" in description
     assert "do not poll repeatedly" in description
     assert "at most once per turn" in description
     assert ai_tools.function_map["get_current_time"] is ai_tools.get_current_time

@@ -231,6 +231,9 @@ asr:
 startup:
   # Keep strict startup by default; when true, Theo can run without a live microphone.
   allow_audio_input_failure: false
+  # Optional one-shot time orientation injected as background context at startup.
+  # This snapshot is low-authority and can become stale; use get_current_time for live time reasoning.
+  inject_time_context: true
 
 # Realtime websocket shutdown behavior
 websocket_close_timeout_s: 5.0
