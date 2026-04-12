@@ -21,7 +21,7 @@ This catalog is the index for seam families and first-pass contracts.
 | Symptom | Likely seam | First inspect file | Adjacent seam |
 | --- | --- | --- | --- |
 | Required-deliverable report never becomes terminal | Required-deliverable contracts | `ai/realtime/response_terminal_handlers.py` | Tool followup and continuity |
-| Tool result exists but no final answer appears | Tool followup/followthrough | `ai/tool_followup_arbitration.py` | Terminal selection |
+| Tool result exists but no final answer appears | Tool followup/followthrough | `ai/tool_followup_arbitration.py`, `ai/realtime/response_create_runtime.py` | Terminal selection |
 | `close_commitment` drifts from actual completion | Continuity and terminal settlement | `ai/continuity.py` | Semantic owner and required-deliverable |
 | Sparse metadata corrupts lineage | Response lifecycle and identity | `ai/realtime/lifecycle_state.py` | Semantic owner |
 | Provisional server_auto stuck/odd | Response create arbitration | `ai/interaction_lifecycle_policy.py` | Memory preference takeover |
