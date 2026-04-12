@@ -534,6 +534,7 @@ class ContinuityLedger:
             commitments=brief.commitments,
             unresolved=brief.unresolved,
             recently_closed=brief.recently_closed,
+            compound_request=brief.compound_request,
         )
 
     @staticmethod
@@ -544,6 +545,7 @@ class ContinuityLedger:
         commitments: tuple[ContinuityItem, ...],
         unresolved: tuple[ContinuityItem, ...],
         recently_closed: tuple[ContinuityItem, ...],
+        compound_request: CompoundContinuityState | None = None,
     ) -> ContinuityTurnSettlement:
         """Classify turn settlement from existing continuity buckets only."""
         has_current_items = bool(current)
@@ -551,6 +553,9 @@ class ContinuityLedger:
         has_commitments = bool(commitments)
         has_unresolved = bool(unresolved)
         has_recently_closed = bool(recently_closed)
+        has_required_deliverable_pending = bool(
+            compound_request is not None and getattr(compound_request, "final_followup_pending", False)
+        )
 
         if has_blockers:
             first_blocker = blockers[0]
@@ -568,6 +573,10 @@ class ContinuityLedger:
             first_unresolved = unresolved[0]
             detail = first_unresolved.detail or first_unresolved.summary
             state = "unresolved_followup"
+        elif has_required_deliverable_pending:
+            next_pending_step_id = str(getattr(compound_request, "next_pending_step_id", "") or "").strip()
+            detail = f"required_deliverable_pending step_id={next_pending_step_id or 'unknown'}"
+            state = "followthrough_remaining"
         elif has_current_items:
             first_current = current[0]
             detail = first_current.detail or f"current={first_current.kind}:{first_current.status}"
