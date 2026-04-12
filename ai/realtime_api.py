@@ -9686,6 +9686,34 @@ class RealtimeAPI:
                 if existing_instructions
                 else descriptive_visual_instruction
             )
+        required_deliverable_open = self._turn_has_active_required_deliverable_step(turn_id=parent_turn_id)
+        required_tool_name = str(self._required_deliverable_required_tool_name(turn_id=parent_turn_id) or "").strip().lower()
+        if (
+            required_deliverable_open
+            and required_tool_name
+            and normalized_tool_name == required_tool_name
+        ):
+            metadata["tool_followup_step_output_policy"] = "required_deliverable"
+            metadata["followthrough_step_output_policy"] = "required_deliverable"
+            metadata["tool_followup_post_completion_bucket"] = self._legacy_bucket_for_step_output_policy(
+                "required_deliverable"
+            )
+            metadata["tool_followup_post_completion_reason"] = "required_deliverable_owed"
+            metadata["followthrough_post_completion_reason"] = "required_deliverable_owed"
+            metadata["followthrough_required_tool_name"] = required_tool_name
+            metadata["tool_followup_required_tool_name"] = required_tool_name
+            response_payload["tool_choice"] = "none"
+            existing_instructions = str(response_payload.get("instructions") or "").strip()
+            report_instruction = (
+                "Required user deliverable is still owed for the parent turn. "
+                f"The {required_tool_name} tool result is already available for this turn. "
+                "Do not call tools again. Deliver the final spoken answer in one concise sentence."
+            )
+            response_payload["instructions"] = (
+                f"{existing_instructions} {report_instruction}".strip()
+                if existing_instructions
+                else report_instruction
+            )
         if tool_result_has_distinct_info:
             metadata["tool_result_has_distinct_info"] = "true"
         canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_input_event_key)
