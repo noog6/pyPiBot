@@ -382,11 +382,28 @@ class ResponseTerminalHandlers:
         selected_response_has_terminal_text_evidence = api._selected_response_has_terminal_text_evidence(
             response_id=active_response_id_before_clear
         )
+        selected_response_terminal_text = ""
+        if selected_response_has_terminal_text_evidence:
+            selected_response_terminal_text = str(
+                api._terminal_response_text(active_response_id_before_clear)
+                or api._assistant_reply_text_for_response(active_response_id_before_clear)
+                or ""
+            ).strip()
+        required_deliverable_progress_only = (
+            required_deliverable_followthrough
+            and selected
+            and selection_reason == "normal"
+            and bool(selected_response_terminal_text)
+            and api._classify_deliverable_text(selected_response_terminal_text) == "progress"
+        )
         required_deliverable_missing_substance = (
             required_deliverable_followthrough
             and selected
             and selection_reason == "normal"
-            and not selected_response_has_terminal_text_evidence
+            and (
+                not selected_response_has_terminal_text_evidence
+                or required_deliverable_progress_only
+            )
         )
         required_deliverable_missing_tool_execution = (
             required_deliverable_followthrough
@@ -404,11 +421,12 @@ class ResponseTerminalHandlers:
             selected = False
             selection_reason = "required_deliverable_missing_substantive_content"
             logger.info(
-                "required_deliverable_completion_rejected run_id=%s turn_id=%s response_id=%s canonical_key=%s action=defer_settlement reason=missing_substantive_content",
+                "required_deliverable_completion_rejected run_id=%s turn_id=%s response_id=%s canonical_key=%s action=defer_settlement reason=%s",
                 api._current_run_id() or "",
                 turn_id,
                 str(active_response_id_before_clear or "none"),
                 done_canonical_key,
+                "progress_only_terminal_text" if required_deliverable_progress_only else "missing_substantive_content",
             )
         elif required_deliverable_missing_tool_execution:
             selected = False
