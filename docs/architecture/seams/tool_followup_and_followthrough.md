@@ -56,6 +56,7 @@ Control whether tool-followup outputs are released, held, or suppressed; preserv
 - Parent coverage source differences (canonical vs terminal selection).
 - Classification pending state timing relative to terminal events.
 - Interaction with same-turn owner drop in response-create arbitration.
+- Provider metadata capping can remove classifier-critical keys (for example `tool_name`), which can flip followup arbitration from suppress -> release even after parent coverage is established.
 
 ## J) Related seams
 
@@ -67,5 +68,6 @@ Control whether tool-followup outputs are released, held, or suppressed; preserv
 
 1. `ai/tool_followup_arbitration.py` decision reason path.
 2. `ai/realtime_api.py` parent coverage evaluation + queue release logs.
-3. `ai/realtime/response_terminal_handlers.py` followthrough guard + selection reason.
-4. Logs: `queue_release_parent_eval`, `tool_followup_*`, `response_done_followthrough_guard_decision`.
+3. `ai/realtime/response_create_runtime.py` metadata capping path (`_enforce_tool_followup_metadata_limit`) when arbitration reasons unexpectedly shift (for example `non_gesture_tool` after queue drain).
+4. `ai/realtime/response_terminal_handlers.py` followthrough guard + selection reason.
+5. Logs: `queue_release_parent_eval`, `tool_followup_*`, `response_done_followthrough_guard_decision`, `tool_followup_metadata_capped`.
