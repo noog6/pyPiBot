@@ -241,6 +241,32 @@ def test_required_deliverable_tool_execution_missing_still_blocks_without_requir
     assert missing is True
 
 
+def test_required_deliverable_tool_execution_missing_accepts_persisted_already_executed_lineage_flag() -> None:
+    api = _make_api()
+    api._response_trace_context_by_id = {
+        "resp_redrive": {
+            "turn_id": "turn_child",
+            "parent_turn_id": "turn_parent",
+            "followthrough_required_tool_name": "get_current_time",
+            "followthrough_required_tool_already_executed": "true",
+        }
+    }
+    api._required_deliverable_step_requires_tool_execution = (
+        lambda *, turn_id: turn_id == "turn_parent"
+    )
+    api._tool_call_records = []
+
+    missing = api._required_deliverable_tool_execution_missing(
+        turn_id="turn_child",
+        required_deliverable_followthrough=True,
+        response_id="resp_redrive",
+        trace_context={},
+        stale_context={},
+    )
+
+    assert missing is False
+
+
 def test_handle_response_done_redrives_required_deliverable_followthrough_after_empty_materialization() -> None:
     api = _make_api()
     api._active_response_origin = "tool_output"

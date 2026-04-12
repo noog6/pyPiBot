@@ -18085,6 +18085,18 @@ class RealtimeAPI:
                 or (response_metadata or {}).get("tool_followup_post_completion_reason")
                 or ""
             ).strip().lower()
+            metadata_followthrough_required_tool_name = str(
+                (response_metadata or {}).get("followthrough_required_tool_name")
+                or ""
+            ).strip().lower()
+            metadata_tool_followup_required_tool_name = str(
+                (response_metadata or {}).get("tool_followup_required_tool_name")
+                or ""
+            ).strip().lower()
+            metadata_followthrough_required_tool_already_executed = str(
+                (response_metadata or {}).get("followthrough_required_tool_already_executed")
+                or ""
+            ).strip().lower()
             metadata_followthrough_dispatch_source = str(
                 (response_metadata or {}).get("followthrough_dispatch_source") or ""
             ).strip().lower()
@@ -18114,6 +18126,11 @@ class RealtimeAPI:
                 followthrough_post_completion_reason=metadata_tool_followup_post_completion_reason,
                 followthrough_dispatch_source=metadata_followthrough_dispatch_source,
                 local_runtime_followthrough=metadata_local_runtime_followthrough,
+                followthrough_required_tool_name=metadata_followthrough_required_tool_name,
+                tool_followup_required_tool_name=metadata_tool_followup_required_tool_name,
+                followthrough_required_tool_already_executed=(
+                    metadata_followthrough_required_tool_already_executed
+                ),
                 tool_call_id=metadata_tool_call_id,
             )
             pref_payload = self._peek_pending_preference_memory_context_payload(
@@ -20866,6 +20883,14 @@ class RealtimeAPI:
 
         if not requires_tool_execution:
             return False
+
+        for context in (trace_candidate, stale_candidate, stored_trace):
+            already_executed = str(
+                context.get("followthrough_required_tool_already_executed")
+                or ""
+            ).strip().lower()
+            if already_executed in {"true", "1", "yes"}:
+                return False
 
         tool_name_to_match = required_tool_name or "get_current_time"
         candidate_turn_id_set = set(candidate_turn_ids)
