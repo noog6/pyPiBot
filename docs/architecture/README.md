@@ -14,6 +14,9 @@ references.
 
 ## Runtime / lifecycle architecture references
 
+- [Theo Runtime Seam Map Overview (Cartography v1)](seam_map_overview.md)
+- [Theo Seam Inventory (v1)](seam_inventory.md)
+- [Theo Seam Mapping Method](seam_mapping_method.md)
 - [Decision Arbitration Authority Map (Implemented Runtime)](decision_arbitration_authority_map.md)
 - [Agent + Thread Map](../agent-map.md)
 - [Realtime API Migration Map (Living plan; metrics are date-stamped)](../realtime_api_migration_map.md)
