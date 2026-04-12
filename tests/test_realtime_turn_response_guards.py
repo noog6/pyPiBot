@@ -257,6 +257,51 @@ def test_dispatch_required_deliverable_followthrough_requires_time_tool_when_rep
     assert metadata["tool_followup_required_tool_name"] == "get_current_time"
 
 
+def test_dispatch_required_deliverable_followthrough_requires_battery_tool_when_report_mentions_voltage() -> None:
+    api = _make_api()
+    api._turn_has_active_required_deliverable_step = lambda *, turn_id: turn_id == "turn_1"
+    api._parent_input_event_key_for_tool_followup = lambda *, turn_id: "item_1"
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
+        compound_request=types.SimpleNamespace(
+            active_step_index=1,
+            steps=(
+                types.SimpleNamespace(kind="gesture", status="completed", step_output_policy="status_only", summary="look center"),
+                types.SimpleNamespace(
+                    kind="report",
+                    status="pending",
+                    step_output_policy="required_deliverable",
+                    summary="tell me what your voltage is",
+                ),
+            ),
+        )
+    )
+
+    sent_events: list[dict[str, object]] = []
+
+    async def _fake_send_response_create(_websocket, response_event, **_kwargs):
+        sent_events.append(response_event)
+        return True
+
+    api._send_response_create = _fake_send_response_create
+
+    dispatched = asyncio.run(
+        api._dispatch_required_deliverable_followthrough_response_create(
+            websocket=None,
+            turn_id="turn_1",
+        )
+    )
+
+    assert dispatched is True
+    assert len(sent_events) == 1
+    response_payload = sent_events[0]["response"]
+    metadata = response_payload["metadata"]
+    assert response_payload["tool_choice"] == "required"
+    assert "Call the read_battery_voltage tool first." in response_payload["instructions"]
+    assert metadata["followthrough_required_tool_execution"] == "true"
+    assert metadata["followthrough_required_tool_name"] == "read_battery_voltage"
+    assert metadata["tool_followup_required_tool_name"] == "read_battery_voltage"
+
+
 def test_dispatch_required_deliverable_followthrough_uses_no_tools_for_non_tool_report() -> None:
     api = _make_api()
     api._turn_has_active_required_deliverable_step = lambda *, turn_id: turn_id == "turn_1"

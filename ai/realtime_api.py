@@ -5568,7 +5568,8 @@ class RealtimeAPI:
             instructions = (
                 "Required user deliverable is still owed for the parent turn. "
                 "Do not call tools. "
-                "Now deliver a short spoken completion report in one concise sentence."
+                "Do not provide a bridge/progress sentence like 'I'll grab that now' as the final deliverable. "
+                "Now deliver the final answer in one concise spoken sentence."
             )
         response_event = {
             "type": "response.create",
@@ -20644,7 +20645,8 @@ class RealtimeAPI:
             instructions = (
                 "Required user deliverable is still owed for the parent turn. "
                 "Do not call tools. "
-                "Now deliver a short spoken completion report in one concise sentence."
+                "Do not provide a bridge/progress sentence like 'I'll grab that now' as the final deliverable. "
+                "Now deliver the final answer in one concise spoken sentence."
             )
         response_event = {
             "type": "response.create",
@@ -20758,6 +20760,8 @@ class RealtimeAPI:
             return None
         if any(token in summary for token in ("time", "clock", "date", "day")):
             return "get_current_time"
+        if any(token in summary for token in ("battery", "voltage", "power level", "charger", "charge")):
+            return "read_battery_voltage"
         return None
 
     def _required_deliverable_tool_execution_missing(
