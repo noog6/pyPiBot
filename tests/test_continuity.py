@@ -12,6 +12,8 @@ import pytest
 sys.modules.setdefault("audioop", types.ModuleType("audioop"))
 
 from ai.continuity import (
+    CompoundContinuityState,
+    CompoundContinuityStep,
     ContinuityBrief,
     ContinuityItem,
     ContinuityLedger,
@@ -1245,6 +1247,52 @@ def test_build_turn_settlement_reports_settled_without_open_items() -> None:
     assert settlement.has_unresolved is False
     assert settlement.has_blockers is False
     assert settlement.has_recently_closed is False
+
+
+def test_build_turn_settlement_reports_followthrough_when_required_deliverable_pending_without_items() -> None:
+    ledger = ContinuityLedger()
+    settlement = ledger.classify_turn_settlement(
+        current=(),
+        blockers=(),
+        commitments=(),
+        unresolved=(),
+        recently_closed=(
+            ContinuityItem(
+                id="recent:1",
+                kind="recently_closed",
+                summary="tool call completed",
+                status="resolved",
+                priority="low",
+                source="unit_test",
+            ),
+        ),
+        compound_request=CompoundContinuityState(
+            request_id="request-1",
+            summary="come back to center and tell me what the current time is",
+            steps=(
+                CompoundContinuityStep(
+                    step_id="step-1",
+                    kind="report",
+                    summary="tell me what the current time is",
+                    status="active",
+                    step_output_policy="required_deliverable",
+                ),
+            ),
+            active_step_index=0,
+            completed_step_ids=(),
+            final_followup_pending=True,
+            recent_completed_step_id=None,
+            next_pending_step_id=None,
+        ),
+    )
+
+    assert settlement.settlement_state == "followthrough_remaining"
+    assert settlement.settlement_detail.startswith("required_deliverable_pending step_id=")
+    assert settlement.has_current_items is False
+    assert settlement.has_commitments is False
+    assert settlement.has_unresolved is False
+    assert settlement.has_blockers is False
+    assert settlement.has_recently_closed is True
 
 
 def test_build_turn_settlement_reports_awaiting_tool_when_blocker_present() -> None:
