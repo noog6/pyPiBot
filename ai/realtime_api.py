@@ -10752,7 +10752,26 @@ class RealtimeAPI:
         settlement = self._continuity_ledger_instance().build_turn_settlement(brief)
         compound_state = getattr(brief, "compound_request", None)
         settlement_state = str(getattr(settlement, "settlement_state", "") or "").strip().lower()
-        final_followup_pending = bool(getattr(compound_state, "final_followup_pending", False))
+        steps = tuple(getattr(compound_state, "steps", ()) or ()) if compound_state is not None else ()
+        legacy_final_followup_pending = bool(getattr(compound_state, "final_followup_pending", False))
+        has_step_output_policy = any(hasattr(step, "step_output_policy") for step in steps)
+        if compound_state is None:
+            final_followup_pending = False
+        elif not has_step_output_policy:
+            final_followup_pending = legacy_final_followup_pending
+        else:
+            final_followup_pending = any(
+                str(getattr(step, "step_output_policy", "") or "").strip().lower() == "required_deliverable"
+                and str(getattr(step, "status", "") or "").strip().lower() != "completed"
+                for step in steps
+            )
+            if final_followup_pending != legacy_final_followup_pending:
+                logger.debug(
+                    "response_done_followthrough_guard_final_followup_pending_recomputed turn_id=%s legacy=%s recomputed=%s",
+                    normalized_turn_id,
+                    legacy_final_followup_pending,
+                    final_followup_pending,
+                )
         open_non_report_steps = False
         decision = False
         gesture_motion_status, gesture_motion_open = self._resolve_gesture_motion_truth(
@@ -10792,7 +10811,6 @@ class RealtimeAPI:
                     response_id=response_id,
                 )
                 return decision
-            steps = getattr(compound_state, "steps", ()) or ()
             open_non_report_steps = any(
                 str(getattr(step, "kind", "") or "").strip() != "report"
                 and str(getattr(step, "status", "") or "").strip() != "completed"
@@ -10838,7 +10856,6 @@ class RealtimeAPI:
                 response_id=response_id,
             )
             return decision
-        steps = getattr(compound_state, "steps", ()) or ()
         open_non_report_steps = any(
             str(getattr(step, "kind", "") or "").strip() != "report"
             and str(getattr(step, "status", "") or "").strip() != "completed"
@@ -20633,6 +20650,20 @@ class RealtimeAPI:
         )
         required_tool_name = self._required_deliverable_required_tool_name(turn_id=turn_id)
         requires_tool_execution = bool(required_tool_name)
+        required_tool_already_executed = False
+        if requires_tool_execution and required_tool_name:
+            required_tool_missing = self._required_deliverable_tool_execution_missing(
+                turn_id=turn_id,
+                required_deliverable_followthrough=True,
+                trace_context={
+                    "turn_id": turn_id,
+                    "followthrough_required_tool_name": required_tool_name,
+                    "tool_followup_required_tool_name": required_tool_name,
+                },
+                stale_context={},
+            )
+            required_tool_already_executed = not required_tool_missing
+            requires_tool_execution = required_tool_missing
         tool_choice = "required" if requires_tool_execution else "none"
         if requires_tool_execution:
             instructions = (
@@ -20640,6 +20671,14 @@ class RealtimeAPI:
                 f"Call the {required_tool_name} tool first. "
                 "Do not provide a bridge/progress sentence like 'I'll grab that now' as the final deliverable. "
                 "After tool results are available, deliver the final answer in one concise spoken sentence."
+            )
+        elif required_tool_already_executed and required_tool_name:
+            instructions = (
+                "Required user deliverable is still owed for the parent turn. "
+                f"The {required_tool_name} tool result is already available for this turn. "
+                "Do not call tools. "
+                "Do not provide a bridge/progress sentence like 'I'll grab that now' as the final deliverable. "
+                "Deliver the final answer in one concise spoken sentence now."
             )
         else:
             instructions = (
@@ -20671,9 +20710,11 @@ class RealtimeAPI:
                 "instructions": instructions,
             },
         }
-        if requires_tool_execution and required_tool_name:
+        if required_tool_name:
             response_event["response"]["metadata"]["followthrough_required_tool_name"] = required_tool_name
             response_event["response"]["metadata"]["tool_followup_required_tool_name"] = required_tool_name
+        if required_tool_already_executed:
+            response_event["response"]["metadata"]["followthrough_required_tool_already_executed"] = "true"
         sent = await self._send_response_create(
             websocket,
             response_event,

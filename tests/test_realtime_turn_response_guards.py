@@ -257,6 +257,59 @@ def test_dispatch_required_deliverable_followthrough_requires_time_tool_when_rep
     assert metadata["tool_followup_required_tool_name"] == "get_current_time"
 
 
+def test_dispatch_required_deliverable_followthrough_pivots_to_no_tools_when_required_tool_already_executed() -> None:
+    api = _make_api()
+    api._turn_has_active_required_deliverable_step = lambda *, turn_id: turn_id == "turn_1"
+    api._parent_input_event_key_for_tool_followup = lambda *, turn_id: "item_1"
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
+        compound_request=types.SimpleNamespace(
+            active_step_index=1,
+            steps=(
+                types.SimpleNamespace(kind="gesture", status="completed", step_output_policy="status_only", summary="look center"),
+                types.SimpleNamespace(
+                    kind="report",
+                    status="pending",
+                    step_output_policy="required_deliverable",
+                    summary="tell me what your voltage is",
+                ),
+            ),
+        )
+    )
+    api._tool_call_records = [
+        {
+            "name": "read_battery_voltage",
+            "turn_id": "turn_1",
+            "call_id": "call_battery_1",
+        }
+    ]
+
+    sent_events: list[dict[str, object]] = []
+
+    async def _fake_send_response_create(_websocket, response_event, **_kwargs):
+        sent_events.append(response_event)
+        return True
+
+    api._send_response_create = _fake_send_response_create
+
+    dispatched = asyncio.run(
+        api._dispatch_required_deliverable_followthrough_response_create(
+            websocket=None,
+            turn_id="turn_1",
+        )
+    )
+
+    assert dispatched is True
+    assert len(sent_events) == 1
+    response_payload = sent_events[0]["response"]
+    metadata = response_payload["metadata"]
+    assert response_payload["tool_choice"] == "none"
+    assert "tool result is already available" in response_payload["instructions"]
+    assert metadata["followthrough_required_tool_execution"] == "false"
+    assert metadata["followthrough_required_tool_name"] == "read_battery_voltage"
+    assert metadata["tool_followup_required_tool_name"] == "read_battery_voltage"
+    assert metadata["followthrough_required_tool_already_executed"] == "true"
+
+
 def test_dispatch_required_deliverable_followthrough_requires_battery_tool_when_report_mentions_voltage() -> None:
     api = _make_api()
     api._turn_has_active_required_deliverable_step = lambda *, turn_id: turn_id == "turn_1"
@@ -3711,6 +3764,36 @@ def test_turn_followthrough_chain_remaining_can_ignore_report_only_pending_follo
     )
 
     assert api._turn_followthrough_chain_remaining(turn_id="turn_2") is True
+    assert api._turn_followthrough_chain_remaining(turn_id="turn_2", include_report_followup=False) is False
+
+
+def test_turn_followthrough_chain_remaining_recomputes_required_deliverable_pending_from_steps() -> None:
+    api = _make_api()
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
+        compound_request=types.SimpleNamespace(
+            final_followup_pending=True,
+            steps=(
+                types.SimpleNamespace(
+                    kind="gesture",
+                    status="completed",
+                    step_output_policy="execution_state_update",
+                ),
+                types.SimpleNamespace(
+                    kind="report",
+                    status="completed",
+                    step_output_policy="required_deliverable",
+                ),
+            ),
+        )
+    )
+    api._continuity_ledger = types.SimpleNamespace(
+        build_turn_settlement=lambda _brief: types.SimpleNamespace(
+            settlement_state="active_items_only",
+            has_commitments=False,
+        )
+    )
+
+    assert api._turn_followthrough_chain_remaining(turn_id="turn_2") is False
     assert api._turn_followthrough_chain_remaining(turn_id="turn_2", include_report_followup=False) is False
 
 
