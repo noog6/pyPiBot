@@ -1912,6 +1912,15 @@ class RealtimeAPI:
                     turn_id=turn_id,
                     input_event_key=input_event_key,
                     upgrade_chain_id=self._upgrade_chain_id_from_response(response_id),
+                    followthrough_required_tool_name=str(
+                        trace_context.get("followthrough_required_tool_name") or ""
+                    ).strip().lower(),
+                    tool_followup_required_tool_name=str(
+                        trace_context.get("tool_followup_required_tool_name") or ""
+                    ).strip().lower(),
+                    followthrough_required_tool_already_executed=str(
+                        trace_context.get("followthrough_required_tool_already_executed") or ""
+                    ).strip().lower(),
                 )
         self._emit_response_lifecycle_trace(
             event_type=event_type,
@@ -3959,6 +3968,21 @@ class RealtimeAPI:
             "tool_followup_step_output_policy": followthrough_step_output_policy,
             "followthrough_post_completion_reason": followthrough_post_completion_reason,
             "tool_followup_post_completion_reason": followthrough_post_completion_reason,
+            "followthrough_required_tool_name": (
+                str((metadata or {}).get("followthrough_required_tool_name") or "").strip().lower()
+                if isinstance(metadata, dict)
+                else ""
+            ),
+            "tool_followup_required_tool_name": (
+                str((metadata or {}).get("tool_followup_required_tool_name") or "").strip().lower()
+                if isinstance(metadata, dict)
+                else ""
+            ),
+            "followthrough_required_tool_already_executed": (
+                str((metadata or {}).get("followthrough_required_tool_already_executed") or "").strip().lower()
+                if isinstance(metadata, dict)
+                else ""
+            ),
         }
         if metadata_turn_id and metadata_input_event_key:
             self._bind_active_input_event_key_for_turn(
@@ -4039,6 +4063,18 @@ class RealtimeAPI:
                 "tool_followup_post_completion_reason": str(
                     pending.get("tool_followup_post_completion_reason")
                     or pending.get("followthrough_post_completion_reason")
+                    or ""
+                ).strip().lower(),
+                "followthrough_required_tool_name": str(
+                    pending.get("followthrough_required_tool_name")
+                    or ""
+                ).strip().lower(),
+                "tool_followup_required_tool_name": str(
+                    pending.get("tool_followup_required_tool_name")
+                    or ""
+                ).strip().lower(),
+                "followthrough_required_tool_already_executed": str(
+                    pending.get("followthrough_required_tool_already_executed")
                     or ""
                 ).strip().lower(),
             }
@@ -7118,6 +7154,15 @@ class RealtimeAPI:
             turn_id=str(turn_id or trace_context.get("turn_id") or "unknown").strip() or "unknown",
             input_event_key=self._active_input_event_key_for_turn(turn_id),
             upgrade_chain_id=str(getattr(pending, "upgrade_chain_id", "") or trace_context.get("upgrade_chain_id") or "").strip(),
+            followthrough_required_tool_name=str(
+                trace_context.get("followthrough_required_tool_name") or ""
+            ).strip().lower(),
+            tool_followup_required_tool_name=str(
+                trace_context.get("tool_followup_required_tool_name") or ""
+            ).strip().lower(),
+            followthrough_required_tool_already_executed=str(
+                trace_context.get("followthrough_required_tool_already_executed") or ""
+            ).strip().lower(),
         )
         self._clear_cancelled_response_blocking_state(
             response_id=pending.response_id,
@@ -7163,12 +7208,22 @@ class RealtimeAPI:
             turn_id=turn_id,
             input_event_key=input_event_key,
         )
+        trace_context = self._response_trace_by_id().get(normalized_response_id, {})
         self._remember_stale_response_context(
             response_id=normalized_response_id,
             canonical_key=canonical_key,
             origin=str(origin or "unknown").strip() or "unknown",
             turn_id=str(turn_id or "unknown").strip() or "unknown",
             input_event_key=str(input_event_key or "unknown").strip() or "unknown",
+            followthrough_required_tool_name=str(
+                trace_context.get("followthrough_required_tool_name") or ""
+            ).strip().lower(),
+            tool_followup_required_tool_name=str(
+                trace_context.get("tool_followup_required_tool_name") or ""
+            ).strip().lower(),
+            followthrough_required_tool_already_executed=str(
+                trace_context.get("followthrough_required_tool_already_executed") or ""
+            ).strip().lower(),
         )
         self._suppress_cancelled_response_audio(normalized_response_id)
         self._clear_cancelled_response_blocking_state(
@@ -7324,6 +7379,9 @@ class RealtimeAPI:
         turn_id: str,
         input_event_key: str,
         upgrade_chain_id: str = "",
+        followthrough_required_tool_name: str = "",
+        tool_followup_required_tool_name: str = "",
+        followthrough_required_tool_already_executed: str = "",
     ) -> None:
         normalized_response_id = str(response_id or "").strip()
         if not normalized_response_id:
@@ -7346,6 +7404,21 @@ class RealtimeAPI:
         state["upgrade_chain_id"] = str(state.get("upgrade_chain_id") or "").strip()
         if str(upgrade_chain_id or "").strip():
             state["upgrade_chain_id"] = str(upgrade_chain_id or "").strip()
+        state["followthrough_required_tool_name"] = str(
+            followthrough_required_tool_name
+            or state.get("followthrough_required_tool_name")
+            or ""
+        ).strip().lower()
+        state["tool_followup_required_tool_name"] = str(
+            tool_followup_required_tool_name
+            or state.get("tool_followup_required_tool_name")
+            or ""
+        ).strip().lower()
+        state["followthrough_required_tool_already_executed"] = str(
+            followthrough_required_tool_already_executed
+            or state.get("followthrough_required_tool_already_executed")
+            or ""
+        ).strip().lower()
         state["expires_at_monotonic"] = now + ttl_s
         store[normalized_response_id] = state
 
@@ -7366,6 +7439,15 @@ class RealtimeAPI:
             "turn_id": str(state.get("turn_id") or "").strip(),
             "input_event_key": str(state.get("input_event_key") or "").strip(),
             "upgrade_chain_id": str(state.get("upgrade_chain_id") or "").strip(),
+            "followthrough_required_tool_name": str(
+                state.get("followthrough_required_tool_name") or ""
+            ).strip().lower(),
+            "tool_followup_required_tool_name": str(
+                state.get("tool_followup_required_tool_name") or ""
+            ).strip().lower(),
+            "followthrough_required_tool_already_executed": str(
+                state.get("followthrough_required_tool_already_executed") or ""
+            ).strip().lower(),
         }
 
     def _clear_stale_response_context(self, response_id: str) -> None:
@@ -17684,6 +17766,9 @@ class RealtimeAPI:
             "tool_followup_step_output_policy",
             "followthrough_post_completion_reason",
             "tool_followup_post_completion_reason",
+            "followthrough_required_tool_name",
+            "tool_followup_required_tool_name",
+            "followthrough_required_tool_already_executed",
         )
         for field in metadata_required_deliverable_fields:
             current_value = str(response_metadata.get(field) or "").strip()

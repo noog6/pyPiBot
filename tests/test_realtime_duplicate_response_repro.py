@@ -6515,6 +6515,70 @@ def test_build_tool_followup_event_non_required_tool_does_not_force_no_tool_foll
     assert metadata.get("tool_followup_step_output_policy") is None
 
 
+def test_required_tool_lineage_survives_redrive_response_created_clear_and_stale_reconstruction() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api._current_turn_id_or_unknown = lambda: "turn_1"
+    api._active_input_event_key_by_turn_id["turn_1"] = "item_parent_1"
+    api._turn_has_active_required_deliverable_step = lambda *, turn_id: turn_id == "turn_1"
+    api._required_deliverable_required_tool_name = (
+        lambda *, turn_id: "get_current_time" if turn_id == "turn_1" else None
+    )
+    api._required_deliverable_step_requires_tool_execution = (
+        lambda *, turn_id: turn_id == "turn_1"
+    )
+    api._tool_call_records = [
+        {
+            "name": "get_current_time",
+            "turn_id": "turn_1",
+            "call_id": "call_time_0",
+        }
+    ]
+
+    dispatched = asyncio.run(
+        api._dispatch_required_deliverable_followthrough_response_create(
+            websocket=ws,
+            turn_id="turn_1",
+        )
+    )
+    assert dispatched is True
+
+    asyncio.run(
+        api._handle_response_created_event(
+            {"type": "response.created", "response": {"id": "resp-redrive-1", "metadata": {}}},
+            ws,
+        )
+    )
+
+    assert api._tool_call_records == []
+    trace_context = api._response_trace_context_by_id.get("resp-redrive-1", {})
+    assert trace_context.get("followthrough_required_tool_name") == "get_current_time"
+    assert trace_context.get("tool_followup_required_tool_name") == "get_current_time"
+    assert trace_context.get("followthrough_required_tool_already_executed") == "true"
+
+    missing = api._required_deliverable_tool_execution_missing(
+        turn_id="turn_1",
+        required_deliverable_followthrough=True,
+        response_id="resp-redrive-1",
+        trace_context={},
+        stale_context={},
+    )
+    assert missing is False
+
+    api._quarantine_cancelled_response_id(
+        response_id="resp-redrive-1",
+        turn_id="turn_1",
+        input_event_key="item_parent_1",
+        origin="tool_output",
+        reason="test_lineage_reconstruction",
+    )
+    stale_context = api._stale_response_context("resp-redrive-1")
+    assert stale_context.get("followthrough_required_tool_name") == "get_current_time"
+    assert stale_context.get("tool_followup_required_tool_name") == "get_current_time"
+    assert stale_context.get("followthrough_required_tool_already_executed") == "true"
+
+
 def test_catalog_only_descriptive_tool_followup_adds_uncertainty_guardrail_instruction() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
