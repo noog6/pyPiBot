@@ -54,6 +54,7 @@ Maintain short-horizon state of ongoing/unresolved/commitment/blocker items and 
 - Semantic owner parent promotion with cross-turn rebind.
 - Non-deliverable intermediate tool-output done events.
 - Report-step pending vs non-report followthrough guard scopes.
+- Settlement classification when continuity buckets are empty but `compound_request.final_followup_pending=true` during required-deliverable redrive windows.
 
 ## J) Related seams
 
@@ -64,6 +65,7 @@ Maintain short-horizon state of ongoing/unresolved/commitment/blocker items and 
 ## K) First places to inspect
 
 1. `ai/continuity.py` compound step transition helpers for required deliverable.
-2. Runtime continuity handoff payload in `response_terminal_handlers`.
-3. `get_continuity_turn_settlement` call sites.
-4. Logs: `continuity_event_applied`, `continuity_inspection_summary`, `CONTINUITY SUMMARY`.
+2. `ai/continuity.py::classify_turn_settlement(...)` handling of `compound_request.final_followup_pending` and `next_pending_step_id`.
+3. Runtime continuity handoff payload in `response_terminal_handlers`.
+4. `get_continuity_turn_settlement` call sites.
+5. Logs: `continuity_event_applied`, `continuity_inspection_summary`, `CONTINUITY SUMMARY`.

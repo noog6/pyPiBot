@@ -22,6 +22,7 @@ This catalog is the index for seam families and first-pass contracts.
 | --- | --- | --- | --- |
 | Runtime aborts before first turn (e.g., `ModuleNotFoundError` during realtime bootstrap import) | Startup and system context injection | `ai/realtime_api.py` top-level imports and `ai/__init__.py` runtime surface export | Observability and tracing surfaces (absence of seam logs is itself a signal) |
 | Required-deliverable report never becomes terminal | Required-deliverable contracts | `ai/realtime/response_terminal_handlers.py` | Tool followup and continuity |
+| Settlement shows `settled` while required-deliverable redrive is still pending | Continuity and commitment state | `ai/continuity.py::classify_turn_settlement(...)` (`compound_request.final_followup_pending`) | Required-deliverable contracts |
 | Tool result exists but no final answer appears | Tool followup/followthrough | `ai/tool_followup_arbitration.py`, `ai/realtime/response_create_runtime.py` | Terminal selection |
 | `close_commitment` drifts from actual completion | Continuity and terminal settlement | `ai/continuity.py` | Semantic owner and required-deliverable |
 | Sparse metadata corrupts lineage | Response lifecycle and identity | `ai/realtime/lifecycle_state.py` | Semantic owner |
