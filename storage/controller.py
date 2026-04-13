@@ -350,15 +350,34 @@ class StorageController:
         row = cursor.fetchone()
         if row is None:
             return None
-        return SessionLedgerRecord(
-            canonical_run_id=str(row[0]),
-            run_number=int(row[1]) if row[1] is not None else None,
-            started_at=int(row[2]),
-            ready_at=int(row[3]) if row[3] is not None else None,
-            last_seen_at=int(row[4]) if row[4] is not None else None,
-            shutdown_completed_at=int(row[5]) if row[5] is not None else None,
-            lifecycle_state=str(row[6]),
+        return self._session_ledger_record_from_row(row)
+
+    def get_recent_session_records(
+        self,
+        *,
+        lookback_runs: int = 1,
+        include_current: bool = False,
+    ) -> list[SessionLedgerRecord]:
+        """Return recent session-ledger rows in newest-first run order."""
+
+        resolved_lookback = max(1, int(lookback_runs))
+        current_run_number = self.get_current_run_number()
+        cursor = self.session_ledger_conn.cursor()
+
+        comparator = "<=" if include_current else "<"
+        cursor.execute(
+            f"""
+            SELECT canonical_run_id, run_number, started_at, ready_at, last_seen_at,
+                   shutdown_completed_at, lifecycle_state
+            FROM session_ledger
+            WHERE run_number {comparator} ?
+            ORDER BY run_number DESC
+            LIMIT ?
+            """,
+            (current_run_number, resolved_lookback),
         )
+        rows = cursor.fetchall()
+        return [self._session_ledger_record_from_row(row) for row in rows]
 
     def previous_run_was_unclean(self) -> tuple[bool, SessionLedgerRecord | None]:
         """Classify whether the prior run appears unclean from durable state."""
@@ -427,3 +446,16 @@ class StorageController:
         log_dir = storage_config.get("log_dir", self.config.get("log_dir", "./log/"))
 
         return Path(var_dir).expanduser(), Path(log_dir).expanduser()
+
+    def _session_ledger_record_from_row(self, row: tuple[Any, ...]) -> SessionLedgerRecord:
+        """Build a typed session-ledger record from a query row."""
+
+        return SessionLedgerRecord(
+            canonical_run_id=str(row[0]),
+            run_number=int(row[1]) if row[1] is not None else None,
+            started_at=int(row[2]),
+            ready_at=int(row[3]) if row[3] is not None else None,
+            last_seen_at=int(row[4]) if row[4] is not None else None,
+            shutdown_completed_at=int(row[5]) if row[5] is not None else None,
+            lifecycle_state=str(row[6]),
+        )

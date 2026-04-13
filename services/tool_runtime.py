@@ -86,6 +86,69 @@ def read_runtime_diagnostics() -> dict[str, Any]:
     }
 
 
+def get_session_ledger_status(
+    lookback_runs: int = 1,
+    *,
+    include_current: bool = False,
+) -> dict[str, Any]:
+    """Return a compact, deterministic snapshot of recent durable session-ledger runs."""
+
+    requested_lookback = int(lookback_runs)
+    clamped_lookback = max(1, min(requested_lookback, 5))
+
+    from storage.controller import StorageController
+
+    storage = StorageController.get_instance()
+    records = storage.get_recent_session_records(
+        lookback_runs=clamped_lookback,
+        include_current=bool(include_current),
+    )
+
+    run_items = [
+        {
+            "run_id": record.canonical_run_id,
+            "run_number": record.run_number,
+            "shutdown_clean": record.shutdown_clean,
+            "lifecycle_state": record.lifecycle_state,
+            "started_at": record.started_at,
+            "ready_at": record.ready_at,
+            "last_seen_at": record.last_seen_at,
+            "shutdown_completed_at": record.shutdown_completed_at,
+            "interpretation": _session_ledger_run_interpretation(shutdown_clean=record.shutdown_clean),
+        }
+        for record in records
+    ]
+
+    return {
+        "status": "ok",
+        "lookback_runs": clamped_lookback,
+        "include_current": bool(include_current),
+        "returned_runs": len(run_items),
+        "runs": run_items,
+        "summary_text": _build_session_ledger_summary(run_items),
+        "interpretation_notes": _session_ledger_interpretation_notes(),
+    }
+
+
+def _session_ledger_run_interpretation(*, shutdown_clean: bool) -> str:
+    return "clean shutdown recorded" if shutdown_clean else "no clean shutdown recorded"
+
+
+def _build_session_ledger_summary(runs: list[dict[str, Any]]) -> str:
+    if not runs:
+        return "no recorded prior run history available"
+    return "; ".join(f"{item['run_id']}: {item['interpretation']}" for item in runs)
+
+
+def _session_ledger_interpretation_notes() -> dict[str, str]:
+    return {
+        "shutdown_clean_true": "appears to have ended cleanly",
+        "shutdown_clean_false": "appears to have ended unexpectedly or has no clean shutdown marker",
+        "empty_history": "no recorded prior run history available",
+        "lifecycle_state_guardrail": "treat lifecycle_state as ledger state only; do not infer beyond recorded markers",
+    }
+
+
 def _collect_host_status() -> dict[str, Any]:
     wifi_ssid, wifi_reason = _read_wifi_ssid()
     primary_ip, ip_reason = _read_primary_ip()
