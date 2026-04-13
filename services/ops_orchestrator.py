@@ -32,6 +32,7 @@ from services.health_probes import (
 from motion.gestures import gesture_idle
 from motion.motion_controller import MotionController
 from services.memory_manager import MemoryManager
+from storage.controller import StorageController
 
 
 class OpsOrchestrator:
@@ -362,6 +363,11 @@ class OpsOrchestrator:
                 event.metadata["ticks"],
                 event.metadata["heartbeats"],
             )
+        try:
+            storage = StorageController.get_instance()
+            storage.touch_session_last_seen(storage.get_canonical_run_id())
+        except Exception as exc:
+            LOGGER.warning("[Ops] Session ledger heartbeat persist failed: %s", exc)
         self._emit_canonical_snapshot(timestamp, reason="heartbeat")
 
     def _emit_canonical_snapshot(self, timestamp: float, reason: str) -> None:

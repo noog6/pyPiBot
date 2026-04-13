@@ -19539,6 +19539,15 @@ class RealtimeAPI:
             if not self.ready_event.is_set():
                 logger.info("Realtime API ready to accept injections.")
                 self.ready_event.set()
+                canonical_run_id = self._storage.get_canonical_run_id()
+                try:
+                    self._storage.mark_session_running(canonical_run_id)
+                except Exception as exc:
+                    logger.warning(
+                        "Session ledger running-state persist failed run_id=%s error=%s",
+                        canonical_run_id,
+                        exc,
+                    )
             self._ensure_startup_injection_timeout_task()
 
     async def handle_output_item_added(self, event: dict[str, Any]) -> None:

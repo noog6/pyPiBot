@@ -173,6 +173,29 @@ def test_start_loop_emits_startup_snapshot(monkeypatch) -> None:
     assert reasons == ["startup"]
 
 
+def test_emit_heartbeat_persists_session_last_seen(monkeypatch) -> None:
+    orchestrator = _new_orchestrator()
+    orchestrator._mode = orchestrator._mode.ACTIVE
+
+    calls: list[tuple[str, str]] = []
+
+    class _FakeStorage:
+        def get_canonical_run_id(self) -> str:
+            return "run-42"
+
+        def touch_session_last_seen(self, run_id: str) -> None:
+            calls.append(("touch", run_id))
+
+    monkeypatch.setattr(
+        "services.ops_orchestrator.StorageController.get_instance",
+        lambda: _FakeStorage(),
+    )
+
+    orchestrator._emit_heartbeat(time.time())
+
+    assert calls == [("touch", "run-42")]
+
+
 def test_tick_reports_warmup_for_transient_startup_degradations(monkeypatch) -> None:
     orchestrator = _new_orchestrator()
     orchestrator._health_debounce_s = 0.0
