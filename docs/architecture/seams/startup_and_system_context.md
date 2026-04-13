@@ -31,12 +31,14 @@ Gate startup/system-context payload injection during early session phases so fir
 - Event loop readiness.
 - First-assistant utterance detection.
 - Startup gate timeout config.
+- Session-ledger prior-run classification from `storage/controller.py`, consumed by `main.py` and passed as read-only startup fact text.
 
 ## F) Downstream impacts
 
 - Early-turn grounding quality.
 - Initial context available to response generation.
 - Potential confusion if startup context arrives too late.
+- Compact prior-run lifecycle awareness (`prior_runtime_session.fact`) without adding new lifecycle authority in startup injection.
 
 ## G) Core invariants
 

@@ -113,6 +113,42 @@ def test_system_context_payload_can_disable_startup_time_context() -> None:
     assert "startup_time_context" not in payload
 
 
+def test_system_context_payload_includes_prior_run_fact_when_present() -> None:
+    coordinator = SystemContextCoordinator(
+        realtime_api=_RealtimeStub(),
+        ops_orchestrator=_OpsStub(
+            startup_emitted=True,
+            health=_Health("ok", "All systems nominal"),
+        ),
+        run_id="run-779",
+        boot_time="2026-01-01T00:00:00+00:00",
+        semantic_state="ready",
+        semantic_reason="provider_ready",
+        prior_run_startup_fact="Previous runtime session ended cleanly.",
+        inject_startup_time_context=False,
+    )
+
+    payload = coordinator._build_startup_payload()
+
+    assert payload["prior_runtime_session"]["fact"] == "Previous runtime session ended cleanly."
+
+
+def test_system_context_payload_omits_prior_run_fact_when_absent() -> None:
+    coordinator = SystemContextCoordinator(
+        realtime_api=_RealtimeStub(),
+        ops_orchestrator=_OpsStub(startup_emitted=True),
+        run_id="run-780",
+        boot_time="2026-01-01T00:00:00+00:00",
+        semantic_state="ready",
+        semantic_reason="provider_ready",
+        inject_startup_time_context=False,
+    )
+
+    payload = coordinator._build_startup_payload()
+
+    assert "prior_runtime_session" not in payload
+
+
 def test_system_context_coordinator_injects_second_update_on_transition_to_ok() -> None:
     realtime = _RealtimeStub()
     ops = _OpsStub(
