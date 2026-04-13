@@ -348,7 +348,6 @@ _PREFERENCE_KEYWORD_STOPWORDS = {
 }
 _PREFERENCE_QUERY_NOISE_TOKENS = {
     "hey",
-    "theo",
     "remember",
     "memories",
     "memory",
@@ -5696,6 +5695,20 @@ class RealtimeAPI:
                 keywords.append(token)
         return keywords
 
+    def _assistant_name_tokens_for_noise_filters(self) -> set[str]:
+        assistant_name = str(getattr(self, "_assistant_name", "Theo") or "Theo")
+        return {
+            token
+            for token in re.findall(r"[a-zA-Z0-9']+", assistant_name.lower())
+            if len(token) >= 2
+        }
+
+    def _preference_query_noise_tokens(self) -> set[str]:
+        return _PREFERENCE_QUERY_NOISE_TOKENS | self._assistant_name_tokens_for_noise_filters()
+
+    def _preference_variant_noise_tokens(self) -> set[str]:
+        return _PREFERENCE_RECALL_VARIANT_NOISE_TOKENS | self._assistant_name_tokens_for_noise_filters()
+
     def _build_preference_recall_query(self, user_text: str, *, keywords: list[str]) -> str:
         canonical = list(_PREFERENCE_QUERY_FALLBACK_CANONICAL)
         domain_hits = [domain for domain in _PREFERENCE_RECALL_DOMAINS if domain in user_text]
@@ -5713,9 +5726,10 @@ class RealtimeAPI:
                         entity_tokens.append(token)
 
         normalized_keywords: list[str] = []
+        query_noise_tokens = self._preference_query_noise_tokens()
         for keyword in keywords:
             normalized = keyword.strip().lower()
-            if not normalized or normalized in _PREFERENCE_QUERY_NOISE_TOKENS:
+            if not normalized or normalized in query_noise_tokens:
                 continue
             if normalized not in normalized_keywords:
                 normalized_keywords.append(normalized)
@@ -5750,10 +5764,11 @@ class RealtimeAPI:
         return " ".join(ordered_parts[:8])
 
     def _build_preference_recall_query_variants(self, query: str) -> list[tuple[str, str]]:
+        variant_noise_tokens = self._preference_variant_noise_tokens()
         normalized_tokens = [
             token
             for token in self._extract_preference_keywords(query)
-            if token not in _PREFERENCE_RECALL_VARIANT_NOISE_TOKENS
+            if token not in variant_noise_tokens
         ]
         if not normalized_tokens:
             candidate = " ".join((query or "").strip().lower().split())
@@ -5778,7 +5793,7 @@ class RealtimeAPI:
                     canonical_tokens = [
                         token.strip().lower()
                         for token in canonical.split()
-                        if token.strip().lower() not in _PREFERENCE_RECALL_VARIANT_NOISE_TOKENS
+                        if token.strip().lower() not in variant_noise_tokens
                     ]
                     _append_variant(canonical_tokens, "canonical")
         _append_variant(normalized_tokens[:8], "canonical")
@@ -5790,10 +5805,11 @@ class RealtimeAPI:
         return variants
 
     def _strict_preference_domain_query(self, query: str) -> str | None:
+        variant_noise_tokens = self._preference_variant_noise_tokens()
         query_tokens = [
             token
             for token in self._extract_preference_keywords(query)
-            if token not in _PREFERENCE_RECALL_VARIANT_NOISE_TOKENS
+            if token not in variant_noise_tokens
         ]
         domain_tokens = [token for token in query_tokens if token in _PREFERENCE_RECALL_DOMAINS]
         if not domain_tokens:
@@ -13292,6 +13308,7 @@ class RealtimeAPI:
             utterance_duration_ms=duration_ms,
             asr_meta=self._asr_meta_from_event(event),
             short_utterance_ms=self._asr_verify_short_utterance_ms,
+            assistant_name=self._assistant_name,
         )
         snapshot = {
             "run_id": snapshot_obj.run_id,
@@ -13388,6 +13405,7 @@ class RealtimeAPI:
                     utterance_duration_ms=getattr(self, "_asr_verify_short_utterance_ms", 450),
                     asr_meta={},
                     short_utterance_ms=self._asr_verify_short_utterance_ms,
+                    assistant_name=self._assistant_name,
                 ),
                 min_confidence=self._asr_verify_min_confidence,
                 camera_available=bool(vision_state.get("available", False) or vision_state.get("can_capture", False)),
@@ -13633,6 +13651,7 @@ class RealtimeAPI:
                     "no_speech_prob": snapshot.get("asr_no_speech_prob"),
                 },
                 short_utterance_ms=self._asr_verify_short_utterance_ms,
+                assistant_name=self._assistant_name,
             ),
             min_confidence=self._asr_verify_min_confidence,
             known_domain=known_domain,

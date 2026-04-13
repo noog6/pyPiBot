@@ -8,6 +8,7 @@ if "audioop" not in sys.modules:
 
 from ai.realtime.asr_trust import (
     build_utterance_trust_snapshot,
+    extract_topic_anchors,
     should_clarify,
     topic_mismatch_detected,
 )
@@ -60,6 +61,12 @@ def test_topic_mismatch_triggers_clarify() -> None:
         "what color my pants are",
         "I don't have any stored information about a favorite color.",
     )
+
+
+def test_extract_topic_anchors_uses_configured_assistant_name_as_noise_token() -> None:
+    anchors = extract_topic_anchors("hey nova what is my favorite editor", assistant_name="Nova")
+    assert "nova" not in anchors
+    assert "editor" in anchors
 
 
 def test_no_clarify_on_normal_high_confidence() -> None:
