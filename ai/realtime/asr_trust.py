@@ -11,7 +11,7 @@ from services.research.intent import has_research_intent
 _STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "do", "for", "from", "how", "i", "in", "is",
     "it", "know", "me", "my", "of", "on", "or", "that", "the", "to", "what", "where", "who", "you",
-    "your", "was", "were", "with", "there", "hey", "theo",
+    "your", "was", "were", "with", "there", "hey",
 }
 
 _VISUAL_TERMS = {"pants", "shirt", "hat", "wearing", "wear", "color", "see"}
@@ -43,10 +43,15 @@ _VISUAL_PHRASE_PATTERNS = (
 )
 
 
-def extract_topic_anchors(text: str, *, top_k: int = 5) -> list[str]:
+def _assistant_name_tokens(assistant_name: str | None) -> set[str]:
+    return set(re.findall(r"[a-zA-Z0-9']+", str(assistant_name or "").lower()))
+
+
+def extract_topic_anchors(text: str, *, top_k: int = 5, assistant_name: str | None = None) -> list[str]:
+    stopwords = _STOPWORDS | _assistant_name_tokens(assistant_name)
     counts: dict[str, int] = {}
     for token in re.findall(r"[a-zA-Z0-9']+", (text or "").lower()):
-        if token in _STOPWORDS or len(token) < 2:
+        if token in stopwords or len(token) < 2:
             continue
         counts[token] = counts.get(token, 0) + 1
     ranked = sorted(counts.items(), key=lambda item: (-item[1], -len(item[0]), item[0]))
@@ -117,6 +122,7 @@ def build_utterance_trust_snapshot(
     asr_meta: dict[str, Any] | None,
     short_utterance_ms: int,
     transcript_max_chars: int = 160,
+    assistant_name: str | None = None,
 ) -> UtteranceTrustSnapshot:
     cleaned = " ".join((transcript_text or "").split())
     words = re.findall(r"\b\w+\b", cleaned)
@@ -124,7 +130,7 @@ def build_utterance_trust_snapshot(
     confidence = meta.get("confidence") if isinstance(meta.get("confidence"), (int, float)) else None
     avg_logprob = meta.get("avg_logprob") if isinstance(meta.get("avg_logprob"), (int, float)) else None
     no_speech_prob = meta.get("no_speech_prob") if isinstance(meta.get("no_speech_prob"), (int, float)) else None
-    anchors = extract_topic_anchors(cleaned)
+    anchors = extract_topic_anchors(cleaned, assistant_name=assistant_name)
     visual_question = _is_visual_question(cleaned)
     duration = int(utterance_duration_ms) if isinstance(utterance_duration_ms, (int, float)) else None
     return UtteranceTrustSnapshot(
@@ -185,9 +191,15 @@ def should_clarify(
     return False, "none"
 
 
-def topic_mismatch_detected(transcript_text: str, response_text: str, *, threshold: float = 0.2) -> bool:
-    transcript_anchors = set(extract_topic_anchors(transcript_text))
-    response_anchors = set(extract_topic_anchors(response_text))
+def topic_mismatch_detected(
+    transcript_text: str,
+    response_text: str,
+    *,
+    threshold: float = 0.2,
+    assistant_name: str | None = None,
+) -> bool:
+    transcript_anchors = set(extract_topic_anchors(transcript_text, assistant_name=assistant_name))
+    response_anchors = set(extract_topic_anchors(response_text, assistant_name=assistant_name))
     if not transcript_anchors or not response_anchors:
         return False
     union = transcript_anchors | response_anchors

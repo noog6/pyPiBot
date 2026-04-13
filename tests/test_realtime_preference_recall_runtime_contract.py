@@ -736,6 +736,32 @@ def test_preference_query_builder_keeps_keyword_lookup_token() -> None:
     assert "vim" in query
 
 
+def test_preference_query_builder_filters_configured_assistant_name_token() -> None:
+    api = _base_api()
+    api._assistant_name = "Nova"
+
+    query = RealtimeAPI._build_preference_recall_query(
+        api,
+        "hey nova do you remember what my favorite editor is",
+        keywords=["hey", "nova", "remember", "editor"],
+    )
+
+    assert "nova" not in query
+    assert "editor" in query
+
+
+def test_preference_noise_helpers_include_configured_assistant_tokens() -> None:
+    api = _base_api()
+    api._assistant_name = "Nova Prime"
+    api._assistant_name_tokens_for_noise_filters = RealtimeAPI._assistant_name_tokens_for_noise_filters.__get__(api, RealtimeAPI)
+    api._preference_query_noise_tokens = RealtimeAPI._preference_query_noise_tokens.__get__(api, RealtimeAPI)
+    api._preference_variant_noise_tokens = RealtimeAPI._preference_variant_noise_tokens.__get__(api, RealtimeAPI)
+
+    assert {"nova", "prime"} <= api._assistant_name_tokens_for_noise_filters()
+    assert {"nova", "prime"} <= api._preference_query_noise_tokens()
+    assert {"nova", "prime"} <= api._preference_variant_noise_tokens()
+
+
 def test_preference_recall_run441_query_variants_return_vim() -> None:
     api = _base_api()
     api._preference_recall_fallback_query = RealtimeAPI._preference_recall_fallback_query.__get__(api, RealtimeAPI)

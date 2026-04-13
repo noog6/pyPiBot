@@ -125,7 +125,11 @@ class ResponseTerminalHandlers:
             transcript_text = str(snapshot.get("transcript_text") or "")
             if (
                 transcript_text
-                and topic_mismatch_detected(transcript_text, reply_text)
+                and topic_mismatch_detected(
+                    transcript_text,
+                    reply_text,
+                    assistant_name=getattr(api, "_assistant_name", None),
+                )
                 and bool(getattr(api, "_asr_verify_on_risk_enabled", False))
             ):
                 websocket = getattr(api, "websocket", None)
