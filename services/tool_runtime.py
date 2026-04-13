@@ -578,7 +578,7 @@ def read_environment() -> dict[str, Any]:
     return {
         "air_pressure": air_pressure,
         "air_temperature": air_temperature,
-        "air_temperature_context": "LPS22HB onboard ambient sensor inside Theo",
+        "air_temperature_context": "LPS22HB onboard ambient sensor inside the chassis",
         "cpu_temperature": cpu_temperature,
         "cpu_temperature_context": "Broadcom SoC core temperature (vcgencmd)",
         "cpu_temperature_status": cpu_status,

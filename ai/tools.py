@@ -529,7 +529,7 @@ tools.append(
             "inference_reason. When answering battery or charger questions, speak in first person "
             "using the tool result directly. Start the answer with the exact phrasing pattern "
             "'I'm at {voltage:.2f} volts right now.' so the spoken voltage always includes the "
-            "space after 'at', and never default to third-person phrasing like 'Theo's battery "
+            "space after 'at', and never default to third-person phrasing like 'the battery "
             "is...' unless another explicit mode requires it. Use inference_reason to choose "
             "charger wording: "
             "no_prior_sample='I don't have enough trend data yet to infer whether my charger is "
@@ -557,8 +557,8 @@ tools.append(
         "type": "function",
         "name": "read_environment",
         "description": (
-            "Fetch Theo's onboard environment readings. "
-            "Includes air pressure/ambient temperature from the LPS22HB sensor (inside Theo), "
+            "Fetch your onboard environment readings. "
+            "Includes air pressure/ambient temperature from the LPS22HB sensor (inside the chassis), "
             "plus the SoC core CPU temperature via vcgencmd (often higher than ambient). "
             "This is onboard data, not external weather. "
             "Return values in hPa and Celsius."
@@ -1055,7 +1055,7 @@ tools.append(
         "type": "function",
         "name": "perform_research",
         "description": (
-            "Perform a web lookup using Theo's research service and return a structured "
+            "Perform a web lookup using the onboard research service and return a structured "
             "research packet summary with facts and sources. Use this only when the user clearly names a searchable "
             "object, topic, question, or information target, such as 'look up the weather', 'look up Sectigo', "
             "or 'look up what this means'. Do not use it for stand-alone embodied direction requests like 'look up', "
