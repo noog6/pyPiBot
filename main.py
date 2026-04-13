@@ -137,6 +137,22 @@ def _run_stop_with_status(stop_fn, is_alive_fn=None) -> str:
     return "stopped"
 
 
+def _build_prior_run_startup_fact(prior_run_unclean: bool, prior_run_record: object | None) -> str | None:
+    """Build compact startup fact text from durable session-ledger classification."""
+
+    if prior_run_record is None:
+        return None
+    if prior_run_unclean:
+        prior_run_id = str(getattr(prior_run_record, "canonical_run_id", "") or "").strip()
+        if prior_run_id:
+            return (
+                "Previous runtime session appears to have ended unexpectedly. "
+                f"Last known session: {prior_run_id}."
+            )
+        return "Previous runtime session appears to have ended unexpectedly."
+    return "Previous runtime session ended cleanly."
+
+
 def main(argv: list[str] | None = None) -> int:
     """Application entry point.
 
@@ -226,6 +242,7 @@ def main(argv: list[str] | None = None) -> int:
     boot_time = datetime.now(timezone.utc).isoformat()
     storage_controller.mark_session_boot_started(runtime_session_id)
     prior_run_unclean, prior_run_record = storage_controller.previous_run_was_unclean()
+    prior_run_startup_fact = _build_prior_run_startup_fact(prior_run_unclean, prior_run_record)
     if prior_run_record is not None:
         if prior_run_unclean:
             logger.warning(
@@ -458,6 +475,7 @@ def main(argv: list[str] | None = None) -> int:
             boot_time=boot_time,
             semantic_state=semantic_state,
             semantic_reason=semantic_reason,
+            prior_run_startup_fact=prior_run_startup_fact,
             inject_startup_time_context=bool(startup_cfg.get("inject_time_context", True)),
         )
         system_context_coordinator.start()

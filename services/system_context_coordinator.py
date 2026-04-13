@@ -22,6 +22,7 @@ class SystemContextCoordinator:
         boot_time: str,
         semantic_state: str,
         semantic_reason: str,
+        prior_run_startup_fact: str | None = None,
         battery_monitor: Any | None = None,
         inject_startup_time_context: bool = True,
         poll_interval_s: float = 0.2,
@@ -33,6 +34,9 @@ class SystemContextCoordinator:
         self._boot_time = boot_time
         self._semantic_state = semantic_state
         self._semantic_reason = semantic_reason
+        self._prior_run_startup_fact = (
+            str(prior_run_startup_fact).strip() if prior_run_startup_fact is not None else None
+        ) or None
         self._inject_startup_time_context = bool(inject_startup_time_context)
         self._poll_interval_s = max(0.05, poll_interval_s)
         self._stop_event = threading.Event()
@@ -138,6 +142,8 @@ class SystemContextCoordinator:
             },
             "battery_startup_v": battery_voltage,
         }
+        if self._prior_run_startup_fact is not None:
+            payload["prior_runtime_session"] = {"fact": self._prior_run_startup_fact}
         if self._inject_startup_time_context:
             startup_time_context = self._build_startup_time_context()
             if startup_time_context:
