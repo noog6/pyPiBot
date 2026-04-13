@@ -155,6 +155,46 @@ def test_get_current_time_delegates_and_keeps_payload_shape(monkeypatch) -> None
     assert payload["unix_epoch_ms"] == 1775924292000
 
 
+def test_get_session_ledger_status_delegates_and_keeps_payload_shape(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_get_session_ledger_status(
+        lookback_runs: int = 1,
+        *,
+        include_current: bool = False,
+    ) -> dict[str, object]:
+        captured["lookback_runs"] = lookback_runs
+        captured["include_current"] = include_current
+        return {
+            "status": "ok",
+            "lookback_runs": lookback_runs,
+            "include_current": include_current,
+            "returned_runs": 1,
+            "runs": [{"run_id": "run-12", "shutdown_clean": True}],
+        }
+
+    monkeypatch.setattr(ai_tools.tool_runtime, "get_session_ledger_status", fake_get_session_ledger_status)
+
+    payload = asyncio.run(ai_tools.get_session_ledger_status(lookback_runs=3, include_current=True))
+
+    assert captured == {"lookback_runs": 3, "include_current": True}
+    assert payload["status"] == "ok"
+    assert payload["lookback_runs"] == 3
+    assert payload["include_current"] is True
+
+
+def test_get_session_ledger_status_tool_registered_in_schema_and_function_map() -> None:
+    ledger_tool = next(tool for tool in ai_tools.tools if tool.get("name") == "get_session_ledger_status")
+    description = ledger_tool["description"]
+
+    assert ledger_tool["type"] == "function"
+    assert "authoritative recent run history" in description
+    assert "maximum of 5" in description
+    assert "shutdown_clean=true" in description
+    assert "no recorded history available" in description
+    assert ai_tools.function_map["get_session_ledger_status"] is ai_tools.get_session_ledger_status
+
+
 def test_get_current_time_tool_registered_in_schema_and_function_map() -> None:
     current_time_tool = next(tool for tool in ai_tools.tools if tool.get("name") == "get_current_time")
     description = current_time_tool["description"]

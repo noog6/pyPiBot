@@ -103,3 +103,49 @@ def test_previous_run_clean_detection_uses_shutdown_clean_property(monkeypatch, 
     finally:
         second.close()
         StorageController._instance = None
+
+
+def test_get_recent_session_records_returns_newest_first_prior_runs(monkeypatch, tmp_path) -> None:
+    from storage.controller import StorageController
+
+    first = _build_storage(monkeypatch, tmp_path)
+    first_run_id = first.get_canonical_run_id()
+    first.mark_session_boot_started(first_run_id)
+    first.mark_session_shutdown_completed(first_run_id)
+    first.close()
+    StorageController._instance = None
+
+    second = _build_storage(monkeypatch, tmp_path)
+    second_run_id = second.get_canonical_run_id()
+    second.mark_session_boot_started(second_run_id)
+    second.close()
+    StorageController._instance = None
+
+    third = _build_storage(monkeypatch, tmp_path)
+    third_run_id = third.get_canonical_run_id()
+    third.mark_session_boot_started(third_run_id)
+    try:
+        records = third.get_recent_session_records(lookback_runs=2)
+
+        assert [record.canonical_run_id for record in records] == [second_run_id, first_run_id]
+        assert records[0].shutdown_clean is False
+        assert records[1].shutdown_clean is True
+    finally:
+        third.close()
+        StorageController._instance = None
+
+
+def test_get_recent_session_records_can_include_current_run(monkeypatch, tmp_path) -> None:
+    from storage.controller import StorageController
+
+    controller = _build_storage(monkeypatch, tmp_path)
+    run_id = controller.get_canonical_run_id()
+    controller.mark_session_boot_started(run_id)
+    try:
+        records = controller.get_recent_session_records(lookback_runs=1, include_current=True)
+
+        assert len(records) == 1
+        assert records[0].canonical_run_id == run_id
+    finally:
+        controller.close()
+        StorageController._instance = None

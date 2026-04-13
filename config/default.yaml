@@ -362,6 +362,20 @@ governance:
       side_effects: "NONE"
       sensitivity: "LOW"
       default_confirmation: "NEVER"
+    get_session_ledger_status:
+      tier: 0
+      reversible: true
+      cost_hint: "cheap"
+      safety_tags: ["diagnostics", "storage"]
+      confirm_required: false
+      confirm_reason: "read-only durable session-ledger query"
+      confirm_prompt: null
+      cooldown_seconds: 0
+      dry_run_supported: true
+      governance_tier: "SAFE"
+      side_effects: "NONE"
+      sensitivity: "LOW"
+      default_confirmation: "NEVER"
     get_current_time:
       tier: 0
       reversible: true

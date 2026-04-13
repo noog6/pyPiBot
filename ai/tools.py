@@ -84,6 +84,17 @@ async def read_runtime_diagnostics() -> dict[str, Any]:
     return tool_runtime.read_runtime_diagnostics()
 
 
+async def get_session_ledger_status(
+    lookback_runs: int = 1,
+    include_current: bool = False,
+) -> dict[str, Any]:
+    """Return a compact, authoritative status view of recent durable session-ledger runs."""
+    return tool_runtime.get_session_ledger_status(
+        lookback_runs=lookback_runs,
+        include_current=include_current,
+    )
+
+
 async def get_current_time(context: dict[str, Any] | None = None) -> dict[str, Any]:
     """Return current local time/date grounding (read-only, on-demand)."""
     return tool_runtime.get_current_time(context=context)
@@ -585,6 +596,33 @@ tools.append(
 )
 
 function_map["read_runtime_diagnostics"] = read_runtime_diagnostics
+
+tools.append(
+    {
+        "type": "function",
+        "name": "get_session_ledger_status",
+        "description": (
+            "Fetch authoritative recent run history from the durable session ledger for questions about prior "
+            "run outcomes. Defaults to the previous 1 run, supports include_current=false/true, and clamps "
+            "lookback_runs to a maximum of 5. Returns deterministic structured facts per run "
+            "(run_id, run_number, shutdown_clean, lifecycle_state, timestamps), plus compact interpretation "
+            "notes. Safe phrasing guidance: shutdown_clean=true means the run appears to have ended cleanly; "
+            "shutdown_clean=false means no clean shutdown marker was recorded and the run appears to have ended "
+            "unexpectedly or without a clean marker. If no rows are returned, describe this as no recorded "
+            "history available, not proof of success or failure."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "lookback_runs": {"type": "integer", "minimum": 1, "maximum": 5, "default": 1},
+                "include_current": {"type": "boolean", "default": False},
+            },
+            "required": [],
+        },
+    }
+)
+
+function_map["get_session_ledger_status"] = get_session_ledger_status
 
 tools.append(
     {
