@@ -756,6 +756,7 @@ class RealtimeAPI:
         if not self.api_key:
             raise RuntimeError("Please set the OPENAI_API_KEY environment variable.")
         config = ConfigController.get_instance().get_config()
+        self._assistant_name = str(config.get("assistant_name", "Theo")).strip() or "Theo"
         realtime_cfg = dict(config.get("realtime") or {})
         self._realtime_model = str(realtime_cfg.get("model", "gpt-realtime"))
         logger.info("[Realtime] startup model=%s", self._realtime_model)
@@ -17506,6 +17507,7 @@ class RealtimeAPI:
         instructions = build_session_instructions(
             profile_context.to_instruction_block(),
             lessons_block,
+            assistant_name=self._assistant_name,
         )
         logger.info(
             "Using VAD profile=%s threshold=%.2f prefix_padding_ms=%s silence_duration_ms=%s",

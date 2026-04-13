@@ -15,8 +15,13 @@ SILENCE_DURATION_MS = 900
 def build_session_instructions(
     profile_block: str | None = None,
     lessons_block: str | None = None,
+    assistant_name: str | None = None,
 ) -> str:
-    instruction_blocks = [SOUL_PATH.read_text(encoding="utf-8").strip()]
+    soul_text = SOUL_PATH.read_text(encoding="utf-8").strip()
+    configured_name = (assistant_name or "").strip()
+    if configured_name:
+        soul_text = soul_text.replace("Theo", configured_name)
+    instruction_blocks = [soul_text]
     if profile_block:
         instruction_blocks.append(profile_block)
     if lessons_block:
