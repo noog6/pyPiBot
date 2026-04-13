@@ -34,6 +34,28 @@ class StorageInfo:
     db_path: Path
 
 
+@dataclass(frozen=True)
+class SessionLedgerRecord:
+    """Durable lifecycle record for a single runtime session."""
+
+    canonical_run_id: str
+    run_number: int | None
+    started_at: int
+    ready_at: int | None
+    last_seen_at: int | None
+    shutdown_completed_at: int | None
+    lifecycle_state: str
+
+    @property
+    def shutdown_clean(self) -> bool:
+        """Return whether this run has a durable clean-shutdown marker."""
+
+        return (
+            self.lifecycle_state == "shutdown_completed"
+            and self.shutdown_completed_at is not None
+        )
+
+
 class StorageController:
     """Singleton controller for persistent storage."""
 
@@ -48,6 +70,7 @@ class StorageController:
         self.config = self.config_controller.get_config()
 
         var_dir, log_dir = self._resolve_storage_dirs()
+        self.var_dir = var_dir
         self.log_dir = log_dir
 
         self.run_id_file = var_dir / "current_run"
@@ -59,6 +82,9 @@ class StorageController:
 
         self.conn = self.connect(log_dir)
         self.initialize_db()
+        self.session_ledger_db_path = self.var_dir / "session_ledger.db"
+        self.session_ledger_conn = self._connect_session_ledger_db()
+        self._initialize_session_ledger_db()
         StorageController._instance = self
 
     @classmethod
@@ -107,11 +133,44 @@ class StorageController:
 
         self.conn.commit()
 
+    def _connect_session_ledger_db(self) -> sqlite3.Connection:
+        """Connect to the shared session-ledger SQLite database."""
+
+        self.var_dir.mkdir(parents=True, exist_ok=True)
+        return sqlite3.connect(self.session_ledger_db_path, check_same_thread=False)
+
+    def _initialize_session_ledger_db(self) -> None:
+        """Initialize the durable session-ledger schema."""
+
+        cursor = self.session_ledger_conn.cursor()
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS session_ledger (
+                canonical_run_id TEXT PRIMARY KEY,
+                run_number INTEGER,
+                started_at INTEGER NOT NULL,
+                ready_at INTEGER,
+                last_seen_at INTEGER,
+                shutdown_completed_at INTEGER,
+                lifecycle_state TEXT NOT NULL
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_session_ledger_run_number
+            ON session_ledger(run_number)
+            """
+        )
+        self.session_ledger_conn.commit()
+
     def close(self) -> None:
         """Close the storage connection."""
 
         if self.conn:
             self.conn.close()
+        if getattr(self, "session_ledger_conn", None):
+            self.session_ledger_conn.close()
 
     def add_log(self, log_level: str, message: str) -> None:
         """Insert a log record into the database."""
@@ -143,6 +202,11 @@ class StorageController:
         """Return the current run id."""
 
         return int(self.run_id)
+
+    def get_canonical_run_id(self) -> str:
+        """Return canonical runtime id used for durable session-ledger rows."""
+
+        return f"run-{self.get_current_run_number()}"
 
     def get_log_file_path(self) -> Path:
         """Return the log file path for the current run."""
@@ -178,6 +242,132 @@ class StorageController:
                     )
             except sqlite3.OperationalError as exc:
                 self.log_exception(exc)
+
+    def mark_session_boot_started(self, canonical_run_id: str, run_number: int | None = None) -> None:
+        """Create or refresh the lifecycle row for a run entering startup."""
+
+        run_id = str(canonical_run_id or "").strip()
+        if not run_id:
+            raise ValueError("canonical_run_id is required")
+        resolved_run_number = self.get_current_run_number() if run_number is None else int(run_number)
+        timestamp = millis()
+        with self._lock:
+            with self.session_ledger_conn:
+                self.session_ledger_conn.execute(
+                    """
+                    INSERT INTO session_ledger (
+                        canonical_run_id,
+                        run_number,
+                        started_at,
+                        last_seen_at,
+                        lifecycle_state
+                    )
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(canonical_run_id) DO UPDATE SET
+                        run_number=excluded.run_number,
+                        started_at=excluded.started_at,
+                        lifecycle_state=excluded.lifecycle_state
+                    """,
+                    (run_id, resolved_run_number, timestamp, timestamp, "boot_started"),
+                )
+
+    def mark_session_running(self, canonical_run_id: str) -> None:
+        """Mark a run as active once realtime is ready."""
+
+        run_id = str(canonical_run_id or "").strip()
+        if not run_id:
+            raise ValueError("canonical_run_id is required")
+        timestamp = millis()
+        with self._lock:
+            with self.session_ledger_conn:
+                self.session_ledger_conn.execute(
+                    """
+                    UPDATE session_ledger
+                    SET lifecycle_state='running',
+                        ready_at=COALESCE(ready_at, ?),
+                        last_seen_at=COALESCE(last_seen_at, ?)
+                    WHERE canonical_run_id=?
+                    """,
+                    (timestamp, timestamp, run_id),
+                )
+
+    def touch_session_last_seen(self, canonical_run_id: str) -> None:
+        """Persist periodic liveness for the active run."""
+
+        run_id = str(canonical_run_id or "").strip()
+        if not run_id:
+            raise ValueError("canonical_run_id is required")
+        timestamp = millis()
+        with self._lock:
+            with self.session_ledger_conn:
+                self.session_ledger_conn.execute(
+                    """
+                    UPDATE session_ledger
+                    SET last_seen_at=?,
+                        lifecycle_state=CASE
+                            WHEN lifecycle_state='boot_started' THEN 'running'
+                            ELSE lifecycle_state
+                        END
+                    WHERE canonical_run_id=?
+                    """,
+                    (timestamp, run_id),
+                )
+
+    def mark_session_shutdown_completed(self, canonical_run_id: str) -> None:
+        """Mark a run as cleanly shutdown."""
+
+        run_id = str(canonical_run_id or "").strip()
+        if not run_id:
+            raise ValueError("canonical_run_id is required")
+        timestamp = millis()
+        with self._lock:
+            with self.session_ledger_conn:
+                self.session_ledger_conn.execute(
+                    """
+                    UPDATE session_ledger
+                    SET lifecycle_state='shutdown_completed',
+                        shutdown_completed_at=?
+                    WHERE canonical_run_id=?
+                    """,
+                    (timestamp, run_id),
+                )
+
+    def get_previous_session_record(self) -> SessionLedgerRecord | None:
+        """Return the most recent run preceding the current run."""
+
+        cursor = self.session_ledger_conn.cursor()
+        cursor.execute(
+            """
+            SELECT canonical_run_id, run_number, started_at, ready_at, last_seen_at,
+                   shutdown_completed_at, lifecycle_state
+            FROM session_ledger
+            WHERE run_number < ?
+            ORDER BY run_number DESC
+            LIMIT 1
+            """,
+            (self.get_current_run_number(),),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return SessionLedgerRecord(
+            canonical_run_id=str(row[0]),
+            run_number=int(row[1]) if row[1] is not None else None,
+            started_at=int(row[2]),
+            ready_at=int(row[3]) if row[3] is not None else None,
+            last_seen_at=int(row[4]) if row[4] is not None else None,
+            shutdown_completed_at=int(row[5]) if row[5] is not None else None,
+            lifecycle_state=str(row[6]),
+        )
+
+    def previous_run_was_unclean(self) -> tuple[bool, SessionLedgerRecord | None]:
+        """Classify whether the prior run appears unclean from durable state."""
+
+        previous = self.get_previous_session_record()
+        if previous is None:
+            return False, None
+        is_clean = previous.shutdown_clean
+        return (not is_clean), previous
 
     def add_user_input(self, data: Any) -> None:
         """Persist user input payload."""

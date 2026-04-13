@@ -224,6 +224,23 @@ def main(argv: list[str] | None = None) -> int:
     )
     runtime_session_id = f"run-{storage_controller.get_current_run_number()}"
     boot_time = datetime.now(timezone.utc).isoformat()
+    storage_controller.mark_session_boot_started(runtime_session_id)
+    prior_run_unclean, prior_run_record = storage_controller.previous_run_was_unclean()
+    if prior_run_record is not None:
+        if prior_run_unclean:
+            logger.warning(
+                "SESSION_LEDGER_PRIOR_RUN_UNCLEAN prior_run_id=%s prior_state=%s shutdown_completed_at=%s last_seen_at=%s",
+                prior_run_record.canonical_run_id,
+                prior_run_record.lifecycle_state,
+                prior_run_record.shutdown_completed_at,
+                prior_run_record.last_seen_at,
+            )
+        else:
+            logger.info(
+                "session_ledger prior_run_clean prior_run_id=%s shutdown_completed_at=%s",
+                prior_run_record.canonical_run_id,
+                prior_run_record.shutdown_completed_at,
+            )
     memory_manager = MemoryManager.get_instance()
     semantic_startup_summary = memory_manager.get_semantic_startup_summary()
     canary_dimension_label = (
@@ -577,6 +594,10 @@ def main(argv: list[str] | None = None) -> int:
             )
 
         logger.info("shutdown summary=%s", shutdown_summary)
+        try:
+            storage_controller.mark_session_shutdown_completed(runtime_session_id)
+        except Exception as exc:
+            logger.warning("Failed to persist session shutdown completion run_id=%s: %s", runtime_session_id, exc)
 
     return runtime_exit_code
 

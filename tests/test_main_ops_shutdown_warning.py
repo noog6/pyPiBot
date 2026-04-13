@@ -19,8 +19,20 @@ class _FakeConfigController:
 
 
 class _FakeStorageController:
+    def __init__(self) -> None:
+        self.shutdown_marked = False
+
     def get_current_run_number(self) -> int:
         return 1
+
+    def mark_session_boot_started(self, _: str) -> None:
+        return None
+
+    def previous_run_was_unclean(self):
+        return (False, None)
+
+    def mark_session_shutdown_completed(self, _: str) -> None:
+        self.shutdown_marked = True
 
 
 class _FakeMemoryManager:
@@ -154,6 +166,13 @@ class _FakeOpsOrchestrator:
         return True
 
 
+class _FakePriorRun:
+    canonical_run_id = "run-0"
+    lifecycle_state = "running"
+    shutdown_completed_at = None
+    last_seen_at = 123
+
+
 def test_main_logs_warning_when_ops_shutdown_not_stopped(monkeypatch) -> None:
     warnings: list[str] = []
 
@@ -161,7 +180,8 @@ def test_main_logs_warning_when_ops_shutdown_not_stopped(monkeypatch) -> None:
         warnings.append(message % args if args else message)
 
     monkeypatch.setattr(main.ConfigController, "get_instance", lambda: _FakeConfigController())
-    monkeypatch.setattr(main.StorageController, "get_instance", lambda: _FakeStorageController())
+    fake_storage = _FakeStorageController()
+    monkeypatch.setattr(main.StorageController, "get_instance", lambda: fake_storage)
     monkeypatch.setattr(main.MemoryManager, "get_instance", lambda: _FakeMemoryManager())
     monkeypatch.setattr(main, "RealtimeAPI", _FakeRealtimeAPI)
     monkeypatch.setattr(main.MotionController, "get_instance", lambda: _FakeMotionController())
@@ -175,11 +195,43 @@ def test_main_logs_warning_when_ops_shutdown_not_stopped(monkeypatch) -> None:
     exit_code = main.main([])
 
     assert exit_code == 0
+    assert fake_storage.shutdown_marked is True
     assert (
         "Ops orchestrator shutdown incomplete "
         "(status=timed_out forced_shutdown_continuation=True loop_alive=True)"
     ) in warnings
     assert any("Ops orchestrator timed out. Follow-up:" in message for message in warnings)
+
+
+def test_main_logs_prior_run_unclean_anchor(monkeypatch) -> None:
+    warnings: list[str] = []
+
+    class UncleanStorage(_FakeStorageController):
+        def previous_run_was_unclean(self):
+            return (True, _FakePriorRun())
+
+    fake_storage = UncleanStorage()
+
+    def capture_warning(message: str, *args) -> None:
+        warnings.append(message % args if args else message)
+
+    monkeypatch.setattr(main.ConfigController, "get_instance", lambda: _FakeConfigController())
+    monkeypatch.setattr(main.StorageController, "get_instance", lambda: fake_storage)
+    monkeypatch.setattr(main.MemoryManager, "get_instance", lambda: _FakeMemoryManager())
+    monkeypatch.setattr(main, "RealtimeAPI", _FakeRealtimeAPI)
+    monkeypatch.setattr(main.MotionController, "get_instance", lambda: _FakeMotionController())
+    monkeypatch.setattr(main.CameraController, "get_instance", lambda: _FakeCameraController())
+    monkeypatch.setattr(main.ImuMonitor, "get_instance", lambda: _FakeMonitor())
+    monkeypatch.setattr(main.BatteryMonitor, "get_instance", lambda: _FakeMonitor())
+    monkeypatch.setattr(main.OpsOrchestrator, "get_instance", lambda: _FakeOpsOrchestrator(loop_alive=False))
+    monkeypatch.setattr(main, "suppress_noisy_stderr", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr(main.logger, "warning", capture_warning)
+
+    exit_code = main.main([])
+
+    assert exit_code == 0
+    assert fake_storage.shutdown_marked is True
+    assert any(message.startswith("SESSION_LEDGER_PRIOR_RUN_UNCLEAN") for message in warnings)
 
 
 class _FakeInterruptingOpsOrchestrator(_FakeOpsOrchestrator):
@@ -194,7 +246,8 @@ def test_main_handles_keyboard_interrupt_while_stopping_ops(monkeypatch) -> None
         warnings.append(message % args if args else message)
 
     monkeypatch.setattr(main.ConfigController, "get_instance", lambda: _FakeConfigController())
-    monkeypatch.setattr(main.StorageController, "get_instance", lambda: _FakeStorageController())
+    fake_storage = _FakeStorageController()
+    monkeypatch.setattr(main.StorageController, "get_instance", lambda: fake_storage)
     monkeypatch.setattr(main.MemoryManager, "get_instance", lambda: _FakeMemoryManager())
     monkeypatch.setattr(main, "RealtimeAPI", _FakeRealtimeAPI)
     monkeypatch.setattr(main.MotionController, "get_instance", lambda: _FakeMotionController())
@@ -208,6 +261,7 @@ def test_main_handles_keyboard_interrupt_while_stopping_ops(monkeypatch) -> None
     exit_code = main.main([])
 
     assert exit_code == 0
+    assert fake_storage.shutdown_marked is True
     assert "Interrupted while stopping ops orchestrator; continuing shutdown." in warnings
     assert (
         "Ops orchestrator shutdown incomplete "
@@ -240,7 +294,8 @@ def test_main_stops_ops_orchestrator_before_other_teardown(monkeypatch) -> None:
             return "stopped"
 
     monkeypatch.setattr(main.ConfigController, "get_instance", lambda: _FakeConfigController())
-    monkeypatch.setattr(main.StorageController, "get_instance", lambda: _FakeStorageController())
+    fake_storage = _FakeStorageController()
+    monkeypatch.setattr(main.StorageController, "get_instance", lambda: fake_storage)
     monkeypatch.setattr(main.MemoryManager, "get_instance", lambda: _FakeMemoryManager())
     monkeypatch.setattr(main, "RealtimeAPI", _FakeRealtimeAPI)
     monkeypatch.setattr(main.MotionController, "get_instance", lambda: OrderedMotion())
@@ -253,6 +308,7 @@ def test_main_stops_ops_orchestrator_before_other_teardown(monkeypatch) -> None:
     exit_code = main.main([])
 
     assert exit_code == 0
+    assert fake_storage.shutdown_marked is True
     assert stop_order[0] == "ops"
     assert set(stop_order[1:]) == {"camera", "motion", "imu", "battery"}
 
@@ -266,7 +322,8 @@ def test_main_prefers_camera_close_during_shutdown(monkeypatch) -> None:
             type(self).stop_calls += 1
 
     monkeypatch.setattr(main.ConfigController, "get_instance", lambda: _FakeConfigController())
-    monkeypatch.setattr(main.StorageController, "get_instance", lambda: _FakeStorageController())
+    fake_storage = _FakeStorageController()
+    monkeypatch.setattr(main.StorageController, "get_instance", lambda: fake_storage)
     monkeypatch.setattr(main.MemoryManager, "get_instance", lambda: _FakeMemoryManager())
     monkeypatch.setattr(main, "RealtimeAPI", _FakeRealtimeAPI)
     monkeypatch.setattr(main.MotionController, "get_instance", lambda: _FakeMotionController())
@@ -279,6 +336,7 @@ def test_main_prefers_camera_close_during_shutdown(monkeypatch) -> None:
     exit_code = main.main([])
 
     assert exit_code == 0
+    assert fake_storage.shutdown_marked is True
     assert ClosingCamera.close_calls == 1
     assert ClosingCamera.stop_calls == 1
 
