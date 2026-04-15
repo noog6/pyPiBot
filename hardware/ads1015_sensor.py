@@ -53,6 +53,7 @@ ADS_CONFIG_COMP_QUE_TWO = 0x0001
 ADS_CONFIG_COMP_QUE_FOUR = 0x0002
 ADS_CONFIG_COMP_QUE_NON = 0x0003
 
+MUX_MASK = 0x7000
 
 class ADS1015Sensor:
     """Singleton controller for ADS1015 sensor readings."""
@@ -119,17 +120,21 @@ class ADS1015Sensor:
 
     def single_read(self, channel: int) -> int:
         """Read a single channel data value."""
-
+        config = self.Config_Set & ~MUX_MASK
+        
         if channel == 0:
-            self.Config_Set |= ADS_CONFIG_MUX_SINGLE_0
+            config |= ADS_CONFIG_MUX_SINGLE_0
         elif channel == 1:
-            self.Config_Set |= ADS_CONFIG_MUX_SINGLE_1
+            config |= ADS_CONFIG_MUX_SINGLE_1
         elif channel == 2:
-            self.Config_Set |= ADS_CONFIG_MUX_SINGLE_2
+            config |= ADS_CONFIG_MUX_SINGLE_2
         elif channel == 3:
-            self.Config_Set |= ADS_CONFIG_MUX_SINGLE_3
-        self.Config_Set |= ADS_CONFIG_OS_SINGLE_CONVERT
-        self._write_word(ADS_POINTER_CONFIG, self.Config_Set)
+            config |= ADS_CONFIG_MUX_SINGLE_3
+        else
+            raise ValueError(f"Invalid ADS1015 channel: {channel}")
+            
+        config |= ADS_CONFIG_OS_SINGLE_CONVERT
+        self._write_word(ADS_POINTER_CONFIG, config)
         time.sleep(0.01)
         data = self._read_u16(ADS_POINTER_CONVERT) >> 4
         return data
