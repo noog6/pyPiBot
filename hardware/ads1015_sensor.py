@@ -96,9 +96,8 @@ class ADS1015Sensor:
         return values
 
     def _read_u16(self, cmd: int) -> int:
-        lsb = self._bus.read_byte_data(self._address, cmd)
-        msb = self._bus.read_byte_data(self._address, cmd + 1)
-        return (lsb << 8) + msb
+        data = self._bus.read_i2c_block_data(self._address, cmd, 2)
+        return (data[0] << 8) | data[1]
 
     def _write_word(self, cmd: int, val: int) -> None:
         val_h = val & 0xFF
