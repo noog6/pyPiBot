@@ -130,7 +130,7 @@ class ADS1015Sensor:
             config |= ADS_CONFIG_MUX_SINGLE_2
         elif channel == 3:
             config |= ADS_CONFIG_MUX_SINGLE_3
-        else
+        else:
             raise ValueError(f"Invalid ADS1015 channel: {channel}")
             
         config |= ADS_CONFIG_OS_SINGLE_CONVERT
