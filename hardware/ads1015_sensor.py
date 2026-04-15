@@ -163,14 +163,14 @@ class ADS1015Sensor:
         return round(current_amps, 2)
 
 def _demo() -> None:
-    LOGGER.info("ADS1015 Test Program")
+    print("ADS1015 Test Program")
     ads1015 = ADS1015Sensor()
     while True:
         time.sleep(0.5)
         values = ads1015.read_value()
         battery_voltage = ads1015.read_battery_voltage()
         system_amperage = ads1015.read_system_amperage()
-        LOGGER.info(
+        print(
             "AIN0=%d AIN1=%d AIN2=%d AIN3=%d | battery=%.2fV | current=%.2fA",
             values[0], values[1], values[2], values[3],
             battery_voltage,
