@@ -168,10 +168,13 @@ def _demo() -> None:
     while True:
         time.sleep(0.5)
         values = ads1015.read_value()
-        readings = values + [v * 2 for v in values]
+        battery_voltage = ads1015.read_battery_voltage()
+        system_amperage = ads1015.read_system_amperage()
         LOGGER.info(
-            "AIN0 = %d(%dmv) ,AIN1 = %d(%dmv) ,AIN2 = %d(%dmv) AIN3 = %d(%dmv)",
-            *readings,
+            "AIN0=%d AIN1=%d AIN2=%d AIN3=%d | battery=%.2fV | current=%.2fA",
+            values[0], values[1], values[2], values[3],
+            battery_voltage,
+            system_amperage,
         )
 
 
