@@ -53,6 +53,9 @@ ADS_CONFIG_COMP_QUE_TWO = 0x0001
 ADS_CONFIG_COMP_QUE_FOUR = 0x0002
 ADS_CONFIG_COMP_QUE_NON = 0x0003
 
+ACS711_31AB_ZERO_VOLTAGE = 1.65
+ACS711_31AB_SENSITIVITY_V_PER_A = 0.045
+ADS1015_LSB_VOLTS = 0.002
 MUX_MASK = 0x7000
 
 class ADS1015Sensor:
@@ -138,19 +141,26 @@ class ADS1015Sensor:
         time.sleep(0.01)
         data = self._read_u16(ADS_POINTER_CONVERT) >> 4
         return data
-
+    
+    def read_channel_voltage(self, channel: int) -> float:
+        data = self.single_read(channel)
+        return data * ADS1015_LSB_VOLTS
+    
     def read_battery_voltage(self) -> float:
         """Read battery voltage from channel 3."""
 
         resistor_r1 = 9750
         resistor_r2 = 6770
 
-        data = self.single_read(3)
-        analog_reading = (data * 2) / 1000
+        analog_reading = self.read_channel_voltage(3)
         battery_voltage = round(analog_reading * ((resistor_r1 + resistor_r2) / resistor_r2), 2)
 
         return battery_voltage
 
+    def read_system_amperage(self) -> float:
+        sensor_voltage = self.read_channel_voltage(0)
+        current_amps = (sensor_voltage - ACS711_31AB_ZERO_VOLTAGE) / ACS711_31AB_SENSITIVITY_V_PER_A
+        return round(current_amps, 2)
 
 def _demo() -> None:
     LOGGER.info("ADS1015 Test Program")
