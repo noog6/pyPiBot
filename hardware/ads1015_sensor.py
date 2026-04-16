@@ -6,8 +6,6 @@ import importlib
 import importlib.util
 import time
 
-from core.logging import logger as LOGGER
-
 ADS_I2C_ADDRESS = 0x48
 
 ADS_POINTER_CONVERT = 0x00
@@ -105,6 +103,19 @@ class ADS1015Sensor:
         val = (val_h << 8) | val_l
         self._bus.write_word_data(self._address, cmd, val)
 
+    def _read_config(self) -> int:
+        data = self._bus.read_i2c_block_data(self._address, ADS_POINTER_CONFIG, 2)
+        return (data[0] << 8) | data[1]
+
+    def _wait_for_conversion_ready(self, timeout_s: float = 0.01) -> None:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            config = self._read_config()
+            if config & ADS_CONFIG_OS_NOBUSY:
+                return
+            time.sleep(0.0001)
+        raise TimeoutError("ADS1015 conversion did not complete in time")
+
     def initialize(self) -> None:
         """Initialize ADS1015 settings."""
 
@@ -137,7 +148,7 @@ class ADS1015Sensor:
             
         config |= ADS_CONFIG_OS_SINGLE_CONVERT
         self._write_word(ADS_POINTER_CONFIG, config)
-        time.sleep(0.01)
+        self._wait_for_conversion_ready(1.0)
         data = self._read_u16(ADS_POINTER_CONVERT) >> 4
         return data
     
