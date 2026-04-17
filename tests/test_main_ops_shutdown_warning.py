@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 import sys
+import time
 import types
+from types import SimpleNamespace
 
 if "audioop" not in sys.modules:
     sys.modules["audioop"] = types.ModuleType("audioop")
@@ -580,3 +582,133 @@ def test_main_binds_camera_controller_on_realtime_api(monkeypatch) -> None:
     assert RecordingCamera.last_instance is not None
     assert RecordingCamera.last_instance.bound_realtime is RecordingRealtime.last_instance
     assert RecordingRealtime.last_instance.camera_controller is RecordingCamera.last_instance
+
+
+def test_run_summary_accumulator_estimates_energy_and_average_power() -> None:
+    summary = main._RunSummaryAccumulator(run_id="run-99", started_monotonic=100.0)
+    summary.observe_battery_event(
+        SimpleNamespace(timestamp=1_000.0, voltage=8.16, power_watts=2.0)
+    )
+    summary.observe_battery_event(
+        SimpleNamespace(timestamp=1_030.0, voltage=8.10, power_watts=1.0)
+    )
+    payload = summary.build_payload(
+        status="normal_shutdown",
+        ended_monotonic=160.0,
+        ended_wall_time=1_030.0,
+    )
+
+    assert payload.run_id == "run-99"
+    assert payload.startup_voltage == 8.16
+    assert payload.latest_voltage == 8.10
+    # 30 seconds at 2W => 0.0167Wh
+    assert payload.energy_wh is not None
+    assert round(payload.energy_wh, 3) == 0.017
+    # Weighted average over 60s runtime
+    assert payload.avg_power_watts is not None
+    assert round(payload.avg_power_watts, 2) == 1.00
+
+
+def test_run_summary_banner_handles_missing_telemetry(monkeypatch) -> None:
+    lines: list[str] = []
+
+    def capture_info(message: str, *args) -> None:
+        lines.append(message % args if args else message)
+
+    monkeypatch.setattr(main.logger, "info", capture_info)
+    payload = main._RunReportPayload(
+        run_id="run-404",
+        status="forced_shutdown",
+        duration_seconds=5.0,
+        startup_voltage=None,
+        latest_voltage=None,
+        avg_power_watts=None,
+        energy_wh=None,
+    )
+    main._emit_run_report_banner(payload)
+
+    assert any("THEO RUN REPORT" in line for line in lines)
+    assert any("battery: unavailable" in line for line in lines)
+    assert any("avg_power: unavailable" in line for line in lines)
+    assert any("energy_used: unavailable" in line for line in lines)
+
+
+def test_derive_shutdown_status_precedence() -> None:
+    assert (
+        main._derive_shutdown_status(
+            startup_failure=True,
+            interrupted=False,
+            runtime_exit_code=0,
+            shutdown_summary={},
+        )
+        == "startup_failure"
+    )
+    assert (
+        main._derive_shutdown_status(
+            startup_failure=False,
+            interrupted=True,
+            runtime_exit_code=1,
+            shutdown_summary={"ops_orchestrator": "timed_out"},
+        )
+        == "signal_shutdown"
+    )
+    assert (
+        main._derive_shutdown_status(
+            startup_failure=False,
+            interrupted=False,
+            runtime_exit_code=0,
+            shutdown_summary={"ops_orchestrator": "timed_out"},
+        )
+        == "forced_shutdown"
+    )
+    assert (
+        main._derive_shutdown_status(
+            startup_failure=False,
+            interrupted=False,
+            runtime_exit_code=1,
+            shutdown_summary={},
+        )
+        == "runtime_exception"
+    )
+
+
+def test_main_run_report_handles_battery_without_power_telemetry(monkeypatch) -> None:
+    infos: list[str] = []
+
+    class _VoltageOnlyBatteryMonitor(_FakeMonitor):
+        def __init__(self) -> None:
+            self._latest_event = SimpleNamespace(
+                timestamp=time.time(),
+                voltage=8.14,
+                power_watts=None,
+            )
+
+        def get_latest_event(self):
+            return self._latest_event
+
+    def capture_info(message: str, *args) -> None:
+        infos.append(message % args if args else message)
+
+    class _StoppedOpsOrchestrator(_FakeOpsOrchestrator):
+        def stop_loop(self) -> str:
+            return "stopped"
+
+    monkeypatch.setattr(main.ConfigController, "get_instance", lambda: _FakeConfigController())
+    monkeypatch.setattr(main.StorageController, "get_instance", lambda: _FakeStorageController())
+    monkeypatch.setattr(main.MemoryManager, "get_instance", lambda: _FakeMemoryManager())
+    monkeypatch.setattr(main, "RealtimeAPI", _FakeRealtimeAPI)
+    monkeypatch.setattr(main.MotionController, "get_instance", lambda: _FakeMotionController())
+    monkeypatch.setattr(main.CameraController, "get_instance", lambda: _FakeCameraController())
+    monkeypatch.setattr(main.ImuMonitor, "get_instance", lambda: _FakeMonitor())
+    monkeypatch.setattr(main.BatteryMonitor, "get_instance", lambda: _VoltageOnlyBatteryMonitor())
+    monkeypatch.setattr(main.OpsOrchestrator, "get_instance", lambda: _StoppedOpsOrchestrator(loop_alive=False))
+    monkeypatch.setattr(main, "suppress_noisy_stderr", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr(main.logger, "info", capture_info)
+
+    exit_code = main.main([])
+
+    assert exit_code == 0
+    assert any("THEO RUN REPORT" in line for line in infos)
+    assert any(":  status: normal_shutdown" in line for line in infos)
+    assert any(":  avg_power: unavailable" in line for line in infos)
+    assert any(":  energy_used: unavailable" in line for line in infos)

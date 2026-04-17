@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import importlib
 import importlib.util
 import logging
 import sys
+import time
 
 from ai import RealtimeAPI
 from ai.realtime_api import RealtimeAPIStartupError
@@ -153,6 +155,157 @@ def _build_prior_run_startup_fact(prior_run_unclean: bool, prior_run_record: obj
     return "Previous runtime session ended cleanly."
 
 
+@dataclass
+class _RunReportPayload:
+    run_id: str
+    status: str
+    duration_seconds: float
+    startup_voltage: float | None
+    latest_voltage: float | None
+    avg_power_watts: float | None
+    energy_wh: float | None
+
+
+class _RunSummaryAccumulator:
+    """Small seam-local runtime summary helper for shutdown reporting."""
+
+    def __init__(self, *, run_id: str, started_monotonic: float | None = None) -> None:
+        self._run_id = run_id
+        self._started_monotonic = started_monotonic if started_monotonic is not None else time.monotonic()
+        self._startup_voltage: float | None = None
+        self._latest_voltage: float | None = None
+        self._energy_wh = 0.0
+        self._power_weighted_seconds = 0.0
+        self._last_power_sample_time: float | None = None
+        self._last_power_watts: float | None = None
+        self._has_power_samples = False
+
+    def observe_battery_event(self, event: object | None) -> None:
+        if event is None:
+            return
+        timestamp = getattr(event, "timestamp", None)
+        voltage = getattr(event, "voltage", None)
+        power_watts = getattr(event, "power_watts", None)
+        self._observe_voltage(voltage)
+        self._observe_power_sample(timestamp=timestamp, power_watts=power_watts)
+
+    def _observe_voltage(self, voltage: object) -> None:
+        if not isinstance(voltage, (int, float)):
+            return
+        numeric_voltage = float(voltage)
+        if self._startup_voltage is None:
+            self._startup_voltage = numeric_voltage
+        self._latest_voltage = numeric_voltage
+
+    def _observe_power_sample(self, *, timestamp: object, power_watts: object) -> None:
+        if not isinstance(timestamp, (int, float)) or not isinstance(power_watts, (int, float)):
+            return
+        sample_time = float(timestamp)
+        sample_power = float(power_watts)
+        if sample_power < 0.0:
+            return
+        if self._last_power_sample_time is not None and self._last_power_watts is not None:
+            elapsed_seconds = max(0.0, sample_time - self._last_power_sample_time)
+            if elapsed_seconds > 0.0:
+                self._power_weighted_seconds += self._last_power_watts * elapsed_seconds
+                self._energy_wh += (self._last_power_watts * elapsed_seconds) / 3600.0
+        self._last_power_sample_time = sample_time
+        self._last_power_watts = sample_power
+        self._has_power_samples = True
+
+    def build_payload(
+        self,
+        *,
+        status: str,
+        ended_monotonic: float | None = None,
+        ended_wall_time: float | None = None,
+    ) -> _RunReportPayload:
+        finished_monotonic = ended_monotonic if ended_monotonic is not None else time.monotonic()
+        finished_wall_time = ended_wall_time if ended_wall_time is not None else time.time()
+        duration_seconds = max(0.0, finished_monotonic - self._started_monotonic)
+        if (
+            self._has_power_samples
+            and self._last_power_sample_time is not None
+            and self._last_power_watts is not None
+        ):
+            tail_seconds = max(0.0, finished_wall_time - self._last_power_sample_time)
+            if tail_seconds > 0.0:
+                self._power_weighted_seconds += self._last_power_watts * tail_seconds
+                self._energy_wh += (self._last_power_watts * tail_seconds) / 3600.0
+                self._last_power_sample_time = finished_wall_time
+        avg_power_watts = (
+            self._power_weighted_seconds / duration_seconds
+            if self._has_power_samples and duration_seconds > 0.0
+            else None
+        )
+        energy_wh = self._energy_wh if self._has_power_samples else None
+        return _RunReportPayload(
+            run_id=self._run_id,
+            status=status,
+            duration_seconds=duration_seconds,
+            startup_voltage=self._startup_voltage,
+            latest_voltage=self._latest_voltage,
+            avg_power_watts=avg_power_watts,
+            energy_wh=energy_wh,
+        )
+
+
+def _format_duration(total_seconds: float) -> str:
+    seconds = int(max(0.0, total_seconds))
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _format_optional_float(value: float | None, *, unit: str, precision: int = 2) -> str:
+    if value is None:
+        return "unavailable"
+    return f"{value:.{precision}f}{unit}"
+
+
+def _emit_run_report_banner(payload: _RunReportPayload) -> None:
+    battery_text = (
+        f"{payload.startup_voltage:.2f}V -> {payload.latest_voltage:.2f}V"
+        if payload.startup_voltage is not None and payload.latest_voltage is not None
+        else "unavailable"
+    )
+    logger.info("············································")
+    logger.info(":               THEO RUN REPORT              :")
+    logger.info(":  run_id: %-34s :", payload.run_id)
+    logger.info(":  status: %-34s :", payload.status)
+    logger.info(":  duration: %-32s :", _format_duration(payload.duration_seconds))
+    logger.info(":  battery: %-33s :", battery_text)
+    logger.info(":  avg_power: %-31s :", _format_optional_float(payload.avg_power_watts, unit="W"))
+    logger.info(":  energy_used: %-29s :", _format_optional_float(payload.energy_wh, unit=" Wh", precision=3))
+    logger.info("············································")
+
+
+def _derive_shutdown_status(
+    *,
+    startup_failure: bool,
+    interrupted: bool,
+    runtime_exit_code: int,
+    shutdown_summary: dict[str, str],
+) -> str:
+    if startup_failure:
+        return "startup_failure"
+    if interrupted:
+        return "signal_shutdown"
+    forced_statuses = {"timed_out", "interrupted", "error"}
+    if any(status in forced_statuses for status in shutdown_summary.values()):
+        return "forced_shutdown"
+    if runtime_exit_code != 0:
+        return "runtime_exception"
+    return "normal_shutdown"
+
+
+def _capture_battery_snapshot(run_summary: _RunSummaryAccumulator, monitor: object) -> None:
+    latest_event_getter = getattr(monitor, "get_latest_event", None)
+    if not callable(latest_event_getter):
+        return
+    run_summary.observe_battery_event(latest_event_getter())
+
+
 def main(argv: list[str] | None = None) -> int:
     """Application entry point.
 
@@ -239,6 +392,7 @@ def main(argv: list[str] | None = None) -> int:
         semantic_state["table_exists"],
     )
     runtime_session_id = f"run-{storage_controller.get_current_run_number()}"
+    run_summary = _RunSummaryAccumulator(run_id=runtime_session_id)
     boot_time = datetime.now(timezone.utc).isoformat()
     storage_controller.mark_session_boot_started(runtime_session_id)
     prior_run_unclean, prior_run_record = storage_controller.previous_run_was_unclean()
@@ -365,6 +519,9 @@ def main(argv: list[str] | None = None) -> int:
             detail=str(exc),
             level="exception",
         )
+        _emit_run_report_banner(
+            run_summary.build_payload(status="startup_failure")
+        )
         return 1
     except Exception as exc:
         log_startup_status(
@@ -373,6 +530,9 @@ def main(argv: list[str] | None = None) -> int:
             "fatal",
             detail=str(exc),
             level="exception",
+        )
+        _emit_run_report_banner(
+            run_summary.build_payload(status="startup_failure")
         )
         return 1
 
@@ -439,12 +599,16 @@ def main(argv: list[str] | None = None) -> int:
     # Optional dependency: battery telemetry failure is non-fatal.
     battery_monitor = None
     battery_event_handler = None
+    battery_run_summary_handler = None
     try:
         log_startup_status("battery_monitor", "optional", "starting")
         battery_monitor = BatteryMonitor.get_instance()
         battery_monitor.start_loop()
         battery_event_handler = battery_monitor.create_event_bus_handler(event_bus)
         battery_monitor.register_event_handler(battery_event_handler)
+        _capture_battery_snapshot(run_summary, battery_monitor)
+        battery_run_summary_handler = run_summary.observe_battery_event
+        battery_monitor.register_event_handler(battery_run_summary_handler)
         log_startup_status("battery_monitor", "optional", "ready")
     except Exception as exc:
         log_startup_status(
@@ -605,13 +769,25 @@ def main(argv: list[str] | None = None) -> int:
                 lambda: _stop_imu_monitor_with_status(imu_monitor),
             )
         if battery_monitor:
+            _capture_battery_snapshot(run_summary, battery_monitor)
             if battery_event_handler:
                 battery_monitor.unregister_event_handler(battery_event_handler)
+            if battery_run_summary_handler:
+                battery_monitor.unregister_event_handler(battery_run_summary_handler)
             shutdown_summary["battery_monitor"] = _run_stop_with_status(
                 lambda: _stop_battery_monitor_with_status(battery_monitor),
             )
 
         logger.info("shutdown summary=%s", shutdown_summary)
+        shutdown_status = _derive_shutdown_status(
+            startup_failure=False,
+            interrupted=interrupted,
+            runtime_exit_code=runtime_exit_code,
+            shutdown_summary=shutdown_summary,
+        )
+        _emit_run_report_banner(
+            run_summary.build_payload(status=shutdown_status)
+        )
         try:
             storage_controller.mark_session_shutdown_completed(runtime_session_id)
         except Exception as exc:
