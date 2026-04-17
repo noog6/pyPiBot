@@ -52,7 +52,10 @@ ADS_CONFIG_COMP_QUE_FOUR = 0x0002
 ADS_CONFIG_COMP_QUE_NON = 0x0003
 
 ACS711_31AB_ZERO_VOLTAGE = 1.684
-ACS711_31AB_SENSITIVITY_V_PER_A = 0.045
+ACS711_31AB_SENSITIVITY_V_PER_A = 0.028
+# Empirically calibrated against external multimeter on installed hardware.
+# Datasheet-typical sensitivity estimate did not match observed low-current behavior.
+
 ADS1015_LSB_VOLTS = 0.002
 MUX_MASK = 0x7000
 
