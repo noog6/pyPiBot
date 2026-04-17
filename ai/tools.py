@@ -523,7 +523,8 @@ tools.append(
         "type": "function",
         "name": "read_battery_voltage",
         "description": (
-            "Fetch the current voltage of the onboard 2S LiPo battery. "
+            "Fetch current onboard battery telemetry from the existing battery monitor/tool path. "
+            "Returns voltage plus current draw (amperage) and, when available, derived power_watts. "
             "Safe operating range is 7.0V to 8.4V. The tool also returns charger inference "
             "fields from the latest battery monitor event: inferred_charger_connected and "
             "inference_reason. When answering battery or charger questions, speak in first person "

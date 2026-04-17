@@ -20933,7 +20933,23 @@ class RealtimeAPI:
             return None
         if any(token in summary for token in ("time", "clock", "date", "day")):
             return "get_current_time"
-        if any(token in summary for token in ("battery", "voltage", "power level", "charger", "charge")):
+        if any(
+            token in summary
+            for token in (
+                "battery",
+                "voltage",
+                "power level",
+                "charger",
+                "charge",
+                "current",
+                "amperage",
+                "amp",
+                "amps",
+                "watt",
+                "watts",
+                "power draw",
+            )
+        ):
             return "read_battery_voltage"
         return None
 

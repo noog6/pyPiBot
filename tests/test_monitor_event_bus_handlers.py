@@ -117,10 +117,14 @@ def test_battery_create_event_bus_handler_emits_unchanged_contract(tmp_path, mon
     assert event.dedupe_key == "battery_status"
     assert event.metadata == {
         "voltage": 7.5,
+        "amperage": None,
+        "power_watts": None,
         "percent_of_range": 0.36,
         "severity": "warning",
         "event_type": "status",
         "transition": "enter_warning",
         "delta_percent": -9.0,
         "rapid_drop": True,
+        "inferred_charger_connected": False,
+        "inference_reason": "no_prior_sample",
     }

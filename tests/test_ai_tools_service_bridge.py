@@ -19,11 +19,14 @@ def test_read_battery_voltage_delegates_and_keeps_payload_shape(monkeypatch) -> 
         called["count"] += 1
         return {
             "voltage": 8.1,
+            "amperage": 0.62,
+            "power_watts": 5.02,
             "unit": "V",
             "min_voltage": 7.0,
             "max_voltage": 8.4,
             "inferred_charger_connected": False,
             "inference_reason": "voltage_flat",
+            "telemetry_source": "battery_monitor",
         }
 
     monkeypatch.setattr(ai_tools.tool_runtime, "read_battery_voltage", fake_read_battery_voltage)
@@ -33,11 +36,14 @@ def test_read_battery_voltage_delegates_and_keeps_payload_shape(monkeypatch) -> 
     assert called["count"] == 1
     assert payload == {
         "voltage": 8.1,
+        "amperage": 0.62,
+        "power_watts": 5.02,
         "unit": "V",
         "min_voltage": 7.0,
         "max_voltage": 8.4,
         "inferred_charger_connected": False,
         "inference_reason": "voltage_flat",
+        "telemetry_source": "battery_monitor",
     }
 
 
@@ -46,6 +52,8 @@ def test_read_battery_voltage_tool_description_guides_first_person_reason_aware_
     description = battery_tool["description"]
 
     assert "speak in first person" in description
+    assert "current draw (amperage)" in description
+    assert "derived power_watts" in description
     assert "Start the answer with the exact phrasing pattern" in description
     assert "space after 'at'" in description
     assert "never default to third-person phrasing" in description

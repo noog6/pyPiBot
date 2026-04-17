@@ -105,6 +105,8 @@ def probe_battery() -> HealthProbeResult:
     details.update(
         {
             "voltage": latest.voltage,
+            "amperage": latest.amperage if latest.amperage is not None else "unavailable",
+            "power_watts": latest.power_watts if latest.power_watts is not None else "unavailable",
             "percent": latest.percent_of_range,
             "severity": latest.severity,
             "inferred_charger_connected": int(latest.inferred_charger_connected),

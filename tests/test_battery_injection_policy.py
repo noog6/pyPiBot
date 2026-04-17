@@ -104,6 +104,10 @@ def test_battery_response_only_for_qualifying_transition_or_critical() -> None:
 def test_battery_query_intent_detection_and_context_window() -> None:
     api = _make_api_stub()
     assert api._is_battery_status_query("how's battery?") is True
+    assert api._is_battery_status_query("what current are you drawing?") is True
+    assert api._is_battery_status_query("what amp are you drawing?") is True
+    assert api._is_battery_status_query("how many watts are you using?") is True
+    assert api._is_battery_status_query("what is your power draw right now?") is True
     assert api._is_battery_status_query("tell me a joke") is False
 
     api._record_user_input("how's battery?", source="text_message")

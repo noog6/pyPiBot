@@ -1,6 +1,9 @@
 """Tests for health probe detail enrichment."""
 
-from services.health_probes import probe_realtime_session
+from types import SimpleNamespace
+
+from core.ops_models import HealthStatus
+from services.health_probes import probe_battery, probe_realtime_session
 
 
 class _FakeRealtime:
@@ -166,3 +169,55 @@ def test_probe_realtime_session_transitions_to_ok_after_readiness() -> None:
     assert initial.status.value == "warmup"
     assert ready.status.value == "ok"
     assert ready.summary == "Realtime session connected"
+
+
+def test_probe_battery_includes_amperage_and_power(monkeypatch) -> None:
+    fake_monitor = SimpleNamespace(
+        is_loop_alive=lambda: True,
+        get_latest_event=lambda: SimpleNamespace(
+            voltage=8.01,
+            amperage=0.58,
+            power_watts=4.65,
+            percent_of_range=0.72,
+            severity="info",
+            inferred_charger_connected=False,
+            inference_reason="voltage_flat",
+        ),
+    )
+    monkeypatch.setattr("services.health_probes.importlib.util.find_spec", lambda _: object())
+    monkeypatch.setattr(
+        "services.health_probes.BatteryMonitor.get_instance",
+        classmethod(lambda cls: fake_monitor),
+    )
+
+    result = probe_battery()
+
+    assert result.status == HealthStatus.OK
+    assert result.details["amperage"] == 0.58
+    assert result.details["power_watts"] == 4.65
+
+
+def test_probe_battery_marks_missing_current_telemetry_unavailable(monkeypatch) -> None:
+    fake_monitor = SimpleNamespace(
+        is_loop_alive=lambda: True,
+        get_latest_event=lambda: SimpleNamespace(
+            voltage=7.8,
+            amperage=None,
+            power_watts=None,
+            percent_of_range=0.5,
+            severity="warning",
+            inferred_charger_connected=False,
+            inference_reason="voltage_flat",
+        ),
+    )
+    monkeypatch.setattr("services.health_probes.importlib.util.find_spec", lambda _: object())
+    monkeypatch.setattr(
+        "services.health_probes.BatteryMonitor.get_instance",
+        classmethod(lambda cls: fake_monitor),
+    )
+
+    result = probe_battery()
+
+    assert result.status == HealthStatus.DEGRADED
+    assert result.details["amperage"] == "unavailable"
+    assert result.details["power_watts"] == "unavailable"
