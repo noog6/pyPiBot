@@ -350,5 +350,7 @@ def test_battery_event_bus_metadata_includes_inferred_charger_state(tmp_path: Pa
     assert published is not None
     assert published.metadata["inferred_charger_connected"] is True
     assert published.metadata["inference_reason"] == "voltage_rising"
+    assert published.metadata["amperage"] is None
+    assert published.metadata["power_watts"] is None
     assert published.metadata["severity"] == "warning"
     assert published.metadata["delta_percent"] == 2.0

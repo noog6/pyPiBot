@@ -536,9 +536,25 @@ def _classify_look_center_request(controller: MotionController) -> str:
 def read_battery_voltage() -> dict[str, Any]:
     """Return the current LiPo battery voltage via the ADS1015 sensor."""
 
-    sensor = ADS1015Sensor.get_instance()
-    voltage = sensor.read_battery_voltage()
     latest_event = BatteryMonitor.get_instance().get_latest_event()
+    voltage: float
+    amperage: float | None = None
+    power_watts: float | None = None
+    telemetry_source = "battery_monitor"
+    if latest_event is not None:
+        voltage = latest_event.voltage
+        amperage = latest_event.amperage
+        power_watts = latest_event.power_watts
+    else:
+        telemetry_source = "ads1015_direct_read"
+        sensor = ADS1015Sensor.get_instance()
+        voltage = sensor.read_battery_voltage()
+        try:
+            amperage = sensor.read_system_amperage()
+        except Exception:
+            amperage = None
+        power_watts = round(voltage * amperage, 2) if amperage is not None else None
+
     inferred_charger_connected = False
     inference_reason = "no_prior_sample"
     if latest_event is not None:
@@ -546,11 +562,14 @@ def read_battery_voltage() -> dict[str, Any]:
         inference_reason = latest_event.inference_reason
     return {
         "voltage": voltage,
+        "amperage": amperage,
+        "power_watts": power_watts,
         "unit": "V",
         "min_voltage": 7.0,
         "max_voltage": 8.4,
         "inferred_charger_connected": inferred_charger_connected,
         "inference_reason": inference_reason,
+        "telemetry_source": telemetry_source,
     }
 
 

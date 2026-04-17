@@ -21,6 +21,8 @@ class BatteryStatusEvent:
     voltage: float
     percent_of_range: float
     severity: str
+    amperage: float | None = None
+    power_watts: float | None = None
     event_type: str = "status"
     transition: str = "steady"
     delta_percent: float = 0.0
@@ -54,6 +56,7 @@ class BatteryMonitor:
         self._response_allow_warning = True
         self._response_allow_critical = True
         self._response_require_transition = False
+        self._amperage_unavailable_logged = False
         self._charger_inference_min_voltage_rise = 0.03
         self._load_config()
         self._loop_period_s = 60.0
@@ -134,6 +137,8 @@ class BatteryMonitor:
                     request_response=request_response,
                     metadata={
                         "voltage": event.voltage,
+                        "amperage": event.amperage,
+                        "power_watts": event.power_watts,
                         "percent_of_range": event.percent_of_range,
                         "severity": event.severity,
                         "event_type": event.event_type,
@@ -153,9 +158,21 @@ class BatteryMonitor:
         while not self._stop_event.is_set():
             try:
                 voltage = self._sensor.read_battery_voltage()
+                amperage: float | None = None
+                try:
+                    amperage = self._sensor.read_system_amperage()
+                except Exception as exc:
+                    if not self._amperage_unavailable_logged:
+                        LOGGER.warning(
+                            "[Battery] Current telemetry unavailable; continuing with voltage-only events: %s",
+                            exc,
+                        )
+                        self._amperage_unavailable_logged = True
+                else:
+                    self._amperage_unavailable_logged = False
                 with self._lock:
                     previous_event = self._latest_event
-                event = self._build_event(voltage, previous_event)
+                event = self._build_event(voltage, previous_event, amperage=amperage)
                 self._store_event(event)
             except Exception as exc:
                 LOGGER.exception("[Battery] Error in loop (retrying): %s", exc)
@@ -170,10 +187,13 @@ class BatteryMonitor:
         self,
         voltage: float,
         previous_event: BatteryStatusEvent | None,
+        *,
+        amperage: float | None = None,
     ) -> BatteryStatusEvent:
         percent = (voltage - self._min_voltage) / (self._max_voltage - self._min_voltage)
         percent = max(0.0, min(1.0, percent))
         severity = self._derive_severity(percent, previous_event)
+        power_watts = round(voltage * amperage, 2) if amperage is not None else None
 
         previous_percent = previous_event.percent_of_range if previous_event else percent
         delta_percent = (percent - previous_percent) * 100.0
@@ -188,6 +208,8 @@ class BatteryMonitor:
             voltage=voltage,
             percent_of_range=percent,
             severity=severity,
+            amperage=amperage,
+            power_watts=power_watts,
             event_type="status",
             transition=transition,
             delta_percent=delta_percent,
@@ -268,6 +290,8 @@ class BatteryMonitor:
                 voltage=event.voltage,
                 percent_of_range=event.percent_of_range,
                 severity="info",
+                amperage=event.amperage,
+                power_watts=event.power_watts,
                 event_type="clear",
                 transition="recover_info",
                 delta_percent=event.delta_percent,
@@ -283,9 +307,13 @@ class BatteryMonitor:
         if not handlers:
             return
         for event in events:
+            amperage_text = f"{event.amperage:.2f}A" if event.amperage is not None else "unavailable"
+            power_text = f"{event.power_watts:.2f}W" if event.power_watts is not None else "unavailable"
             LOGGER.info(
-                "[Battery] Emitting event: voltage=%.2fV severity=%s percent=%.2f transition=%s delta=%.2f rapid_drop=%s inferred_charger_connected=%s inference_reason=%s",
+                "[Battery] Emitting event: voltage=%.2fV amperage=%s power=%s severity=%s percent=%.2f transition=%s delta=%.2f rapid_drop=%s inferred_charger_connected=%s inference_reason=%s",
                 event.voltage,
+                amperage_text,
+                power_text,
                 event.severity,
                 event.percent_of_range,
                 event.transition,
