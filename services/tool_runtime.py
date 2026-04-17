@@ -158,20 +158,39 @@ def _collect_host_status() -> dict[str, Any]:
     status: dict[str, Any] = {
         "wifi_ssid": wifi_ssid,
         "primary_ip": primary_ip,
-        "uptime_pretty": uptime_pretty,
+        "system_uptime": uptime_pretty,
         "load_average": load_average,
         "memory": _read_memory_snapshot(),
         "disk_root": _read_root_disk_snapshot(),
+        "battery": _read_battery_snapshot(),
     }
     if wifi_ssid == "unknown" and wifi_reason:
         status["wifi_ssid_reason"] = wifi_reason
     if primary_ip == "unknown" and ip_reason:
         status["primary_ip_reason"] = ip_reason
     if uptime_pretty == "unknown" and uptime_reason:
-        status["uptime_pretty_reason"] = uptime_reason
+        status["system_uptime_reason"] = uptime_reason
     if any(value == "unknown" for value in load_average.values()) and load_reason:
         status["load_average_reason"] = load_reason
     return status
+
+
+def _read_battery_snapshot() -> dict[str, Any]:
+    latest_event = BatteryMonitor.get_instance().get_latest_event()
+    if latest_event is None:
+        return {
+            "voltage": "unknown",
+            "amperage": "unknown",
+            "power_watts": "unknown",
+            "telemetry_source": "battery_monitor",
+            "reason": "no_sample_available",
+        }
+    return {
+        "voltage": latest_event.voltage,
+        "amperage": latest_event.amperage if latest_event.amperage is not None else "unavailable",
+        "power_watts": latest_event.power_watts if latest_event.power_watts is not None else "unavailable",
+        "telemetry_source": "battery_monitor",
+    }
 
 
 def _motion_request_key(action: Any) -> str:
