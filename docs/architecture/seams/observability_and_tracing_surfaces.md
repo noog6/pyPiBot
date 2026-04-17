@@ -24,6 +24,7 @@ Expose reason-coded, seam-local diagnostics that make arbitration/settlement dec
 - Turn-level arbitration traces and review summaries.
 - Contract breach artifacts with fingerprints and recommended action kind.
 - High-signal log anchors used in incident triage.
+- End-of-run lifecycle report banner emitted from `main.py` shutdown finalization with machine-friendly status and battery/power summary fields.
 
 ## E) Upstream dependencies
 
