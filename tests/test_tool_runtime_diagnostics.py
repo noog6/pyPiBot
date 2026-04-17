@@ -11,6 +11,7 @@ if "audioop" not in sys.modules:
 
 from ai.realtime_api import RealtimeAPI
 from services import tool_runtime
+from services.battery_monitor import BatteryStatusEvent
 
 
 def test_read_runtime_diagnostics_delegates_to_registered_provider_and_adds_host_status(monkeypatch) -> None:
@@ -39,7 +40,7 @@ def test_read_runtime_diagnostics_delegates_to_registered_provider_and_adds_host
         monkeypatch.setattr(
             tool_runtime,
             "_collect_host_status",
-            lambda: {"wifi_ssid": "TheoWiFi", "primary_ip": "192.168.1.42"},
+            lambda: {"wifi_ssid": "TheoWiFi", "primary_ip": "192.168.1.42", "system_uptime": "up 1 hour"},
         )
         tool_runtime.set_runtime_diagnostics_provider(lambda: source_payload)
 
@@ -51,6 +52,7 @@ def test_read_runtime_diagnostics_delegates_to_registered_provider_and_adds_host
         assert payload["host_status"] == {
             "wifi_ssid": "TheoWiFi",
             "primary_ip": "192.168.1.42",
+            "system_uptime": "up 1 hour",
         }
         assert "host_status" not in source_payload
         assert set(payload["continuity"]) == {
@@ -126,14 +128,49 @@ def test_collect_host_status_includes_stable_unknown_reasons(monkeypatch) -> Non
         "_read_root_disk_snapshot",
         lambda: {"mount": "/", "total": "unknown", "used": "unknown", "available": "unknown", "percent_used": "unknown"},
     )
+    monkeypatch.setattr(tool_runtime, "_read_battery_snapshot", lambda: {"amperage": "unknown"})
 
     payload = tool_runtime._collect_host_status()
 
     assert payload["wifi_ssid"] == "unknown"
     assert payload["wifi_ssid_reason"] == "wifi_missing"
     assert payload["primary_ip_reason"] == "ip_missing"
-    assert payload["uptime_pretty_reason"] == "uptime_missing"
+    assert payload["system_uptime"] == "unknown"
+    assert payload["system_uptime_reason"] == "uptime_missing"
     assert payload["load_average_reason"] == "load_missing"
+    assert payload["battery"] == {"amperage": "unknown"}
+
+
+def test_collect_host_status_includes_battery_amperage_and_power_from_monitor(monkeypatch) -> None:
+    event = BatteryStatusEvent(
+        timestamp=123.0,
+        voltage=7.95,
+        percent_of_range=60.0,
+        severity="ok",
+        amperage=0.58,
+        power_watts=4.61,
+    )
+
+    class _MonitorStub:
+        def get_latest_event(self) -> BatteryStatusEvent:
+            return event
+
+    monkeypatch.setattr(tool_runtime, "_read_wifi_ssid", lambda: ("TheoWiFi", None))
+    monkeypatch.setattr(tool_runtime, "_read_primary_ip", lambda: ("192.168.1.42", None))
+    monkeypatch.setattr(tool_runtime, "_read_uptime_pretty", lambda: ("up 1 hour", None))
+    monkeypatch.setattr(tool_runtime, "_read_load_average", lambda: ({"1m": "0.10", "5m": "0.12", "15m": "0.20"}, None))
+    monkeypatch.setattr(tool_runtime, "_read_memory_snapshot", lambda: {"ram_total": "1Gi"})
+    monkeypatch.setattr(tool_runtime, "_read_root_disk_snapshot", lambda: {"mount": "/"})
+    monkeypatch.setattr(tool_runtime.BatteryMonitor, "get_instance", lambda: _MonitorStub())
+
+    payload = tool_runtime._collect_host_status()
+
+    assert payload["battery"] == {
+        "voltage": 7.95,
+        "amperage": 0.58,
+        "power_watts": 4.61,
+        "telemetry_source": "battery_monitor",
+    }
 
 
 def test_run_command_returns_none_on_timeout(monkeypatch) -> None:
