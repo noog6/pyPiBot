@@ -44,6 +44,7 @@ Control whether tool-followup outputs are released, held, or suppressed; preserv
 - Suppress only when parent coverage is actually qualified.
 - Hold is transitional and should resolve into release/suppress deterministically.
 - Non-distinct or gesture-only outputs should not consume final deliverable ownership.
+- `gesture_intermediate_inject_only` suppression is valid only when runtime can deterministically dispatch the next non-report step; if the active next step is non-gesture and no runtime descriptor exists, keep `response.create` enabled so model dispatch can continue the chain.
 
 ## H) Failure signatures
 
