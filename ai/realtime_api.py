@@ -9493,6 +9493,35 @@ class RealtimeAPI:
         )
         return open_non_report_steps
 
+    def _active_followthrough_non_report_step_kind(self, *, turn_id: str) -> str:
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return ""
+        run_id = str(self._current_run_id() or "").strip()
+        if not run_id:
+            return ""
+        try:
+            brief = self.get_continuity_brief(
+                run_id=run_id,
+                turn_id=normalized_turn_id,
+                reason="followthrough_active_non_report_step_kind",
+            )
+        except Exception:
+            return ""
+        compound_state = getattr(brief, "compound_request", None)
+        if compound_state is None:
+            return ""
+        steps = tuple(getattr(compound_state, "steps", ()) or ())
+        active_idx = getattr(compound_state, "active_step_index", None)
+        if not isinstance(active_idx, int) or not (0 <= active_idx < len(steps)):
+            return ""
+        active_step = steps[active_idx]
+        if str(getattr(active_step, "status", "") or "").strip().lower() == "completed":
+            return ""
+        if str(getattr(active_step, "kind", "") or "").strip().lower() == "report":
+            return ""
+        return str(getattr(active_step, "kind", "") or "").strip().lower()
+
     def _log_gesture_followup_truth_snapshot(
         self,
         *,
@@ -9707,6 +9736,7 @@ class RealtimeAPI:
                 if not keep_status_only:
                     non_report_followthrough_remaining = False
                 if keep_status_only:
+                    runtime_step_descriptor: dict[str, Any] | None = None
                     post_tool_bucket, bucket_reason = self._classify_tool_followup_post_completion_bucket(
                         keep_status_only=keep_status_only,
                         followthrough_remaining=followthrough_remaining,
@@ -9720,15 +9750,6 @@ class RealtimeAPI:
                     )
                     metadata["tool_followup_post_completion_reason"] = bucket_reason
                     metadata["followthrough_post_completion_reason"] = bucket_reason
-                    create_suppression_reason = ""
-                    if post_tool_bucket in {"execution_state_update", "model_context_injection_only"}:
-                        create_suppression_reason = bucket_reason
-                    if create_suppression_reason:
-                        metadata["tool_followup_create_suppressed"] = "true"
-                        metadata["tool_followup_create_suppression_reason"] = create_suppression_reason
-                        # Backward-compatible alias for existing diagnostics/tests.
-                        metadata["tool_followup_no_create"] = "true"
-                        metadata["tool_followup_no_create_reason"] = create_suppression_reason
                     metadata["tool_followup_suppress_if_parent_covered"] = "true"
                     metadata["tool_followup_status_only"] = "true"
                     metadata["tool_followup_silent_audio"] = "true"
@@ -9750,6 +9771,28 @@ class RealtimeAPI:
                                 separators=(",", ":"),
                                 sort_keys=True,
                             )
+                    create_suppression_reason = ""
+                    if post_tool_bucket in {"execution_state_update", "model_context_injection_only"}:
+                        create_suppression_reason = bucket_reason
+                    if (
+                        create_suppression_reason == "gesture_intermediate_inject_only"
+                        and non_report_followthrough_remaining
+                        and runtime_step_descriptor is None
+                    ):
+                        active_non_report_kind = self._active_followthrough_non_report_step_kind(
+                            turn_id=followthrough_turn_id
+                        )
+                        if active_non_report_kind and active_non_report_kind != "gesture":
+                            create_suppression_reason = ""
+                            metadata["tool_followup_create_unsuppressed_reason"] = (
+                                "non_gesture_followthrough_requires_model_dispatch"
+                            )
+                    if create_suppression_reason:
+                        metadata["tool_followup_create_suppressed"] = "true"
+                        metadata["tool_followup_create_suppression_reason"] = create_suppression_reason
+                        # Backward-compatible alias for existing diagnostics/tests.
+                        metadata["tool_followup_no_create"] = "true"
+                        metadata["tool_followup_no_create_reason"] = create_suppression_reason
                     if motion_status:
                         metadata["gesture_motion_status"] = motion_status
                     response_payload["instructions"] = self._gesture_followup_instruction(motion_status=motion_status)

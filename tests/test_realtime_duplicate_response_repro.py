@@ -5324,6 +5324,47 @@ def test_low_risk_gesture_followup_marks_inject_only_no_create_for_intermediate_
     assert metadata.get("tool_followup_create_suppression_reason") == "gesture_intermediate_inject_only"
 
 
+def test_low_risk_gesture_followup_keeps_create_for_non_gesture_intermediate_without_runtime_descriptor() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    api._current_response_turn_id = "turn_gesture_to_diagnostics"
+    api._active_input_event_key_by_turn_id["turn_gesture_to_diagnostics"] = "item_parent_gesture_to_diagnostics"
+    api.get_gesture_motion_state = lambda *, tool_call_id: {"status": "completed"}
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True: True
+    api._deterministic_followthrough_runtime_descriptor = lambda *, turn_id: None
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
+        compound_request=types.SimpleNamespace(
+            steps=(
+                types.SimpleNamespace(step_id="step_1", kind="gesture", status="completed"),
+                types.SimpleNamespace(step_id="step_2", kind="diagnostics", status="active"),
+                types.SimpleNamespace(step_id="step_3", kind="report", status="pending"),
+            ),
+            active_step_index=1,
+            recent_completed_step_id="step_1",
+            next_pending_step_id="step_2",
+            final_followup_pending=True,
+        )
+    )
+
+    response_create_event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_gesture_to_diagnostics",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+    )
+
+    payload = response_create_event.get("response") or {}
+    metadata = payload.get("metadata") or {}
+
+    assert metadata.get("tool_followup_status_only") == "true"
+    assert metadata.get("tool_followup_step_output_policy") == "model_context_injection_only"
+    assert metadata.get("tool_followup_post_completion_reason") == "gesture_intermediate_inject_only"
+    assert metadata.get("tool_followup_create_suppressed") is None
+    assert metadata.get("tool_followup_create_unsuppressed_reason") == (
+        "non_gesture_followthrough_requires_model_dispatch"
+    )
+    assert payload.get("tool_choice") == "required"
+
+
 def test_low_risk_gesture_followup_marks_no_create_when_followthrough_complete() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
