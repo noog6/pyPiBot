@@ -4552,7 +4552,7 @@ class RealtimeAPI:
             snapshot.release_reason,
         )
 
-    def _mark_attention_gate_closed_recovery(self, *, reason: str) -> None:
+    def _mark_blocked_listening_recovery(self, *, reason: str) -> None:
         now = time.monotonic()
         cooldown_s = max(
             0.0,
@@ -4563,6 +4563,9 @@ class RealtimeAPI:
         if continuity is not None:
             continuity.release(now_s=now, reason=f"{reason}_blocked")
         self._emit_attention_hold_release(reason=reason)
+
+    def _mark_attention_gate_closed_recovery(self, *, reason: str) -> None:
+        self._mark_blocked_listening_recovery(reason=reason)
 
     def _attention_gate_blocked_listening_cue_suppressed(self, *, now: float) -> bool:
         suppress_until = float(
@@ -19381,6 +19384,7 @@ class RealtimeAPI:
                         input_event_key,
                     )
                     start_recording()
+            self._mark_blocked_listening_recovery(reason="empty_transcript")
             if hasattr(self, "state_manager") and self.state_manager is not None:
                 self.state_manager.update_state(InteractionState.LISTENING, "empty transcript blocked")
             return
