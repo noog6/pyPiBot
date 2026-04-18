@@ -45,6 +45,7 @@ def _wire_runtime(api: RealtimeAPI) -> None:
 def _make_api_stub() -> RealtimeAPI:
     api = RealtimeAPI.__new__(RealtimeAPI)
     api._preference_recall_cooldown_s = 0.0
+    api._assistant_name = "Theo"
     api._preference_recall_cache = {}
     api._memory_retrieval_scope = "user_global"
     api._pending_response_create_origins = deque()
@@ -1132,6 +1133,88 @@ def test_empty_transcript_rearms_recording_when_not_playing_audio() -> None:
     assert api.state_manager.transitions[-1] == (
         InteractionState.LISTENING,
         "empty transcript blocked",
+    )
+
+
+def test_attention_gate_closed_rearms_recording_and_cancels_pending_server_auto() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+
+    class _Mic:
+        def __init__(self) -> None:
+            self.is_recording = False
+            self.start_calls = 0
+
+        def start_recording(self) -> None:
+            self.start_calls += 1
+            self.is_recording = True
+
+    class _State:
+        def __init__(self) -> None:
+            self.state = InteractionState.THINKING
+            self.transitions: list[tuple[InteractionState, str]] = []
+
+        def update_state(self, state: InteractionState, reason: str) -> None:
+            self.state = state
+            self.transitions.append((state, reason))
+
+    api.mic = _Mic()
+    api.state_manager = _State()
+    api._audio_playback_busy = False
+
+    async def _false(*_args, **_kwargs) -> bool:
+        return False
+
+    api._maybe_handle_confirmation_decision_timeout = _false
+    api._maybe_handle_approval_response = _false
+    api._handle_stop_word = _false
+    api._maybe_handle_research_permission_response = _false
+    api._maybe_handle_research_budget_response = _false
+    api._maybe_apply_late_confirmation_decision = _false
+    api._maybe_process_research_intent = _false
+    api._maybe_verify_on_risk_clarify = _false
+    api._has_active_confirmation_token = lambda: False
+    api._is_awaiting_confirmation_phase = lambda: False
+    api._evaluate_attention_gate_admission = lambda **_kwargs: (False, "attention_gate_closed")
+    api._asr_verify_short_utterance_ms = 1200
+    api._vad_turn_detection = {}
+    api._utterance_trust_snapshot_by_input_event_key = {}
+
+    async def _run() -> None:
+        api._active_response_origin = "server_auto"
+        api._active_response_id = "resp-server-auto-attn-closed"
+        api._active_server_auto_input_event_key = "item_attn_closed"
+        api._record_pending_server_auto_response(
+            turn_id="turn_1",
+            response_id="resp-server-auto-attn-closed",
+            canonical_key=api._canonical_utterance_key(turn_id="turn_1", input_event_key="item_attn_closed"),
+        )
+        await api._handle_input_audio_transcription_completed_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "item_attn_closed",
+                "transcript": "this should be ignored",
+            },
+            ws,
+        )
+
+    asyncio.run(_run())
+
+    cancels = [event for event in ws.sent if event.get("type") == "response.cancel"]
+    assert len(cancels) == 1
+    assert cancels[0]["response_id"] == "resp-server-auto-attn-closed"
+    pending = api._pending_server_auto_response_for_turn(turn_id="turn_1")
+    assert pending is not None
+    assert pending.active is False
+    assert pending.cancelled_for_upgrade is True
+    assert api.mic.start_calls == 1
+    assert api.mic.is_recording is True
+    assert api.state_manager.state == InteractionState.LISTENING
+    assert api.state_manager.transitions[-1] == (
+        InteractionState.LISTENING,
+        "attention gate closed",
     )
 
 
@@ -7943,6 +8026,7 @@ def test_transcript_final_recovery_schedules_upgrade_after_provisional_server_au
     api._maybe_verify_on_risk_clarify = _false
     api._has_active_confirmation_token = lambda: False
     api._is_awaiting_confirmation_phase = lambda: False
+    api._evaluate_attention_gate_admission = lambda **_kwargs: (True, "direct_address")
     api._log_utterance_trust_snapshot = lambda **_kwargs: {"word_count": 9}
     api._asr_verify_short_utterance_ms = 1200
     api._vad_turn_detection = {}
