@@ -19548,7 +19548,6 @@ class RealtimeAPI:
             marker="transcript_final_received",
             when=turn_timestamps["transcript_final"],
         )
-        self._signal_server_auto_transcript_final(turn_id=resolved_turn_id)
         partial_store = getattr(self, "_latest_partial_transcript_by_turn_id", None)
         if isinstance(partial_store, dict):
             partial_store.pop(resolved_turn_id, None)
@@ -19663,6 +19662,8 @@ class RealtimeAPI:
                 turn_id=resolved_turn_id,
                 input_event_key=input_event_key,
             )
+        if transcript:
+            self._signal_server_auto_transcript_final(turn_id=resolved_turn_id)
         if (
             transcript
             and not confirmation_active
