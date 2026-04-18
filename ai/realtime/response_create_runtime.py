@@ -85,6 +85,7 @@ class ResponseCreatePreparedSnapshot:
     terminal_state_blocked: bool
     lineage_allowed: bool
     lineage_reason: str
+    attention_gate_closed: bool
 
 
 @dataclass(frozen=True)
@@ -591,6 +592,13 @@ class ResponseCreateRuntime:
         pending_server_auto_for_turn = getattr(api, "_pending_server_auto_response_for_turn", None)
         if callable(pending_server_auto_for_turn):
             pending_server_auto_present = pending_server_auto_for_turn(turn_id=turn_id) is not None
+        attention_gate_closed = False
+        gating_verdict = getattr(api, "_get_response_gating_verdict", None)
+        if callable(gating_verdict):
+            verdict = gating_verdict(turn_id=turn_id, input_event_key=current_input_event_key)
+            attention_gate_closed = (
+                str(getattr(verdict, "reason", "") or "").strip().lower() == "attention_gate_closed"
+            )
         response_in_flight = api._is_active_response_blocking()
         created_for_key = canonical_key in created_keys
         if required_deliverable_motion_followthrough_override:
@@ -636,6 +644,7 @@ class ResponseCreateRuntime:
             terminal_state_blocked=terminal_state_blocked,
             lineage_allowed=bool(lineage_allowed),
             lineage_reason=lineage_reason,
+            attention_gate_closed=attention_gate_closed,
         )
 
     def _decide_response_create_action_with_lifecycle(
@@ -671,6 +680,13 @@ class ResponseCreateRuntime:
                     ),
                     selected_candidate_id="single_flight_block",
                 ), None
+        if prepared_snapshot.attention_gate_closed:
+            return self._build_execution_decision(
+                action=ResponseCreateOutcomeAction.BLOCK,
+                reason_code="attention_gate_closed",
+                explanation="Response.create blocked: transcript-final attention gate is closed.",
+                selected_candidate_id="attention_gate_backstop",
+            ), None
         canonical_audio_started = (
             api._canonical_first_audio_started(prepared_snapshot.canonical_key)
             and not prepared_snapshot.allow_audio_started_upgrade

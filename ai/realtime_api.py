@@ -362,6 +362,7 @@ _PREFERENCE_RECALL_VARIANT_NOISE_TOKENS = _PREFERENCE_QUERY_NOISE_TOKENS | {
 }
 _SPEAKING_SETTLE_RETRY_MAX_AGE_S = 2.0
 REALTIME_CALL_ID_MAX_LENGTH = 32
+_ATTENTION_GATE_HOLD_WINDOW_S_DEFAULT = 2.75
 
 
 @dataclass
@@ -1242,6 +1243,11 @@ class RealtimeAPI:
         }
         self._memory_usage_audit_by_turn_key: dict[str, dict[str, Any]] = {}
         self._response_gating_verdict_by_input_event_key: dict[str, ResponseGatingVerdict] = {}
+        self._attention_gate_hold_until_monotonic: float | None = None
+        self._attention_gate_hold_window_s = max(
+            0.0,
+            float(realtime_cfg.get("attention_gate_hold_window_s", _ATTENTION_GATE_HOLD_WINDOW_S_DEFAULT)),
+        )
         self._latest_partial_transcript_by_turn_id: dict[str, str] = {}
         self._server_auto_audio_waiters_by_turn_id: dict[str, asyncio.Event] = {}
         self._server_auto_audio_defer_tasks_by_turn_id: dict[str, asyncio.Task[Any]] = {}
@@ -5702,6 +5708,109 @@ class RealtimeAPI:
             for token in re.findall(r"[a-zA-Z0-9']+", assistant_name.lower())
             if len(token) >= 2
         }
+
+    def _assistant_name_tokens_for_attention_gate(self) -> tuple[str, ...]:
+        assistant_name = str(getattr(self, "_assistant_name", "Theo") or "Theo")
+        ordered_tokens: list[str] = []
+        for token in re.findall(r"[a-zA-Z0-9']+", assistant_name.lower()):
+            if len(token) < 2 or token in ordered_tokens:
+                continue
+            ordered_tokens.append(token)
+        return tuple(ordered_tokens)
+
+    def _transcript_explicitly_addresses_assistant_name(self, transcript: str) -> bool:
+        transcript_tokens = tuple(
+            token
+            for token in re.findall(r"[a-zA-Z0-9']+", str(transcript or "").lower())
+            if token
+        )
+        name_tokens = self._assistant_name_tokens_for_attention_gate()
+        if not transcript_tokens or not name_tokens:
+            return False
+        if len(name_tokens) > len(transcript_tokens):
+            return False
+        window_size = len(name_tokens)
+        for idx in range(0, len(transcript_tokens) - window_size + 1):
+            if transcript_tokens[idx : idx + window_size] == name_tokens:
+                return True
+        return False
+
+    def _attention_gate_hold_active(self, *, now: float | None = None) -> bool:
+        hold_until = getattr(self, "_attention_gate_hold_until_monotonic", None)
+        if not isinstance(hold_until, (int, float)):
+            return False
+        probe_now = time.monotonic() if now is None else float(now)
+        if probe_now <= float(hold_until):
+            return True
+        self._attention_gate_hold_until_monotonic = None
+        logger.info(
+            "attention_gate_hold_expired run_id=%s hold_until=%.6f now=%.6f",
+            self._current_run_id() or "",
+            float(hold_until),
+            probe_now,
+        )
+        return False
+
+    def _open_attention_gate_hold_window(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str,
+        now: float | None = None,
+    ) -> float:
+        probe_now = time.monotonic() if now is None else float(now)
+        hold_window_s = max(
+            0.0,
+            float(getattr(self, "_attention_gate_hold_window_s", _ATTENTION_GATE_HOLD_WINDOW_S_DEFAULT) or 0.0),
+        )
+        hold_until = probe_now + hold_window_s
+        self._attention_gate_hold_until_monotonic = hold_until
+        logger.info(
+            "attention_gate_hold_refreshed run_id=%s turn_id=%s input_event_key=%s hold_window_s=%.3f hold_until=%.6f",
+            self._current_run_id() or "",
+            turn_id,
+            input_event_key or "unknown",
+            hold_window_s,
+            hold_until,
+        )
+        return hold_until
+
+    def _evaluate_attention_gate_admission(
+        self,
+        *,
+        transcript: str,
+        turn_id: str,
+        input_event_key: str,
+        now: float | None = None,
+    ) -> tuple[bool, str]:
+        if self._transcript_explicitly_addresses_assistant_name(transcript):
+            self._open_attention_gate_hold_window(
+                turn_id=turn_id,
+                input_event_key=input_event_key,
+                now=now,
+            )
+            logger.info(
+                "attention_gate_admitted run_id=%s turn_id=%s input_event_key=%s via=direct_address",
+                self._current_run_id() or "",
+                turn_id,
+                input_event_key or "unknown",
+            )
+            return True, "direct_address"
+        if self._attention_gate_hold_active(now=now):
+            logger.info(
+                "attention_gate_admitted run_id=%s turn_id=%s input_event_key=%s via=active_hold_window",
+                self._current_run_id() or "",
+                turn_id,
+                input_event_key or "unknown",
+            )
+            return True, "active_hold_window"
+        logger.info(
+            "attention_gate_ignored run_id=%s turn_id=%s input_event_key=%s reason=attention_gate_closed",
+            self._current_run_id() or "",
+            turn_id,
+            input_event_key or "unknown",
+        )
+        return False, "attention_gate_closed"
 
     def _preference_query_noise_tokens(self) -> set[str]:
         return _PREFERENCE_QUERY_NOISE_TOKENS | self._assistant_name_tokens_for_noise_filters()
@@ -18601,7 +18710,7 @@ class RealtimeAPI:
             verdict = self._get_response_gating_verdict(turn_id=active_turn_id, input_event_key=active_input_event_key)
             if verdict is None or verdict.action == "NOOP":
                 return
-            if verdict.action in {"CLARIFY", "UPGRADE"}:
+            if verdict.action in {"CLARIFY", "UPGRADE", "BLOCK"}:
                 if response_id:
                     self._quarantine_cancelled_response_id(
                         response_id=response_id,
@@ -19194,6 +19303,34 @@ class RealtimeAPI:
             snapshot=trust_snapshot,
         ):
             return
+        if transcript and not confirmation_active:
+            attention_admitted, attention_reason = self._evaluate_attention_gate_admission(
+                transcript=transcript,
+                turn_id=resolved_turn_id,
+                input_event_key=input_event_key,
+            )
+            if not attention_admitted:
+                self._clear_response_obligation(
+                    turn_id=resolved_turn_id,
+                    input_event_key=input_event_key,
+                    reason=attention_reason,
+                    origin="input_audio_transcription",
+                )
+                self._set_response_gating_verdict(
+                    turn_id=resolved_turn_id,
+                    input_event_key=input_event_key,
+                    action="BLOCK",
+                    reason=attention_reason,
+                )
+                self._mark_transcript_response_outcome(
+                    input_event_key=input_event_key,
+                    turn_id=resolved_turn_id,
+                    outcome="response_not_scheduled",
+                    reason=attention_reason,
+                    details="attention_gate_closed",
+                )
+                self._cancel_micro_ack(turn_id=resolved_turn_id, reason="attention_gate_closed")
+                return
         if transcript and not confirmation_active:
             self._set_response_gating_verdict(
                 turn_id=resolved_turn_id,

@@ -151,6 +151,7 @@ realtime:
   vad_profile: "short_confirmations"
   minimum_non_confirmation_duration_ms: 120
   transcript_response_watchdog_timeout_s: 3.0
+  attention_gate_hold_window_s: 2.75
   server_auto_audio_deferral_timeout_ms: 225
   stale_response_map_ttl_s: 15.0
   lifecycle_trace_item_added_unknown_debug: false

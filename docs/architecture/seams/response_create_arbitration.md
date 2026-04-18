@@ -46,6 +46,8 @@ Decide whether a `response.create` attempt should `SEND`, `SCHEDULE`, `BLOCK`, o
 - Exactly one winning create action per evaluated attempt.
 - Higher-priority hard guards (lineage/terminal) beat lifecycle send/defer candidates.
 - Same-turn owner suppression should be explicit (`DROP`) rather than silent loss.
+- Transcript-final attention admission remains fail-closed at create time: a verdict reason of
+  `attention_gate_closed` must force `BLOCK` even if a create attempt reaches runtime execution.
 
 ## H) Failure signatures
 
