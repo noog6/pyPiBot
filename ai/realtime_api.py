@@ -366,6 +366,25 @@ _ATTENTION_GATE_HOLD_WINDOW_S_DEFAULT = 2.75
 _ATTENTION_GATE_BLOCKED_LISTENING_COOLDOWN_S_DEFAULT = 1.0
 
 
+class AttentionState(Enum):
+    CLOSED = "closed"
+    DIRECT_ADDRESS_ACTIVE = "direct_address_active"
+    HOLD_ACTIVE = "hold_active"
+    BYPASS_ACTIVE = "bypass_active"
+    BLOCKED_RECOVERY_COOLDOWN = "blocked_recovery_cooldown"
+
+
+@dataclass(frozen=True)
+class AttentionRuntimeState:
+    state: AttentionState
+    reason: str
+    entered_at_monotonic: float
+    hold_until_monotonic: float | None = None
+    suppress_until_monotonic: float | None = None
+    source_turn_id: str = ""
+    source_input_event_key: str = ""
+
+
 @dataclass
 class PendingAction:
     action: ActionPacket
@@ -1255,6 +1274,11 @@ class RealtimeAPI:
         self._memory_usage_audit_by_turn_key: dict[str, dict[str, Any]] = {}
         self._response_gating_verdict_by_input_event_key: dict[str, ResponseGatingVerdict] = {}
         self._attention_gate_hold_until_monotonic: float | None = None
+        self._attention_state = AttentionRuntimeState(
+            state=AttentionState.CLOSED,
+            reason="runtime_init",
+            entered_at_monotonic=time.monotonic(),
+        )
         self._attention_gate_hold_window_s = max(
             0.0,
             float(realtime_cfg.get("attention_gate_hold_window_s", _ATTENTION_GATE_HOLD_WINDOW_S_DEFAULT)),
@@ -4552,13 +4576,119 @@ class RealtimeAPI:
             snapshot.release_reason,
         )
 
-    def _mark_blocked_listening_recovery(self, *, reason: str) -> None:
-        now = time.monotonic()
+    def _attention_state_snapshot(self) -> AttentionRuntimeState:
+        snapshot = getattr(self, "_attention_state", None)
+        if isinstance(snapshot, AttentionRuntimeState):
+            return snapshot
+        initialized = AttentionRuntimeState(
+            state=AttentionState.CLOSED,
+            reason="runtime_init",
+            entered_at_monotonic=time.monotonic(),
+        )
+        self._attention_state = initialized
+        return initialized
+
+    def _set_attention_state(
+        self,
+        *,
+        state: AttentionState,
+        reason: str,
+        now: float | None = None,
+        turn_id: str = "",
+        input_event_key: str = "",
+        hold_until_monotonic: float | None = None,
+        suppress_until_monotonic: float | None = None,
+    ) -> AttentionRuntimeState:
+        probe_now = time.monotonic() if now is None else float(now)
+        previous = self._attention_state_snapshot()
+        next_state = AttentionRuntimeState(
+            state=state,
+            reason=str(reason or "").strip() or "unknown",
+            entered_at_monotonic=probe_now,
+            hold_until_monotonic=hold_until_monotonic,
+            suppress_until_monotonic=suppress_until_monotonic,
+            source_turn_id=turn_id or "",
+            source_input_event_key=input_event_key or "",
+        )
+        self._attention_state = next_state
+        self._attention_gate_hold_until_monotonic = hold_until_monotonic
+        self._attention_gate_blocked_listening_suppress_until_ts = float(suppress_until_monotonic or 0.0)
+        logger.info(
+            "attention_state_transition run_id=%s from=%s to=%s reason=%s turn_id=%s input_event_key=%s hold_until=%.6f suppress_until=%.6f",
+            self._current_run_id() or "",
+            previous.state.value,
+            next_state.state.value,
+            next_state.reason,
+            next_state.source_turn_id or "unknown",
+            next_state.source_input_event_key or "unknown",
+            float(next_state.hold_until_monotonic or 0.0),
+            float(next_state.suppress_until_monotonic or 0.0),
+        )
+        return next_state
+
+    def _set_attention_state_closed(
+        self,
+        *,
+        reason: str,
+        now: float | None = None,
+        turn_id: str = "",
+        input_event_key: str = "",
+    ) -> AttentionRuntimeState:
+        return self._set_attention_state(
+            state=AttentionState.CLOSED,
+            reason=reason,
+            now=now,
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            hold_until_monotonic=None,
+            suppress_until_monotonic=None,
+        )
+
+    def _set_attention_state_bypass(
+        self,
+        *,
+        reason: str,
+        now: float | None = None,
+        turn_id: str = "",
+        input_event_key: str = "",
+    ) -> AttentionRuntimeState:
+        return self._set_attention_state(
+            state=AttentionState.BYPASS_ACTIVE,
+            reason=reason,
+            now=now,
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            hold_until_monotonic=self._attention_state_snapshot().hold_until_monotonic,
+            suppress_until_monotonic=None,
+        )
+
+    def _set_attention_state_blocked_recovery(
+        self,
+        *,
+        reason: str,
+        now: float | None = None,
+        turn_id: str = "",
+        input_event_key: str = "",
+    ) -> AttentionRuntimeState:
+        probe_now = time.monotonic() if now is None else float(now)
         cooldown_s = max(
             0.0,
             float(getattr(self, "_attention_gate_blocked_listening_cooldown_s", 0.0) or 0.0),
         )
-        self._attention_gate_blocked_listening_suppress_until_ts = now + cooldown_s
+        suppress_until = probe_now + cooldown_s
+        return self._set_attention_state(
+            state=AttentionState.BLOCKED_RECOVERY_COOLDOWN,
+            reason=reason,
+            now=probe_now,
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            hold_until_monotonic=None,
+            suppress_until_monotonic=suppress_until,
+        )
+
+    def _mark_blocked_listening_recovery(self, *, reason: str) -> None:
+        now = time.monotonic()
+        self._set_attention_state_blocked_recovery(reason=reason, now=now)
         continuity = getattr(self, "_attention_continuity", None)
         if continuity is not None:
             continuity.release(now_s=now, reason=f"{reason}_blocked")
@@ -4568,9 +4698,11 @@ class RealtimeAPI:
         self._mark_blocked_listening_recovery(reason=reason)
 
     def _attention_gate_blocked_listening_cue_suppressed(self, *, now: float) -> bool:
-        suppress_until = float(
-            getattr(self, "_attention_gate_blocked_listening_suppress_until_ts", 0.0) or 0.0
-        )
+        snapshot = self._attention_state_snapshot()
+        suppress_until = float(snapshot.suppress_until_monotonic or 0.0)
+        if suppress_until > 0.0 and float(now) >= suppress_until and snapshot.state is AttentionState.BLOCKED_RECOVERY_COOLDOWN:
+            self._set_attention_state_closed(reason="blocked_recovery_elapsed", now=now)
+            return False
         return now < suppress_until
 
     def _emit_attention_hold_release(self, *, reason: str) -> None:
@@ -5804,13 +5936,14 @@ class RealtimeAPI:
         return False
 
     def _attention_gate_hold_active(self, *, now: float | None = None) -> bool:
-        hold_until = getattr(self, "_attention_gate_hold_until_monotonic", None)
+        snapshot = self._attention_state_snapshot()
+        hold_until = snapshot.hold_until_monotonic
         if not isinstance(hold_until, (int, float)):
             return False
         probe_now = time.monotonic() if now is None else float(now)
         if probe_now <= float(hold_until):
             return True
-        self._attention_gate_hold_until_monotonic = None
+        self._set_attention_state_closed(reason="hold_expired", now=probe_now)
         logger.info(
             "attention_gate_hold_expired run_id=%s hold_until=%.6f now=%.6f",
             self._current_run_id() or "",
@@ -5827,13 +5960,21 @@ class RealtimeAPI:
         now: float | None = None,
     ) -> float:
         probe_now = time.monotonic() if now is None else float(now)
-        previous_hold_until = getattr(self, "_attention_gate_hold_until_monotonic", None)
+        previous_hold_until = self._attention_state_snapshot().hold_until_monotonic
         hold_window_s = max(
             0.0,
             float(getattr(self, "_attention_gate_hold_window_s", _ATTENTION_GATE_HOLD_WINDOW_S_DEFAULT) or 0.0),
         )
         hold_until = probe_now + hold_window_s
-        self._attention_gate_hold_until_monotonic = hold_until
+        self._set_attention_state(
+            state=AttentionState.DIRECT_ADDRESS_ACTIVE,
+            reason="direct_address",
+            now=probe_now,
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            hold_until_monotonic=hold_until,
+            suppress_until_monotonic=None,
+        )
         hold_event = "opened"
         if isinstance(previous_hold_until, (int, float)) and probe_now <= float(previous_hold_until):
             hold_event = "refreshed"
@@ -5853,11 +5994,27 @@ class RealtimeAPI:
         *,
         transcript: str,
         confirmation_active: bool,
+        turn_id: str = "",
+        input_event_key: str = "",
+        now: float | None = None,
     ) -> tuple[bool, str]:
+        probe_now = time.monotonic() if now is None else float(now)
         if confirmation_active:
+            self._set_attention_state_bypass(
+                reason="awaiting_confirmation",
+                now=probe_now,
+                turn_id=turn_id,
+                input_event_key=input_event_key,
+            )
             return True, "awaiting_confirmation"
         stop_words = getattr(self, "_stop_words", None)
         if stop_words and self._find_stop_word(transcript):
+            self._set_attention_state_bypass(
+                reason="stop_abort_safety_interrupt",
+                now=probe_now,
+                turn_id=turn_id,
+                input_event_key=input_event_key,
+            )
             return True, "stop_abort_safety_interrupt"
         return False, ""
 
@@ -5878,7 +6035,23 @@ class RealtimeAPI:
             )
             return True, "direct_address"
         if self._attention_gate_hold_active(now=probe_now):
+            hold_until = self._attention_state_snapshot().hold_until_monotonic
+            self._set_attention_state(
+                state=AttentionState.HOLD_ACTIVE,
+                reason="active_hold_window",
+                now=probe_now,
+                turn_id=turn_id,
+                input_event_key=input_event_key,
+                hold_until_monotonic=hold_until,
+                suppress_until_monotonic=None,
+            )
             return True, "active_hold_window"
+        self._set_attention_state_closed(
+            reason="attention_gate_closed",
+            now=probe_now,
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+        )
         return False, "attention_gate_closed"
 
     def _log_transcript_attention_decision(
@@ -5895,12 +6068,14 @@ class RealtimeAPI:
             cleaned = self._redact_user_transcript_text(cleaned)
         rendered = self._clip_text(cleaned, limit=160).replace("\\", "\\\\").replace('"', '\\"')
         logger.info(
-            'transcript_attention_decision run_id=%s turn_id=%s input_event_key=%s attention=%s reason=%s heard_transcript="%s"',
+            'transcript_attention_decision run_id=%s turn_id=%s input_event_key=%s attention=%s reason=%s current_state=%s state_reason=%s heard_transcript="%s"',
             self._current_run_id() or "",
             turn_id,
             input_event_key or "unknown",
             attention,
             str(reason or "").strip() or "unknown",
+            self._attention_state_snapshot().state.value,
+            self._attention_state_snapshot().reason,
             rendered,
         )
 
@@ -19396,6 +19571,8 @@ class RealtimeAPI:
             attention_exception_admitted, attention_exception_reason = self._evaluate_attention_gate_exception(
                 transcript=transcript,
                 confirmation_active=confirmation_active,
+                turn_id=resolved_turn_id,
+                input_event_key=input_event_key,
             )
             if attention_exception_admitted:
                 self._log_transcript_attention_decision(
