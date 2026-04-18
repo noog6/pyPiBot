@@ -1516,6 +1516,102 @@ def test_empty_transcript_server_auto_ghost_deliverable_is_blocked(monkeypatch) 
     api.loop.close()
 
 
+def test_empty_transcript_short_circuits_before_watchdog_signal_and_verify() -> None:
+    api = _api_stub()
+    turn_id = "turn-empty"
+    input_event_key = "item-empty"
+    api._current_turn_id_or_unknown = lambda: turn_id
+    api._resolve_input_event_key = lambda _event: input_event_key
+    api._active_input_event_key_by_turn_id = {}
+    api._utterance_trust_snapshot_by_input_event_key = {}
+    api._vad_turn_detection = {}
+    api._log_user_transcripts_enabled = False
+    api._log_utterance_trust_snapshot = lambda **_kwargs: {"word_count": 0}
+
+    call_order: list[str] = []
+    api._start_transcript_response_watchdog = lambda **_kwargs: call_order.append("watchdog")
+    api._signal_server_auto_transcript_final = lambda **_kwargs: call_order.append("signal")
+
+    async def _should_not_verify(**_kwargs) -> bool:
+        call_order.append("verify")
+        return False
+
+    api._maybe_verify_on_risk_clarify = _should_not_verify
+
+    asyncio.run(
+        api._handle_input_audio_transcription_completed_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": input_event_key,
+                "transcript": "",
+            },
+            api.websocket,
+        )
+    )
+
+    assert call_order == []
+    api.loop.close()
+
+
+def test_mark_empty_transcript_blocked_clears_only_input_event_scope() -> None:
+    api = _api_stub()
+    captured: list[tuple[str, str, str]] = []
+
+    def _capture_clear(*, turn_id: str, input_event_key: str | None, reason: str) -> None:
+        captured.append((turn_id, str(input_event_key or ""), reason))
+
+    api._clear_pending_response_contenders = _capture_clear
+    api._set_response_delivery_state = lambda **_kwargs: None
+
+    api._mark_empty_transcript_blocked(
+        turn_id="turn-7",
+        input_event_key="item-7",
+        reason="transcript_missing_or_zero_words",
+    )
+
+    assert captured == [("", "item-7", "empty_transcript_blocked")]
+    api.loop.close()
+
+
+def test_short_non_empty_direct_address_still_reaches_verify_gate(monkeypatch) -> None:
+    api = _api_stub()
+    turn_id = "turn-short"
+    input_event_key = "item-short"
+    api._current_turn_id_or_unknown = lambda: turn_id
+    api._resolve_input_event_key = lambda _event: input_event_key
+    api._extract_transcript = lambda event: str(event.get("transcript") or "")
+    api._active_input_event_key_by_turn_id = {}
+    api._utterance_trust_snapshot_by_input_event_key = {}
+    api._vad_turn_detection = {}
+    api._log_user_transcripts_enabled = False
+    api._log_utterance_trust_snapshot = lambda **_kwargs: {"word_count": 1, "run_id": "run-test"}
+    api._evaluate_attention_gate_exception = lambda **_kwargs: (True, "direct_address")
+    api._log_transcript_attention_decision = lambda **_kwargs: None
+
+    verify_calls: list[str] = []
+
+    async def _capture_verify(**_kwargs) -> bool:
+        verify_calls.append("called")
+        return True
+
+    api._maybe_verify_on_risk_clarify = _capture_verify
+    monkeypatch.setattr(api, "_mark_empty_transcript_blocked", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("should not block")))
+
+    asyncio.run(
+        api._handle_input_audio_transcription_completed_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": input_event_key,
+                "transcript": "Theo?",
+            },
+            api.websocket,
+        )
+    )
+
+    assert verify_calls == ["called"]
+    api.loop.close()
+
+
 def test_server_auto_audio_deferral_timeout_schedules_before_transcript_final_upgrade_cancel(monkeypatch) -> None:
     api = _api_stub()
     turn_id = "turn-server-auto"
