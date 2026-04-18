@@ -19388,16 +19388,9 @@ class RealtimeAPI:
             if hasattr(self, "state_manager") and self.state_manager is not None:
                 self.state_manager.update_state(InteractionState.LISTENING, "empty transcript blocked")
             return
-        if transcript and not confirmation_active and await self._maybe_verify_on_risk_clarify(
-            transcript=transcript,
-            websocket=websocket,
-            turn_id=resolved_turn_id,
-            input_event_key=input_event_key,
-            snapshot=trust_snapshot,
-        ):
-            return
         attention_exception_admitted = False
         attention_exception_reason = ""
+        attention_admitted = False
         attention_admission_reason = ""
         if transcript:
             attention_exception_admitted, attention_exception_reason = self._evaluate_attention_gate_exception(
@@ -19485,6 +19478,19 @@ class RealtimeAPI:
                 turn_id=resolved_turn_id,
                 input_event_key=input_event_key,
             )
+        if (
+            transcript
+            and not confirmation_active
+            and (attention_exception_admitted or attention_admitted)
+            and await self._maybe_verify_on_risk_clarify(
+                transcript=transcript,
+                websocket=websocket,
+                turn_id=resolved_turn_id,
+                input_event_key=input_event_key,
+                snapshot=trust_snapshot,
+            )
+        ):
+            return
         if transcript and not confirmation_active and not attention_exception_admitted:
             self._set_response_gating_verdict(
                 turn_id=resolved_turn_id,
