@@ -19310,6 +19310,18 @@ class RealtimeAPI:
                 input_event_key=input_event_key,
             )
             if not attention_admitted:
+                pending = self._pending_server_auto_response_for_turn(turn_id=resolved_turn_id)
+                if isinstance(pending, PendingServerAutoResponse) and pending.active and pending.response_id:
+                    cancel_event = {"type": "response.cancel", "response_id": pending.response_id}
+                    self._record_cancel_issued_timing(pending.response_id)
+                    self._stale_response_ids().add(pending.response_id)
+                    self._mark_pending_server_auto_response_cancelled(
+                        turn_id=resolved_turn_id,
+                        reason="attention_gate_closed",
+                    )
+                    self._suppress_cancelled_response_audio(pending.response_id)
+                    transport = self._get_or_create_transport()
+                    await transport.send_json(websocket, cancel_event)
                 self._clear_response_obligation(
                     turn_id=resolved_turn_id,
                     input_event_key=input_event_key,
@@ -19330,6 +19342,23 @@ class RealtimeAPI:
                     details="attention_gate_closed",
                 )
                 self._cancel_micro_ack(turn_id=resolved_turn_id, reason="attention_gate_closed")
+                if not self._audio_playback_busy:
+                    mic = getattr(self, "mic", None)
+                    start_recording = getattr(mic, "start_recording", None) if mic is not None else None
+                    if (
+                        mic is not None
+                        and not getattr(mic, "is_recording", False)
+                        and callable(start_recording)
+                    ):
+                        logger.info(
+                            "attention_gate_closed_rearm_recording run_id=%s turn_id=%s input_event_key=%s",
+                            self._current_run_id() or "",
+                            resolved_turn_id,
+                            input_event_key,
+                        )
+                        start_recording()
+                if hasattr(self, "state_manager") and self.state_manager is not None:
+                    self.state_manager.update_state(InteractionState.LISTENING, "attention gate closed")
                 return
         if transcript and not confirmation_active:
             self._set_response_gating_verdict(
