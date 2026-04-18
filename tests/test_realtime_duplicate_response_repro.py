@@ -154,6 +154,7 @@ def _make_api_stub() -> RealtimeAPI:
         },
     )()
     api._current_run_id = lambda: "run-405-repro"
+    api._log_user_transcript_redact_enabled = False
     api._record_ai_call = lambda: None
     api._maybe_enqueue_reflection = lambda *_args, **_kwargs: None
     api._enqueue_response_done_reflection = lambda *_args, **_kwargs: None
@@ -1219,6 +1220,228 @@ def test_attention_gate_closed_rearms_recording_and_cancels_pending_server_auto(
     assert api._attention_gate_blocked_listening_suppress_until_ts > 0.0
     assert api._attention_gate_blocked_listening_cue_suppressed(
         now=api._attention_gate_blocked_listening_suppress_until_ts - 0.01
+    )
+
+
+def test_non_addressed_visual_question_skips_verify_and_blocks_attention_gate() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+
+    verify_calls: list[str] = []
+
+    async def _false(*_args, **_kwargs) -> bool:
+        return False
+
+    async def _verify(*_args, **kwargs) -> bool:
+        verify_calls.append(str(kwargs.get("input_event_key") or ""))
+        return False
+
+    api._maybe_handle_confirmation_decision_timeout = _false
+    api._maybe_handle_approval_response = _false
+    api._handle_stop_word = _false
+    api._maybe_handle_research_permission_response = _false
+    api._maybe_handle_research_budget_response = _false
+    api._maybe_apply_late_confirmation_decision = _false
+    api._maybe_process_research_intent = _false
+    api._maybe_verify_on_risk_clarify = _verify
+    api._has_active_confirmation_token = lambda: False
+    api._is_awaiting_confirmation_phase = lambda: False
+    api._evaluate_attention_gate_admission = lambda **_kwargs: (False, "attention_gate_closed")
+    api._asr_verify_short_utterance_ms = 1200
+    api._vad_turn_detection = {}
+    api._utterance_trust_snapshot_by_input_event_key = {}
+
+    asyncio.run(
+        api._handle_input_audio_transcription_completed_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "item_blocked_visual",
+                "transcript": "what color is that on the screen",
+            },
+            ws,
+        )
+    )
+
+    assert verify_calls == []
+    verdict = api._get_response_gating_verdict(turn_id="turn_1", input_event_key="item_blocked_visual")
+    assert verdict is not None
+    assert verdict.action == "BLOCK"
+    assert verdict.reason == "attention_gate_closed"
+
+
+def test_direct_address_visual_question_runs_verify_path_after_attention_admission() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+
+    verify_calls: list[str] = []
+
+    async def _false(*_args, **_kwargs) -> bool:
+        return False
+
+    async def _verify(*_args, **kwargs) -> bool:
+        verify_calls.append(str(kwargs.get("input_event_key") or ""))
+        return False
+
+    api._maybe_handle_confirmation_decision_timeout = _false
+    api._maybe_handle_approval_response = _false
+    api._handle_stop_word = _false
+    api._maybe_handle_research_permission_response = _false
+    api._maybe_handle_research_budget_response = _false
+    api._maybe_apply_late_confirmation_decision = _false
+    api._maybe_process_research_intent = _false
+    api._maybe_verify_on_risk_clarify = _verify
+    api._has_active_confirmation_token = lambda: False
+    api._is_awaiting_confirmation_phase = lambda: False
+    api._evaluate_attention_gate_admission = lambda **_kwargs: (True, "direct_address")
+    api._asr_verify_short_utterance_ms = 1200
+    api._vad_turn_detection = {}
+    api._utterance_trust_snapshot_by_input_event_key = {}
+
+    asyncio.run(
+        api._handle_input_audio_transcription_completed_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "item_direct_visual",
+                "transcript": "Theo, what color is that?",
+            },
+            ws,
+        )
+    )
+
+    assert verify_calls == ["item_direct_visual"]
+
+
+def test_attention_exception_bypass_runs_verify_without_admission_check() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+
+    verify_calls: list[str] = []
+
+    async def _false(*_args, **_kwargs) -> bool:
+        return False
+
+    async def _verify(*_args, **kwargs) -> bool:
+        verify_calls.append(str(kwargs.get("input_event_key") or ""))
+        return False
+
+    api._maybe_handle_confirmation_decision_timeout = _false
+    api._maybe_handle_approval_response = _false
+    api._handle_stop_word = _false
+    api._maybe_handle_research_permission_response = _false
+    api._maybe_handle_research_budget_response = _false
+    api._maybe_apply_late_confirmation_decision = _false
+    api._maybe_process_research_intent = _false
+    api._maybe_verify_on_risk_clarify = _verify
+    api._has_active_confirmation_token = lambda: False
+    api._is_awaiting_confirmation_phase = lambda: False
+    api._evaluate_attention_gate_exception = lambda **_kwargs: (True, "stop_abort_safety_interrupt")
+    api._evaluate_attention_gate_admission = lambda **_kwargs: pytest.fail("admission should be skipped for bypass")
+    api._asr_verify_short_utterance_ms = 1200
+    api._vad_turn_detection = {}
+    api._utterance_trust_snapshot_by_input_event_key = {}
+
+    asyncio.run(
+        api._handle_input_audio_transcription_completed_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "item_bypass_visual",
+                "transcript": "stop what is this object",
+            },
+            ws,
+        )
+    )
+
+    assert verify_calls == ["item_bypass_visual"]
+
+
+def test_non_admitted_visual_question_preserves_blocked_turn_recovery() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+
+    class _Mic:
+        def __init__(self) -> None:
+            self.is_recording = False
+            self.start_calls = 0
+
+        def start_recording(self) -> None:
+            self.start_calls += 1
+            self.is_recording = True
+
+    class _State:
+        def __init__(self) -> None:
+            self.state = InteractionState.THINKING
+            self.transitions: list[tuple[InteractionState, str]] = []
+
+        def update_state(self, state: InteractionState, reason: str) -> None:
+            self.state = state
+            self.transitions.append((state, reason))
+
+    verify_calls: list[str] = []
+
+    async def _false(*_args, **_kwargs) -> bool:
+        return False
+
+    async def _verify(*_args, **kwargs) -> bool:
+        verify_calls.append(str(kwargs.get("input_event_key") or ""))
+        return False
+
+    api.mic = _Mic()
+    api.state_manager = _State()
+    api._audio_playback_busy = False
+    api._maybe_handle_confirmation_decision_timeout = _false
+    api._maybe_handle_approval_response = _false
+    api._handle_stop_word = _false
+    api._maybe_handle_research_permission_response = _false
+    api._maybe_handle_research_budget_response = _false
+    api._maybe_apply_late_confirmation_decision = _false
+    api._maybe_process_research_intent = _false
+    api._maybe_verify_on_risk_clarify = _verify
+    api._has_active_confirmation_token = lambda: False
+    api._is_awaiting_confirmation_phase = lambda: False
+    api._evaluate_attention_gate_admission = lambda **_kwargs: (False, "attention_gate_closed")
+    api._asr_verify_short_utterance_ms = 1200
+    api._vad_turn_detection = {}
+    api._utterance_trust_snapshot_by_input_event_key = {}
+
+    async def _run() -> None:
+        api._active_response_origin = "server_auto"
+        api._active_response_id = "resp-server-auto-visual-attn-closed"
+        api._active_server_auto_input_event_key = "item_visual_blocked"
+        api._record_pending_server_auto_response(
+            turn_id="turn_1",
+            response_id="resp-server-auto-visual-attn-closed",
+            canonical_key=api._canonical_utterance_key(turn_id="turn_1", input_event_key="item_visual_blocked"),
+        )
+        await api._handle_input_audio_transcription_completed_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "item_visual_blocked",
+                "transcript": "what color is this",
+            },
+            ws,
+        )
+
+    asyncio.run(_run())
+
+    assert verify_calls == []
+    cancels = [event for event in ws.sent if event.get("type") == "response.cancel"]
+    assert len(cancels) == 1
+    assert cancels[0]["response_id"] == "resp-server-auto-visual-attn-closed"
+    assert api._stale_response_ids() == {"resp-server-auto-visual-attn-closed"}
+    assert api.mic.start_calls == 1
+    assert api.mic.is_recording is True
+    assert api.state_manager.state == InteractionState.LISTENING
+    assert api.state_manager.transitions[-1] == (
+        InteractionState.LISTENING,
+        "attention gate closed",
     )
 
 
