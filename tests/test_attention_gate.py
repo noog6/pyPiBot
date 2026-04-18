@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 import types
+from unittest.mock import patch
 
 if "audioop" not in sys.modules:
     sys.modules["audioop"] = types.ModuleType("audioop")
@@ -22,6 +23,7 @@ def _make_attention_api(*, assistant_name: str = "Theo Prime") -> RealtimeAPI:
     api._stop_words = ["stop", "abort"]
     api._attention_gate_hold_window_s = 2.0
     api._attention_gate_hold_until_monotonic = None
+    api._log_user_transcript_redact_enabled = True
     api._current_run_id = lambda: "run-attn"
     return api
 
@@ -70,6 +72,11 @@ def _snapshot(*, attention_gate_closed: bool) -> ResponseCreatePreparedSnapshot:
         lineage_reason="",
         attention_gate_closed=attention_gate_closed,
     )
+
+
+def _render_logged_line(info_mock) -> str:
+    msg, *values = info_mock.call_args.args
+    return msg % tuple(values)
 
 
 def test_direct_address_opens_attention_hold_window() -> None:
@@ -262,3 +269,80 @@ def test_clear_direct_address_question_classifier_is_name_and_question_bound() -
     assert api._is_clear_direct_address_question("Theo Prime, what time is it") is True
     assert api._is_clear_direct_address_question("what time is it") is False
     assert api._is_clear_direct_address_question("Theo Prime, I like this") is False
+
+
+def test_attention_decision_log_direct_address_admitted() -> None:
+    api = _make_attention_api()
+    admitted, reason = api._evaluate_attention_gate_admission(
+        transcript="Theo Prime, what's the status?",
+        turn_id="turn-1",
+        input_event_key="item-1",
+        now=100.0,
+    )
+    assert admitted is True
+
+    with patch("ai.realtime_api.logger.info") as info_mock:
+        api._log_transcript_attention_decision(
+            transcript="Theo Prime, what's the status?",
+            attention="admitted",
+            reason=reason,
+            turn_id="turn-1",
+            input_event_key="item-1",
+        )
+
+    assert info_mock.call_count == 1
+    line = _render_logged_line(info_mock)
+    assert "transcript_attention_decision" in line
+    assert "attention=admitted" in line
+    assert "reason=direct_address" in line
+    assert 'heard_transcript="Theo Prime, what\'s the status?"' in line
+
+
+def test_attention_decision_log_non_addressed_blocked() -> None:
+    api = _make_attention_api()
+    admitted, reason = api._evaluate_attention_gate_admission(
+        transcript="PJs, are you comfy?",
+        turn_id="turn-1",
+        input_event_key="item-2",
+        now=100.0,
+    )
+    assert admitted is False
+
+    with patch("ai.realtime_api.logger.info") as info_mock:
+        api._log_transcript_attention_decision(
+            transcript="PJs, are you comfy?",
+            attention="blocked",
+            reason=reason,
+            turn_id="turn-1",
+            input_event_key="item-2",
+        )
+
+    assert info_mock.call_count == 1
+    line = _render_logged_line(info_mock)
+    assert "attention=blocked" in line
+    assert "reason=attention_gate_closed" in line
+    assert 'heard_transcript="PJs, are you comfy?"' in line
+
+
+def test_attention_decision_log_confirmation_bypass() -> None:
+    api = _make_attention_api()
+    admitted, reason = api._evaluate_attention_gate_exception(
+        transcript="yes",
+        confirmation_active=True,
+    )
+    assert admitted is True
+
+    with patch("ai.realtime_api.logger.info") as info_mock:
+        api._log_transcript_attention_decision(
+            transcript="yes",
+            attention="bypass",
+            reason=reason,
+            turn_id="turn-2",
+            input_event_key="item-3",
+        )
+
+    assert info_mock.call_count == 1
+    line = _render_logged_line(info_mock)
+    assert "attention=bypass" in line
+    assert "reason=awaiting_confirmation" in line
+    assert 'heard_transcript="yes"' in line
