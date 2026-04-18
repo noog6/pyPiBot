@@ -5873,33 +5873,33 @@ class RealtimeAPI:
                 input_event_key=input_event_key,
                 now=probe_now,
             )
-            logger.info(
-                "attention_gate_admitted run_id=%s turn_id=%s input_event_key=%s via=direct_address",
-                self._current_run_id() or "",
-                turn_id,
-                input_event_key or "unknown",
-            )
             return True, "direct_address"
         if self._attention_gate_hold_active(now=probe_now):
-            hold_until = getattr(self, "_attention_gate_hold_until_monotonic", None)
-            hold_remaining_s = 0.0
-            if isinstance(hold_until, (int, float)):
-                hold_remaining_s = max(0.0, float(hold_until) - probe_now)
-            logger.info(
-                "attention_gate_admitted run_id=%s turn_id=%s input_event_key=%s via=active_hold_window hold_remaining_s=%.3f hold_refreshed=false",
-                self._current_run_id() or "",
-                turn_id,
-                input_event_key or "unknown",
-                hold_remaining_s,
-            )
             return True, "active_hold_window"
+        return False, "attention_gate_closed"
+
+    def _log_transcript_attention_decision(
+        self,
+        *,
+        transcript: str,
+        attention: Literal["admitted", "blocked", "bypass"],
+        reason: str,
+        turn_id: str,
+        input_event_key: str,
+    ) -> None:
+        cleaned = " ".join((transcript or "").split())
+        if self._log_user_transcript_redact_enabled:
+            cleaned = self._redact_user_transcript_text(cleaned)
+        rendered = self._clip_text(cleaned, limit=160).replace("\\", "\\\\").replace('"', '\\"')
         logger.info(
-            "attention_gate_blocked run_id=%s turn_id=%s input_event_key=%s reason=attention_gate_closed",
+            'transcript_attention_decision run_id=%s turn_id=%s input_event_key=%s attention=%s reason=%s heard_transcript="%s"',
             self._current_run_id() or "",
             turn_id,
             input_event_key or "unknown",
+            attention,
+            str(reason or "").strip() or "unknown",
+            rendered,
         )
-        return False, "attention_gate_closed"
 
     def _preference_query_noise_tokens(self) -> set[str]:
         return _PREFERENCE_QUERY_NOISE_TOKENS | self._assistant_name_tokens_for_noise_filters()
@@ -19401,12 +19401,12 @@ class RealtimeAPI:
                 confirmation_active=confirmation_active,
             )
             if attention_exception_admitted:
-                logger.info(
-                    "attention_gate_bypass run_id=%s turn_id=%s input_event_key=%s reason=%s",
-                    self._current_run_id() or "",
-                    resolved_turn_id,
-                    input_event_key,
-                    attention_exception_reason,
+                self._log_transcript_attention_decision(
+                    transcript=transcript,
+                    attention="bypass",
+                    reason=attention_exception_reason,
+                    turn_id=resolved_turn_id,
+                    input_event_key=input_event_key,
                 )
         if transcript and not confirmation_active and not attention_exception_admitted:
             attention_admitted, attention_reason = self._evaluate_attention_gate_admission(
@@ -19415,6 +19415,13 @@ class RealtimeAPI:
                 input_event_key=input_event_key,
             )
             if not attention_admitted:
+                self._log_transcript_attention_decision(
+                    transcript=transcript,
+                    attention="blocked",
+                    reason=attention_reason,
+                    turn_id=resolved_turn_id,
+                    input_event_key=input_event_key,
+                )
                 pending = self._pending_server_auto_response_for_turn(turn_id=resolved_turn_id)
                 if isinstance(pending, PendingServerAutoResponse) and pending.active and pending.response_id:
                     cancel_event = {"type": "response.cancel", "response_id": pending.response_id}
@@ -19467,6 +19474,13 @@ class RealtimeAPI:
                     self.state_manager.update_state(InteractionState.LISTENING, "attention gate closed")
                 return
             attention_admission_reason = attention_reason
+            self._log_transcript_attention_decision(
+                transcript=transcript,
+                attention="admitted",
+                reason=attention_reason,
+                turn_id=resolved_turn_id,
+                input_event_key=input_event_key,
+            )
         if transcript and not confirmation_active and not attention_exception_admitted:
             self._set_response_gating_verdict(
                 turn_id=resolved_turn_id,
