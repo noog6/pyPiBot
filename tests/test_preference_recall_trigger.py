@@ -36,6 +36,7 @@ class _DummyTransport:
 
 def _make_api_stub() -> RealtimeAPI:
     api = RealtimeAPI.__new__(RealtimeAPI)
+    api._assistant_name = "Theo"
     api._preference_recall_cooldown_s = 10.0
     api._preference_recall_cache = {}
     api._memory_retrieval_scope = "user_global"
@@ -749,13 +750,13 @@ def test_preference_recall_short_circuits_server_auto_response(monkeypatch) -> N
 
     asyncio.run(
         api.handle_event(
-            {
-                "type": "conversation.item.input_audio_transcription.completed",
-                "transcript": "Which editor do I prefer?",
-            },
-            ws,
+                {
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "transcript": "Theo, which editor do I prefer?",
+                },
+                ws,
+            )
         )
-    )
 
     asyncio.run(api.handle_event({"type": "response.created", "response": {"id": "r-1"}}, ws))
     asyncio.run(api.handle_event({"type": "response.text.delta", "delta": "fallback"}, ws))
@@ -863,7 +864,7 @@ def test_preference_recall_transcript_path_emits_memory_answer_without_model_fol
         api.handle_event(
             {
                 "type": "conversation.item.input_audio_transcription.completed",
-                "transcript": "Which editor do I prefer?",
+                "transcript": "Theo, which editor do I prefer?",
             },
             ws,
         )
@@ -959,7 +960,15 @@ def test_memory_intent_sets_response_obligation_and_clears_on_assistant_response
     api.websocket = ws
     _configure_event_pipeline(api)
 
-    asyncio.run(api.handle_event({"type": "conversation.item.input_audio_transcription.completed", "transcript": "Which editor do I prefer?"}, ws))
+    asyncio.run(
+        api.handle_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "transcript": "Theo, which editor do I prefer?",
+            },
+            ws,
+        )
+    )
 
     assert api._response_obligations
 
@@ -1796,7 +1805,7 @@ def test_server_auto_response_created_binds_to_active_turn_key_after_memory_inte
             {
                 "type": "conversation.item.input_audio_transcription.completed",
                 "item_id": "item-1",
-                "transcript": "Do you remember my favorite editor?",
+                "transcript": "Theo, do you remember my favorite editor?",
             },
             ws,
         )
@@ -1811,7 +1820,7 @@ def test_server_auto_response_created_binds_to_active_turn_key_after_memory_inte
             {
                 "type": "conversation.item.input_audio_transcription.completed",
                 "item_id": "item-2",
-                "transcript": "Thanks.",
+                "transcript": "Theo, thanks.",
             },
             ws,
         )
@@ -1949,7 +1958,7 @@ def test_memory_intent_transcript_final_upgrades_from_pending_server_auto_even_a
             {
                 "type": "conversation.item.input_audio_transcription.completed",
                 "item_id": "item-memory",
-                "transcript": "Go back to center and tell me my favorite editor.",
+                "transcript": "Theo, go back to center and tell me my favorite editor.",
             },
             ws,
         )

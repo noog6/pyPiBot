@@ -161,6 +161,7 @@ def test_realtime_run_uses_configured_model_in_websocket_url(monkeypatch) -> Non
 def test_initialize_session_uses_configured_model_in_session_update(monkeypatch) -> None:
     sent_payloads: list[dict[str, object]] = []
     api = RealtimeAPI.__new__(RealtimeAPI)
+    api._assistant_name = "Theo"
     api._realtime_model = "gpt-realtime-preview"
     api.profile_manager = type(
         "P",
