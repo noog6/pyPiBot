@@ -254,3 +254,11 @@ def test_response_create_backstop_blocks_when_attention_gate_closed() -> None:
     assert lifecycle_decision is None
     assert decision.action is ResponseCreateOutcomeAction.BLOCK
     assert decision.reason_code == "attention_gate_closed"
+
+
+def test_clear_direct_address_question_classifier_is_name_and_question_bound() -> None:
+    api = _make_attention_api()
+
+    assert api._is_clear_direct_address_question("Theo Prime, what time is it") is True
+    assert api._is_clear_direct_address_question("what time is it") is False
+    assert api._is_clear_direct_address_question("Theo Prime, I like this") is False
