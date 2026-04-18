@@ -9227,7 +9227,14 @@ class RealtimeAPI:
             mutator=_mutate,
         )
 
-    def _mark_empty_transcript_blocked(self, *, turn_id: str, input_event_key: str, reason: str) -> None:
+    def _mark_empty_transcript_blocked(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str,
+        reason: str,
+        clear_turn_scope: bool = False,
+    ) -> None:
         normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
         normalized_input_event_key = str(input_event_key or "").strip()
         if not normalized_input_event_key:
@@ -9238,7 +9245,7 @@ class RealtimeAPI:
             state="blocked_empty_transcript",
         )
         self._clear_pending_response_contenders(
-            turn_id=normalized_turn_id,
+            turn_id=normalized_turn_id if clear_turn_scope else "",
             input_event_key=normalized_input_event_key,
             reason="empty_transcript_blocked",
         )
@@ -19365,88 +19372,6 @@ class RealtimeAPI:
                 superseded_input_event_key=pending_server_auto_input_event_key,
                 reason="transcript_final_handoff",
             )
-        memory_intent_subtype = self._classify_memory_intent(transcript or "")
-        memory_intent = memory_intent_subtype != "none"
-        logger.info(
-            "memory_intent_classification run_id=%s source=input_audio_transcription input_event_key=%s memory_intent=%s memory_intent_subtype=%s",
-            self._current_run_id() or "",
-            input_event_key,
-            str(memory_intent).lower(),
-            memory_intent_subtype,
-        )
-        if memory_intent:
-            self._set_response_obligation(
-                turn_id=self._current_turn_id_or_unknown(),
-                input_event_key=input_event_key,
-                source="input_audio_transcription",
-            )
-            logger.info(
-                "response_obligation_eval run_id=%s turn_id=%s input_event_key=%s obligation_state=%s response_created_seen=%s response_done_seen=%s action=%s reason=%s",
-                self._current_run_id() or "",
-                resolved_turn_id,
-                input_event_key,
-                "open",
-                str(
-                    self._summary_response_created_seen_for_canonical(
-                        turn_id=resolved_turn_id,
-                        canonical_key=transcript_canonical_key,
-                    )
-                ).lower(),
-                str(self._response_delivery_state(turn_id=resolved_turn_id, input_event_key=input_event_key) == "done").lower(),
-                "schedule",
-                "memory_intent_transcript_final",
-            )
-        pending_server_auto_keys = getattr(self, "_pending_server_auto_input_event_keys", None)
-        if not isinstance(pending_server_auto_keys, deque):
-            pending_server_auto_keys = deque(maxlen=64)
-            self._pending_server_auto_input_event_keys = pending_server_auto_keys
-        active_input_event_key = str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip()
-        has_active_server_auto = str(getattr(self, "_active_response_origin", "")).strip().lower() == "server_auto"
-        if not (has_active_server_auto and active_input_event_key and active_input_event_key == input_event_key):
-            pending_server_auto_keys.append(input_event_key)
-        logger.info(
-            "input_audio_transcription_linked run_id=%s input_event_key=%s pending_server_auto=%s",
-            self._current_run_id() or "",
-            input_event_key,
-            len(pending_server_auto_keys),
-        )
-        self._start_transcript_response_watchdog(
-            turn_id=resolved_turn_id,
-            input_event_key=input_event_key,
-        )
-        turn_timestamps_store = getattr(self, "_turn_diagnostic_timestamps", None)
-        if not isinstance(turn_timestamps_store, dict):
-            turn_timestamps_store = {}
-            self._turn_diagnostic_timestamps = turn_timestamps_store
-        turn_timestamps = turn_timestamps_store.setdefault(resolved_turn_id, {})
-        turn_timestamps["transcript_final"] = time.monotonic()
-        self._mark_tool_followup_timing(
-            turn_id=resolved_turn_id,
-            marker="transcript_final_received",
-            when=turn_timestamps["transcript_final"],
-        )
-        self._signal_server_auto_transcript_final(turn_id=resolved_turn_id)
-        partial_store = getattr(self, "_latest_partial_transcript_by_turn_id", None)
-        if isinstance(partial_store, dict):
-            partial_store.pop(resolved_turn_id, None)
-        confirmation_active = self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase()
-        if confirmation_active:
-            self._confirmation_asr_pending = False
-            self._mark_confirmation_activity(reason="transcription_completed")
-        if self._active_utterance is not None:
-            self._active_utterance["transcript"] = transcript or ""
-            self._active_utterance["transcript_len"] = len((transcript or "").strip())
-            decision = self._parse_confirmation_decision(transcript or "")
-            self._active_utterance["confirmation_candidate"] = decision in {"yes", "no"}
-            self._active_utterance["decision"] = decision
-            duration_ms = self._active_utterance.get("duration_ms")
-            suppressed = self._should_suppress_short_utterance(transcript, duration_ms)
-            self._active_utterance["suppressed"] = suppressed
-            if suppressed:
-                await self._suppress_guardrail_response(websocket, transcript)
-            self._log_utterance_envelope(event_type)
-            if suppressed:
-                return
         trust_snapshot = self._log_utterance_trust_snapshot(
             transcript=transcript or "",
             event=event,
@@ -19563,6 +19488,89 @@ class RealtimeAPI:
             if hasattr(self, "state_manager") and self.state_manager is not None:
                 self.state_manager.update_state(InteractionState.LISTENING, "empty transcript blocked")
             return
+        memory_intent_subtype = self._classify_memory_intent(transcript or "")
+        memory_intent = memory_intent_subtype != "none"
+        logger.info(
+            "memory_intent_classification run_id=%s source=input_audio_transcription input_event_key=%s memory_intent=%s memory_intent_subtype=%s",
+            self._current_run_id() or "",
+            input_event_key,
+            str(memory_intent).lower(),
+            memory_intent_subtype,
+        )
+        if memory_intent:
+            self._set_response_obligation(
+                turn_id=self._current_turn_id_or_unknown(),
+                input_event_key=input_event_key,
+                source="input_audio_transcription",
+            )
+            logger.info(
+                "response_obligation_eval run_id=%s turn_id=%s input_event_key=%s obligation_state=%s response_created_seen=%s response_done_seen=%s action=%s reason=%s",
+                self._current_run_id() or "",
+                resolved_turn_id,
+                input_event_key,
+                "open",
+                str(
+                    self._summary_response_created_seen_for_canonical(
+                        turn_id=resolved_turn_id,
+                        canonical_key=transcript_canonical_key,
+                    )
+                ).lower(),
+                str(self._response_delivery_state(turn_id=resolved_turn_id, input_event_key=input_event_key) == "done").lower(),
+                "schedule",
+                "memory_intent_transcript_final",
+            )
+        pending_server_auto_keys = getattr(self, "_pending_server_auto_input_event_keys", None)
+        if not isinstance(pending_server_auto_keys, deque):
+            pending_server_auto_keys = deque(maxlen=64)
+            self._pending_server_auto_input_event_keys = pending_server_auto_keys
+        active_input_event_key = str(getattr(self, "_active_server_auto_input_event_key", "") or "").strip()
+        has_active_server_auto = str(getattr(self, "_active_response_origin", "")).strip().lower() == "server_auto"
+        if not (has_active_server_auto and active_input_event_key and active_input_event_key == input_event_key):
+            pending_server_auto_keys.append(input_event_key)
+        logger.info(
+            "input_audio_transcription_linked run_id=%s input_event_key=%s pending_server_auto=%s",
+            self._current_run_id() or "",
+            input_event_key,
+            len(pending_server_auto_keys),
+        )
+        self._start_transcript_response_watchdog(
+            turn_id=resolved_turn_id,
+            input_event_key=input_event_key,
+        )
+        turn_timestamps_store = getattr(self, "_turn_diagnostic_timestamps", None)
+        if not isinstance(turn_timestamps_store, dict):
+            turn_timestamps_store = {}
+            self._turn_diagnostic_timestamps = turn_timestamps_store
+        turn_timestamps = turn_timestamps_store.setdefault(resolved_turn_id, {})
+        turn_timestamps["transcript_final"] = time.monotonic()
+        self._mark_tool_followup_timing(
+            turn_id=resolved_turn_id,
+            marker="transcript_final_received",
+            when=turn_timestamps["transcript_final"],
+        )
+        self._signal_server_auto_transcript_final(turn_id=resolved_turn_id)
+        partial_store = getattr(self, "_latest_partial_transcript_by_turn_id", None)
+        if isinstance(partial_store, dict):
+            partial_store.pop(resolved_turn_id, None)
+        confirmation_active = self._has_active_confirmation_token() or self._is_awaiting_confirmation_phase()
+        if confirmation_active:
+            self._confirmation_asr_pending = False
+            self._mark_confirmation_activity(reason="transcription_completed")
+        if self._active_utterance is not None:
+            self._active_utterance["transcript"] = transcript or ""
+            self._active_utterance["transcript_len"] = len((transcript or "").strip())
+            decision = self._parse_confirmation_decision(transcript or "")
+            self._active_utterance["confirmation_candidate"] = decision in {"yes", "no"}
+            self._active_utterance["decision"] = decision
+            duration_ms = self._active_utterance.get("duration_ms")
+            suppressed = self._should_suppress_short_utterance(transcript, duration_ms)
+            self._active_utterance["suppressed"] = suppressed
+            if suppressed:
+                await self._suppress_guardrail_response(websocket, transcript)
+            self._log_utterance_envelope(event_type)
+            if suppressed:
+                return
+        transcript_word_count = int(trust_snapshot.get("word_count") or 0)
         attention_exception_admitted = False
         attention_exception_reason = ""
         attention_admitted = False
