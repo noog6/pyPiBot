@@ -5759,14 +5759,19 @@ class RealtimeAPI:
         now: float | None = None,
     ) -> float:
         probe_now = time.monotonic() if now is None else float(now)
+        previous_hold_until = getattr(self, "_attention_gate_hold_until_monotonic", None)
         hold_window_s = max(
             0.0,
             float(getattr(self, "_attention_gate_hold_window_s", _ATTENTION_GATE_HOLD_WINDOW_S_DEFAULT) or 0.0),
         )
         hold_until = probe_now + hold_window_s
         self._attention_gate_hold_until_monotonic = hold_until
+        hold_event = "opened"
+        if isinstance(previous_hold_until, (int, float)) and probe_now <= float(previous_hold_until):
+            hold_event = "refreshed"
         logger.info(
-            "attention_gate_hold_refreshed run_id=%s turn_id=%s input_event_key=%s hold_window_s=%.3f hold_until=%.6f",
+            "attention_gate_hold_%s run_id=%s turn_id=%s input_event_key=%s hold_window_s=%.3f hold_until=%.6f policy=direct_address_only_refresh",
+            hold_event,
             self._current_run_id() or "",
             turn_id,
             input_event_key or "unknown",
@@ -5774,6 +5779,19 @@ class RealtimeAPI:
             hold_until,
         )
         return hold_until
+
+    def _evaluate_attention_gate_exception(
+        self,
+        *,
+        transcript: str,
+        confirmation_active: bool,
+    ) -> tuple[bool, str]:
+        if confirmation_active:
+            return True, "awaiting_confirmation"
+        stop_words = getattr(self, "_stop_words", None)
+        if stop_words and self._find_stop_word(transcript):
+            return True, "stop_abort_safety_interrupt"
+        return False, ""
 
     def _evaluate_attention_gate_admission(
         self,
@@ -5783,11 +5801,12 @@ class RealtimeAPI:
         input_event_key: str,
         now: float | None = None,
     ) -> tuple[bool, str]:
+        probe_now = time.monotonic() if now is None else float(now)
         if self._transcript_explicitly_addresses_assistant_name(transcript):
             self._open_attention_gate_hold_window(
                 turn_id=turn_id,
                 input_event_key=input_event_key,
-                now=now,
+                now=probe_now,
             )
             logger.info(
                 "attention_gate_admitted run_id=%s turn_id=%s input_event_key=%s via=direct_address",
@@ -5796,16 +5815,21 @@ class RealtimeAPI:
                 input_event_key or "unknown",
             )
             return True, "direct_address"
-        if self._attention_gate_hold_active(now=now):
+        if self._attention_gate_hold_active(now=probe_now):
+            hold_until = getattr(self, "_attention_gate_hold_until_monotonic", None)
+            hold_remaining_s = 0.0
+            if isinstance(hold_until, (int, float)):
+                hold_remaining_s = max(0.0, float(hold_until) - probe_now)
             logger.info(
-                "attention_gate_admitted run_id=%s turn_id=%s input_event_key=%s via=active_hold_window",
+                "attention_gate_admitted run_id=%s turn_id=%s input_event_key=%s via=active_hold_window hold_remaining_s=%.3f hold_refreshed=false",
                 self._current_run_id() or "",
                 turn_id,
                 input_event_key or "unknown",
+                hold_remaining_s,
             )
             return True, "active_hold_window"
         logger.info(
-            "attention_gate_ignored run_id=%s turn_id=%s input_event_key=%s reason=attention_gate_closed",
+            "attention_gate_blocked run_id=%s turn_id=%s input_event_key=%s reason=attention_gate_closed",
             self._current_run_id() or "",
             turn_id,
             input_event_key or "unknown",
@@ -19303,7 +19327,22 @@ class RealtimeAPI:
             snapshot=trust_snapshot,
         ):
             return
-        if transcript and not confirmation_active:
+        attention_exception_admitted = False
+        attention_exception_reason = ""
+        if transcript:
+            attention_exception_admitted, attention_exception_reason = self._evaluate_attention_gate_exception(
+                transcript=transcript,
+                confirmation_active=confirmation_active,
+            )
+            if attention_exception_admitted:
+                logger.info(
+                    "attention_gate_bypass run_id=%s turn_id=%s input_event_key=%s reason=%s",
+                    self._current_run_id() or "",
+                    resolved_turn_id,
+                    input_event_key,
+                    attention_exception_reason,
+                )
+        if transcript and not confirmation_active and not attention_exception_admitted:
             attention_admitted, attention_reason = self._evaluate_attention_gate_admission(
                 transcript=transcript,
                 turn_id=resolved_turn_id,
@@ -19360,7 +19399,7 @@ class RealtimeAPI:
                 if hasattr(self, "state_manager") and self.state_manager is not None:
                     self.state_manager.update_state(InteractionState.LISTENING, "attention gate closed")
                 return
-        if transcript and not confirmation_active:
+        if transcript and not confirmation_active and not attention_exception_admitted:
             self._set_response_gating_verdict(
                 turn_id=resolved_turn_id,
                 input_event_key=input_event_key,

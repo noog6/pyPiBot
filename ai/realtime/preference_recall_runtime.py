@@ -682,6 +682,6 @@ def _find_stop_word(controller, text: str) -> str | None:
                 if word in lowered:
                     return word
                 continue
-            if re.search(rf"\\b{re.escape(word)}\\b", lowered):
+            if re.search(rf"\b{re.escape(word)}\b", lowered):
                 return word
         return None

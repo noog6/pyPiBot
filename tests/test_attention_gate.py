@@ -19,6 +19,7 @@ from ai.realtime_api import RealtimeAPI
 def _make_attention_api(*, assistant_name: str = "Theo Prime") -> RealtimeAPI:
     api = RealtimeAPI.__new__(RealtimeAPI)
     api._assistant_name = assistant_name
+    api._stop_words = ["stop", "abort"]
     api._attention_gate_hold_window_s = 2.0
     api._attention_gate_hold_until_monotonic = None
     api._current_run_id = lambda: "run-attn"
@@ -156,6 +157,66 @@ def test_followup_outside_hold_window_is_ignored() -> None:
 
     assert admitted is False
     assert reason == "attention_gate_closed"
+
+
+def test_repeated_hold_admissions_do_not_extend_hold_window_forever() -> None:
+    api = _make_attention_api()
+    api._attention_gate_hold_window_s = 0.5
+    api._evaluate_attention_gate_admission(
+        transcript="Theo Prime, status.",
+        turn_id="turn-1",
+        input_event_key="item-1",
+        now=100.0,
+    )
+
+    admitted_1, reason_1 = api._evaluate_attention_gate_admission(
+        transcript="And tomorrow?",
+        turn_id="turn-1",
+        input_event_key="item-2",
+        now=100.2,
+    )
+    admitted_2, reason_2 = api._evaluate_attention_gate_admission(
+        transcript="And later?",
+        turn_id="turn-1",
+        input_event_key="item-3",
+        now=100.4,
+    )
+    admitted_3, reason_3 = api._evaluate_attention_gate_admission(
+        transcript="Still there?",
+        turn_id="turn-1",
+        input_event_key="item-4",
+        now=100.51,
+    )
+
+    assert admitted_1 is True
+    assert reason_1 == "active_hold_window"
+    assert admitted_2 is True
+    assert reason_2 == "active_hold_window"
+    assert admitted_3 is False
+    assert reason_3 == "attention_gate_closed"
+    assert api._attention_gate_hold_until_monotonic is None
+
+
+def test_stop_abort_exception_bypasses_attention_gate_when_closed() -> None:
+    api = _make_attention_api()
+    admitted, reason = api._evaluate_attention_gate_exception(
+        transcript="please stop right now",
+        confirmation_active=False,
+    )
+
+    assert admitted is True
+    assert reason == "stop_abort_safety_interrupt"
+
+
+def test_confirmation_reply_bypasses_attention_gate_when_awaiting_confirmation() -> None:
+    api = _make_attention_api()
+    admitted, reason = api._evaluate_attention_gate_exception(
+        transcript="yes",
+        confirmation_active=True,
+    )
+
+    assert admitted is True
+    assert reason == "awaiting_confirmation"
 
 
 def test_configured_name_change_updates_direct_address_detection() -> None:
