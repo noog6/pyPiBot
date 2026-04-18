@@ -264,20 +264,28 @@ def _format_optional_float(value: float | None, *, unit: str, precision: int = 2
 
 
 def _emit_run_report_banner(payload: _RunReportPayload) -> None:
+    banner_width = 48
+    inner_width = banner_width - 2
+    label_width = 11
+    value_width = inner_width - 2 - label_width - 3
+
+    def emit_row(label: str, value: str) -> None:
+        logger.info(":%s:", f"  {label:<{label_width}} : {value:<{value_width}}")
+
     battery_text = (
         f"{payload.startup_voltage:.2f}V -> {payload.latest_voltage:.2f}V"
         if payload.startup_voltage is not None and payload.latest_voltage is not None
         else "unavailable"
     )
-    logger.info("············································")
-    logger.info(":               THEO RUN REPORT              :")
-    logger.info(":  run_id: %-34s :", payload.run_id)
-    logger.info(":  status: %-34s :", payload.status)
-    logger.info(":  duration: %-32s :", _format_duration(payload.duration_seconds))
-    logger.info(":  battery: %-33s :", battery_text)
-    logger.info(":  avg_power: %-31s :", _format_optional_float(payload.avg_power_watts, unit="W"))
-    logger.info(":  energy_used: %-29s :", _format_optional_float(payload.energy_wh, unit=" Wh", precision=3))
-    logger.info("············································")
+    logger.info("·" * banner_width)
+    logger.info(":%s:", f"{'THEO RUN REPORT':^{inner_width}}")
+    emit_row("run_id", payload.run_id)
+    emit_row("status", payload.status)
+    emit_row("duration", _format_duration(payload.duration_seconds))
+    emit_row("battery", battery_text)
+    emit_row("avg_power", _format_optional_float(payload.avg_power_watts, unit="W"))
+    emit_row("energy_used", _format_optional_float(payload.energy_wh, unit=" Wh", precision=3))
+    logger.info("·" * banner_width)
 
 
 def _derive_shutdown_status(
