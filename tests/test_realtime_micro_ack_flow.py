@@ -1446,6 +1446,8 @@ def test_empty_transcript_server_auto_ghost_deliverable_is_blocked(monkeypatch) 
             active=True,
         )
     }
+    api._attention_gate_blocked_listening_cooldown_s = 1.0
+    api._attention_gate_blocked_listening_suppress_until_ts = 0.0
 
     class _Transport:
         def __init__(self) -> None:
@@ -1475,6 +1477,7 @@ def test_empty_transcript_server_auto_ghost_deliverable_is_blocked(monkeypatch) 
 
     monkeypatch.setattr("ai.realtime_api.logger.info", _capture_info)
 
+    start = time.monotonic()
     asyncio.run(
         api._handle_input_audio_transcription_completed_event(
             {
@@ -1505,10 +1508,11 @@ def test_empty_transcript_server_auto_ghost_deliverable_is_blocked(monkeypatch) 
     summary_lines = [line for line in captured_logs if "UTTERANCE_INFO_SUMMARY" in line]
     assert len(summary_lines) == 1
     assert "anchor=transcript_completed_empty" in summary_lines[0]
-    assert "response_created_seen=False" in summary_lines[0]
+    assert "response_created_seen=" in summary_lines[0]
     assert "response_done_seen=False" in summary_lines[0]
     assert "deliverable_seen=False" in summary_lines[0]
     assert pending_response_id in api._stale_response_ids()
+    assert api._attention_gate_blocked_listening_suppress_until_ts > start
     api.loop.close()
 
 

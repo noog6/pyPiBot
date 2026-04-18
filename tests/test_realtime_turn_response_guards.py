@@ -156,6 +156,46 @@ def test_turn_contract_blocks_state_gesture_cues() -> None:
     assert api._last_interaction_state == InteractionState.IDLE
 
 
+def test_listening_attention_hold_suppressed_during_blocked_recovery_cooldown() -> None:
+    api = _make_api()
+    api._last_interaction_state = InteractionState.THINKING
+    api._listening_attention_hold_active = False
+    api._attention_gate_blocked_listening_suppress_until_ts = time.monotonic() + 5.0
+    api._embodiment_policy.decide_state_cue = lambda **_kwargs: EmbodimentDecision(
+        action=EmbodimentActionType.EMIT_CUE,
+        cue_name="gesture_attention_hold",
+        delay_ms=0,
+        reason="attention_detected",
+    )
+    emitted: list[str] = []
+    api._enqueue_gesture_cue = lambda **kwargs: emitted.append(kwargs["gesture_name"]) or True
+
+    api._handle_state_gesture(InteractionState.LISTENING)
+
+    assert emitted == []
+    assert api._listening_attention_hold_active is False
+
+
+def test_listening_attention_hold_emits_after_blocked_recovery_cooldown_expires() -> None:
+    api = _make_api()
+    api._last_interaction_state = InteractionState.THINKING
+    api._listening_attention_hold_active = False
+    api._attention_gate_blocked_listening_suppress_until_ts = time.monotonic() - 0.1
+    api._embodiment_policy.decide_state_cue = lambda **_kwargs: EmbodimentDecision(
+        action=EmbodimentActionType.EMIT_CUE,
+        cue_name="gesture_attention_hold",
+        delay_ms=0,
+        reason="attention_detected",
+    )
+    emitted: list[str] = []
+    api._enqueue_gesture_cue = lambda **kwargs: emitted.append(kwargs["gesture_name"]) or True
+
+    api._handle_state_gesture(InteractionState.LISTENING)
+
+    assert emitted == ["gesture_attention_hold"]
+    assert api._listening_attention_hold_active is True
+
+
 def test_turn_contract_blocks_gesture_tool_calls() -> None:
     api = _make_api()
     api._update_turn_contract_from_input("Do not gesture.", source="input_audio_transcription")
