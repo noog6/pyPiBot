@@ -1182,6 +1182,8 @@ def test_attention_gate_closed_rearms_recording_and_cancels_pending_server_auto(
     api._asr_verify_short_utterance_ms = 1200
     api._vad_turn_detection = {}
     api._utterance_trust_snapshot_by_input_event_key = {}
+    signal_calls: list[str] = []
+    api._signal_server_auto_transcript_final = lambda *, turn_id: signal_calls.append(turn_id)
 
     async def _run() -> None:
         api._active_response_origin = "server_auto"
@@ -1221,6 +1223,7 @@ def test_attention_gate_closed_rearms_recording_and_cancels_pending_server_auto(
     assert api._attention_gate_blocked_listening_cue_suppressed(
         now=api._attention_gate_blocked_listening_suppress_until_ts - 0.01
     )
+    assert signal_calls == []
 
 
 def test_non_addressed_visual_question_skips_verify_and_blocks_attention_gate() -> None:
@@ -1300,6 +1303,8 @@ def test_direct_address_visual_question_runs_verify_path_after_attention_admissi
     api._asr_verify_short_utterance_ms = 1200
     api._vad_turn_detection = {}
     api._utterance_trust_snapshot_by_input_event_key = {}
+    signal_calls: list[str] = []
+    api._signal_server_auto_transcript_final = lambda *, turn_id: signal_calls.append(turn_id)
 
     asyncio.run(
         api._handle_input_audio_transcription_completed_event(
@@ -1313,6 +1318,7 @@ def test_direct_address_visual_question_runs_verify_path_after_attention_admissi
     )
 
     assert verify_calls == ["item_direct_visual"]
+    assert signal_calls == ["turn_1"]
 
 
 def test_attention_exception_bypass_runs_verify_without_admission_check() -> None:
