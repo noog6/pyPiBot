@@ -363,6 +363,7 @@ _PREFERENCE_RECALL_VARIANT_NOISE_TOKENS = _PREFERENCE_QUERY_NOISE_TOKENS | {
 _SPEAKING_SETTLE_RETRY_MAX_AGE_S = 2.0
 REALTIME_CALL_ID_MAX_LENGTH = 32
 _ATTENTION_GATE_HOLD_WINDOW_S_DEFAULT = 2.75
+_ATTENTION_GATE_BLOCKED_LISTENING_COOLDOWN_S_DEFAULT = 1.0
 
 
 @dataclass
@@ -826,6 +827,16 @@ class RealtimeAPI:
         self._speaking_started = False
         self._embodiment_policy = EmbodimentPolicy()
         self._attention_continuity = AttentionContinuity(hold_window_s=1.25)
+        self._attention_gate_blocked_listening_cooldown_s = max(
+            0.0,
+            float(
+                realtime_cfg.get(
+                    "attention_gate_blocked_listening_cooldown_s",
+                    _ATTENTION_GATE_BLOCKED_LISTENING_COOLDOWN_S_DEFAULT,
+                )
+            ),
+        )
+        self._attention_gate_blocked_listening_suppress_until_ts = 0.0
         self._quiet_intent_selector = QuietIntentSelector()
         self._latest_quiet_intent_decision: QuietIntentDecision | None = None
         self._latest_quiet_intent_log_fingerprint: str | None = None
@@ -4541,6 +4552,23 @@ class RealtimeAPI:
             snapshot.release_reason,
         )
 
+    def _mark_attention_gate_closed_recovery(self, *, reason: str) -> None:
+        now = time.monotonic()
+        cooldown_s = max(
+            0.0,
+            float(getattr(self, "_attention_gate_blocked_listening_cooldown_s", 0.0) or 0.0),
+        )
+        self._attention_gate_blocked_listening_suppress_until_ts = now + cooldown_s
+        continuity = getattr(self, "_attention_continuity", None)
+        if continuity is not None:
+            continuity.release(now_s=now, reason=f"{reason}_blocked")
+        self._emit_attention_hold_release(reason=reason)
+
+    def _attention_gate_blocked_listening_cue_suppressed(self, *, now: float) -> bool:
+        suppress_until = float(
+            getattr(self, "_attention_gate_blocked_listening_suppress_until_ts", 0.0) or 0.0
+        )
+        return now < suppress_until
 
     def _emit_attention_hold_release(self, *, reason: str) -> None:
         if not bool(getattr(self, "_listening_attention_hold_active", False)):
@@ -4776,6 +4804,12 @@ class RealtimeAPI:
         gesture_name = decision.cue_name
         if gesture_name == "gesture_attention_hold" and bool(getattr(self, "_listening_attention_hold_active", False)):
             logger.debug("attention_hold_start_skipped reason=already_active state=%s", state.value)
+            return
+        if gesture_name == "gesture_attention_hold" and self._attention_gate_blocked_listening_cue_suppressed(now=now):
+            logger.info(
+                "attention_hold_start_suppressed reason=attention_gate_blocked_cooldown state=%s",
+                state.value,
+            )
             return
         if gesture_name == "gesture_speaking_posture" and was_speaking_episode_active:
             logger.info("speaking_posture_start_skipped reason=already_started state=%s", state.value)
@@ -5732,6 +5766,37 @@ class RealtimeAPI:
         window_size = len(name_tokens)
         for idx in range(0, len(transcript_tokens) - window_size + 1):
             if transcript_tokens[idx : idx + window_size] == name_tokens:
+                return True
+        return False
+
+    def _is_clear_direct_address_question(self, transcript: str) -> bool:
+        if not self._transcript_explicitly_addresses_assistant_name(transcript):
+            return False
+        normalized = str(transcript or "").strip().lower()
+        if not normalized:
+            return False
+        if "?" in normalized:
+            return True
+        question_starts = (
+            "who",
+            "what",
+            "when",
+            "where",
+            "why",
+            "how",
+            "can",
+            "could",
+            "would",
+            "will",
+            "do",
+            "does",
+            "did",
+            "is",
+            "are",
+            "should",
+        )
+        for marker in question_starts:
+            if re.search(rf"\b{marker}\b", normalized):
                 return True
         return False
 
@@ -19329,6 +19394,7 @@ class RealtimeAPI:
             return
         attention_exception_admitted = False
         attention_exception_reason = ""
+        attention_admission_reason = ""
         if transcript:
             attention_exception_admitted, attention_exception_reason = self._evaluate_attention_gate_exception(
                 transcript=transcript,
@@ -19396,9 +19462,11 @@ class RealtimeAPI:
                             input_event_key,
                         )
                         start_recording()
+                self._mark_attention_gate_closed_recovery(reason="attention_gate_closed")
                 if hasattr(self, "state_manager") and self.state_manager is not None:
                     self.state_manager.update_state(InteractionState.LISTENING, "attention gate closed")
                 return
+            attention_admission_reason = attention_reason
         if transcript and not confirmation_active and not attention_exception_admitted:
             self._set_response_gating_verdict(
                 turn_id=resolved_turn_id,
@@ -19432,14 +19500,26 @@ class RealtimeAPI:
                     turn_id=resolved_turn_id,
                     replacement_input_event_key=input_event_key,
                 )
-                self._maybe_schedule_micro_ack(
-                    turn_id=resolved_turn_id,
-                    category=self._micro_ack_category_for_reason("transcript_finalized"),
-                    channel="voice",
-                    action=self._canonical_utterance_key(turn_id=resolved_turn_id, input_event_key=input_event_key),
-                    reason="transcript_finalized",
-                    expected_delay_ms=700,
+                suppress_direct_address_latency_mask = (
+                    attention_admission_reason == "direct_address"
+                    and self._is_clear_direct_address_question(transcript)
                 )
+                if suppress_direct_address_latency_mask:
+                    logger.info(
+                        "micro_ack_suppressed reason=direct_address_question_fastpath run_id=%s turn_id=%s input_event_key=%s",
+                        self._current_run_id() or "",
+                        resolved_turn_id,
+                        input_event_key,
+                    )
+                else:
+                    self._maybe_schedule_micro_ack(
+                        turn_id=resolved_turn_id,
+                        category=self._micro_ack_category_for_reason("transcript_finalized"),
+                        channel="voice",
+                        action=self._canonical_utterance_key(turn_id=resolved_turn_id, input_event_key=input_event_key),
+                        reason="transcript_finalized",
+                        expected_delay_ms=700,
+                    )
             else:
                 self._cancel_micro_ack(turn_id=resolved_turn_id, reason="upgrade_selected")
             self._record_user_input(transcript, source="input_audio_transcription")

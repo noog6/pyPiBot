@@ -1216,6 +1216,58 @@ def test_attention_gate_closed_rearms_recording_and_cancels_pending_server_auto(
         InteractionState.LISTENING,
         "attention gate closed",
     )
+    assert api._attention_gate_blocked_listening_suppress_until_ts > 0.0
+    assert api._attention_gate_blocked_listening_cue_suppressed(
+        now=api._attention_gate_blocked_listening_suppress_until_ts - 0.01
+    )
+
+
+def test_direct_address_question_transcript_suppresses_latency_mask_micro_ack() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+
+    recorded_reasons: list[str] = []
+
+    async def _true(*_args, **_kwargs) -> bool:
+        return True
+
+    async def _false(*_args, **_kwargs) -> bool:
+        return False
+
+    api._maybe_schedule_micro_ack = lambda **kwargs: recorded_reasons.append(str(kwargs.get("reason") or ""))
+    api._rebind_pending_micro_ack_after_transcript_final = lambda **_kwargs: 0
+    api._cancel_micro_ack = lambda **_kwargs: None
+    api._maybe_handle_confirmation_decision_timeout = _false
+    api._maybe_verify_on_risk_clarify = _false
+    api._maybe_handle_approval_response = _true
+    api._handle_stop_word = _false
+    api._maybe_handle_research_permission_response = _false
+    api._maybe_handle_research_budget_response = _false
+    api._maybe_apply_late_confirmation_decision = _false
+    api._maybe_process_research_intent = _false
+    api._has_active_confirmation_token = lambda: False
+    api._is_awaiting_confirmation_phase = lambda: False
+    api._evaluate_attention_gate_admission = lambda **_kwargs: (True, "direct_address")
+    api._attention_on_transcript_finalized = lambda: None
+    api._asr_verify_short_utterance_ms = 1200
+    api._vad_turn_detection = {}
+    api._utterance_trust_snapshot_by_input_event_key = {}
+
+    async def _run() -> None:
+        await api._handle_input_audio_transcription_completed_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": "item_direct_question",
+                "transcript": "Theo, what time is it",
+            },
+            ws,
+        )
+
+    asyncio.run(_run())
+
+    assert "transcript_finalized" not in recorded_reasons
 
 
 def test_preference_recall_preserves_parent_input_event_key_during_active_response() -> None:
