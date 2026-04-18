@@ -14,7 +14,7 @@ from ai.realtime.response_create_runtime import (
     ResponseCreatePreparedSnapshot,
     ResponseCreateRuntime,
 )
-from ai.realtime_api import RealtimeAPI
+from ai.realtime_api import AttentionState, RealtimeAPI
 
 
 def _make_attention_api(*, assistant_name: str = "Theo Prime") -> RealtimeAPI:
@@ -23,6 +23,8 @@ def _make_attention_api(*, assistant_name: str = "Theo Prime") -> RealtimeAPI:
     api._stop_words = ["stop", "abort"]
     api._attention_gate_hold_window_s = 2.0
     api._attention_gate_hold_until_monotonic = None
+    api._attention_gate_blocked_listening_cooldown_s = 1.0
+    api._attention_gate_blocked_listening_suppress_until_ts = 0.0
     api._log_user_transcript_redact_enabled = True
     api._current_run_id = lambda: "run-attn"
     return api
@@ -92,6 +94,7 @@ def test_direct_address_opens_attention_hold_window() -> None:
     assert admitted is True
     assert reason == "direct_address"
     assert api._attention_gate_hold_until_monotonic == 102.0
+    assert api._attention_state_snapshot().state is AttentionState.DIRECT_ADDRESS_ACTIVE
 
 
 def test_configured_hold_window_value_is_applied() -> None:
@@ -143,6 +146,7 @@ def test_followup_within_hold_window_is_admitted() -> None:
 
     assert admitted is True
     assert reason == "active_hold_window"
+    assert api._attention_state_snapshot().state is AttentionState.HOLD_ACTIVE
 
 
 def test_followup_outside_hold_window_is_ignored() -> None:
@@ -164,6 +168,7 @@ def test_followup_outside_hold_window_is_ignored() -> None:
 
     assert admitted is False
     assert reason == "attention_gate_closed"
+    assert api._attention_state_snapshot().state is AttentionState.CLOSED
 
 
 def test_repeated_hold_admissions_do_not_extend_hold_window_forever() -> None:
@@ -213,6 +218,7 @@ def test_stop_abort_exception_bypasses_attention_gate_when_closed() -> None:
 
     assert admitted is True
     assert reason == "stop_abort_safety_interrupt"
+    assert api._attention_state_snapshot().state is AttentionState.BYPASS_ACTIVE
 
 
 def test_confirmation_reply_bypasses_attention_gate_when_awaiting_confirmation() -> None:
@@ -224,6 +230,49 @@ def test_confirmation_reply_bypasses_attention_gate_when_awaiting_confirmation()
 
     assert admitted is True
     assert reason == "awaiting_confirmation"
+    assert api._attention_state_snapshot().state is AttentionState.BYPASS_ACTIVE
+
+
+def test_blocked_recovery_cooldown_state_expires_to_closed() -> None:
+    api = _make_attention_api()
+    api._attention_gate_blocked_listening_cooldown_s = 0.5
+
+    with patch("ai.realtime_api.time.monotonic", return_value=10.0):
+        api._mark_attention_gate_closed_recovery(reason="attention_gate_closed")
+
+    assert api._attention_state_snapshot().state is AttentionState.BLOCKED_RECOVERY_COOLDOWN
+    assert api._attention_gate_blocked_listening_cue_suppressed(now=10.25) is True
+    assert api._attention_gate_blocked_listening_cue_suppressed(now=10.51) is False
+    assert api._attention_state_snapshot().state is AttentionState.CLOSED
+
+
+def test_empty_transcript_recovery_marks_blocked_cooldown_state() -> None:
+    api = _make_attention_api()
+    api._attention_gate_blocked_listening_cooldown_s = 0.25
+
+    with patch("ai.realtime_api.time.monotonic", return_value=22.0):
+        api._mark_blocked_listening_recovery(reason="empty_transcript")
+
+    snapshot = api._attention_state_snapshot()
+    assert snapshot.state is AttentionState.BLOCKED_RECOVERY_COOLDOWN
+    assert snapshot.reason == "empty_transcript"
+    assert snapshot.suppress_until_monotonic == 22.25
+
+
+def test_hold_expiry_uses_formal_state_not_legacy_timestamp() -> None:
+    api = _make_attention_api()
+    api._attention_gate_hold_until_monotonic = 999.0
+    api._set_attention_state_closed(reason="test_closed", now=50.0)
+
+    assert api._attention_gate_hold_active(now=100.0) is False
+
+
+def test_blocked_cooldown_expiry_uses_formal_state_not_legacy_timestamp() -> None:
+    api = _make_attention_api()
+    api._attention_gate_blocked_listening_suppress_until_ts = 999.0
+    api._set_attention_state_closed(reason="test_closed", now=10.0)
+
+    assert api._attention_gate_blocked_listening_cue_suppressed(now=100.0) is False
 
 
 def test_configured_name_change_updates_direct_address_detection() -> None:
@@ -295,6 +344,7 @@ def test_attention_decision_log_direct_address_admitted() -> None:
     assert "transcript_attention_decision" in line
     assert "attention=admitted" in line
     assert "reason=direct_address" in line
+    assert "current_state=direct_address_active" in line
     assert 'heard_transcript="Theo Prime, what\'s the status?"' in line
 
 
@@ -321,6 +371,7 @@ def test_attention_decision_log_non_addressed_blocked() -> None:
     line = _render_logged_line(info_mock)
     assert "attention=blocked" in line
     assert "reason=attention_gate_closed" in line
+    assert "current_state=closed" in line
     assert 'heard_transcript="PJs, are you comfy?"' in line
 
 
@@ -345,4 +396,5 @@ def test_attention_decision_log_confirmation_bypass() -> None:
     line = _render_logged_line(info_mock)
     assert "attention=bypass" in line
     assert "reason=awaiting_confirmation" in line
+    assert "current_state=bypass_active" in line
     assert 'heard_transcript="yes"' in line
