@@ -628,9 +628,38 @@ def test_run_summary_banner_handles_missing_telemetry(monkeypatch) -> None:
     main._emit_run_report_banner(payload)
 
     assert any("THEO RUN REPORT" in line for line in lines)
-    assert any("battery: unavailable" in line for line in lines)
-    assert any("avg_power: unavailable" in line for line in lines)
-    assert any("energy_used: unavailable" in line for line in lines)
+    assert any("battery     : unavailable" in line for line in lines)
+    assert any("avg_power   : unavailable" in line for line in lines)
+    assert any("energy_used : unavailable" in line for line in lines)
+
+
+def test_run_summary_banner_field_alignment(monkeypatch) -> None:
+    lines: list[str] = []
+
+    def capture_info(message: str, *args) -> None:
+        lines.append(message % args if args else message)
+
+    monkeypatch.setattr(main.logger, "info", capture_info)
+    payload = main._RunReportPayload(
+        run_id="run-505",
+        status="normal_shutdown",
+        duration_seconds=12.0,
+        startup_voltage=8.20,
+        latest_voltage=8.05,
+        avg_power_watts=1.2,
+        energy_wh=0.02,
+    )
+    main._emit_run_report_banner(payload)
+
+    field_rows = lines[2:-1]
+    row_lengths = {len(row) for row in field_rows}
+    assert len(row_lengths) == 1
+
+    left_separator_indexes = {row.index(" : ") for row in field_rows}
+    assert len(left_separator_indexes) == 1
+
+    right_separator_indexes = {row.rindex(":") for row in field_rows}
+    assert len(right_separator_indexes) == 1
 
 
 def test_derive_shutdown_status_precedence() -> None:
@@ -709,6 +738,6 @@ def test_main_run_report_handles_battery_without_power_telemetry(monkeypatch) ->
 
     assert exit_code == 0
     assert any("THEO RUN REPORT" in line for line in infos)
-    assert any(":  status: normal_shutdown" in line for line in infos)
-    assert any(":  avg_power: unavailable" in line for line in infos)
-    assert any(":  energy_used: unavailable" in line for line in infos)
+    assert any(":  status      : normal_shutdown" in line for line in infos)
+    assert any(":  avg_power   : unavailable" in line for line in infos)
+    assert any(":  energy_used : unavailable" in line for line in infos)
