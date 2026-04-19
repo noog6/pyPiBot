@@ -10025,6 +10025,9 @@ class RealtimeAPI:
 
         motion_state = self.get_gesture_motion_state(tool_call_id=normalized_call_id)
         normalized_status = str((motion_state or {}).get("status") or "").strip().lower()
+        motion_completed = self.is_gesture_motion_completed(tool_call_id=normalized_call_id)
+        if motion_completed is True:
+            return "completed", False
         if normalized_status not in {"queued", "started", "completed"}:
             return None, False
         if is_known_gesture_tool:
@@ -14002,6 +14005,24 @@ class RealtimeAPI:
         if str(action or "").strip().upper() in {"CLARIFY", "UPGRADE"}:
             self._cancel_latency_mask_micro_ack_for_clarify_imminent(turn_id=turn_id, input_event_key=input_event_key)
         return verdict
+
+    def _blocked_turn_tool_call_context(self) -> tuple[str, str] | None:
+        """Return (turn_id, input_event_key) when the active turn is hard-blocked upstream."""
+
+        turn_id = str(self._current_turn_id_or_unknown() or "").strip()
+        if not turn_id:
+            return None
+        input_event_key = str(self._active_input_event_key_for_turn(turn_id) or "").strip()
+        if not input_event_key:
+            input_event_key = str(getattr(self, "_current_input_event_key", "") or "").strip()
+        if not input_event_key or input_event_key.startswith("tool:"):
+            return None
+        verdict = self._get_response_gating_verdict(turn_id=turn_id, input_event_key=input_event_key)
+        if not isinstance(verdict, ResponseGatingVerdict):
+            return None
+        if str(verdict.action or "").strip().upper() != "BLOCK":
+            return None
+        return turn_id, input_event_key
 
     def _pending_tool_followup_likely(self) -> bool:
         pending_token = getattr(self, "_pending_confirmation_token", None)
@@ -20443,6 +20464,28 @@ class RealtimeAPI:
             function_name = self.function_call.get("name")
             call_id = self.function_call.get("call_id")
             suppression_notice_sent = False
+            blocked_turn_context = self._blocked_turn_tool_call_context()
+            if blocked_turn_context is not None:
+                blocked_turn_id, blocked_input_event_key = blocked_turn_context
+                logger.info(
+                    "Function call blocked by turn admission | tool=%s call_id=%s reason=attention_gate_closed turn_id=%s input_event_key=%s",
+                    function_name,
+                    call_id,
+                    blocked_turn_id,
+                    blocked_input_event_key,
+                )
+                await self._send_noop_tool_output(
+                    websocket,
+                    call_id=call_id,
+                    status="blocked_attention_gate",
+                    message="No action taken. Tool call blocked because this transcript turn was rejected by attention gating.",
+                    tool_name=function_name,
+                    reason="attention_gate_closed",
+                    category="suppression",
+                )
+                self.function_call = None
+                self.function_call_args = ""
+                return
             if self._turn_contract_blocks_tool_call(tool_name=function_name):
                 logger.info(
                     "Function call blocked by turn contract | tool=%s call_id=%s reason=turn_contract_disallow_tool",
