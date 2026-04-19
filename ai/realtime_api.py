@@ -7561,6 +7561,12 @@ class RealtimeAPI:
             response_id=pending.response_id,
             reason=reason,
         )
+        if str(reason or "").strip() in {"attention_gate_closed", "empty_transcript", "verify_clarify"}:
+            self._clear_deferred_provisional_tool_call(
+                reason=f"pending_server_auto_cancelled:{reason}",
+                turn_id=turn_id,
+                response_id=pending.response_id,
+            )
         log_label = (
             "server_auto_cancelled_for_empty_transcript"
             if str(reason or "").strip() == "empty_transcript"
@@ -17347,6 +17353,38 @@ class RealtimeAPI:
             str(call_id or "").strip() or "none",
             previous_call_id or "none",
         )
+
+    def _clear_deferred_provisional_tool_call(
+        self,
+        *,
+        reason: str,
+        turn_id: str | None = None,
+        response_id: str | None = None,
+    ) -> bool:
+        pending = getattr(self, "_deferred_provisional_tool_call", None)
+        if not isinstance(pending, dict):
+            return False
+        normalized_turn_id = str(turn_id or "").strip()
+        pending_turn_id = str(pending.get("turn_id") or "").strip()
+        if normalized_turn_id and pending_turn_id and pending_turn_id != normalized_turn_id:
+            return False
+        normalized_response_id = str(response_id or "").strip()
+        pending_response_id = str(pending.get("response_id") or "").strip()
+        if normalized_response_id and pending_response_id and pending_response_id != normalized_response_id:
+            return False
+        tool_name = str(pending.get("tool_name") or "").strip() or "unknown"
+        call_id = str(pending.get("call_id") or "").strip() or "none"
+        self._deferred_provisional_tool_call = None
+        logger.info(
+            "provisional_tool_call_dropped run_id=%s turn_id=%s response_id=%s tool=%s call_id=%s reason=%s",
+            self._current_run_id() or "",
+            pending_turn_id or "turn-unknown",
+            pending_response_id or "none",
+            tool_name,
+            call_id,
+            str(reason or "").strip() or "unknown",
+        )
+        return True
 
     async def _dispatch_deferred_provisional_tool_call_for_turn(
         self,
