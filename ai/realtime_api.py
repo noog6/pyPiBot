@@ -1145,8 +1145,9 @@ class RealtimeAPI:
         self._preference_recall_skip_logged_turn_ids: set[str] = set()
         self._preference_recall_handled_logged_turn_ids: set[str] = set()
         self._response_schedule_logged_turn_ids: set[str] = set()
-        self._turn_diagnostic_timestamps: dict[str, dict[str, float]] = {}
+        self._turn_diagnostic_timestamps: dict[str, dict[str, Any]] = {}
         self._tool_followup_timing_by_turn_id: dict[str, dict[str, Any]] = {}
+        self._turn_latency_summary_emitted: set[str] = set()
 
         research_cfg = config.get("research") or {}
         self._research_enabled = bool(research_cfg.get("enabled", False))
@@ -1531,6 +1532,201 @@ class RealtimeAPI:
             if normalized_value:
                 current[key] = normalized_value
         return current
+
+    def _turn_latency_state(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str | None = None,
+        canonical_key: str | None = None,
+        create: bool = False,
+    ) -> dict[str, Any] | None:
+        normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
+        normalized_input_event_key = str(input_event_key or "").strip()
+        resolved_canonical_key = str(canonical_key or "").strip()
+        if not resolved_canonical_key and normalized_input_event_key:
+            resolved_canonical_key = self._canonical_utterance_key(
+                turn_id=normalized_turn_id,
+                input_event_key=normalized_input_event_key,
+            )
+        if not resolved_canonical_key:
+            return None
+        turn_timestamps_store = getattr(self, "_turn_diagnostic_timestamps", None)
+        if not isinstance(turn_timestamps_store, dict):
+            if not create:
+                return None
+            turn_timestamps_store = {}
+            self._turn_diagnostic_timestamps = turn_timestamps_store
+        turn_state = turn_timestamps_store.setdefault(normalized_turn_id, {}) if create else turn_timestamps_store.get(normalized_turn_id)
+        if not isinstance(turn_state, dict):
+            return None
+        latency_by_canonical_key = turn_state.get("latency_by_canonical_key")
+        if not isinstance(latency_by_canonical_key, dict):
+            if not create:
+                return None
+            latency_by_canonical_key = {}
+            turn_state["latency_by_canonical_key"] = latency_by_canonical_key
+        state = latency_by_canonical_key.get(resolved_canonical_key)
+        if isinstance(state, dict):
+            return state
+        if not create:
+            return None
+        state = {
+            "run_id": str(self._current_run_id() or "").strip(),
+            "turn_id": normalized_turn_id,
+            "input_event_key": normalized_input_event_key,
+            "canonical_key": resolved_canonical_key,
+            "path": "normal_admitted_answer",
+            "outcome": "in_progress",
+            "summary_emitted": False,
+            "markers": {},
+            "tool_total_ms": 0.0,
+            "tool_count": 0,
+            "tool_active_started_at": None,
+        }
+        latency_by_canonical_key[resolved_canonical_key] = state
+        return state
+
+    def _mark_turn_latency_marker(
+        self,
+        *,
+        turn_id: str,
+        marker: str,
+        when: float | None = None,
+        input_event_key: str | None = None,
+        canonical_key: str | None = None,
+    ) -> None:
+        state = self._turn_latency_state(
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            canonical_key=canonical_key,
+            create=True,
+        )
+        if state is None:
+            return
+        markers = state.setdefault("markers", {})
+        if marker not in markers:
+            markers[marker] = float(time.monotonic() if when is None else when)
+
+    def _mark_turn_latency_tool_start(self, *, turn_id: str, input_event_key: str | None = None) -> None:
+        state = self._turn_latency_state(turn_id=turn_id, input_event_key=input_event_key, create=True)
+        if state is None:
+            return
+        if not isinstance(state.get("tool_active_started_at"), (int, float)):
+            state["tool_active_started_at"] = float(time.monotonic())
+            state["tool_count"] = int(state.get("tool_count") or 0) + 1
+
+    def _mark_turn_latency_tool_end(self, *, turn_id: str, input_event_key: str | None = None) -> None:
+        state = self._turn_latency_state(turn_id=turn_id, input_event_key=input_event_key, create=True)
+        if state is None:
+            return
+        started_at = state.get("tool_active_started_at")
+        if not isinstance(started_at, (int, float)):
+            return
+        elapsed_ms = max(0.0, (time.monotonic() - float(started_at)) * 1000.0)
+        state["tool_total_ms"] = float(state.get("tool_total_ms") or 0.0) + elapsed_ms
+        state["tool_active_started_at"] = None
+
+    def _set_turn_latency_classification(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str | None = None,
+        canonical_key: str | None = None,
+        path: str | None = None,
+        outcome: str | None = None,
+    ) -> None:
+        state = self._turn_latency_state(
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            canonical_key=canonical_key,
+            create=True,
+        )
+        if state is None:
+            return
+        if path:
+            state["path"] = str(path).strip()
+        if outcome:
+            state["outcome"] = str(outcome).strip()
+
+    @staticmethod
+    def _turn_latency_delta_ms(start_ts: Any, end_ts: Any) -> str:
+        if not isinstance(start_ts, (int, float)) or not isinstance(end_ts, (int, float)):
+            return "na"
+        return str(max(0, int((float(end_ts) - float(start_ts)) * 1000)))
+
+    def _emit_turn_latency_summary(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str | None = None,
+        canonical_key: str | None = None,
+    ) -> None:
+        state = self._turn_latency_state(
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            canonical_key=canonical_key,
+            create=False,
+        )
+        if not isinstance(state, dict):
+            return
+        canonical_key = str(state.get("canonical_key") or canonical_key or "").strip()
+        emitted = getattr(self, "_turn_latency_summary_emitted", None)
+        if not isinstance(emitted, set):
+            emitted = set()
+            self._turn_latency_summary_emitted = emitted
+        if canonical_key in emitted or bool(state.get("summary_emitted", False)):
+            return
+        markers = state.get("markers") if isinstance(state.get("markers"), dict) else {}
+        speech_stopped = markers.get("speech_stopped")
+        transcript_final = markers.get("transcript_final_received")
+        attention_decision = markers.get("attention_decision_finalized")
+        response_create_sent = markers.get("response_create_sent")
+        response_created = markers.get("response_created_received")
+        first_audio_delta = markers.get("first_audio_delta_received")
+        playback_start = markers.get("playback_start")
+        response_done = markers.get("response_done")
+        first_audible_marker = playback_start if isinstance(playback_start, (int, float)) else first_audio_delta
+        summary = {
+            "speech_to_transcript_final_ms": self._turn_latency_delta_ms(speech_stopped, transcript_final),
+            "transcript_final_to_attention_decision_ms": self._turn_latency_delta_ms(transcript_final, attention_decision),
+            "transcript_final_to_response_create_ms": self._turn_latency_delta_ms(transcript_final, response_create_sent),
+            "response_create_to_response_created_ms": self._turn_latency_delta_ms(response_create_sent, response_created),
+            "response_created_to_first_audio_delta_ms": self._turn_latency_delta_ms(response_created, first_audio_delta),
+            "response_created_to_playback_start_ms": self._turn_latency_delta_ms(response_created, playback_start),
+            "transcript_final_to_first_audible_answer_ms": self._turn_latency_delta_ms(transcript_final, first_audible_marker),
+            "tool_total_ms": str(int(float(state.get("tool_total_ms") or 0.0))),
+            "tool_count": str(int(state.get("tool_count") or 0)),
+            "total_turn_ms": self._turn_latency_delta_ms(speech_stopped, response_done),
+        }
+        path = str(state.get("path") or "unknown").strip() or "unknown"
+        if summary["tool_count"] != "0" and path == "normal_admitted_answer":
+            path = "tool_involved"
+        logger.info(
+            "turn_latency_summary run_id=%s turn_id=%s input_event_key=%s canonical_key=%s "
+            "speech_to_transcript_final_ms=%s transcript_final_to_attention_decision_ms=%s "
+            "transcript_final_to_response_create_ms=%s response_create_to_response_created_ms=%s "
+            "response_created_to_first_audio_delta_ms=%s response_created_to_playback_start_ms=%s "
+            "transcript_final_to_first_audible_answer_ms=%s tool_total_ms=%s tool_count=%s total_turn_ms=%s path=%s outcome=%s",
+            str(state.get("run_id") or self._current_run_id() or "").strip(),
+            str(state.get("turn_id") or turn_id or "").strip() or "turn-unknown",
+            str(state.get("input_event_key") or input_event_key or "").strip() or "unknown",
+            canonical_key or "unknown",
+            summary["speech_to_transcript_final_ms"],
+            summary["transcript_final_to_attention_decision_ms"],
+            summary["transcript_final_to_response_create_ms"],
+            summary["response_create_to_response_created_ms"],
+            summary["response_created_to_first_audio_delta_ms"],
+            summary["response_created_to_playback_start_ms"],
+            summary["transcript_final_to_first_audible_answer_ms"],
+            summary["tool_total_ms"],
+            summary["tool_count"],
+            summary["total_turn_ms"],
+            path,
+            str(state.get("outcome") or "unknown").strip() or "unknown",
+        )
+        state["summary_emitted"] = True
+        emitted.add(canonical_key)
 
     def _tool_followup_timing_state(self, *, turn_id: str, create: bool = False) -> dict[str, Any] | None:
         normalized_turn_id = str(turn_id or "").strip() or "turn-unknown"
@@ -18445,6 +18641,12 @@ class RealtimeAPI:
             turn_id = utterance_context.turn_id
             resolved_input_event_key = utterance_context.input_event_key
             canonical_key = utterance_context.canonical_key
+        self._mark_turn_latency_marker(
+            turn_id=turn_id,
+            input_event_key=resolved_input_event_key,
+            canonical_key=canonical_key,
+            marker="response_created_received",
+        )
         allow_tool_followup_rebind = (
             str((response_metadata or {}).get("tool_followup_release", "")).strip().lower() in {"true", "1", "yes"}
         )
@@ -18922,6 +19124,8 @@ class RealtimeAPI:
     def _deliver_active_response_audio_bytes(self, *, response_id: str | None, audio_data: bytes) -> None:
         self._mark_utterance_info_summary(deliverable_seen=True)
         active_canonical_key = str(getattr(self, "_active_response_canonical_key", "") or "").strip()
+        active_turn_id = self._current_turn_id_or_unknown()
+        active_input_event_key = str(getattr(self, "_active_response_input_event_key", "") or "").strip()
         if active_canonical_key:
             lifecycle_state = self._canonical_lifecycle_state(active_canonical_key)
             if lifecycle_state.get("cancel_requested_pre_audio", False):
@@ -18981,6 +19185,12 @@ class RealtimeAPI:
             self.state_manager.update_state(InteractionState.SPEAKING, "audio output")
 
         if len(self._audio_accum) >= self._audio_accum_bytes_target:
+            self._mark_turn_latency_marker(
+                turn_id=active_turn_id,
+                input_event_key=active_input_event_key,
+                canonical_key=active_canonical_key,
+                marker="playback_start",
+            )
             if self.audio_player:
                 self.audio_player.play_audio(bytes(self._audio_accum))
             self._audio_accum.clear()
@@ -19025,6 +19235,12 @@ class RealtimeAPI:
                     await transport.send_json(websocket, cancel_event)
                 return
         audio_data = base64.b64decode(event["delta"])
+        self._mark_turn_latency_marker(
+            turn_id=active_turn_id,
+            input_event_key=active_input_event_key,
+            canonical_key=str(getattr(self, "_active_response_canonical_key", "") or "").strip(),
+            marker="first_audio_delta_received",
+        )
         self._deliver_active_response_audio_bytes(response_id=response_id, audio_data=audio_data)
 
     async def _handle_response_done_event(self, event: dict[str, Any], websocket: Any) -> None:
@@ -19489,12 +19705,30 @@ class RealtimeAPI:
                 action="CLARIFY",
                 reason="empty_transcript_blocked",
             )
+            self._mark_turn_latency_marker(
+                turn_id=resolved_turn_id,
+                input_event_key=input_event_key,
+                canonical_key=summary_canonical_key,
+                marker="attention_decision_finalized",
+            )
+            self._set_turn_latency_classification(
+                turn_id=resolved_turn_id,
+                input_event_key=input_event_key,
+                canonical_key=summary_canonical_key,
+                path="empty_transcript_blocked",
+                outcome="blocked",
+            )
             self._mark_transcript_response_outcome(
                 input_event_key=input_event_key,
                 turn_id=resolved_turn_id,
                 outcome="response_not_scheduled",
                 reason="empty_transcript_blocked",
                 details="transcript_missing_or_zero_words",
+            )
+            self._emit_turn_latency_summary(
+                turn_id=resolved_turn_id,
+                input_event_key=input_event_key,
+                canonical_key=summary_canonical_key,
             )
             if not self._audio_playback_busy:
                 mic = getattr(self, "mic", None)
@@ -19570,6 +19804,22 @@ class RealtimeAPI:
             self._turn_diagnostic_timestamps = turn_timestamps_store
         turn_timestamps = turn_timestamps_store.setdefault(resolved_turn_id, {})
         turn_timestamps["transcript_final"] = time.monotonic()
+        speech_stopped_ts = turn_timestamps.get("speech_stopped")
+        self._mark_turn_latency_marker(
+            turn_id=resolved_turn_id,
+            input_event_key=input_event_key,
+            canonical_key=transcript_canonical_key,
+            marker="transcript_final_received",
+            when=turn_timestamps["transcript_final"],
+        )
+        if isinstance(speech_stopped_ts, (int, float)):
+            self._mark_turn_latency_marker(
+                turn_id=resolved_turn_id,
+                input_event_key=input_event_key,
+                canonical_key=transcript_canonical_key,
+                marker="speech_stopped",
+                when=float(speech_stopped_ts),
+            )
         self._mark_tool_followup_timing(
             turn_id=resolved_turn_id,
             marker="transcript_final_received",
@@ -19616,6 +19866,19 @@ class RealtimeAPI:
                     turn_id=resolved_turn_id,
                     input_event_key=input_event_key,
                 )
+                self._mark_turn_latency_marker(
+                    turn_id=resolved_turn_id,
+                    input_event_key=input_event_key,
+                    canonical_key=transcript_canonical_key,
+                    marker="attention_decision_finalized",
+                )
+                self._set_turn_latency_classification(
+                    turn_id=resolved_turn_id,
+                    input_event_key=input_event_key,
+                    canonical_key=transcript_canonical_key,
+                    path="bypass",
+                    outcome="admitted",
+                )
         if transcript and not confirmation_active and not attention_exception_admitted:
             attention_admitted, attention_reason = self._evaluate_attention_gate_admission(
                 transcript=transcript,
@@ -19654,12 +19917,30 @@ class RealtimeAPI:
                     action="BLOCK",
                     reason=attention_reason,
                 )
+                self._mark_turn_latency_marker(
+                    turn_id=resolved_turn_id,
+                    input_event_key=input_event_key,
+                    canonical_key=transcript_canonical_key,
+                    marker="attention_decision_finalized",
+                )
+                self._set_turn_latency_classification(
+                    turn_id=resolved_turn_id,
+                    input_event_key=input_event_key,
+                    canonical_key=transcript_canonical_key,
+                    path="attention_gate_blocked",
+                    outcome="blocked",
+                )
                 self._mark_transcript_response_outcome(
                     input_event_key=input_event_key,
                     turn_id=resolved_turn_id,
                     outcome="response_not_scheduled",
                     reason=attention_reason,
                     details="attention_gate_closed",
+                )
+                self._emit_turn_latency_summary(
+                    turn_id=resolved_turn_id,
+                    input_event_key=input_event_key,
+                    canonical_key=transcript_canonical_key,
                 )
                 self._cancel_micro_ack(turn_id=resolved_turn_id, reason="attention_gate_closed")
                 if not self._audio_playback_busy:
@@ -19711,6 +19992,19 @@ class RealtimeAPI:
                 action="ANSWER",
                 reason="transcript_final",
             )
+            self._mark_turn_latency_marker(
+                turn_id=resolved_turn_id,
+                input_event_key=input_event_key,
+                canonical_key=transcript_canonical_key,
+                marker="attention_decision_finalized",
+            )
+            self._set_turn_latency_classification(
+                turn_id=resolved_turn_id,
+                input_event_key=input_event_key,
+                canonical_key=transcript_canonical_key,
+                path="normal_admitted_answer",
+                outcome="admitted",
+            )
         if transcript:
             self._apply_interrupted_tool_output_transcript_resolution(
                 interruption_turn_id=resolved_turn_id,
@@ -19724,6 +20018,13 @@ class RealtimeAPI:
                 and pending_server_auto_key != transcript_canonical_key
             )
             decision_path = "upgraded_response" if transcript_upgrade_candidate else "canonical_transcript"
+            if decision_path == "upgraded_response":
+                self._set_turn_latency_classification(
+                    turn_id=resolved_turn_id,
+                    input_event_key=input_event_key,
+                    canonical_key=transcript_canonical_key,
+                    path="upgraded_response",
+                )
             if memory_intent:
                 logger.info(
                     "memory_intent_decision_path run_id=%s turn_id=%s input_event_key=%s decision_path=%s",
@@ -20877,6 +21178,7 @@ class RealtimeAPI:
         owner_mismatch_blocked = False
 
         if function_name in function_map:
+            self._mark_turn_latency_tool_start(turn_id=self._current_turn_id_or_unknown())
             try:
                 owner_blocked, owner_turn_id, owner_block_reason = self._should_block_non_owner_followthrough_gesture_call(
                     function_name=function_name,
@@ -20954,6 +21256,8 @@ class RealtimeAPI:
                 result = {"error": error_message}
                 self._record_intent_state(function_name, args, "failure")
                 await self.send_error_message_to_assistant(error_message, websocket)
+            finally:
+                self._mark_turn_latency_tool_end(turn_id=self._current_turn_id_or_unknown())
         else:
             error_message = (
                 f"Function '{function_name}' not found. Add to function_map in tools.py."
@@ -22155,8 +22459,19 @@ class RealtimeAPI:
         logger.info("Speech ended, processing...")
         self.response_start_time = time.perf_counter()
         self._response_start_monotonic = time.monotonic()
+        turn_id = self._current_turn_id_or_unknown()
+        turn_timestamps = self._turn_diagnostic_timestamps.setdefault(turn_id, {})
+        turn_timestamps["speech_stopped"] = self._response_start_monotonic
+        active_input_event_key = str(self._active_input_event_key_for_turn(turn_id) or "").strip()
+        if active_input_event_key:
+            self._mark_turn_latency_marker(
+                turn_id=turn_id,
+                input_event_key=active_input_event_key,
+                marker="speech_stopped",
+                when=self._response_start_monotonic,
+            )
         self._mark_tool_followup_timing(
-            turn_id=self._current_turn_id_or_unknown(),
+            turn_id=turn_id,
             marker="speech_stopped",
             when=self._response_start_monotonic,
         )
