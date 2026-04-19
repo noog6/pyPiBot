@@ -313,7 +313,7 @@ class ResponseLifecycleTracker:
             return False
         selection_entry = selection_store().get(response_id, {})
         selection_reason = str(selection_entry.get("reason") or "").strip().lower()
-        if selection_reason not in {"tool_followup_precedence", "empty_tool_followup_non_deliverable"}:
+        if selection_reason != "tool_followup_precedence":
             return False
         if not hasattr(self._api, "_response_done_followthrough_chain_remaining"):
             return False
