@@ -1608,16 +1608,38 @@ class RealtimeAPI:
         if marker not in markers:
             markers[marker] = float(time.monotonic() if when is None else when)
 
-    def _mark_turn_latency_tool_start(self, *, turn_id: str, input_event_key: str | None = None) -> None:
-        state = self._turn_latency_state(turn_id=turn_id, input_event_key=input_event_key, create=True)
+    def _mark_turn_latency_tool_start(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str | None = None,
+        canonical_key: str | None = None,
+    ) -> None:
+        state = self._turn_latency_state(
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            canonical_key=canonical_key,
+            create=True,
+        )
         if state is None:
             return
         if not isinstance(state.get("tool_active_started_at"), (int, float)):
             state["tool_active_started_at"] = float(time.monotonic())
             state["tool_count"] = int(state.get("tool_count") or 0) + 1
 
-    def _mark_turn_latency_tool_end(self, *, turn_id: str, input_event_key: str | None = None) -> None:
-        state = self._turn_latency_state(turn_id=turn_id, input_event_key=input_event_key, create=True)
+    def _mark_turn_latency_tool_end(
+        self,
+        *,
+        turn_id: str,
+        input_event_key: str | None = None,
+        canonical_key: str | None = None,
+    ) -> None:
+        state = self._turn_latency_state(
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            canonical_key=canonical_key,
+            create=True,
+        )
         if state is None:
             return
         started_at = state.get("tool_active_started_at")
@@ -21178,7 +21200,11 @@ class RealtimeAPI:
         owner_mismatch_blocked = False
 
         if function_name in function_map:
-            self._mark_turn_latency_tool_start(turn_id=self._current_turn_id_or_unknown())
+            tool_latency_input_event_key = self._tool_followup_input_event_key(call_id=call_id)
+            self._mark_turn_latency_tool_start(
+                turn_id=self._current_turn_id_or_unknown(),
+                input_event_key=tool_latency_input_event_key,
+            )
             try:
                 owner_blocked, owner_turn_id, owner_block_reason = self._should_block_non_owner_followthrough_gesture_call(
                     function_name=function_name,
@@ -21257,7 +21283,10 @@ class RealtimeAPI:
                 self._record_intent_state(function_name, args, "failure")
                 await self.send_error_message_to_assistant(error_message, websocket)
             finally:
-                self._mark_turn_latency_tool_end(turn_id=self._current_turn_id_or_unknown())
+                self._mark_turn_latency_tool_end(
+                    turn_id=self._current_turn_id_or_unknown(),
+                    input_event_key=tool_latency_input_event_key,
+                )
         else:
             error_message = (
                 f"Function '{function_name}' not found. Add to function_map in tools.py."
