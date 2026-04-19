@@ -11533,39 +11533,15 @@ class RealtimeAPI:
         )
 
         if settlement_state == "followthrough_remaining":
-            if include_report_followup:
-                decision = True
-                self._log_followthrough_guard_decision(
-                    turn_id=normalized_turn_id,
-                    include_report_followup=include_report_followup,
-                    settlement_state=settlement_state or "unknown",
-                    final_followup_pending=final_followup_pending,
-                    open_non_report_steps=open_non_report_steps,
-                    gesture_motion_status=gesture_motion_status or "unknown",
-                    gesture_motion_open=gesture_motion_open,
-                    decision=decision,
-                    response_id=response_id,
-                )
-                return decision
-            if not final_followup_pending:
-                self._log_followthrough_guard_decision(
-                    turn_id=normalized_turn_id,
-                    include_report_followup=include_report_followup,
-                    settlement_state=settlement_state or "unknown",
-                    final_followup_pending=final_followup_pending,
-                    open_non_report_steps=open_non_report_steps,
-                    gesture_motion_status=gesture_motion_status or "unknown",
-                    gesture_motion_open=gesture_motion_open,
-                    decision=decision,
-                    response_id=response_id,
-                )
-                return decision
             open_non_report_steps = any(
-                str(getattr(step, "kind", "") or "").strip() != "report"
-                and str(getattr(step, "status", "") or "").strip() != "completed"
+                str(getattr(step, "kind", "") or "").strip().lower() != "report"
+                and str(getattr(step, "status", "") or "").strip().lower() != "completed"
                 for step in steps
             )
-            decision = open_non_report_steps or gesture_motion_open
+            if include_report_followup:
+                decision = final_followup_pending or open_non_report_steps or gesture_motion_open
+            else:
+                decision = open_non_report_steps or gesture_motion_open
             self._log_followthrough_guard_decision(
                 turn_id=normalized_turn_id,
                 include_report_followup=include_report_followup,
