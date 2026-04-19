@@ -95,6 +95,12 @@ def arbitrate_terminal_deliverable_selection(
             reason_code="tool_followup_precedence",
             selected_candidate_id="tool_followup_precedence",
         )
+    if normalized_origin == "upgraded_response" and response_done_is_empty:
+        return TerminalDeliverableDecision(
+            selected=False,
+            reason_code="upgraded_response_empty_non_deliverable",
+            selected_candidate_id="upgraded_response_empty_non_deliverable",
+        )
     if exact_phrase_obligation_open:
         return TerminalDeliverableDecision(
             selected=False,

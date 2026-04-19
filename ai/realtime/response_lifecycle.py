@@ -23,7 +23,7 @@ class EmptyResponseDecision:
 
 
 TERMINAL_DELIVERY_STATES = frozenset({"cancelled", "failed", "errored"})
-RETRYABLE_ORIGINS = frozenset({"prompt", "server_auto", "user_transcript"})
+RETRYABLE_ORIGINS = frozenset({"prompt", "server_auto", "user_transcript", "upgraded_response"})
 
 
 def decide_empty_response_done_action(

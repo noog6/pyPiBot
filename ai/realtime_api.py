@@ -11372,11 +11372,19 @@ class RealtimeAPI:
             # dedicated tool-output followthrough path may become terminal.
             turn_has_pending_tool_followup = True
 
+        response_done_is_empty = self._is_empty_response_done(canonical_key=done_canonical_key)
+        if (
+            normalized_origin == "upgraded_response"
+            and str(response_id or "").strip()
+            and self._selected_response_has_terminal_text_evidence(response_id=response_id)
+        ):
+            response_done_is_empty = False
+
         decision = arbitrate_terminal_deliverable_selection(
             delivery_state_before_done=delivery_state_before_done,
             origin=normalized_origin,
             active_response_was_provisional=active_response_was_provisional,
-            response_done_is_empty=self._is_empty_response_done(canonical_key=done_canonical_key),
+            response_done_is_empty=response_done_is_empty,
             interrupted_pre_evidence_defer=self._is_interrupted_tool_output_candidate(
                 response_id=response_id,
                 canonical_key=done_canonical_key,
@@ -12163,6 +12171,7 @@ class RealtimeAPI:
             elif normalized_reason in {
                 "micro_ack_non_deliverable",
                 "empty_tool_followup_non_deliverable",
+                "upgraded_response_empty_non_deliverable",
                 "cancelled",
                 "provisional_empty_non_deliverable",
                 "provisional_server_auto_awaiting_transcript_final",

@@ -92,6 +92,10 @@ def test_terminal_deliverable_arbitration_covers_cancelled_and_other_non_deliver
         origin="tool_output",
         response_done_is_empty=True,
     )
+    empty_upgraded_response = _decide(
+        origin="upgraded_response",
+        response_done_is_empty=True,
+    )
     provisional_empty = _decide(
         active_response_was_provisional=True,
         response_done_is_empty=True,
@@ -108,6 +112,11 @@ def test_terminal_deliverable_arbitration_covers_cancelled_and_other_non_deliver
         False,
         "empty_tool_followup_non_deliverable",
         "empty_tool_followup_non_deliverable",
+    )
+    assert empty_upgraded_response == TerminalDeliverableDecision(
+        False,
+        "upgraded_response_empty_non_deliverable",
+        "upgraded_response_empty_non_deliverable",
     )
     assert provisional_empty == TerminalDeliverableDecision(
         False,
@@ -172,4 +181,3 @@ def test_terminal_deliverable_arbitration_allows_non_empty_tool_output_when_foll
         "normal",
         "terminal_selected",
     )
-

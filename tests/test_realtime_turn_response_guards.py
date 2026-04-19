@@ -2996,8 +2996,12 @@ def test_response_done_decision_rejects_upgraded_response_when_tool_followup_pen
 def test_response_done_decision_allows_upgraded_response_when_only_status_gesture_followup_pending() -> None:
     api = _make_api()
     turn_id = "turn_1"
+    response_id = "resp_upgraded_non_empty"
     canonical_key = f"{api._current_run_id()}:{turn_id}:tool:call_1"
     api._tool_followup_state_by_canonical_key = {canonical_key: "created"}
+    api._terminal_response_text_by_response_id = {
+        response_id: "Yep — I can remember your preferred editor.",
+    }
     api._record_tool_followup_metadata(
         canonical_key=canonical_key,
         metadata={
@@ -3013,10 +3017,26 @@ def test_response_done_decision_allows_upgraded_response_when_only_status_gestur
         active_response_was_provisional=False,
         done_canonical_key=api._canonical_utterance_key(turn_id=turn_id, input_event_key="item_1"),
         transcript_final_seen=True,
+        response_id=response_id,
     )
 
     assert selected is True
     assert reason == "normal"
+
+
+def test_response_done_decision_rejects_empty_upgraded_response_as_non_deliverable() -> None:
+    api = _make_api()
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id="turn_1",
+        origin="upgraded_response",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id="turn_1", input_event_key="item_1"),
+        transcript_final_seen=True,
+    )
+
+    assert selected is False
+    assert reason == "upgraded_response_empty_non_deliverable"
 
 
 def test_tool_followup_status_only_gesture_requires_tool_choice_when_non_report_followthrough_remains() -> None:
