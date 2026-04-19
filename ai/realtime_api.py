@@ -12521,8 +12521,20 @@ class RealtimeAPI:
         if isinstance(selection_entry, dict):
             terminal_selected = bool(selection_entry.get("selected", False))
             terminal_reason = str(selection_entry.get("reason") or "unknown").strip().lower() or "unknown"
-        covered = canonical_covered
-        source = "canonical" if canonical_covered else "none"
+        terminal_non_selected_defers_coverage = (
+            bool(selection_entry)
+            and not terminal_selected
+            and terminal_reason in {
+                "tool_followup_precedence",
+                "exact_phrase_obligation_open",
+                "required_deliverable_missing_substantive_content",
+                "required_deliverable_missing_tool_execution",
+                "interrupted_pre_evidence_deferred",
+                "provisional_server_auto_awaiting_transcript_final",
+            }
+        )
+        covered = canonical_covered and not terminal_non_selected_defers_coverage
+        source = "canonical" if covered else "none"
         terminal_text_present = self._selected_response_has_substantive_evidence(response_id=selected_response_id)
         if not covered and terminal_selected and terminal_reason == "normal" and terminal_text_present:
             covered = True
