@@ -3735,3 +3735,47 @@ def test_handle_response_done_logs_contract_breach_with_followthrough_step_conte
     breach_log = breach_logs[0]
     assert breach_log.args[10] == "1"
     assert breach_log.args[11] == "step_3"
+
+
+def test_handle_response_done_expected_empty_tool_followup_closes_continuity_without_silent_incident() -> None:
+    api = _make_api()
+    api._active_response_origin = "tool_output"
+    api._active_response_input_event_key = "tool:call_center"
+    api._active_response_canonical_key = "turn_1::tool:call_center"
+    api._active_response_id = "resp_center_done"
+    api._is_empty_response_done = lambda **_kwargs: True
+    api._response_done_deliverable_arbitration = Mock(
+        return_value=TerminalDeliverableDecision(
+            False,
+            "empty_tool_followup_non_deliverable",
+            "empty_tool_followup_non_deliverable",
+        )
+    )
+    api._response_done_followthrough_chain_remaining = lambda **_kwargs: False
+    api._response_done_marks_required_deliverable_followthrough = lambda **_kwargs: False
+    api._turn_has_pending_tool_followup = lambda **_kwargs: False
+    api._record_silent_turn_incident = Mock()
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    real_apply_continuity_event = RealtimeAPI._apply_continuity_event.__get__(api, RealtimeAPI)
+    apply_continuity_event = Mock(side_effect=real_apply_continuity_event)
+    api._apply_continuity_event = apply_continuity_event
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_center_done"}}))
+
+    api._record_silent_turn_incident.assert_not_called()
+    response_done_calls = [call for call in apply_continuity_event.call_args_list if call.args and call.args[0] == "response_done"]
+    assert len(response_done_calls) == 1
+    _, kwargs = response_done_calls[0]
+    assert kwargs["close_commitment"] == "true"
+    assert kwargs["close_unresolved"] == "true"
+    brief = api.get_continuity_brief("run-test", "turn_1", reason="post_expected_empty_tool_followup_terminal")
+    settlement = api._continuity_ledger.build_turn_settlement(brief)
+    assert settlement.settlement_state != "followthrough_remaining"

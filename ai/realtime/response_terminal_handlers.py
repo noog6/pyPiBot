@@ -933,10 +933,28 @@ class ResponseTerminalHandlers:
             str(deliverable_observed).lower(),
             str(is_empty_done).lower(),
         )
+        expected_empty_tool_followup_terminal = (
+            is_empty_done
+            and str(active_response_origin_before_clear or "").strip().lower() == "tool_output"
+            and selection_reason == "empty_tool_followup_non_deliverable"
+            and not api._response_done_followthrough_chain_remaining(
+                turn_id=turn_id,
+                origin=active_response_origin_before_clear,
+                response_id=active_response_id_before_clear,
+                include_report_followup=True,
+            )
+            and not api._response_done_marks_required_deliverable_followthrough(
+                origin=active_response_origin_before_clear,
+                turn_id=turn_id,
+                response_id=active_response_id_before_clear,
+                trace_context=trace_context,
+                stale_context=stale_context,
+            )
+        )
         suppress_empty_tool_followup_silent_incident = (
             is_empty_done
             and str(active_response_origin_before_clear or "").strip().lower() == "tool_output"
-            and pending_tool_followup_after_release
+            and (pending_tool_followup_after_release or expected_empty_tool_followup_terminal)
         )
         followthrough_chain_bridge = (
             is_empty_done
@@ -951,12 +969,18 @@ class ResponseTerminalHandlers:
             )
         )
         if suppress_empty_tool_followup_silent_incident:
+            suppress_reason = (
+                "expected_terminal_empty_non_deliverable"
+                if expected_empty_tool_followup_terminal
+                else "pending_followup_after_release"
+            )
             logger.info(
-                "tool_followup_empty_bridge run_id=%s turn_id=%s response_id=%s canonical_key=%s action=suppress_silent_incident reason=pending_followup_after_release",
+                "tool_followup_empty_bridge run_id=%s turn_id=%s response_id=%s canonical_key=%s action=suppress_silent_incident reason=%s",
                 api._current_run_id() or "",
                 turn_id,
                 str(active_response_id_before_clear or "none"),
                 done_canonical_key,
+                suppress_reason,
             )
         elif followthrough_chain_bridge:
             logger.info(
@@ -992,8 +1016,10 @@ class ResponseTerminalHandlers:
                 str(active_response_id_before_clear or "").strip() or "none",
             )
         continuity_close_allowed = not (
-            provisional_server_auto_close_deferred or exact_phrase_close_deferred or is_empty_done
+            provisional_server_auto_close_deferred or exact_phrase_close_deferred
         )
+        if is_empty_done and not expected_empty_tool_followup_terminal:
+            continuity_close_allowed = False
         if interrupted_tool_output_candidate:
             continuity_close_allowed = False
         if required_deliverable_missing_substance:
