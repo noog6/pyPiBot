@@ -417,6 +417,53 @@ def test_tool_output_report_only_followthrough_skips_bridge_retry_while_chain_ac
     assert chain_remaining_calls == [True]
 
 
+def test_empty_non_deliverable_tool_followup_does_not_materialize_bridge_retry() -> None:
+    api = _make_api()
+    sent_events: list[tuple[dict, dict]] = []
+
+    async def _capture_send_response_create(_websocket, event, **kwargs):
+        sent_events.append((event, kwargs))
+        return True
+
+    response_id = "resp_tool_empty_non_deliverable"
+    selection_store = {
+        response_id: {
+            "selected": False,
+            "reason": "empty_tool_followup_non_deliverable",
+            "canonical_key": "turn_1::tool:call_empty",
+        }
+    }
+    api._terminal_deliverable_selection_store = lambda: selection_store
+    api._response_done_followthrough_chain_remaining = lambda **_kwargs: False
+    api._canonical_response_state = lambda _canonical_key: type(
+        "_State",
+        (),
+        {
+            "audio_started": False,
+            "deliverable_observed": False,
+            "deliverable_class": "non_deliverable",
+            "response_id": response_id,
+        },
+    )()
+    api._send_response_create = _capture_send_response_create
+    canonical_key = api._canonical_utterance_key(turn_id="turn_1", input_event_key="tool:call_empty")
+
+    asyncio.run(
+        api._maybe_schedule_empty_response_retry(
+            websocket=object(),
+            turn_id="turn_1",
+            canonical_key=canonical_key,
+            input_event_key="tool:call_empty",
+            origin="tool_output",
+            delivery_state_before_done="done",
+        )
+    )
+
+    assert sent_events == []
+    assert api._empty_response_retry_counts == {}
+    assert api._empty_response_retry_canonical_keys == set()
+
+
 def test_tool_output_silent_intermediate_chain_does_not_materialize_retry_while_steps_owed() -> None:
     api = _make_api()
     sent_events: list[tuple[dict, dict]] = []
