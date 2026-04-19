@@ -290,6 +290,12 @@ class ResponseTerminalHandlers:
             turn_id=turn_id,
             input_event_key=done_input_event_key,
         )
+        api._mark_turn_latency_marker(
+            turn_id=turn_id,
+            input_event_key=done_input_event_key,
+            canonical_key=done_canonical_key,
+            marker="response_done",
+        )
         resolved_origin = str(
             stale_context.get("origin")
             or trace_context.get("origin")
@@ -702,6 +708,28 @@ class ResponseTerminalHandlers:
             close_action,
             close_reason,
         )
+        latency_path = "normal_admitted_answer"
+        latency_outcome = "completed"
+        should_emit_latency_summary = True
+        if close_reason == "provisional_server_auto_awaiting_transcript_final":
+            latency_path = "server_auto_cancelled_before_audio"
+            latency_outcome = "deferred"
+            should_emit_latency_summary = False
+        elif str(active_response_origin_before_clear or "").strip().lower() == "tool_output":
+            latency_path = "tool_involved"
+        api._set_turn_latency_classification(
+            turn_id=turn_id,
+            input_event_key=done_input_event_key,
+            canonical_key=done_canonical_key,
+            path=latency_path,
+            outcome=latency_outcome,
+        )
+        if should_emit_latency_summary:
+            api._emit_turn_latency_summary(
+                turn_id=turn_id,
+                input_event_key=done_input_event_key,
+                canonical_key=done_canonical_key,
+            )
         terminal_assistant_text = str(api._terminal_response_text(active_response_id_before_clear) or "").strip()
         if not terminal_assistant_text:
             terminal_assistant_text = str(api._assistant_reply_text_for_response(active_response_id_before_clear) or "").strip()

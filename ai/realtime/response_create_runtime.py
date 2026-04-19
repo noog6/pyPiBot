@@ -1370,7 +1370,15 @@ class ResponseCreateRuntime:
         log_ws_event("Outgoing", response_create_event)
         api._track_outgoing_event(response_create_event, origin=origin)
         transport = api._get_or_create_transport()
+        response_create_sent_at = time.monotonic()
         await transport.send_json(websocket, response_create_event)
+        api._mark_turn_latency_marker(
+            turn_id=turn_id,
+            input_event_key=current_input_event_key,
+            canonical_key=canonical_key,
+            marker="response_create_sent",
+            when=response_create_sent_at,
+        )
         if prepared_snapshot.consumes_canonical_slot:
             api._set_response_delivery_state(
                 turn_id=turn_id,
