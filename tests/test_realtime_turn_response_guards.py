@@ -3039,6 +3039,27 @@ def test_response_done_decision_rejects_empty_upgraded_response_as_non_deliverab
     assert reason == "upgraded_response_empty_non_deliverable"
 
 
+def test_response_done_decision_selects_upgraded_response_with_terminal_text_when_no_followup_pending() -> None:
+    api = _make_api()
+    response_id = "resp-upgraded-final"
+    api._terminal_response_text_by_response_id = {
+        response_id: "Yes — your preferred editor is Neovim.",
+    }
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id="turn_1",
+        origin="upgraded_response",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id="turn_1", input_event_key="item_1"),
+        transcript_final_seen=True,
+        response_id=response_id,
+    )
+
+    assert selected is True
+    assert reason == "normal"
+
+
 def test_tool_followup_status_only_gesture_requires_tool_choice_when_non_report_followthrough_remains() -> None:
     api = _make_api()
     api._current_turn_id_or_unknown = lambda: "turn_1"

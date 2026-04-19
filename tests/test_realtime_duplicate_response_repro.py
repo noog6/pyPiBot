@@ -8521,6 +8521,105 @@ def test_upgraded_response_still_suppresses_redundant_tool_followup_after_pendin
     assert coverage_source == "canonical"
 
 
+def test_parent_coverage_does_not_mark_canonical_final_when_terminal_selection_deferred_to_tool_followup() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_parent_terminal_precedence"
+    parent_input_event_key = "item_parent_terminal_precedence"
+    parent_response_id = "resp-parent-terminal-precedence"
+    parent_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "upgraded_response"),
+            setattr(record, "response_id", parent_response_id),
+            setattr(record, "done", True),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "final"),
+        ),
+    )
+    api._record_terminal_response_text(
+        response_id=parent_response_id,
+        text="Your preferred editor is Neovim.",
+    )
+    api._apply_terminal_deliverable_selection(
+        canonical_key=parent_key,
+        response_id=parent_response_id,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        selected=False,
+        selection_reason="tool_followup_precedence",
+    )
+
+    parent_state = api._canonical_response_state(parent_key)
+    covered, source, observed, deliverable_class, terminal_selected, terminal_reason = api._parent_response_coverage_state(
+        parent_state=parent_state,
+        parent_canonical_key=parent_key,
+    )
+
+    assert covered is False
+    assert source == "none"
+    assert observed is True
+    assert deliverable_class == "final"
+    assert terminal_selected is False
+    assert terminal_reason == "tool_followup_precedence"
+
+
+def test_tool_followup_release_is_not_dropped_when_parent_terminal_selection_deferred() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_parent_terminal_precedence_release"
+    parent_input_event_key = "item_parent_terminal_precedence_release"
+    parent_response_id = "resp-parent-terminal-precedence-release"
+    parent_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "upgraded_response"),
+            setattr(record, "response_id", parent_response_id),
+            setattr(record, "done", True),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "final"),
+        ),
+    )
+    api._record_terminal_response_text(
+        response_id=parent_response_id,
+        text="Your preferred editor is Neovim.",
+    )
+    api._apply_terminal_deliverable_selection(
+        canonical_key=parent_key,
+        response_id=parent_response_id,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        selected=False,
+        selection_reason="tool_followup_precedence",
+    )
+
+    response_create_event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_parent_terminal_precedence_release",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_around",
+    )
+    metadata = ((response_create_event.get("response") or {}).get("metadata") or {})
+    metadata["blocked_by_response_id"] = parent_response_id
+    metadata["parent_turn_id"] = turn_id
+    metadata["parent_input_event_key"] = parent_input_event_key
+
+    should_drop, _entry, reason = api._should_suppress_queued_tool_followup_release(
+        response_metadata=metadata,
+        blocked_by_response_id=parent_response_id,
+    )
+
+    assert should_drop is False
+    assert reason == "parent_not_coverage_qualified"
+
+
 def test_status_only_gesture_followup_observation_marks_released_child_redundant() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
