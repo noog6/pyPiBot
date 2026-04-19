@@ -1331,6 +1331,57 @@ def test_cancel_and_replace_reissues_deferred_provisional_tool_call_before_repla
     assert api._deferred_provisional_tool_call is None
 
 
+def test_cancelled_pending_server_auto_drops_matching_deferred_provisional_tool_call() -> None:
+    api = _build_api_stub()
+    api._pending_server_auto_response_by_turn_id["turn_3"] = PendingServerAutoResponse(
+        turn_id="turn_3",
+        response_id="resp-server-auto",
+        canonical_key="run-464:turn_3:synthetic_server_auto_3",
+        created_at_ms=1,
+        active=True,
+    )
+    api._deferred_provisional_tool_call = {
+        "tool_name": "gesture_look_center",
+        "call_id": "call-provisional",
+        "args": {},
+        "turn_id": "turn_3",
+        "response_id": "resp-server-auto",
+        "input_event_key": "synthetic_server_auto_3",
+        "stored_at": 1.0,
+    }
+
+    pending = api._mark_pending_server_auto_response_cancelled(
+        turn_id="turn_3",
+        reason="attention_gate_closed",
+    )
+
+    assert isinstance(pending, PendingServerAutoResponse)
+    assert api._deferred_provisional_tool_call is None
+
+
+def test_clear_deferred_provisional_tool_call_preserves_other_lineage() -> None:
+    api = _build_api_stub()
+    api._deferred_provisional_tool_call = {
+        "tool_name": "perform_research",
+        "call_id": "call-provisional",
+        "args": {"query": "cheese"},
+        "turn_id": "turn_9",
+        "response_id": "resp-other",
+        "input_event_key": "synthetic_server_auto_9",
+        "stored_at": 1.0,
+    }
+
+    cleared = api._clear_deferred_provisional_tool_call(
+        reason="pending_server_auto_cancelled:attention_gate_closed",
+        turn_id="turn_3",
+        response_id="resp-server-auto",
+    )
+
+    assert cleared is False
+    assert api._deferred_provisional_tool_call is not None
+    assert api._deferred_provisional_tool_call["turn_id"] == "turn_9"
+
+
 def test_transcript_final_handoff_invalidates_provisional_tool_followup_lineage() -> None:
     api = _build_api_stub()
     api._pending_response_create = types.SimpleNamespace(
