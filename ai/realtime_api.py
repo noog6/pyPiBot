@@ -11365,8 +11365,23 @@ class RealtimeAPI:
         if normalized_origin != "tool_output":
             required_deliverable_pending = self._turn_has_active_required_deliverable_step(turn_id=turn_id)
         turn_has_pending_tool_followup = self._turn_has_pending_tool_followup(turn_id=turn_id)
+        followthrough_chain_remaining = self._response_done_followthrough_chain_remaining(
+            turn_id=turn_id,
+            origin=normalized_origin,
+            response_id=response_id,
+        )
+        followthrough_non_report_steps_remaining = self._response_done_followthrough_chain_remaining(
+            turn_id=turn_id,
+            origin=normalized_origin,
+            response_id=response_id,
+            include_report_followup=False,
+        )
         if required_deliverable_followthrough:
-            turn_has_pending_tool_followup = True
+            # The required-deliverable followthrough response is itself the owed
+            # terminal candidate. Only non-report followthrough should keep
+            # tool-followup precedence active here.
+            turn_has_pending_tool_followup = bool(followthrough_non_report_steps_remaining)
+            followthrough_chain_remaining = bool(followthrough_non_report_steps_remaining)
         elif required_deliverable_pending and normalized_origin != "tool_output":
             # While a required-deliverable report step is still pending, only the
             # dedicated tool-output followthrough path may become terminal.
@@ -11391,17 +11406,8 @@ class RealtimeAPI:
             ),
             transcript_final_seen=transcript_final_seen,
             turn_has_pending_tool_followup=turn_has_pending_tool_followup,
-            followthrough_chain_remaining=self._response_done_followthrough_chain_remaining(
-                turn_id=turn_id,
-                origin=normalized_origin,
-                response_id=response_id,
-            ),
-            followthrough_non_report_steps_remaining=self._response_done_followthrough_chain_remaining(
-                turn_id=turn_id,
-                origin=normalized_origin,
-                response_id=response_id,
-                include_report_followup=False,
-            ),
+            followthrough_chain_remaining=followthrough_chain_remaining,
+            followthrough_non_report_steps_remaining=followthrough_non_report_steps_remaining,
             exact_phrase_obligation_open=self._turn_contract_exact_phrase_open(
                 turn_id=turn_id,
                 response_id=response_id,
