@@ -65,7 +65,7 @@ def test_upgrade_likely_detects_pending_tool_followup() -> None:
     assert "pending_tool_followup" in reasons
 
 
-def test_long_utterance_pre_audio_hold_emits_single_micro_ack_and_waits_for_transcript_final() -> None:
+def test_long_utterance_pre_audio_hold_waits_for_transcript_final_without_prescheduling_micro_ack() -> None:
     api = _api_stub()
     api.audio_player = SimpleNamespace(start_response=lambda: setattr(api, "_started", True))
     api._started = False
@@ -78,7 +78,7 @@ def test_long_utterance_pre_audio_hold_emits_single_micro_ack_and_waits_for_tran
         api._schedule_server_auto_audio_deferral(turn_id="turn-1", input_event_key="item-1", response_id="resp-1")
         await asyncio.sleep(0.05)
         assert api._started is False
-        assert micro_acks == [("turn-1", "transcript_finalized")]
+        assert micro_acks == []
         api._signal_server_auto_transcript_final(turn_id="turn-1")
         await asyncio.sleep(0.03)
 
@@ -108,7 +108,7 @@ def test_short_utterance_transcript_final_arrives_quickly_without_micro_ack_spam
     assert micro_acks == []
 
 
-def test_pre_audio_hold_timeout_schedules_single_transcript_finalized_micro_ack_before_signal(
+def test_pre_audio_hold_timeout_does_not_schedule_transcript_finalized_micro_ack_before_signal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     api = _api_stub()
@@ -138,9 +138,7 @@ def test_pre_audio_hold_timeout_schedules_single_transcript_finalized_micro_ack_
         api._schedule_server_auto_audio_deferral(turn_id="turn-1", input_event_key="item-1", response_id="resp-1")
         await asyncio.sleep(0)
 
-        assert len(scheduled_micro_acks) == 1
-        assert scheduled_micro_acks[0]["reason"] == "transcript_finalized"
-        assert scheduled_micro_acks[0]["expected_delay_ms"] == 700
+        assert scheduled_micro_acks == []
         assert api._started is False
 
         api._signal_server_auto_transcript_final(turn_id="turn-1")
@@ -149,7 +147,7 @@ def test_pre_audio_hold_timeout_schedules_single_transcript_finalized_micro_ack_
     asyncio.run(_run())
 
     assert api._started is True
-    assert len(scheduled_micro_acks) == 1
+    assert scheduled_micro_acks == []
 
 
 def test_pre_audio_hold_rejects_duplicate_and_out_of_order_transitions() -> None:

@@ -1612,7 +1612,9 @@ def test_short_non_empty_direct_address_still_reaches_verify_gate(monkeypatch) -
     api.loop.close()
 
 
-def test_server_auto_audio_deferral_timeout_schedules_before_transcript_final_upgrade_cancel(monkeypatch) -> None:
+def test_server_auto_audio_deferral_timeout_does_not_preschedule_before_transcript_final_upgrade_cancel(
+    monkeypatch,
+) -> None:
     api = _api_stub()
     turn_id = "turn-server-auto"
     input_event_key = "input-server-auto"
@@ -1635,12 +1637,15 @@ def test_server_auto_audio_deferral_timeout_schedules_before_transcript_final_up
     api._get_response_gating_verdict = lambda **_kwargs: None
     api._mark_utterance_info_summary = lambda **_kwargs: None
     api._log_user_transcript = lambda *_args, **_kwargs: None
+    api._log_user_transcript_redact_enabled = False
     api._rebind_active_response_correlation_key = lambda **_kwargs: None
     api._clear_stale_pending_server_auto_for_turn = lambda **_kwargs: None
     api._start_transcript_response_watchdog = lambda **_kwargs: None
     api._has_active_confirmation_token = lambda: False
     api._is_awaiting_confirmation_phase = lambda: False
     api._log_utterance_trust_snapshot = lambda **_kwargs: {"word_count": 3}
+    api._evaluate_attention_gate_admission = lambda **_kwargs: (True, "direct_address")
+    api._log_transcript_attention_decision = lambda **_kwargs: None
     api._maybe_verify_on_risk_clarify = lambda **_kwargs: asyncio.sleep(0, result=False)
     api._set_response_gating_verdict = lambda **_kwargs: None
     api._record_user_input = lambda *_args, **_kwargs: None
@@ -1705,10 +1710,8 @@ def test_server_auto_audio_deferral_timeout_schedules_before_transcript_final_up
         defer_task = api._server_auto_audio_defer_tasks_by_turn_id[turn_id]
 
         for _ in range(5):
-            if scheduled_calls:
-                break
             await asyncio.sleep(0)
-        assert scheduled_calls == [{"turn_id": turn_id, "reason": "transcript_finalized"}]
+        assert scheduled_calls == []
 
         await api._handle_input_audio_transcription_completed_event(
             {
@@ -1724,9 +1727,103 @@ def test_server_auto_audio_deferral_timeout_schedules_before_transcript_final_up
     asyncio.run(_run())
 
     assert wait_for_calls["count"] >= 2
-    assert cancel_calls == [(turn_id, "upgrade_selected")]
-    assert call_order.index(("schedule", "transcript_finalized")) < call_order.index(("signal", turn_id))
-    assert call_order.index(("schedule", "transcript_finalized")) < call_order.index(("cancel", "upgrade_selected"))
+    assert cancel_calls == []
+    assert ("signal", turn_id) in call_order
+    assert ("schedule", "transcript_finalized") in call_order
+    assert call_order.index(("signal", turn_id)) < call_order.index(("schedule", "transcript_finalized"))
+    api.loop.close()
+
+
+def test_server_auto_audio_deferral_timeout_blocked_attention_never_schedules_transcript_final_micro_ack(
+    monkeypatch,
+) -> None:
+    api = _api_stub()
+    turn_id = "turn-server-auto-blocked"
+    input_event_key = "input-server-auto-blocked"
+    response_id = "resp-server-auto-blocked"
+    scheduled_calls: list[dict[str, str]] = []
+    cancel_calls: list[tuple[str, str]] = []
+    sent_events: list[dict[str, str]] = []
+
+    api._current_turn_id_or_unknown = lambda: turn_id
+    api._resolve_input_event_key = lambda _event: input_event_key
+    api._extract_transcript = lambda event: str(event.get("transcript") or "")
+    api._active_response_id = response_id
+    api._active_response_origin = "server_auto"
+    api.audio_player = None
+    api._server_auto_audio_deferral_timeout_ms = 1
+    api._server_auto_audio_waiters_by_turn_id = {}
+    api._server_auto_audio_defer_tasks_by_turn_id = {}
+    api._server_auto_pre_audio_hold_by_turn_id = {}
+    api._is_cancelled_or_superseded_response_id = lambda _response_id: False
+    api._get_response_gating_verdict = lambda **_kwargs: None
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._log_user_transcript = lambda *_args, **_kwargs: None
+    api._log_user_transcript_redact_enabled = False
+    api._rebind_active_response_correlation_key = lambda **_kwargs: None
+    api._clear_stale_pending_server_auto_for_turn = lambda **_kwargs: None
+    api._start_transcript_response_watchdog = lambda **_kwargs: None
+    api._has_active_confirmation_token = lambda: False
+    api._is_awaiting_confirmation_phase = lambda: False
+    api._log_utterance_trust_snapshot = lambda **_kwargs: {"word_count": 3}
+    api._evaluate_attention_gate_admission = lambda **_kwargs: (False, "attention_gate_closed")
+    api._log_transcript_attention_decision = lambda **_kwargs: None
+    api._maybe_verify_on_risk_clarify = lambda **_kwargs: asyncio.sleep(0, result=False)
+    api._set_response_gating_verdict = lambda **_kwargs: None
+    api._record_user_input = lambda *_args, **_kwargs: None
+    api._mark_transcript_response_outcome = lambda **_kwargs: None
+    api._clear_response_obligation = lambda **_kwargs: None
+    api._mark_attention_gate_closed_recovery = lambda **_kwargs: None
+
+    @contextmanager
+    def _fixed_context_scope(*, turn_id: str, input_event_key: str):
+        yield type("Ctx", (), {"turn_id": turn_id, "input_event_key": input_event_key})()
+
+    api._utterance_context_scope = _fixed_context_scope
+    api._lifecycle_controller = lambda: type("Lifecycle", (), {"on_transcript_final": lambda *_args, **_kwargs: None})()
+
+    def _capture_schedule(**kwargs) -> None:
+        scheduled_calls.append({"turn_id": kwargs["turn_id"], "reason": kwargs["reason"]})
+
+    def _capture_cancel(*, turn_id: str, reason: str) -> None:
+        cancel_calls.append((turn_id, reason))
+
+    class _Transport:
+        async def send_json(self, _ws, payload):
+            sent_events.append(payload)
+
+    api._get_or_create_transport = lambda: _Transport()
+    monkeypatch.setattr(api, "_maybe_schedule_micro_ack", _capture_schedule)
+    monkeypatch.setattr(api, "_cancel_micro_ack", _capture_cancel)
+
+    async def _run() -> None:
+        api._record_pending_server_auto_response(
+            turn_id=turn_id,
+            response_id=response_id,
+            canonical_key=f"run-test:{turn_id}:{input_event_key}",
+        )
+        api._set_server_auto_pre_audio_hold(turn_id=turn_id, enabled=True, reason="test_pre_audio_hold")
+        api._schedule_server_auto_audio_deferral(
+            turn_id=turn_id,
+            input_event_key=input_event_key,
+            response_id=response_id,
+        )
+        await asyncio.sleep(0.01)
+
+        await api._handle_input_audio_transcription_completed_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": input_event_key,
+                "transcript": "this is ambient",
+            },
+            api.websocket,
+        )
+
+    asyncio.run(_run())
+
+    assert scheduled_calls == []
+    assert cancel_calls == [(turn_id, "attention_gate_closed")]
+    assert sent_events == [{"type": "response.cancel", "response_id": response_id}]
     api.loop.close()
 
 def test_response_done_cancels_prescheduled_micro_ack_using_response_mapping() -> None:

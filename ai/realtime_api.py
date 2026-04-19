@@ -13926,7 +13926,6 @@ class RealtimeAPI:
         waiters[turn_id] = waiter
 
         async def _wait_for_upgrade_decision() -> None:
-            micro_ack_sent_during_hold = False
             try:
                 while True:
                     pending = self._pending_server_auto_response_for_turn(turn_id=turn_id)
@@ -13965,16 +13964,6 @@ class RealtimeAPI:
                                 response_id=response_id,
                             )
                             break
-                        if timed_out and not micro_ack_sent_during_hold:
-                            self._maybe_schedule_micro_ack(
-                                turn_id=turn_id,
-                                category=self._micro_ack_category_for_reason("transcript_finalized"),
-                                channel="voice",
-                                action=self._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key),
-                                reason="transcript_finalized",
-                                expected_delay_ms=700,
-                            )
-                            micro_ack_sent_during_hold = True
                         logger.info(
                             "server_auto_audio_start_deferred run_id=%s turn_id=%s response_id=%s timeout_ms=%s reasons=awaiting_transcript_final_pre_audio_hold",
                             self._current_run_id() or "",
