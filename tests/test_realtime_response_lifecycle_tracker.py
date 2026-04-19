@@ -169,6 +169,21 @@ def test_terminal_cancelled_state_skips_retry_with_reason() -> None:
     assert decision.reason_code == "delivery_state_terminal"
 
 
+def test_upgraded_response_empty_done_is_retryable() -> None:
+    decision = decide_empty_response_done_action(
+        origin="upgraded_response",
+        delivery_state_before_done="done",
+        assistant_text_present=False,
+        audio_started=False,
+        attempt_count=0,
+        max_attempts=2,
+        websocket_available=True,
+    )
+
+    assert decision.action == EmptyResponseDecisionAction.SCHEDULE_RETRY
+    assert decision.reason_code == "empty_response_done"
+
+
 def test_tool_output_followthrough_bridge_empty_retry_skips_while_chain_still_active() -> None:
     api = _make_api()
     sent_events: list[tuple[dict, dict]] = []
@@ -212,6 +227,32 @@ def test_tool_output_followthrough_bridge_empty_retry_skips_while_chain_still_ac
     )
 
     assert sent_events == []
+
+
+def test_upgraded_response_empty_done_schedules_retry_create() -> None:
+    api = _make_api()
+    sent_events: list[dict] = []
+
+    async def _capture_send_response_create(_websocket, event, **_kwargs):
+        sent_events.append(event)
+        return True
+
+    api._send_response_create = _capture_send_response_create
+    canonical_key = api._canonical_utterance_key(turn_id="turn_1", input_event_key="item_1")
+
+    asyncio.run(
+        api._maybe_schedule_empty_response_retry(
+            websocket=object(),
+            turn_id="turn_1",
+            canonical_key=canonical_key,
+            input_event_key="item_1",
+            origin="upgraded_response",
+            delivery_state_before_done="done",
+        )
+    )
+
+    assert len(sent_events) == 1
+    assert sent_events[0]["response"]["metadata"]["retry_reason"] == "empty_response_done"
 
 
 def test_tool_output_silent_intermediate_followthrough_skips_bridge_retry_while_chain_active() -> None:
