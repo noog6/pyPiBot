@@ -12,7 +12,13 @@ from unittest.mock import patch
 from ai.governance import ActionPacket, build_normalized_idempotency_key
 from ai.micro_ack_manager import MicroAckCategory
 from ai.orchestration import OrchestrationPhase
-from ai.realtime_api import ConfirmationState, PendingConfirmationToken, RealtimeAPI, UtteranceContext
+from ai.realtime_api import (
+    ConfirmationState,
+    PendingConfirmationToken,
+    RealtimeAPI,
+    ResponseGatingVerdict,
+    UtteranceContext,
+)
 from interaction import InteractionState
 from services.research import OpenAIResearchService
 from services.research import ResearchRequest
@@ -1554,6 +1560,119 @@ def test_handle_function_call_suppresses_research_while_research_permission_pend
         if controller is not None:
             controller.close()
         storage_controller_cls._instance = None
+
+
+def test_handle_function_call_blocks_tool_execution_for_attention_gate_blocked_turn() -> None:
+    api = _make_api_stub()
+    api._pending_action = None
+    api.function_call = {"name": "read_runtime_diagnostics", "call_id": "call_blocked_diag"}
+    api.function_call_args = "{}"
+    api._current_response_turn_id = "turn_blocked"
+    api._active_input_event_key_by_turn_id = {"turn_blocked": "item_blocked"}
+    blocked_key = api._gating_verdict_key(turn_id="turn_blocked", input_event_key="item_blocked")
+    api._response_gating_verdict_by_input_event_key = {
+        blocked_key: ResponseGatingVerdict(
+            action="BLOCK",
+            reason="attention_gate_closed",
+            decided_at=time.monotonic(),
+        )
+    }
+    api.orchestration_state = type(
+        "S",
+        (),
+        {
+            "phase": OrchestrationPhase.IDLE,
+            "transition": lambda *args, **kwargs: None,
+        },
+    )()
+
+    executed: list[str] = []
+
+    async def _execute_action(*_args, **_kwargs):
+        executed.append("executed")
+
+    api._execute_action = _execute_action
+
+    sent_noops: list[dict[str, object]] = []
+
+    async def _send_noop_tool_output(_websocket, **kwargs):
+        sent_noops.append(kwargs)
+
+    api._send_noop_tool_output = _send_noop_tool_output
+
+    asyncio.run(api.handle_function_call({}, _Ws()))
+
+    assert executed == []
+    assert len(sent_noops) == 1
+    assert sent_noops[0]["status"] == "blocked_attention_gate"
+    assert sent_noops[0]["reason"] == "attention_gate_closed"
+    assert api.function_call is None
+    assert api.function_call_args == ""
+
+
+def test_handle_function_call_allows_diagnostic_when_turn_not_blocked() -> None:
+    api = _make_api_stub()
+    api._pending_action = None
+    api.function_call = {"name": "read_runtime_diagnostics", "call_id": "call_diag_allowed"}
+    api.function_call_args = "{}"
+    api._current_response_turn_id = "turn_admitted"
+    api._active_input_event_key_by_turn_id = {"turn_admitted": "item_admitted"}
+    admitted_key = api._gating_verdict_key(turn_id="turn_admitted", input_event_key="item_admitted")
+    api._response_gating_verdict_by_input_event_key = {
+        admitted_key: ResponseGatingVerdict(
+            action="ANSWER",
+            reason="transcript_final",
+            decided_at=time.monotonic(),
+        )
+    }
+    api._extract_dry_run_flag = lambda _args: False
+    api._is_duplicate_tool_call = lambda *_args, **_kwargs: False
+    api._tool_execution_cooldown_remaining = lambda: 0.0
+    api._stage_action = lambda _action: {"valid": True}
+    api.orchestration_state = type(
+        "S",
+        (),
+        {
+            "phase": OrchestrationPhase.IDLE,
+            "transition": lambda *args, **kwargs: None,
+        },
+    )()
+    api._governance = type(
+        "Gov",
+        (),
+        {
+            "build_action_packet": lambda *args, **kwargs: type(
+                "Action",
+                (),
+                {
+                    "id": "call_diag_allowed",
+                    "tool_name": "read_runtime_diagnostics",
+                    "tool_args": {},
+                    "summary": lambda self: "summary",
+                },
+            )(),
+            "review": lambda *args, **kwargs: type(
+                "Decision",
+                (),
+                {
+                    "approved": True,
+                    "needs_confirmation": False,
+                    "status": "approved",
+                    "reason": "ok",
+                },
+            )(),
+        },
+    )()
+    executed: list[str] = []
+
+    async def _execute_action(*_args, **_kwargs):
+        executed.append("executed")
+
+    api._execute_action = _execute_action
+
+    asyncio.run(api.handle_function_call({}, _Ws()))
+
+    assert executed == ["executed"]
 
 
 def test_handle_function_call_transitions_to_act_when_execution_approved() -> None:
