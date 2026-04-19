@@ -42,6 +42,25 @@ def _log_runtime(function_or_name: str, duration: float) -> None:
     logger.info("⏰ %s() took %.4f seconds", function_or_name, duration)
 
 
+def _resolve_turn_latency_summary_contract(
+    *,
+    close_reason: str,
+    active_response_origin: str,
+    selected: bool,
+    selection_reason: str,
+) -> tuple[str, str, bool]:
+    """Resolve latency summary path/outcome emission for response.done."""
+    if close_reason == "provisional_server_auto_awaiting_transcript_final":
+        return ("server_auto_cancelled_before_audio", "deferred", False)
+    normalized_origin = str(active_response_origin or "").strip().lower()
+    normalized_selection_reason = str(selection_reason or "").strip().lower()
+    if normalized_origin == "server_auto" and not selected and normalized_selection_reason == "tool_followup_precedence":
+        return ("server_auto_superseded_by_tool_followup", "deferred", False)
+    if normalized_origin == "tool_output":
+        return ("tool_involved", "completed", True)
+    return ("normal_admitted_answer", "completed", True)
+
+
 class ResponseTerminalHandlers:
     """Owns response terminal event handlers for :class:`RealtimeAPI`."""
 
@@ -708,15 +727,12 @@ class ResponseTerminalHandlers:
             close_action,
             close_reason,
         )
-        latency_path = "normal_admitted_answer"
-        latency_outcome = "completed"
-        should_emit_latency_summary = True
-        if close_reason == "provisional_server_auto_awaiting_transcript_final":
-            latency_path = "server_auto_cancelled_before_audio"
-            latency_outcome = "deferred"
-            should_emit_latency_summary = False
-        elif str(active_response_origin_before_clear or "").strip().lower() == "tool_output":
-            latency_path = "tool_involved"
+        latency_path, latency_outcome, should_emit_latency_summary = _resolve_turn_latency_summary_contract(
+            close_reason=close_reason,
+            active_response_origin=str(active_response_origin_before_clear or ""),
+            selected=bool(selected),
+            selection_reason=selection_reason,
+        )
         api._set_turn_latency_classification(
             turn_id=turn_id,
             input_event_key=done_input_event_key,

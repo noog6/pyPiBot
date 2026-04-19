@@ -7,6 +7,7 @@ if "audioop" not in sys.modules:
     sys.modules["audioop"] = types.ModuleType("audioop")
 
 from ai.realtime_api import RealtimeAPI
+from ai.realtime.response_terminal_handlers import _resolve_turn_latency_summary_contract
 
 
 def _make_api_stub() -> RealtimeAPI:
@@ -154,3 +155,31 @@ def test_cancelled_provisional_server_auto_can_be_suppressed_without_polluting_f
     assert len(messages) == 1
     assert "input_event_key=item_final_1" in messages[0]
     assert "transcript_final_to_response_create_ms=99" in messages[0]
+
+
+def test_tool_latency_start_end_tracks_tool_followup_execution_key(monkeypatch) -> None:
+    api = _make_api_stub()
+    key = "tool:call_123"
+    monotonic_values = iter([10.0, 10.35])
+    monkeypatch.setattr("ai.realtime_api.time.monotonic", lambda: next(monotonic_values))
+
+    api._mark_turn_latency_tool_start(turn_id="turn-7", input_event_key=key)
+    api._mark_turn_latency_tool_end(turn_id="turn-7", input_event_key=key)
+
+    state = api._turn_latency_state(turn_id="turn-7", input_event_key=key, create=False)
+    assert state is not None
+    assert state["tool_count"] == 1
+    assert int(state["tool_total_ms"]) == 349
+
+
+def test_latency_contract_defers_unselected_server_auto_when_tool_followup_wins() -> None:
+    path, outcome, emit = _resolve_turn_latency_summary_contract(
+        close_reason="response_done_received",
+        active_response_origin="server_auto",
+        selected=False,
+        selection_reason="tool_followup_precedence",
+    )
+
+    assert path == "server_auto_superseded_by_tool_followup"
+    assert outcome == "deferred"
+    assert emit is False
