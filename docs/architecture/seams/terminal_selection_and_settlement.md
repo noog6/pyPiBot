@@ -44,6 +44,7 @@ Decide whether a terminal response event is the turn deliverable and apply settl
 ## G) Core invariants
 
 - `selected=false` is valid for intermediate non-deliverable states; not automatically a fault.
+- `selected=false reason=empty_tool_followup_non_deliverable` can still be an expected terminal close when tool motion/followthrough is fully complete and no report is owed.
 - Semantic owner reassignment is narrow and reason-coded.
 - Cancelled/non-deliverable reasons should be explicitly recorded.
 
@@ -56,6 +57,7 @@ Decide whether a terminal response event is the turn deliverable and apply settl
 ## I) Known tricky handoffs
 
 - Tool-output `response.done` with followthrough still open.
+- Tool-output empty non-deliverable terminal: suppress silent-incident + allow continuity close only when no followthrough/report remains.
 - Provisional server-auto done before transcript-final.
 - Selection reason to continuity close-flag translation.
 
