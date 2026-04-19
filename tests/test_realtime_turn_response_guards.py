@@ -3870,7 +3870,7 @@ def test_turn_followthrough_chain_remaining_include_report_false_ignores_non_com
         )
     )
 
-    assert api._turn_followthrough_chain_remaining(turn_id="turn_2") is True
+    assert api._turn_followthrough_chain_remaining(turn_id="turn_2") is False
     assert api._turn_followthrough_chain_remaining(turn_id="turn_2", include_report_followup=False) is False
 
 
@@ -4172,6 +4172,60 @@ def test_response_done_followthrough_chain_remaining_releases_when_trace_motion_
             include_report_followup=False,
         )
         is False
+    )
+
+
+def test_turn_followthrough_chain_remaining_include_report_releases_when_no_pending_steps_or_motion() -> None:
+    api = _make_api()
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
+        compound_request=types.SimpleNamespace(
+            final_followup_pending=False,
+            steps=(types.SimpleNamespace(kind="report", status="completed"),),
+        )
+    )
+    api._continuity_ledger = types.SimpleNamespace(
+        build_turn_settlement=lambda _brief: types.SimpleNamespace(
+            settlement_state="followthrough_remaining",
+            has_commitments=True,
+        )
+    )
+    api.get_gesture_motion_state = lambda *, tool_call_id: {"status": "completed"}
+
+    assert (
+        api._turn_followthrough_chain_remaining(
+            turn_id="turn_2",
+            include_report_followup=True,
+            gesture_tool_call_id="call_1",
+            gesture_tool_name="gesture_look_center",
+        )
+        is False
+    )
+
+
+def test_turn_followthrough_chain_remaining_non_report_step_stays_open_without_final_report() -> None:
+    api = _make_api()
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
+        compound_request=types.SimpleNamespace(
+            final_followup_pending=False,
+            steps=(types.SimpleNamespace(kind="gesture", status="pending"),),
+        )
+    )
+    api._continuity_ledger = types.SimpleNamespace(
+        build_turn_settlement=lambda _brief: types.SimpleNamespace(
+            settlement_state="followthrough_remaining",
+            has_commitments=True,
+        )
+    )
+    api.get_gesture_motion_state = lambda *, tool_call_id: {"status": "completed"}
+
+    assert (
+        api._turn_followthrough_chain_remaining(
+            turn_id="turn_2",
+            include_report_followup=False,
+            gesture_tool_call_id="call_1",
+            gesture_tool_name="gesture_look_center",
+        )
+        is True
     )
 
 

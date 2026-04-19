@@ -45,6 +45,7 @@ Control whether tool-followup outputs are released, held, or suppressed; preserv
 - Hold is transitional and should resolve into release/suppress deterministically.
 - Non-distinct or gesture-only outputs should not consume final deliverable ownership.
 - `gesture_intermediate_inject_only` suppression is valid only when runtime can deterministically dispatch the next non-report step; if the active next step is non-gesture and no runtime descriptor exists, keep `response.create` enabled so model dispatch can continue the chain.
+- `followthrough_remaining` settlement alone is insufficient to keep a followup open: guard decisions must also confirm a still-open non-report step, a pending required report step, or motion that is physically still in `queued/started`.
 
 ## H) Failure signatures
 
