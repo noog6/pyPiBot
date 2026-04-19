@@ -46,6 +46,9 @@ Ensure user-visible required deliverables (especially report/followthrough outpu
 - Required-deliverable paths must not settle on bridge/progress-only output.
 - Missing tool execution should block completion even if text exists.
 - Redrive budget must be bounded and explicit.
+- Required-deliverable `tool_output` response.done candidates must not be
+  demoted by report-step self-precedence; only remaining **non-report**
+  followthrough may block terminal selection.
 
 ## H) Failure signatures
 

@@ -3792,6 +3792,79 @@ def test_response_done_empty_tool_output_bridges_from_parent_turn_followthrough_
     assert checked_turns == ["turn_2", "turn_1"]
 
 
+def test_response_done_required_deliverable_followthrough_empty_uses_empty_non_deliverable_reason() -> None:
+    api = _make_api()
+    turn_id = "turn_2"
+    response_id = "resp_tool_required_empty"
+    tool_input_event_key = "tool:call_final_report"
+
+    def _followthrough(*, include_report_followup: bool = True, **_kwargs) -> bool:
+        return include_report_followup
+
+    api._turn_followthrough_chain_remaining = _followthrough
+    api._turn_has_pending_tool_followup = lambda **_kwargs: True
+    api._is_empty_response_done = lambda **_kwargs: True
+    api._record_response_trace_context(
+        response_id,
+        turn_id=turn_id,
+        input_event_key=tool_input_event_key,
+        origin="tool_output",
+        tool_followup_step_output_policy="required_deliverable",
+        tool_followup_post_completion_reason="required_deliverable_owed",
+    )
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id=turn_id,
+        origin="tool_output",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_input_event_key),
+        transcript_final_seen=True,
+        input_event_key=tool_input_event_key,
+        response_id=response_id,
+    )
+
+    assert selected is False
+    assert reason == "empty_tool_followup_non_deliverable"
+
+
+def test_response_done_required_deliverable_followthrough_with_text_can_select_terminal() -> None:
+    api = _make_api()
+    turn_id = "turn_2"
+    response_id = "resp_tool_required_complete"
+    tool_input_event_key = "tool:call_final_report"
+
+    def _followthrough(*, include_report_followup: bool = True, **_kwargs) -> bool:
+        return include_report_followup
+
+    api._turn_followthrough_chain_remaining = _followthrough
+    api._turn_has_pending_tool_followup = lambda **_kwargs: True
+    api._is_empty_response_done = lambda **_kwargs: False
+    api._record_terminal_response_text(response_id=response_id, text="Done. I tilted down, up, and centered.")
+    api._record_response_trace_context(
+        response_id,
+        turn_id=turn_id,
+        input_event_key=tool_input_event_key,
+        origin="tool_output",
+        tool_followup_step_output_policy="required_deliverable",
+        tool_followup_post_completion_reason="required_deliverable_owed",
+    )
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id=turn_id,
+        origin="tool_output",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_input_event_key),
+        transcript_final_seen=True,
+        input_event_key=tool_input_event_key,
+        response_id=response_id,
+    )
+
+    assert selected is True
+    assert reason == "normal"
+
+
 def test_turn_followthrough_chain_remaining_ignores_generic_commitment_without_followthrough_or_final_pending() -> None:
     api = _make_api()
 
