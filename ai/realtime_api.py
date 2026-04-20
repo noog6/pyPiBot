@@ -8201,6 +8201,9 @@ class RealtimeAPI:
     def _should_drop_stale_response_event(self, event: dict[str, Any]) -> bool:
         event_type = str(event.get("type") or "").strip()
         if event_type not in {
+            "response.output_item.added",
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done",
             "response.output_audio.delta",
             "response.output_audio.done",
             "response.output_audio_transcript.delta",
@@ -11885,6 +11888,8 @@ class RealtimeAPI:
         normalized_fallback_turn_id = str(fallback_turn_id or "").strip() or "turn-unknown"
         active_response_id = str(getattr(self, "_active_response_id", "") or "").strip()
         if not active_response_id:
+            return normalized_fallback_turn_id, False, ""
+        if self._is_cancelled_or_superseded_response_id(active_response_id):
             return normalized_fallback_turn_id, False, ""
         trace_context = self._response_trace_by_id().get(active_response_id, {})
         if not isinstance(trace_context, dict):

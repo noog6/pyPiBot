@@ -644,6 +644,72 @@ def test_dropped_stale_response_event_is_rate_limited() -> None:
     )
 
 
+def test_stale_blocked_attention_turn_function_call_ingress_is_dropped() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._stale_response_ids_set = {"resp-blocked-attn"}
+    api._cancelled_response_ids = set()
+    api._suppressed_audio_response_ids = set()
+    api._superseded_response_ids = set()
+    api._handle_output_item_added_event = AsyncMock()
+
+    asyncio.run(
+        api._handle_event_legacy(
+            {
+                "type": "response.output_item.added",
+                "response_id": "resp-blocked-attn",
+                "item": {"type": "function_call", "name": "gesture_look_down", "call_id": "call_stale"},
+            },
+            websocket=None,
+        )
+    )
+
+    api._handle_output_item_added_event.assert_not_called()
+
+
+def test_stale_empty_transcript_cancelled_function_call_args_done_is_dropped() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._stale_response_ids_set = {"resp-empty-cancelled"}
+    api._cancelled_response_ids = set()
+    api._suppressed_audio_response_ids = set()
+    api._superseded_response_ids = set()
+    api._handle_function_call_arguments_done_event = AsyncMock()
+
+    asyncio.run(
+        api._handle_event_legacy(
+            {
+                "type": "response.function_call_arguments.done",
+                "response_id": "resp-empty-cancelled",
+                "arguments": "{}",
+            },
+            websocket=None,
+        )
+    )
+
+    api._handle_function_call_arguments_done_event.assert_not_called()
+
+
+def test_admitted_response_function_call_args_done_still_routes_normally() -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._stale_response_ids_set = set()
+    api._cancelled_response_ids = set()
+    api._suppressed_audio_response_ids = set()
+    api._superseded_response_ids = set()
+    api._handle_function_call_arguments_done_event = AsyncMock()
+
+    asyncio.run(
+        api._handle_event_legacy(
+            {
+                "type": "response.function_call_arguments.done",
+                "response_id": "resp-live",
+                "arguments": "{}",
+            },
+            websocket=None,
+        )
+    )
+
+    api._handle_function_call_arguments_done_event.assert_awaited_once()
+
+
 def test_transcript_final_skips_verify_on_risk_when_confirmation_active() -> None:
     api = RealtimeAPI.__new__(RealtimeAPI)
     verify_gate = AsyncMock(return_value=True)
