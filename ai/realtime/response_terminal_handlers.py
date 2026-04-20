@@ -489,8 +489,12 @@ class ResponseTerminalHandlers:
             and str(active_response_origin_before_clear or "").strip().lower() == "tool_output"
             and (redrive_marker_present or continuity_required_deliverable_open)
         )
+        required_deliverable_materialization_pending = api._has_required_deliverable_followthrough_materialization_pending(
+            turn_id=turn_id
+        )
         if (
             required_deliverable_materialization_redrive_eligible
+            and not required_deliverable_materialization_pending
             and (required_deliverable_missing_substance or required_deliverable_missing_tool_execution)
         ):
             retry_allowed, retry_attempt, retry_max_attempts = (
@@ -526,12 +530,18 @@ class ResponseTerminalHandlers:
                     retry_max_attempts,
                 )
         elif required_deliverable_missing_substance or required_deliverable_missing_tool_execution:
+            redrive_not_eligible_reason = (
+                "materialization_already_pending"
+                if required_deliverable_materialization_pending
+                else "not_redrive_eligible"
+            )
             logger.info(
-                "required_deliverable_followthrough_materialization_redrive_not_eligible run_id=%s turn_id=%s response_id=%s reason=%s required_followthrough=%s origin=%s marker_present=%s continuity_required_deliverable_open=%s",
+                "required_deliverable_followthrough_materialization_redrive_not_eligible run_id=%s turn_id=%s response_id=%s reason=%s gate=%s required_followthrough=%s origin=%s marker_present=%s continuity_required_deliverable_open=%s",
                 api._current_run_id() or "",
                 turn_id,
                 str(active_response_id_before_clear or "none"),
                 selection_reason,
+                redrive_not_eligible_reason,
                 str(required_deliverable_followthrough).lower(),
                 str(active_response_origin_before_clear or "").strip().lower() or "unknown",
                 str(redrive_marker_present).lower(),
