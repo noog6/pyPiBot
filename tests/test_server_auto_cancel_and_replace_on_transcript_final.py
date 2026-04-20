@@ -1273,6 +1273,34 @@ def test_provisional_server_auto_tool_call_is_deferred_before_transcript_final(m
     assert api.function_call_args == ""
 
 
+def test_contract_alias_tool_execution_admission_delegates_to_server_auto_helper(monkeypatch) -> None:
+    api = _build_api_stub()
+    monkeypatch.setattr(api, "_should_defer_provisional_server_auto_tool_call", lambda: True)
+    assert api._tool_execution_admission_should_defer() is True
+
+
+def test_contract_alias_transcript_final_handoff_delegates_to_existing_rebind(monkeypatch) -> None:
+    api = _build_api_stub()
+    captured: dict[str, str] = {}
+
+    def _capture(**kwargs):
+        captured.update({k: str(v) for k, v in kwargs.items()})
+
+    monkeypatch.setattr(api, "_rebind_provisional_server_auto_turn_ownership", _capture)
+
+    api._apply_transcript_final_handoff_for_provisional_response(
+        turn_id="turn_3",
+        response_id="resp-server-auto",
+        replacement_input_event_key="item_3",
+    )
+
+    assert captured == {
+        "turn_id": "turn_3",
+        "response_id": "resp-server-auto",
+        "replacement_input_event_key": "item_3",
+    }
+
+
 def test_cancel_and_replace_reissues_deferred_provisional_tool_call_before_replacement(monkeypatch) -> None:
     api = _build_api_stub()
     transport = _Transport()

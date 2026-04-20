@@ -7829,6 +7829,24 @@ class RealtimeAPI:
         legacy_by_turn_id[normalized_turn_id] = pending
         return pending
 
+    def _provisional_response_for_turn(self, *, turn_id: str) -> PendingServerAutoResponse | None:
+        """Contract alias: provisional ownership lookup for this turn.
+
+        Naming decomposition guide:
+        - provisional ownership state: this helper (pending provisional response identity)
+        - speech start gating: `_speech_start_gate_hold_active`
+        - tool execution admission: `_tool_execution_admission_should_defer`
+        - transcript-final handoff: `_apply_transcript_final_handoff_for_provisional_response`
+        """
+
+        return self._pending_server_auto_response_for_turn(turn_id=turn_id)
+
+    def _provisional_response_is_active_for_turn(self, *, turn_id: str) -> bool:
+        """Contract alias: whether provisional ownership remains active for the turn."""
+
+        pending = self._provisional_response_for_turn(turn_id=turn_id)
+        return bool(isinstance(pending, PendingServerAutoResponse) and pending.active)
+
     def _mark_pending_server_auto_response_cancelled(
         self,
         *,
@@ -8269,6 +8287,21 @@ class RealtimeAPI:
                 rebound_selection["canonical_key"] = replacement_canonical_key
                 selection_store[normalized_response_id] = rebound_selection
 
+    def _apply_transcript_final_handoff_for_provisional_response(
+        self,
+        *,
+        turn_id: str,
+        response_id: str | None,
+        replacement_input_event_key: str,
+    ) -> None:
+        """Contract alias: transcript-final handoff for provisional ownership."""
+
+        self._rebind_provisional_server_auto_turn_ownership(
+            turn_id=turn_id,
+            response_id=response_id,
+            replacement_input_event_key=replacement_input_event_key,
+        )
+
     def _replacement_response_already_exists(
         self,
         *,
@@ -8317,6 +8350,16 @@ class RealtimeAPI:
         if not turn_id or not active_response_id or not self._is_synthetic_input_event_key(active_input_event_key):
             return False
         return self._server_auto_pre_audio_hold_active(turn_id=turn_id, response_id=active_response_id)
+
+    def _speech_start_gate_hold_active(self, *, turn_id: str, response_id: str | None = None) -> bool:
+        """Contract alias: speech-start gate state for provisional pre-audio hold."""
+
+        return self._server_auto_pre_audio_hold_active(turn_id=turn_id, response_id=response_id)
+
+    def _tool_execution_admission_should_defer(self) -> bool:
+        """Contract alias: tool execution admission check for provisional ownership."""
+
+        return self._should_defer_provisional_server_auto_tool_call()
 
     def _is_cancelled_response_event(self, event: dict[str, Any]) -> bool:
         response_id = self._response_id_from_event(event)
@@ -19726,7 +19769,7 @@ class RealtimeAPI:
             turn_id=resolved_turn_id,
             input_event_key=input_event_key,
         )
-        pending_server_auto = self._pending_server_auto_response_for_turn(turn_id=resolved_turn_id)
+        pending_server_auto = self._provisional_response_for_turn(turn_id=resolved_turn_id)
         pending_server_auto_key = str(getattr(pending_server_auto, "canonical_key", "") or "").strip()
         pending_server_auto_active = bool(
             isinstance(pending_server_auto, PendingServerAutoResponse) and pending_server_auto.active
@@ -19742,7 +19785,7 @@ class RealtimeAPI:
             pending_server_auto_key or "none",
             transcript_canonical_key,
         )
-        self._rebind_provisional_server_auto_turn_ownership(
+        self._apply_transcript_final_handoff_for_provisional_response(
             turn_id=resolved_turn_id,
             response_id=str(getattr(pending_server_auto, "response_id", "") or "").strip() or None,
             replacement_input_event_key=input_event_key,
@@ -20672,7 +20715,7 @@ class RealtimeAPI:
                 marker="first_tool_call_received",
                 call_id=str(call_id or "").strip() or None,
             )
-            if self._should_defer_provisional_server_auto_tool_call():
+            if self._tool_execution_admission_should_defer():
                 self._store_deferred_provisional_tool_call(
                     tool_name=function_name,
                     call_id=call_id,
