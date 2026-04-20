@@ -11364,7 +11364,19 @@ class RealtimeAPI:
         required_deliverable_pending = False
         if normalized_origin != "tool_output":
             required_deliverable_pending = self._turn_has_active_required_deliverable_step(turn_id=turn_id)
+        selected_response_has_terminal_text_evidence = self._selected_response_has_terminal_text_evidence(
+            response_id=response_id
+        )
         turn_has_pending_tool_followup = self._turn_has_pending_tool_followup(turn_id=turn_id)
+        if (
+            normalized_origin == "server_auto"
+            and not selected_response_has_terminal_text_evidence
+            and self._turn_has_pending_tool_followup(turn_id=turn_id, include_status_only=True)
+        ):
+            # A server_auto parent shell without terminal text should not become
+            # terminal-selected while any tool followup lineage for the turn is
+            # still pending, including status-only gesture followups.
+            turn_has_pending_tool_followup = True
         followthrough_chain_remaining = self._response_done_followthrough_chain_remaining(
             turn_id=turn_id,
             origin=normalized_origin,

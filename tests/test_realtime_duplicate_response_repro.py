@@ -8751,6 +8751,78 @@ def test_provisional_server_auto_parent_progression_holds_then_suppresses_follow
     assert followup_metadata.get("tool_followup_release") == "true"
 
 
+def test_server_auto_parent_without_terminal_text_defers_to_status_only_tool_followup_precedence() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+
+    turn_id = "turn_server_auto_status_only_precedence"
+    parent_input_event_key = "item_server_auto_status_only_parent"
+    parent_response_id = "resp-server-auto-status-only-parent"
+    parent_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    api._canonical_response_state_mutate(
+        canonical_key=parent_canonical_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "server_auto"),
+            setattr(record, "response_id", parent_response_id),
+            # Mirror the observed seam: transport/tool scaffolding made the
+            # parent non-empty even though no terminal text was delivered.
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "unknown"),
+            setattr(record, "done", True),
+        ),
+    )
+
+    child_input_event_key = "tool:call_server_auto_status_only_child"
+    child_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=child_input_event_key)
+    api._record_tool_followup_metadata(
+        canonical_key=child_canonical_key,
+        metadata={
+            "tool_name": "gesture_look_center",
+            "tool_followup_status_only": "true",
+            "parent_turn_id": turn_id,
+            "parent_input_event_key": parent_input_event_key,
+        },
+    )
+    api._set_tool_followup_state(
+        canonical_key=child_canonical_key,
+        state="blocked_active_response",
+        reason="test_seed_status_only_pending",
+    )
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id=turn_id,
+        origin="server_auto",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=parent_canonical_key,
+        transcript_final_seen=True,
+        input_event_key=parent_input_event_key,
+        response_id=parent_response_id,
+    )
+
+    assert selected is False
+    assert reason == "tool_followup_precedence"
+
+    api._apply_terminal_deliverable_selection(
+        canonical_key=parent_canonical_key,
+        response_id=parent_response_id,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        selected=selected,
+        selection_reason=reason,
+    )
+    covered, source, _observed, _klass, terminal_selected, terminal_reason = api._parent_response_coverage_state(
+        parent_state=api._canonical_response_state(parent_canonical_key),
+        parent_canonical_key=parent_canonical_key,
+    )
+    assert covered is False
+    assert source == "none"
+    assert terminal_selected is False
+    assert terminal_reason == "tool_followup_precedence"
+
+
 def test_tool_followup_release_does_not_reopen_parent_pending_after_tool_rebind() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
