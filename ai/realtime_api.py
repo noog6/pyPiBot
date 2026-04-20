@@ -6122,6 +6122,65 @@ class RealtimeAPI:
                 return True
         return False
 
+    def _transcript_matches_secondary_direct_address(self, transcript: str) -> bool:
+        normalized = str(transcript or "").strip().lower()
+        if not normalized:
+            return False
+        transcript_tokens = tuple(
+            token
+            for token in re.findall(r"[a-zA-Z0-9']+", normalized)
+            if token
+        )
+        if not transcript_tokens:
+            return False
+        secondary_terms = ("robot", "droid", "android")
+        term_positions = [idx for idx, token in enumerate(transcript_tokens) if token in secondary_terms]
+        if not term_positions:
+            return False
+        question_starts = (
+            "who",
+            "what",
+            "when",
+            "where",
+            "why",
+            "how",
+            "can",
+            "could",
+            "would",
+            "will",
+            "do",
+            "does",
+            "did",
+            "is",
+            "are",
+            "should",
+        )
+        second_person_present = bool(
+            re.search(r"\b(you|your|you're|youre|u)\b", normalized)
+        )
+        greeting_prefix_present = bool(re.match(r"^(?:hey|hi|hello)\b", normalized))
+        question_request_present = ("?" in normalized) or bool(
+            re.match(rf"^(?:{'|'.join(question_starts)})\b", normalized)
+        )
+        imperative_markers = ("look", "check", "see", "tell", "show", "scan", "track", "run", "give")
+        for idx in term_positions:
+            term_at_vocative_start = idx == 0 or (idx == 1 and greeting_prefix_present)
+            imperative_after_term = False
+            for offset in range(1, 3):
+                next_idx = idx + offset
+                if next_idx >= len(transcript_tokens):
+                    break
+                if transcript_tokens[next_idx] in imperative_markers:
+                    imperative_after_term = True
+                    break
+            if term_at_vocative_start and (
+                second_person_present or question_request_present or imperative_after_term
+            ):
+                return True
+        if re.search(r"\b(?:can|could|would|will|should)\s+the\s+(?:robot|droid|android)\b", normalized):
+            return True
+        return False
+
     def _is_clear_direct_address_question(self, transcript: str) -> bool:
         if not self._transcript_explicitly_addresses_assistant_name(transcript):
             return False
@@ -6246,6 +6305,13 @@ class RealtimeAPI:
     ) -> tuple[bool, str]:
         probe_now = time.monotonic() if now is None else float(now)
         if self._transcript_explicitly_addresses_assistant_name(transcript):
+            self._open_attention_gate_hold_window(
+                turn_id=turn_id,
+                input_event_key=input_event_key,
+                now=probe_now,
+            )
+            return True, "direct_address"
+        if self._transcript_matches_secondary_direct_address(transcript):
             self._open_attention_gate_hold_window(
                 turn_id=turn_id,
                 input_event_key=input_event_key,
