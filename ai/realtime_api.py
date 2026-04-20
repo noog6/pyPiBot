@@ -21968,6 +21968,45 @@ class RealtimeAPI:
             return True
         return False
 
+    def _has_required_deliverable_followthrough_materialization_pending(self, *, turn_id: str) -> bool:
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return False
+
+        def _is_required_deliverable_metadata(metadata: Mapping[str, Any] | None) -> bool:
+            candidate = metadata if isinstance(metadata, Mapping) else {}
+            if str(candidate.get("tool_followup") or "").strip().lower() not in {"1", "true", "yes"}:
+                return False
+            if str(candidate.get("turn_id") or "").strip() != normalized_turn_id:
+                return False
+            return self._trace_context_marks_required_deliverable_followthrough(candidate)
+
+        active_response_id = str(getattr(self, "_active_response_id", "") or "").strip()
+        if active_response_id:
+            trace_context = self._response_trace_by_id().get(active_response_id, {})
+            if _is_required_deliverable_metadata(trace_context):
+                return True
+
+        pending = getattr(self, "_pending_response_create", None)
+        if pending is not None and isinstance(getattr(pending, "event", None), dict):
+            pending_metadata = self._extract_response_create_metadata(pending.event)
+            if _is_required_deliverable_metadata(pending_metadata):
+                return True
+
+        queue = getattr(self, "_response_create_queue", None)
+        if isinstance(queue, deque):
+            for queued in queue:
+                if not isinstance(queued, dict):
+                    continue
+                event = queued.get("event")
+                if not isinstance(event, dict):
+                    continue
+                queued_metadata = self._extract_response_create_metadata(event)
+                if _is_required_deliverable_metadata(queued_metadata):
+                    return True
+
+        return False
+
     def _release_required_deliverable_followthrough_dispatch_lock(
         self,
         *,
