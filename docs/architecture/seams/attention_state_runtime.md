@@ -22,6 +22,7 @@ Each state carries:
 ## Transition rules (current behavior, now explicit)
 
 - Direct configured-name address enters `direct_address_active` and opens/refreshes the bounded hold window.
+- Secondary address terms (`robot`, `droid`, `android`) can enter `direct_address_active` only when paired with direct-address/request evidence (vocative/greeting start, request/question, or imperative phrasing); bare third-person mentions remain blocked.
 - Follow-up during active hold enters `hold_active` without extending hold indefinitely.
 - Confirmation/stop-abort exception admission enters `bypass_active`.
 - Attention-gate block enters `blocked_recovery_cooldown`; runtime still re-arms quiet LISTENING as before.

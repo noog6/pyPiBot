@@ -297,6 +297,74 @@ def test_configured_name_change_updates_direct_address_detection() -> None:
     assert reason_new == "direct_address"
 
 
+def test_secondary_direct_address_terms_admit_when_request_shaped() -> None:
+    api = _make_attention_api()
+
+    admitted_robot, reason_robot = api._evaluate_attention_gate_admission(
+        transcript="Robot, look over there.",
+        turn_id="turn-1",
+        input_event_key="item-1",
+        now=100.0,
+    )
+    admitted_droid, reason_droid = api._evaluate_attention_gate_admission(
+        transcript="Droid, what do you see?",
+        turn_id="turn-1",
+        input_event_key="item-2",
+        now=110.0,
+    )
+    admitted_android, reason_android = api._evaluate_attention_gate_admission(
+        transcript="Android, can you check that?",
+        turn_id="turn-1",
+        input_event_key="item-3",
+        now=120.0,
+    )
+    admitted_modal, reason_modal = api._evaluate_attention_gate_admission(
+        transcript="Can the droid look left?",
+        turn_id="turn-1",
+        input_event_key="item-4",
+        now=130.0,
+    )
+
+    assert admitted_robot is True
+    assert reason_robot == "direct_address"
+    assert admitted_droid is True
+    assert reason_droid == "direct_address"
+    assert admitted_android is True
+    assert reason_android == "direct_address"
+    assert admitted_modal is True
+    assert reason_modal == "direct_address"
+
+
+def test_secondary_terms_without_direct_address_evidence_remain_blocked() -> None:
+    api = _make_attention_api()
+
+    admitted_robot, reason_robot = api._evaluate_attention_gate_admission(
+        transcript="That robot on the desk is cute.",
+        turn_id="turn-1",
+        input_event_key="item-1",
+        now=100.0,
+    )
+    admitted_droid, reason_droid = api._evaluate_attention_gate_admission(
+        transcript="The droid moved earlier.",
+        turn_id="turn-1",
+        input_event_key="item-2",
+        now=110.0,
+    )
+    admitted_android, reason_android = api._evaluate_attention_gate_admission(
+        transcript="This android looks expensive.",
+        turn_id="turn-1",
+        input_event_key="item-3",
+        now=120.0,
+    )
+
+    assert admitted_robot is False
+    assert reason_robot == "attention_gate_closed"
+    assert admitted_droid is False
+    assert reason_droid == "attention_gate_closed"
+    assert admitted_android is False
+    assert reason_android == "attention_gate_closed"
+
+
 def test_response_create_backstop_blocks_when_attention_gate_closed() -> None:
     api = types.SimpleNamespace(
         _should_suppress_nonessential_runtime_emission_during_followthrough=lambda **_kwargs: (False, "none"),
