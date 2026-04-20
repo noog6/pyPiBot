@@ -6845,6 +6845,28 @@ def test_tool_followup_continuity_owner_turn_prefers_semantic_owner_trace() -> N
     assert reason == "tool_followup_semantic_owner_handoff"
 
 
+def test_tool_followup_continuity_owner_turn_ignores_cancelled_active_response_lineage() -> None:
+    api = _make_api_stub()
+    api._active_response_id = "resp_startup_stale"
+    api._response_trace_context_by_id = {
+        "resp_startup_stale": {
+            "origin": "tool_output",
+            "turn_id": "turn_startup",
+            "parent_turn_id": "turn_startup",
+            "semantic_owner_turn_id": "turn_startup",
+        }
+    }
+    api._response_status_by_id = {"resp_startup_stale": "cancelled"}
+
+    owner_turn_id, allow_rebind, reason = api._resolve_continuity_tool_event_owner_turn(
+        fallback_turn_id="turn_live",
+    )
+
+    assert owner_turn_id == "turn_live"
+    assert allow_rebind is False
+    assert reason == ""
+
+
 def test_build_tool_followup_event_preserves_parent_owner_on_cross_turn_split() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
