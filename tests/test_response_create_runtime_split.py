@@ -155,6 +155,28 @@ def test_prepare_response_create_snapshot_does_not_let_nonrelease_tool_followup_
     assert api._active_input_event_key_for_turn("turn_tool_parent") == "item_parent_owner"
 
 
+def test_prepare_response_create_snapshot_prefers_provisional_response_facade_lookup() -> None:
+    api = _make_api_stub()
+    runtime = api._response_create_runtime
+    api._pending_server_auto_response_for_turn = lambda *, turn_id: None
+    api._provisional_response_for_turn = lambda *, turn_id: object()
+
+    event = {
+        "type": "response.create",
+        "response": {"metadata": {"turn_id": "turn_facade", "input_event_key": "item_facade"}},
+    }
+
+    prepared_snapshot = runtime.prepare_response_create_snapshot(
+        response_create_event=event,
+        origin="assistant_message",
+        utterance_context=None,
+        memory_brief_note=None,
+        now=789.0,
+    )
+
+    assert prepared_snapshot.pending_server_auto_present is True
+
+
 def test_send_response_create_executes_side_effects_after_direct_send_decision() -> None:
     api = _make_api_stub()
     ws = _Ws()

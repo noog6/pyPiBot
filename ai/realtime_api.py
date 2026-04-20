@@ -7853,7 +7853,7 @@ class RealtimeAPI:
         turn_id: str,
         reason: str,
     ) -> PendingServerAutoResponse | None:
-        pending = self._pending_server_auto_response_for_turn(turn_id=turn_id)
+        pending = self._provisional_response_for_turn(turn_id=turn_id)
         if pending is None:
             return None
         if not self._pending_server_auto_response_mutation_allowed(
@@ -8224,7 +8224,7 @@ class RealtimeAPI:
         return True
 
     def _mark_pending_server_auto_response_replaced(self, *, turn_id: str) -> None:
-        pending = self._pending_server_auto_response_for_turn(turn_id=turn_id)
+        pending = self._provisional_response_for_turn(turn_id=turn_id)
         if pending is None:
             logger.info(
                 "pending_server_auto_mutation_ignored run_id=%s turn_id=%s mutation=%s reason=already_cleaned pending_response_id=none active_response_id=%s",
@@ -8269,7 +8269,7 @@ class RealtimeAPI:
         )
         if not replacement_canonical_key:
             return
-        pending = self._pending_server_auto_response_for_turn(turn_id=normalized_turn_id)
+        pending = self._provisional_response_for_turn(turn_id=normalized_turn_id)
         if isinstance(pending, PendingServerAutoResponse):
             previous_canonical_key = str(getattr(pending, "canonical_key", "") or "").strip()
             if (
@@ -8349,7 +8349,7 @@ class RealtimeAPI:
         ).strip()
         if not turn_id or not active_response_id or not self._is_synthetic_input_event_key(active_input_event_key):
             return False
-        return self._server_auto_pre_audio_hold_active(turn_id=turn_id, response_id=active_response_id)
+        return self._speech_start_gate_hold_active(turn_id=turn_id, response_id=active_response_id)
 
     def _speech_start_gate_hold_active(self, *, turn_id: str, response_id: str | None = None) -> bool:
         """Contract alias: speech-start gate state for provisional pre-audio hold."""
@@ -14285,7 +14285,7 @@ class RealtimeAPI:
         started_ids.add(normalized_response_id)
 
     def _signal_server_auto_transcript_final(self, *, turn_id: str) -> None:
-        pending = self._pending_server_auto_response_for_turn(turn_id=turn_id)
+        pending = self._provisional_response_for_turn(turn_id=turn_id)
         self._set_server_auto_pre_audio_hold(
             turn_id=turn_id,
             enabled=False,
@@ -14297,7 +14297,7 @@ class RealtimeAPI:
             waiter.set()
 
     def _should_start_deferred_server_auto_audio(self, *, turn_id: str, input_event_key: str, response_id: str) -> bool:
-        if self._server_auto_pre_audio_hold_active(turn_id=turn_id, response_id=response_id):
+        if self._speech_start_gate_hold_active(turn_id=turn_id, response_id=response_id):
             return False
         if self._is_cancelled_or_superseded_response_id(response_id):
             return False
@@ -14332,7 +14332,7 @@ class RealtimeAPI:
         async def _wait_for_upgrade_decision() -> None:
             try:
                 while True:
-                    pending = self._pending_server_auto_response_for_turn(turn_id=turn_id)
+                    pending = self._provisional_response_for_turn(turn_id=turn_id)
                     active_pending_response_id = str(pending.response_id or "").strip() if pending is not None else ""
                     if not active_pending_response_id or active_pending_response_id != response_id:
                         logger.debug(
@@ -14359,7 +14359,7 @@ class RealtimeAPI:
                         await asyncio.wait_for(waiter.wait(), timeout=self._server_auto_audio_deferral_timeout_ms / 1000.0)
                     except asyncio.TimeoutError:
                         timed_out = True
-                    if self._server_auto_pre_audio_hold_active(turn_id=turn_id, response_id=response_id):
+                    if self._speech_start_gate_hold_active(turn_id=turn_id, response_id=response_id):
                         if self._is_cancelled_or_superseded_response_id(response_id) or str(getattr(self, "_active_response_id", "") or "").strip() != response_id:
                             self._set_server_auto_pre_audio_hold(
                                 turn_id=turn_id,
@@ -14507,7 +14507,7 @@ class RealtimeAPI:
         )
         self._asr_clarify_asked_input_event_keys.add(input_event_key)
         self._asr_clarify_count_by_turn[turn_id] = self._asr_clarify_count_by_turn.get(turn_id, 0) + 1
-        pending = self._pending_server_auto_response_for_turn(turn_id=turn_id)
+        pending = self._provisional_response_for_turn(turn_id=turn_id)
         if isinstance(pending, PendingServerAutoResponse) and pending.active and pending.response_id:
             cancel_event = {"type": "response.cancel", "response_id": pending.response_id}
             self._record_cancel_issued_timing(pending.response_id)
@@ -17352,7 +17352,7 @@ class RealtimeAPI:
         active_canonical_key = str(getattr(self, "_active_response_canonical_key", "") or "").strip()
         if active_canonical_key and active_canonical_key == normalized_canonical_key:
             return True
-        pending = self._pending_server_auto_response_for_turn(turn_id=turn_id)
+        pending = self._provisional_response_for_turn(turn_id=turn_id)
         if isinstance(pending, PendingServerAutoResponse):
             pending_canonical_key = str(pending.canonical_key or "").strip()
             if pending_canonical_key and pending_canonical_key == normalized_canonical_key:
@@ -19464,7 +19464,7 @@ class RealtimeAPI:
     ) -> bool:
         cancel_replace_started_at = time.monotonic()
         self._cancel_micro_ack(turn_id=turn_id, reason="upgrade_selected")
-        pending = self._pending_server_auto_response_for_turn(turn_id=turn_id)
+        pending = self._provisional_response_for_turn(turn_id=turn_id)
         pending_active = bool(isinstance(pending, PendingServerAutoResponse) and pending.active)
         if pending_active and pending is not None:
             pending_active = self._pending_server_auto_response_mutation_allowed(
@@ -19511,7 +19511,7 @@ class RealtimeAPI:
                 turn_id,
             )
             return False
-        self._rebind_provisional_server_auto_turn_ownership(
+        self._apply_transcript_final_handoff_for_provisional_response(
             turn_id=turn_id,
             response_id=old_response_id or None,
             replacement_input_event_key=input_event_key,
@@ -19654,7 +19654,7 @@ class RealtimeAPI:
             return False
         reentry_store.add(reentry_key)
 
-        pending = self._pending_server_auto_response_for_turn(turn_id=turn_id)
+        pending = self._provisional_response_for_turn(turn_id=turn_id)
         can_replace = self.should_cancel_and_replace(
             server_auto_state=pending,
             transcript_final_state={
@@ -19881,7 +19881,7 @@ class RealtimeAPI:
                 deliverable_seen=False,
             )
             self._emit_utterance_info_summary(anchor="transcript_completed_empty")
-            pending = self._pending_server_auto_response_for_turn(turn_id=resolved_turn_id)
+            pending = self._provisional_response_for_turn(turn_id=resolved_turn_id)
             if isinstance(pending, PendingServerAutoResponse) and pending.active and pending.response_id:
                 cancel_event = {"type": "response.cancel", "response_id": pending.response_id}
                 self._record_cancel_issued_timing(pending.response_id)
@@ -20095,7 +20095,7 @@ class RealtimeAPI:
                     turn_id=resolved_turn_id,
                     input_event_key=input_event_key,
                 )
-                pending = self._pending_server_auto_response_for_turn(turn_id=resolved_turn_id)
+                pending = self._provisional_response_for_turn(turn_id=resolved_turn_id)
                 if isinstance(pending, PendingServerAutoResponse) and pending.active and pending.response_id:
                     cancel_event = {"type": "response.cancel", "response_id": pending.response_id}
                     self._record_cancel_issued_timing(pending.response_id)
