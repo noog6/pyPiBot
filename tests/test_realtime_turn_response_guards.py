@@ -3024,6 +3024,68 @@ def test_response_done_decision_allows_upgraded_response_when_only_status_gestur
     assert reason == "normal"
 
 
+def test_response_done_decision_allows_upgraded_response_when_only_read_only_helper_followup_pending() -> None:
+    api = _make_api()
+    turn_id = "turn_1"
+    response_id = "resp_upgraded_non_empty"
+    canonical_key = f"{api._current_run_id()}:{turn_id}:tool:call_1"
+    api._tool_followup_state_by_canonical_key = {canonical_key: "blocked_active_response"}
+    api._terminal_response_text_by_response_id = {
+        response_id: "You prefer Neovim.",
+    }
+    api._record_tool_followup_metadata(
+        canonical_key=canonical_key,
+        metadata={
+            "tool_name": "recall_memories",
+            "tool_followup_status_only": "false",
+        },
+    )
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id=turn_id,
+        origin="upgraded_response",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id=turn_id, input_event_key="item_1"),
+        transcript_final_seen=True,
+        response_id=response_id,
+    )
+
+    assert selected is True
+    assert reason == "normal"
+
+
+def test_response_done_decision_keeps_precedence_when_pending_followup_is_not_read_only_helper() -> None:
+    api = _make_api()
+    turn_id = "turn_1"
+    response_id = "resp_server_auto_non_empty"
+    canonical_key = f"{api._current_run_id()}:{turn_id}:tool:call_1"
+    api._tool_followup_state_by_canonical_key = {canonical_key: "blocked_active_response"}
+    api._terminal_response_text_by_response_id = {
+        response_id: "Done — moving now.",
+    }
+    api._record_tool_followup_metadata(
+        canonical_key=canonical_key,
+        metadata={
+            "tool_name": "gesture_look_center",
+            "tool_followup_status_only": "false",
+        },
+    )
+
+    selected, reason = api._response_done_deliverable_decision(
+        turn_id=turn_id,
+        origin="server_auto",
+        delivery_state_before_done="done",
+        active_response_was_provisional=False,
+        done_canonical_key=api._canonical_utterance_key(turn_id=turn_id, input_event_key="item_1"),
+        transcript_final_seen=True,
+        response_id=response_id,
+    )
+
+    assert selected is False
+    assert reason == "tool_followup_precedence"
+
+
 def test_response_done_decision_rejects_empty_upgraded_response_as_non_deliverable() -> None:
     api = _make_api()
     selected, reason = api._response_done_deliverable_decision(
