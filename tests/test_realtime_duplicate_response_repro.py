@@ -16,7 +16,7 @@ from ai.micro_ack_manager import MicroAckCategory, MicroAckContext
 from ai.realtime.response_create_runtime import ResponseCreateRuntime
 from ai.realtime.types import PendingResponseCreate
 from ai.realtime.response_terminal_handlers import ResponseTerminalHandlers
-from ai.realtime_api import InteractionState, RealtimeAPI
+from ai.realtime_api import InteractionState, PendingServerAutoResponse, RealtimeAPI
 from ai.interaction_lifecycle_controller import InteractionLifecycleState
 from core.logging import logger
 
@@ -3762,6 +3762,67 @@ def test_response_done_snapshot_still_flags_turn_active_mismatch_outside_cleared
     assert "turn_active_key_canonical_mismatch" in snapshot["violations"]
     assert snapshot["active_response"]["response_id"] is None
     assert snapshot["active_response"]["canonical_key"] is None
+
+
+def test_coherence_snapshot_prefers_provisional_response_facade_lookup() -> None:
+    api = _make_api_stub()
+    turn_id = "turn_facade_snapshot"
+    input_event_key = "evt_facade"
+    canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=input_event_key)
+    api._provisional_response_for_turn = lambda *, turn_id: PendingServerAutoResponse(
+        turn_id=turn_id,
+        response_id="resp-facade",
+        canonical_key=canonical_key,
+        created_at_ms=1,
+    )
+    api._pending_server_auto_response_for_turn = lambda **_kwargs: (_ for _ in ()).throw(
+        AssertionError("legacy pending lookup should not be used")
+    )
+
+    snapshot = api._response_runtime_coherence_snapshot(
+        stage="replacement_created",
+        turn_id=turn_id,
+        canonical_key=canonical_key,
+        response_id="resp-facade",
+    )
+
+    assert snapshot["pending_server_auto"]["response_id"] == "resp-facade"
+
+
+def test_rebind_correlation_prefers_provisional_response_facade_lookup() -> None:
+    api = _make_api_stub()
+    turn_id = "turn_facade_rebind"
+    old_key = "synthetic_server_auto_turn_facade_1"
+    new_key = "evt_facade_rebound"
+    old_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=old_key)
+    new_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=new_key)
+    pending = PendingServerAutoResponse(
+        turn_id=turn_id,
+        response_id="resp-facade-rebind",
+        canonical_key=old_canonical_key,
+        created_at_ms=1,
+    )
+    api._provisional_response_for_turn = lambda *, turn_id: pending
+    api._pending_server_auto_response_for_turn = lambda **_kwargs: (_ for _ in ()).throw(
+        AssertionError("legacy pending lookup should not be used")
+    )
+    api._active_response_origin = "server_auto"
+    api._response_in_flight = True
+    api._active_response_id = "resp-facade-rebind"
+    api._active_server_auto_input_event_key = old_key
+    api._set_active_response_state(
+        response_id="resp-facade-rebind",
+        origin="server_auto",
+        input_event_key=old_key,
+        canonical_key=old_canonical_key,
+    )
+
+    api._rebind_active_response_correlation_key(
+        turn_id=turn_id,
+        replacement_input_event_key=new_key,
+    )
+
+    assert pending.canonical_key == new_canonical_key
 
 
 def test_websocket_close_clears_active_ownership_surface_and_legacy_mirrors(monkeypatch) -> None:
