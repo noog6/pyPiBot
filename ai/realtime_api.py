@@ -5727,6 +5727,41 @@ class RealtimeAPI:
             "source_text": normalized_text,
         }
 
+    def _is_simple_gesture_fastpath_candidate(self, transcript: str) -> bool:
+        """Return True for short, explicit single-gesture imperatives.
+
+        This seam-local helper intentionally targets transcript-final latency for
+        direct gesture turns and avoids broad policy changes for multi-step or
+        mixed-intent prompts.
+        """
+
+        normalized = " ".join(str(transcript or "").lower().split())
+        if not normalized:
+            return False
+        contract = self._parse_turn_contract_from_text(normalized)
+        explicit_tools = contract.get("explicit_gesture_tools")
+        if not isinstance(explicit_tools, list) or len(explicit_tools) != 1:
+            return False
+        if any(token in normalized for token in (" and ", " then ", " after ", " while ", " but ")):
+            return False
+        if len(re.findall(r"[a-zA-Z0-9']+", normalized)) > 7:
+            return False
+        simple_phrases = {
+            "look left",
+            "look right",
+            "look up",
+            "look down",
+            "tilt up",
+            "tilt down",
+            "look over there",
+            "center",
+            "look center",
+            "look back",
+            "return to neutral",
+        }
+        trimmed = normalized.strip(" .!?",)
+        return trimmed in simple_phrases
+
     def _update_turn_contract_from_input(self, text: str, *, source: str) -> None:
         contract = self._parse_turn_contract_from_text(text)
         contract["source"] = source
@@ -20135,6 +20170,7 @@ class RealtimeAPI:
                 resolution=interruption_resolution,
                 candidates=interruption_candidates,
             )
+            simple_gesture_fastpath = self._is_simple_gesture_fastpath_candidate(transcript)
             self._prune_interrupted_tool_output_candidates(interruption_turn_id=resolved_turn_id)
             transcript_upgrade_candidate = bool(
                 pending_server_auto is not None
@@ -20206,32 +20242,42 @@ class RealtimeAPI:
                 return
             if await self._maybe_apply_late_confirmation_decision(transcript, websocket):
                 return
-            perception_memory_verdict = await self._analyze_preference_recall_intent(
-                transcript,
-                source="input_audio_transcription",
-            )
-            if await self._apply_perception_memory_verdict(
-                perception_memory_verdict,
-                websocket=websocket,
-                source="input_audio_transcription",
-            ):
-                return
-            pref_recall_context_pending = (
-                isinstance(perception_memory_verdict, PerceptionMemoryVerdict)
-                and bool(perception_memory_verdict.preference_recall_requested)
-                and self._has_pending_preference_memory_context(
-                    turn_id=resolved_turn_id,
-                    input_event_key=input_event_key,
+            if simple_gesture_fastpath:
+                logger.info(
+                    "transcript_final_fastpath run_id=%s turn_id=%s input_event_key=%s path=simple_gesture",
+                    self._current_run_id() or "",
+                    resolved_turn_id,
+                    input_event_key,
                 )
-            )
-            if decision_path != "upgraded_response" and pref_recall_context_pending:
-                if await self._ensure_preference_recall_reentry_on_transcript_final(
+                perception_memory_verdict = PerceptionMemoryVerdict.empty(memory_intent_subtype=memory_intent_subtype)
+                pref_recall_context_pending = False
+            else:
+                perception_memory_verdict = await self._analyze_preference_recall_intent(
+                    transcript,
+                    source="input_audio_transcription",
+                )
+                if await self._apply_perception_memory_verdict(
+                    perception_memory_verdict,
                     websocket=websocket,
-                    turn_id=resolved_turn_id,
-                    input_event_key=input_event_key,
-                    memory_intent_subtype=memory_intent_subtype,
+                    source="input_audio_transcription",
                 ):
                     return
+                pref_recall_context_pending = (
+                    isinstance(perception_memory_verdict, PerceptionMemoryVerdict)
+                    and bool(perception_memory_verdict.preference_recall_requested)
+                    and self._has_pending_preference_memory_context(
+                        turn_id=resolved_turn_id,
+                        input_event_key=input_event_key,
+                    )
+                )
+                if decision_path != "upgraded_response" and pref_recall_context_pending:
+                    if await self._ensure_preference_recall_reentry_on_transcript_final(
+                        websocket=websocket,
+                        turn_id=resolved_turn_id,
+                        input_event_key=input_event_key,
+                        memory_intent_subtype=memory_intent_subtype,
+                    ):
+                        return
             if decision_path == "upgraded_response":
                 pending = self._pending_server_auto_response_for_turn(turn_id=resolved_turn_id)
                 replacement_canonical_key = self._canonical_utterance_key(
@@ -20296,7 +20342,7 @@ class RealtimeAPI:
                     memory_intent_subtype=memory_intent_subtype,
                 ):
                     return
-            if await self._maybe_process_research_intent(
+            if not simple_gesture_fastpath and await self._maybe_process_research_intent(
                 transcript,
                 websocket,
                 source="input_audio_transcription",

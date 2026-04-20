@@ -14,6 +14,7 @@ if "audioop" not in sys.modules:
 from ai.orchestration import OrchestrationPhase
 from ai.realtime.event_router import EventRouter
 from ai.realtime.input_audio_events import InputAudioEventHandlers
+from ai.realtime.memory_runtime import PerceptionMemoryVerdict
 from ai.micro_ack_manager import MicroAckCategory, MicroAckConfig, MicroAckManager
 from ai.realtime_api import PendingResponseCreate, PendingServerAutoResponse, RealtimeAPI
 from interaction import InteractionState
@@ -1609,6 +1610,118 @@ def test_short_non_empty_direct_address_still_reaches_verify_gate(monkeypatch) -
     )
 
     assert verify_calls == ["called"]
+    api.loop.close()
+
+
+def test_simple_gesture_transcript_fastpath_skips_perception_and_research() -> None:
+    api = _api_stub()
+    turn_id = "turn-gesture-fastpath"
+    input_event_key = "item-gesture-fastpath"
+    api._current_turn_id_or_unknown = lambda: turn_id
+    api._resolve_input_event_key = lambda _event: input_event_key
+    api._extract_transcript = lambda event: str(event.get("transcript") or "")
+    api._active_input_event_key_by_turn_id = {}
+    api._utterance_trust_snapshot_by_input_event_key = {}
+    api._vad_turn_detection = {}
+    api._log_user_transcripts_enabled = False
+    api._log_utterance_trust_snapshot = lambda **_kwargs: {"word_count": 2}
+    api._evaluate_attention_gate_admission = lambda **_kwargs: (True, "direct_address")
+    api._log_transcript_attention_decision = lambda **_kwargs: None
+    api._maybe_verify_on_risk_clarify = lambda **_kwargs: asyncio.sleep(0, result=False)
+    api._set_response_gating_verdict = lambda **_kwargs: None
+    api._record_user_input = lambda *_args, **_kwargs: None
+    api._maybe_handle_approval_response = lambda *_args, **_kwargs: asyncio.sleep(0, result=False)
+    api._handle_stop_word = lambda *_args, **_kwargs: asyncio.sleep(0, result=False)
+    api._maybe_handle_research_permission_response = lambda *_args, **_kwargs: asyncio.sleep(0, result=False)
+    api._maybe_handle_research_budget_response = lambda *_args, **_kwargs: asyncio.sleep(0, result=False)
+    api._maybe_apply_late_confirmation_decision = lambda *_args, **_kwargs: asyncio.sleep(0, result=False)
+
+    async def _should_not_run_perception(*_args, **_kwargs):
+        raise AssertionError("perception path should be skipped for simple gesture fastpath")
+
+    async def _should_not_run_research(*_args, **_kwargs):
+        raise AssertionError("research intent path should be skipped for simple gesture fastpath")
+
+    api._analyze_preference_recall_intent = _should_not_run_perception
+    api._apply_perception_memory_verdict = _should_not_run_perception
+    api._maybe_process_research_intent = _should_not_run_research
+
+    asyncio.run(
+        api._handle_input_audio_transcription_completed_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": input_event_key,
+                "transcript": "look left",
+            },
+            api.websocket,
+        )
+    )
+
+    api.loop.close()
+
+
+def test_non_simple_gesture_transcript_does_not_use_fastpath() -> None:
+    api = _api_stub()
+    turn_id = "turn-gesture-nonfastpath"
+    input_event_key = "item-gesture-nonfastpath"
+    api._current_turn_id_or_unknown = lambda: turn_id
+    api._resolve_input_event_key = lambda _event: input_event_key
+    api._extract_transcript = lambda event: str(event.get("transcript") or "")
+    api._active_input_event_key_by_turn_id = {}
+    api._utterance_trust_snapshot_by_input_event_key = {}
+    api._vad_turn_detection = {}
+    api._log_user_transcripts_enabled = False
+    api._log_utterance_trust_snapshot = lambda **_kwargs: {"word_count": 6}
+    api._evaluate_attention_gate_admission = lambda **_kwargs: (True, "direct_address")
+    api._log_transcript_attention_decision = lambda **_kwargs: None
+    api._maybe_verify_on_risk_clarify = lambda **_kwargs: asyncio.sleep(0, result=False)
+    api._set_response_gating_verdict = lambda **_kwargs: None
+    api._record_user_input = lambda *_args, **_kwargs: None
+    api._maybe_handle_approval_response = lambda *_args, **_kwargs: asyncio.sleep(0, result=False)
+    api._handle_stop_word = lambda *_args, **_kwargs: asyncio.sleep(0, result=False)
+    api._maybe_handle_research_permission_response = lambda *_args, **_kwargs: asyncio.sleep(0, result=False)
+    api._maybe_handle_research_budget_response = lambda *_args, **_kwargs: asyncio.sleep(0, result=False)
+    api._maybe_apply_late_confirmation_decision = lambda *_args, **_kwargs: asyncio.sleep(0, result=False)
+
+    calls: list[str] = []
+
+    async def _capture_perception(*_args, **_kwargs):
+        calls.append("perception")
+        return PerceptionMemoryVerdict.empty()
+
+    async def _capture_apply(*_args, **_kwargs):
+        calls.append("apply")
+        return False
+
+    async def _capture_research(*_args, **_kwargs):
+        calls.append("research")
+        return False
+
+    api._analyze_preference_recall_intent = _capture_perception
+    api._apply_perception_memory_verdict = _capture_apply
+    api._maybe_process_research_intent = _capture_research
+
+    asyncio.run(
+        api._handle_input_audio_transcription_completed_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "item_id": input_event_key,
+                "transcript": "look left then look right",
+            },
+            api.websocket,
+        )
+    )
+
+    assert calls == ["perception", "apply", "research"]
+    api.loop.close()
+
+
+def test_simple_gesture_fastpath_candidate_accepts_tilt_aliases() -> None:
+    api = _api_stub()
+
+    assert api._is_simple_gesture_fastpath_candidate("tilt up") is True
+    assert api._is_simple_gesture_fastpath_candidate("tilt down") is True
+
     api.loop.close()
 
 
