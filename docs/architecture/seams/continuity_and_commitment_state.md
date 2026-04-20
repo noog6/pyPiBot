@@ -54,6 +54,9 @@ Maintain short-horizon state of ongoing/unresolved/commitment/blocker items and 
 - Semantic owner parent promotion with cross-turn rebind.
 - Non-deliverable intermediate tool-output done events.
 - Report-step pending vs non-report followthrough guard scopes.
+- Compound clause decomposition must ignore discourse/politeness/vocative fragments
+  (e.g., `now`, `can you`, assistant name) so only executable/request-deliverable
+  steps enter the followthrough ledger.
 - Settlement classification when continuity buckets are empty but `compound_request.final_followup_pending=true` during required-deliverable redrive windows.
 
 ## J) Related seams
@@ -68,4 +71,6 @@ Maintain short-horizon state of ongoing/unresolved/commitment/blocker items and 
 2. `ai/continuity.py::classify_turn_settlement(...)` handling of `compound_request.final_followup_pending` and `next_pending_step_id`.
 3. Runtime continuity handoff payload in `response_terminal_handlers`.
 4. `get_continuity_turn_settlement` call sites.
-5. Logs: `continuity_event_applied`, `continuity_inspection_summary`, `CONTINUITY SUMMARY`.
+5. Compound parser normalization (`_split_compound_request`, `_build_compound_step`,
+   `_normalize_compound_clause`) when step sequences look inflated by phrasing artifacts.
+6. Logs: `continuity_event_applied`, `continuity_inspection_summary`, `CONTINUITY SUMMARY`.

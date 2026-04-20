@@ -154,6 +154,15 @@ _REQUEST_INTENT_RE = re.compile(
     r"\b(?:please|can you|could you|would you|will you|tell me|let me know|show me)\b",
     re.IGNORECASE,
 )
+_COMPOUND_POLITE_PREFIX_RE = re.compile(
+    r"^(?:please\s+)?(?:can|could|would|will)\s+you\b[\s,:-]*",
+    re.IGNORECASE,
+)
+_COMPOUND_DISCOURSE_PREFIX_RE = re.compile(
+    r"^(?:now|okay|ok|well|so|hey)\b[\s,:-]*",
+    re.IGNORECASE,
+)
+_COMPOUND_VOCATIVE_ONLY_RE = re.compile(r"^(?:theo|assistant)\.?$", re.IGNORECASE)
 _GESTURE_DIRECTION_CENTER_RE = re.compile(
     r"\b(?:center|centre|middle|straight ahead|back to center|return to center|come back to center)\b",
     re.IGNORECASE,
@@ -1342,7 +1351,7 @@ class ContinuityLedger:
         unresolved_summary: str | None,
         prior_steps: tuple[CompoundContinuityStep, ...],
     ) -> CompoundContinuityStep | None:
-        normalized = clause.strip()
+        normalized = self._normalize_compound_clause(clause)
         if not normalized:
             return None
         kind = self._classify_compound_step_kind(normalized, unresolved_summary=unresolved_summary)
@@ -1364,6 +1373,23 @@ class ContinuityLedger:
             and report_traits["perception_mode"] == "visual",
             step_output_policy=self._step_output_policy_for_kind(kind),
         )
+
+    def _normalize_compound_clause(self, clause: str) -> str:
+        normalized = clause.strip(" ,.")
+        if not normalized:
+            return ""
+        prior = None
+        while normalized != prior:
+            prior = normalized
+            normalized = _COMPOUND_DISCOURSE_PREFIX_RE.sub("", normalized).strip(" ,.")
+            normalized = _COMPOUND_POLITE_PREFIX_RE.sub("", normalized).strip(" ,.")
+            normalized = re.sub(r"^(?:theo|assistant)\b[\s,:-]*", "", normalized, flags=re.IGNORECASE).strip(" ,.")
+        lowered = normalized.lower().strip(" .?!")
+        if lowered in {"can you", "could you", "would you", "will you", "please", "now"}:
+            return ""
+        if _COMPOUND_VOCATIVE_ONLY_RE.fullmatch(lowered):
+            return ""
+        return normalized
 
 
     @staticmethod
