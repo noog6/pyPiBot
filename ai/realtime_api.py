@@ -8672,7 +8672,7 @@ class RealtimeAPI:
             raw_selection = selection_store.get(normalized_response_id)
             if isinstance(raw_selection, dict):
                 selection_entry = dict(raw_selection)
-        pending_server_auto = self._pending_server_auto_response_for_turn(turn_id=normalized_turn_id)
+        pending_server_auto = self._provisional_response_for_turn(turn_id=normalized_turn_id)
         pending_server_auto_snapshot = asdict(pending_server_auto) if isinstance(pending_server_auto, PendingServerAutoResponse) else None
         queue_entries: list[dict[str, Any]] = []
         queue = getattr(self, "_response_create_queue", deque())
@@ -8793,7 +8793,7 @@ class RealtimeAPI:
         normalized_turn_id = str(snapshot.get("turn_id") or "turn-unknown")
         normalized_response_id = str(snapshot.get("response_id") or "").strip()
         normalized_canonical_key = str(snapshot.get("canonical_key") or "").strip()
-        pending = self._pending_server_auto_response_for_turn(turn_id=normalized_turn_id)
+        pending = self._provisional_response_for_turn(turn_id=normalized_turn_id)
         if stage in {"transcript_final_rebind", "replacement_scheduled", "replacement_created"}:
             active_turn_map = getattr(self, "_active_input_event_key_by_turn_id", {})
             if isinstance(active_turn_map, dict) and normalized_turn_id not in active_turn_map:
@@ -9118,7 +9118,7 @@ class RealtimeAPI:
                 self._set_active_response_state(input_event_key=normalized_replacement)
             if str(getattr(self, "_active_response_canonical_key", "") or "").strip() == old_canonical_key:
                 self._set_active_response_state(canonical_key=new_canonical_key)
-            pending = self._pending_server_auto_response_for_turn(turn_id=turn_id)
+            pending = self._provisional_response_for_turn(turn_id=turn_id)
             active_response_id = str(getattr(self, "_active_response_id", "") or "").strip()
             if (
                 isinstance(pending, PendingServerAutoResponse)
@@ -20322,7 +20322,7 @@ class RealtimeAPI:
                     ):
                         return
             if decision_path == "upgraded_response":
-                pending = self._pending_server_auto_response_for_turn(turn_id=resolved_turn_id)
+                pending = self._provisional_response_for_turn(turn_id=resolved_turn_id)
                 replacement_canonical_key = self._canonical_utterance_key(
                     turn_id=resolved_turn_id,
                     input_event_key=input_event_key,
