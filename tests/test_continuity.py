@@ -238,6 +238,29 @@ def test_compound_parser_preserves_order_for_comma_then_chain() -> None:
     assert brief.compound_request.steps[2].report_intent == "status"
 
 
+def test_compound_parser_drops_politeness_and_vocative_fragments() -> None:
+    ledger = ContinuityLedger()
+
+    ledger.update_from_event(
+        "transcript_final",
+        text=(
+            "Now, can you, Theo, take a look to the left, and then check your diagnostics "
+            "and tell me what they say?"
+        ),
+        source="input_audio_transcription",
+    )
+
+    brief = ledger.build_brief("run-polite-vocative", "turn-1", "polite_vocative_fragments")
+    assert brief.compound_request is not None
+    assert [step.kind for step in brief.compound_request.steps] == ["gesture", "diagnostics", "report"]
+    assert [step.summary for step in brief.compound_request.steps] == [
+        "take a look to the left.",
+        "check your diagnostics.",
+        "tell me what they say?",
+    ]
+    assert brief.compound_request.final_followup_pending is True
+
+
 def test_compound_parser_classifies_diagnostic_reading_chain_between_gestures_and_report() -> None:
     ledger = ContinuityLedger()
 
