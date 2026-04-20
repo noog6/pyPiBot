@@ -11436,6 +11436,47 @@ class RealtimeAPI:
         tool_name = str(metadata.get("tool_name") or "").strip().lower()
         return self._is_low_risk_reversible_gesture_tool(tool_name=tool_name)
 
+    @staticmethod
+    def _is_read_only_helper_tool_for_precedence(*, tool_name: str | None) -> bool:
+        normalized_tool_name = str(tool_name or "").strip().lower()
+        if not normalized_tool_name:
+            return False
+        return normalized_tool_name.startswith("read_") or normalized_tool_name.startswith("recall_")
+
+    def _turn_pending_tool_followups_are_read_only_helpers(self, *, turn_id: str) -> bool:
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return False
+        followup_states = getattr(self, "_tool_followup_state_by_canonical_key", None)
+        if not isinstance(followup_states, dict):
+            return False
+        pending_states = {
+            "scheduled",
+            "blocked_active_response",
+            "scheduled_release",
+            "released_on_response_done",
+            "creating",
+            "created",
+        }
+        metadata_store = self._tool_followup_metadata_store()
+        turn_prefix = f":{normalized_turn_id}:"
+        saw_pending_followup = False
+        for canonical_key, raw_state in followup_states.items():
+            normalized_canonical_key = str(canonical_key or "").strip()
+            if ":tool:" not in normalized_canonical_key or turn_prefix not in normalized_canonical_key:
+                continue
+            state = str(raw_state or "").strip().lower() or "new"
+            if state not in pending_states:
+                continue
+            saw_pending_followup = True
+            metadata = metadata_store.get(normalized_canonical_key)
+            if not isinstance(metadata, dict):
+                return False
+            tool_name = str(metadata.get("tool_name") or "").strip().lower()
+            if not self._is_read_only_helper_tool_for_precedence(tool_name=tool_name):
+                return False
+        return saw_pending_followup
+
     def _response_done_deliverable_decision(
         self,
         *,
@@ -11524,6 +11565,20 @@ class RealtimeAPI:
             # terminal-selected while any tool followup lineage for the turn is
             # still pending, including status-only gesture followups.
             turn_has_pending_tool_followup = True
+        if (
+            normalized_origin in {"server_auto", "upgraded_response", "assistant_message"}
+            and selected_response_has_terminal_text_evidence
+            and turn_has_pending_tool_followup
+            and self._turn_pending_tool_followups_are_read_only_helpers(turn_id=turn_id)
+        ):
+            turn_has_pending_tool_followup = False
+            logger.info(
+                "terminal_selection_read_only_helper_precedence_relaxed run_id=%s turn_id=%s origin=%s response_id=%s reason=parent_terminal_text_evidence",
+                self._current_run_id() or "",
+                turn_id,
+                normalized_origin,
+                str(response_id or "").strip() or "none",
+            )
         followthrough_chain_remaining = self._response_done_followthrough_chain_remaining(
             turn_id=turn_id,
             origin=normalized_origin,
