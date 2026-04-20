@@ -205,3 +205,24 @@ def test_audio_deferral_waiter_terminates_when_pending_response_changes() -> Non
 
     assert api._started is False
     assert "turn-1" not in api._server_auto_audio_waiters_by_turn_id
+
+
+def test_should_start_deferred_audio_uses_speech_start_gate_contract_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    api = _api_stub()
+    calls: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(
+        api,
+        "_speech_start_gate_hold_active",
+        lambda *, turn_id, response_id=None: calls.append((turn_id, response_id)) or False,
+    )
+    api._active_response_id = "resp-1"
+    api._get_response_gating_verdict = lambda **_kwargs: None
+
+    should_start = api._should_start_deferred_server_auto_audio(
+        turn_id="turn-1",
+        input_event_key="item-1",
+        response_id="resp-1",
+    )
+
+    assert should_start is True
+    assert calls == [("turn-1", "resp-1")]

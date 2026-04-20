@@ -589,9 +589,15 @@ class ResponseCreateRuntime:
             response_metadata=response_metadata,
         )
         pending_server_auto_present = False
+        provisional_response_for_turn = getattr(api, "_provisional_response_for_turn", None)
         pending_server_auto_for_turn = getattr(api, "_pending_server_auto_response_for_turn", None)
-        if callable(pending_server_auto_for_turn):
-            pending_server_auto_present = pending_server_auto_for_turn(turn_id=turn_id) is not None
+        pending_lookup = (
+            provisional_response_for_turn
+            if callable(provisional_response_for_turn)
+            else pending_server_auto_for_turn
+        )
+        if callable(pending_lookup):
+            pending_server_auto_present = pending_lookup(turn_id=turn_id) is not None
         attention_gate_closed = False
         gating_verdict = getattr(api, "_get_response_gating_verdict", None)
         if callable(gating_verdict):

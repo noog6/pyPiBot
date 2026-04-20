@@ -1698,3 +1698,52 @@ def test_preference_recall_analysis_single_request_keeps_companion_gesture_unset
 
     assert verdict.preference_recall_requested is True
     assert verdict.companion_gesture_tool_request is None
+
+
+def test_server_auto_takeover_request_prefers_provisional_response_facade() -> None:
+    controller = SimpleNamespace(
+        _active_response_origin="server_auto",
+        _response_in_flight=True,
+        _active_response_id="resp-provisional",
+        _current_response_turn_id="turn_1",
+        _active_response_input_event_key="evt_1",
+        _active_server_auto_input_event_key="evt_legacy",
+        _is_provisional_response=lambda *, response_id: True,
+        _canonical_utterance_key=lambda *, turn_id, input_event_key: f"{turn_id}:{input_event_key}",
+        _provisional_response_for_turn=lambda *, turn_id: SimpleNamespace(canonical_key=f"{turn_id}:evt_1"),
+        _pending_server_auto_response_for_turn=lambda *, turn_id: SimpleNamespace(canonical_key=f"{turn_id}:evt_other"),
+    )
+
+    allowed, reason = preference_recall_runtime._evaluate_server_auto_takeover_request(
+        controller,
+        resolved_turn_id="turn_1",
+        input_event_key="evt_1",
+        hit=True,
+    )
+
+    assert allowed is True
+    assert reason == "ownership_match"
+
+
+def test_server_auto_takeover_request_falls_back_to_legacy_pending_lookup() -> None:
+    controller = SimpleNamespace(
+        _active_response_origin="server_auto",
+        _response_in_flight=True,
+        _active_response_id="resp-provisional",
+        _current_response_turn_id="turn_1",
+        _active_response_input_event_key="evt_legacy",
+        _active_server_auto_input_event_key="evt_legacy",
+        _is_provisional_response=lambda *, response_id: True,
+        _canonical_utterance_key=lambda *, turn_id, input_event_key: f"{turn_id}:{input_event_key}",
+        _pending_server_auto_response_for_turn=lambda *, turn_id: SimpleNamespace(canonical_key=f"{turn_id}:evt_legacy"),
+    )
+
+    allowed, reason = preference_recall_runtime._evaluate_server_auto_takeover_request(
+        controller,
+        resolved_turn_id="turn_1",
+        input_event_key="evt_legacy",
+        hit=True,
+    )
+
+    assert allowed is True
+    assert reason == "ownership_match"

@@ -250,9 +250,15 @@ def _evaluate_server_auto_takeover_request(
                 or ""
             ).strip()
         pending_canonical_key = ""
+        provisional_response_for_turn = getattr(controller, "_provisional_response_for_turn", None)
         pending_server_auto_for_turn = getattr(controller, "_pending_server_auto_response_for_turn", None)
-        if callable(pending_server_auto_for_turn):
-            pending_server_auto = pending_server_auto_for_turn(turn_id=resolved_turn_id)
+        pending_lookup = (
+            provisional_response_for_turn
+            if callable(provisional_response_for_turn)
+            else pending_server_auto_for_turn
+        )
+        if callable(pending_lookup):
+            pending_server_auto = pending_lookup(turn_id=resolved_turn_id)
             pending_canonical_key = str(getattr(pending_server_auto, "canonical_key", "") or "").strip()
         if transcript_input_event_key and active_input_event_key and transcript_input_event_key == active_input_event_key:
             return True, "ownership_match"
