@@ -11477,6 +11477,42 @@ class RealtimeAPI:
                 return False
         return saw_pending_followup
 
+    def _turn_pending_tool_followups_are_status_only_low_risk_gestures(self, *, turn_id: str) -> bool:
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return False
+        followup_states = getattr(self, "_tool_followup_state_by_canonical_key", None)
+        if not isinstance(followup_states, dict):
+            return False
+        pending_states = {
+            "scheduled",
+            "blocked_active_response",
+            "scheduled_release",
+            "released_on_response_done",
+            "creating",
+            "created",
+        }
+        metadata_store = self._tool_followup_metadata_store()
+        turn_prefix = f":{normalized_turn_id}:"
+        saw_pending_followup = False
+        for canonical_key, raw_state in followup_states.items():
+            normalized_canonical_key = str(canonical_key or "").strip()
+            if ":tool:" not in normalized_canonical_key or turn_prefix not in normalized_canonical_key:
+                continue
+            state = str(raw_state or "").strip().lower() or "new"
+            if state not in pending_states:
+                continue
+            saw_pending_followup = True
+            if not self._tool_followup_is_status_only_gesture(canonical_key=normalized_canonical_key):
+                return False
+            metadata = metadata_store.get(normalized_canonical_key)
+            if not isinstance(metadata, dict):
+                return False
+            tool_name = str(metadata.get("tool_name") or "").strip().lower()
+            if not self._is_low_risk_reversible_gesture_tool(tool_name=tool_name):
+                return False
+        return saw_pending_followup
+
     def _response_done_deliverable_decision(
         self,
         *,
@@ -11600,6 +11636,21 @@ class RealtimeAPI:
             # While a required-deliverable report step is still pending, only the
             # dedicated tool-output followthrough path may become terminal.
             turn_has_pending_tool_followup = True
+        elif (
+            normalized_origin == "server_auto"
+            and selected_response_has_terminal_text_evidence
+            and turn_has_pending_tool_followup
+            and not followthrough_non_report_steps_remaining
+            and self._turn_pending_tool_followups_are_status_only_low_risk_gestures(turn_id=turn_id)
+        ):
+            turn_has_pending_tool_followup = False
+            logger.info(
+                "terminal_selection_status_only_gesture_precedence_relaxed run_id=%s turn_id=%s origin=%s response_id=%s reason=parent_terminal_text_evidence",
+                self._current_run_id() or "",
+                turn_id,
+                normalized_origin,
+                str(response_id or "").strip() or "none",
+            )
 
         response_done_is_empty = self._is_empty_response_done(canonical_key=done_canonical_key)
         if (

@@ -1501,6 +1501,150 @@ def test_handle_response_done_server_auto_cannot_win_terminal_selection_while_re
     assert kwargs["complete_required_deliverable"] == ""
 
 
+def test_response_done_deliverable_arbitration_relaxes_server_auto_for_status_only_gesture_followups() -> None:
+    api = _make_api()
+    api._turn_has_pending_tool_followup = RealtimeAPI._turn_has_pending_tool_followup.__get__(api, RealtimeAPI)
+    api._selected_response_has_terminal_text_evidence = lambda **_kwargs: True
+    api._tool_followup_state_by_canonical_key = {"run-test:turn_1:tool:call_1": "created"}
+    api._tool_followup_metadata_by_canonical_key = {
+        "run-test:turn_1:tool:call_1": {
+            "tool_name": "gesture_look_right",
+            "tool_followup_status_only": "true",
+            "parent_turn_id": "turn_1",
+            "parent_input_event_key": "item_parent",
+        }
+    }
+    api._response_done_followthrough_chain_remaining = lambda **_kwargs: False
+
+    decision = api._response_done_deliverable_arbitration(
+        turn_id="turn_1",
+        origin="server_auto",
+        delivery_state_before_done="in_progress",
+        active_response_was_provisional=False,
+        done_canonical_key="turn_1::item_parent",
+        transcript_final_seen=True,
+        input_event_key="item_parent",
+        response_id="resp_server_auto_status_only",
+    )
+
+    assert decision.selected is True
+    assert decision.reason_code == "normal"
+
+
+def test_response_done_deliverable_arbitration_keeps_required_deliverable_protection_for_server_auto_status_only_gesture_followups() -> None:
+    api = _make_api()
+    api._turn_has_pending_tool_followup = RealtimeAPI._turn_has_pending_tool_followup.__get__(api, RealtimeAPI)
+    api._selected_response_has_terminal_text_evidence = lambda **_kwargs: True
+    api._turn_has_active_required_deliverable_step = lambda **_kwargs: True
+    api._tool_followup_state_by_canonical_key = {"run-test:turn_1:tool:call_1": "created"}
+    api._tool_followup_metadata_by_canonical_key = {
+        "run-test:turn_1:tool:call_1": {
+            "tool_name": "gesture_look_right",
+            "tool_followup_status_only": "true",
+            "parent_turn_id": "turn_1",
+            "parent_input_event_key": "item_parent",
+        }
+    }
+    api._response_done_followthrough_chain_remaining = lambda **_kwargs: False
+
+    decision = api._response_done_deliverable_arbitration(
+        turn_id="turn_1",
+        origin="server_auto",
+        delivery_state_before_done="in_progress",
+        active_response_was_provisional=False,
+        done_canonical_key="turn_1::item_parent",
+        transcript_final_seen=True,
+        input_event_key="item_parent",
+        response_id="resp_server_auto_status_only_required",
+    )
+
+    assert decision.selected is False
+    assert decision.reason_code == "tool_followup_precedence"
+
+
+def test_response_done_deliverable_arbitration_keeps_precedence_for_non_status_or_non_gesture_followups() -> None:
+    api = _make_api()
+    api._turn_has_pending_tool_followup = RealtimeAPI._turn_has_pending_tool_followup.__get__(api, RealtimeAPI)
+    api._selected_response_has_terminal_text_evidence = lambda **_kwargs: True
+    api._tool_followup_state_by_canonical_key = {"run-test:turn_1:tool:call_1": "created"}
+    api._tool_followup_metadata_by_canonical_key = {
+        "run-test:turn_1:tool:call_1": {
+            "tool_name": "perform_research",
+            "tool_followup_status_only": "false",
+            "parent_turn_id": "turn_1",
+            "parent_input_event_key": "item_parent",
+        }
+    }
+    api._response_done_followthrough_chain_remaining = lambda **_kwargs: False
+
+    decision = api._response_done_deliverable_arbitration(
+        turn_id="turn_1",
+        origin="server_auto",
+        delivery_state_before_done="in_progress",
+        active_response_was_provisional=False,
+        done_canonical_key="turn_1::item_parent",
+        transcript_final_seen=True,
+        input_event_key="item_parent",
+        response_id="resp_server_auto_non_gesture",
+    )
+
+    assert decision.selected is False
+    assert decision.reason_code == "tool_followup_precedence"
+
+
+def test_handle_response_done_server_auto_status_only_gesture_followthrough_settles_without_tool_output_winner() -> None:
+    api = _make_api()
+    api._turn_has_pending_tool_followup = RealtimeAPI._turn_has_pending_tool_followup.__get__(api, RealtimeAPI)
+    api._active_response_origin = "server_auto"
+    api._active_response_input_event_key = "item_parent"
+    api._active_response_canonical_key = "turn_1::item_parent"
+    api._active_response_id = "resp_server_auto_status_only_settle"
+    api._terminal_response_text_by_response_id = {
+        "resp_server_auto_status_only_settle": "Done, status captured."
+    }
+    api._selected_response_has_terminal_text_evidence = lambda **_kwargs: True
+    api._tool_followup_state_by_canonical_key = {"run-test:turn_1:tool:call_1": "created"}
+    api._tool_followup_metadata_by_canonical_key = {
+        "run-test:turn_1:tool:call_1": {
+            "tool_name": "gesture_look_right",
+            "tool_followup_status_only": "true",
+            "parent_turn_id": "turn_1",
+            "parent_input_event_key": "item_parent",
+        }
+    }
+    api._response_done_followthrough_chain_remaining = lambda **_kwargs: False
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    api._semantic_owner_decision_for_response = Mock(
+        return_value=SimpleNamespace(
+            semantic_owner_canonical_key="turn_1::item_parent",
+            parent_turn_id="turn_1",
+            parent_input_event_key="item_parent",
+            selected_candidate_id="semantic_owner_parent",
+            reason_code="normal",
+        )
+    )
+    apply_selection = Mock()
+    api._apply_terminal_deliverable_selection = apply_selection
+
+    asyncio.run(
+        api.handle_response_done(
+            {"type": "response.done", "response": {"id": "resp_server_auto_status_only_settle"}}
+        )
+    )
+
+    apply_selection.assert_called_once()
+    assert apply_selection.call_args.kwargs["selected"] is True
+    assert apply_selection.call_args.kwargs["selection_reason"] == "normal"
+
+
 def test_handle_response_done_required_deliverable_followthrough_with_terminal_text_completes_contract() -> None:
     api = _make_api()
     api._active_response_origin = "tool_output"
