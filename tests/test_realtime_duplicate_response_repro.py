@@ -6208,6 +6208,118 @@ def test_send_followthrough_runtime_status_update_deduplicates_per_step_call() -
     assert payload["required_deliverable_owed"] is True
 
 
+def test_execute_function_call_local_companion_emits_runtime_status_when_descriptor_missing(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_response_turn_id = "turn_local_compgest_fallback"
+    api._active_input_event_key_by_turn_id["turn_local_compgest_fallback"] = "item_parent_local_compgest_fallback"
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._intent_ledger = {}
+    api._resolve_continuity_tool_event_owner_turn = (
+        lambda *, fallback_turn_id: ("turn_local_compgest_fallback", False, "")
+    )
+    api._deterministic_followthrough_runtime_descriptor = lambda *, turn_id: None
+
+    def _fake_followup_event(**_kwargs):
+        return (
+            {
+                "type": "response.create",
+                "response": {
+                    "metadata": {
+                        "tool_followup_create_suppressed": "true",
+                        "tool_followup_create_suppression_reason": "gesture_intermediate_inject_only",
+                    }
+                },
+            },
+            api._canonical_utterance_key(
+                turn_id="turn_local_compgest_fallback",
+                input_event_key="tool:compgest_chain_step_9",
+            ),
+        )
+
+    api._build_tool_followup_response_create_event = _fake_followup_event
+
+    async def _fake_dispatch(**_kwargs):
+        return {"outcome": "allow", "executed": True}
+
+    api._submit_companion_gesture_tool_request = _fake_dispatch
+
+    async def _fake_gesture(**_kwargs):
+        return {"ok": True, "motion_request_key": "mrk-local-compgest-fallback"}
+
+    monkeypatch.setitem(
+        __import__("ai.tools", fromlist=["function_map"]).function_map,
+        "gesture_look_left",
+        _fake_gesture,
+    )
+
+    asyncio.run(api.execute_function_call("gesture_look_left", "compgest_chain_step_9", {"target": "left"}, ws))
+
+    conversation_item_events = [event for event in ws.sent if event.get("type") == "conversation.item.create"]
+    assert len(conversation_item_events) == 1
+    runtime_status_payload = json.loads(conversation_item_events[0]["item"]["content"][0]["text"])
+    assert runtime_status_payload["type"] == "followthrough_runtime_status"
+    assert runtime_status_payload["turn_id"] == "turn_local_compgest_fallback"
+    assert runtime_status_payload["step_id"] == "gesture_call:compgest_chain_step_9"
+    assert runtime_status_payload["tool_name"] == "gesture_look_left"
+    assert [event for event in ws.sent if event.get("type") == "response.create"] == []
+
+
+def test_execute_function_call_local_companion_inject_only_stays_non_user_facing_with_fallback_runtime_status(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_response_turn_id = "turn_local_compgest_silent"
+    api._active_input_event_key_by_turn_id["turn_local_compgest_silent"] = "item_parent_local_compgest_silent"
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._intent_ledger = {}
+    api._resolve_continuity_tool_event_owner_turn = lambda *, fallback_turn_id: ("turn_local_compgest_silent", False, "")
+    api._deterministic_followthrough_runtime_descriptor = lambda *, turn_id: None
+
+    def _fake_followup_event(**_kwargs):
+        return (
+            {
+                "type": "response.create",
+                "response": {
+                    "metadata": {
+                        "tool_followup_create_suppressed": "true",
+                        "tool_followup_create_suppression_reason": "gesture_intermediate_inject_only",
+                    }
+                },
+            },
+            api._canonical_utterance_key(
+                turn_id="turn_local_compgest_silent",
+                input_event_key="tool:compgest_chain_step_silent",
+            ),
+        )
+
+    api._build_tool_followup_response_create_event = _fake_followup_event
+
+    async def _fake_dispatch(**_kwargs):
+        return {"outcome": "allow", "executed": True}
+
+    api._submit_companion_gesture_tool_request = _fake_dispatch
+
+    async def _fake_gesture(**_kwargs):
+        return {"ok": True, "motion_request_key": "mrk-local-compgest-silent"}
+
+    monkeypatch.setitem(
+        __import__("ai.tools", fromlist=["function_map"]).function_map,
+        "gesture_look_right",
+        _fake_gesture,
+    )
+
+    asyncio.run(
+        api.execute_function_call("gesture_look_right", "compgest_chain_step_silent", {"target": "right"}, ws)
+    )
+
+    assert [event for event in ws.sent if event.get("type") == "response.create"] == []
+    assert len([event for event in ws.sent if event.get("type") == "conversation.item.create"]) == 1
+
+
 def test_deterministic_inject_only_dispatch_dedupe_only_latches_after_executed() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
@@ -6265,6 +6377,11 @@ def test_deterministic_inject_only_no_descriptor_dispatches_required_deliverable
     api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True, **_kwargs: False
     api.get_gesture_motion_state = lambda *, tool_call_id: {"status": "completed"}
     api._parent_input_event_key_for_tool_followup = lambda *, turn_id: "item_parent_report_dispatch"
+    api._buffer_followthrough_completion_fact(
+        turn_id="turn_report_dispatch",
+        tool_name="gesture_look_center",
+        call_id="call_report_dispatch",
+    )
     sent: list[dict[str, object]] = []
 
     async def _fake_send_response_create(websocket, event, origin, **_kwargs):
@@ -6287,8 +6404,11 @@ def test_deterministic_inject_only_no_descriptor_dispatches_required_deliverable
     assert sent[0]["origin"] == "tool_output"
     assert metadata["followthrough_step_output_policy"] == "required_deliverable"
     assert metadata["followthrough_post_completion_reason"] == "required_deliverable_owed"
+    assert "followthrough_catchup_payload" in metadata
+    assert "gesture_look_center" in metadata["followthrough_catchup_payload"]
     assert sent[0]["event"]["response"]["tool_choice"] == "none"
     assert "Do not call tools." in sent[0]["event"]["response"]["instructions"]
+    assert "Runtime catch-up:" in sent[0]["event"]["response"]["instructions"]
 
 
 def test_deterministic_inject_only_required_deliverable_can_require_tool_execution() -> None:

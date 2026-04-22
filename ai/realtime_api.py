@@ -21591,9 +21591,12 @@ class RealtimeAPI:
                         cross_turn_rebind_reason=continuity_rebind_reason,
                     )
                     if function_name.startswith("gesture_"):
-                        if self._turn_followthrough_chain_remaining(
+                        non_report_followthrough_remaining = self._turn_followthrough_chain_remaining(
                             turn_id=continuity_turn_id,
                             include_report_followup=False,
+                        )
+                        if non_report_followthrough_remaining or self._turn_has_active_required_deliverable_step(
+                            turn_id=continuity_turn_id
                         ):
                             self._buffer_followthrough_completion_fact(
                                 turn_id=continuity_turn_id,
@@ -21673,16 +21676,18 @@ class RealtimeAPI:
                 runtime_step_descriptor = self._deterministic_followthrough_runtime_descriptor(
                     turn_id=continuity_turn_id
                 )
-                if runtime_step_descriptor is not None:
-                    await self._send_followthrough_runtime_status_update(
-                        websocket,
-                        turn_id=continuity_turn_id,
-                        step_id=str(runtime_step_descriptor.get("step_id") or "").strip(),
-                        step_kind="gesture",
-                        tool_name=function_name,
-                        call_id=call_id,
-                        completion_status="completed",
-                    )
+                runtime_step_id = str((runtime_step_descriptor or {}).get("step_id") or "").strip()
+                if not runtime_step_id:
+                    runtime_step_id = f"gesture_call:{call_id}"
+                await self._send_followthrough_runtime_status_update(
+                    websocket,
+                    turn_id=continuity_turn_id,
+                    step_id=runtime_step_id,
+                    step_kind="gesture",
+                    tool_name=function_name,
+                    call_id=call_id,
+                    completion_status="completed",
+                )
         function_call_output = {
             "type": "conversation.item.create",
             "item": {
@@ -22064,6 +22069,12 @@ class RealtimeAPI:
                 "instructions": instructions,
             },
         }
+        catchup_payload = self._consume_followthrough_catchup_payload(turn_id=turn_id)
+        if catchup_payload:
+            response_event["response"]["metadata"]["followthrough_catchup_payload"] = catchup_payload
+            response_event["response"]["instructions"] = (
+                f"{instructions} Runtime catch-up: {catchup_payload}."
+            )
         if required_tool_name:
             response_event["response"]["metadata"]["followthrough_required_tool_name"] = required_tool_name
             response_event["response"]["metadata"]["tool_followup_required_tool_name"] = required_tool_name

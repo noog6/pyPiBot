@@ -442,6 +442,55 @@ def test_dispatch_required_deliverable_followthrough_uses_no_tools_for_non_tool_
     assert "followthrough_required_tool_name" not in metadata
 
 
+def test_dispatch_required_deliverable_followthrough_consumes_catchup_payload_when_present() -> None:
+    api = _make_api()
+    api._turn_has_active_required_deliverable_step = lambda *, turn_id: turn_id == "turn_1"
+    api._parent_input_event_key_for_tool_followup = lambda *, turn_id: "item_1"
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
+        compound_request=types.SimpleNamespace(
+            active_step_index=1,
+            steps=(
+                types.SimpleNamespace(kind="gesture", status="completed", step_output_policy="status_only", summary="look center"),
+                types.SimpleNamespace(
+                    kind="report",
+                    status="pending",
+                    step_output_policy="required_deliverable",
+                    summary="say done",
+                ),
+            ),
+        )
+    )
+    api._buffer_followthrough_completion_fact(
+        turn_id="turn_1",
+        tool_name="gesture_look_center",
+        call_id="call_1",
+    )
+
+    sent_events: list[dict[str, object]] = []
+
+    async def _fake_send_response_create(_websocket, response_event, **_kwargs):
+        sent_events.append(response_event)
+        return True
+
+    api._send_response_create = _fake_send_response_create
+
+    dispatched = asyncio.run(
+        api._dispatch_required_deliverable_followthrough_response_create(
+            websocket=None,
+            turn_id="turn_1",
+        )
+    )
+
+    assert dispatched is True
+    assert len(sent_events) == 1
+    response_payload = sent_events[0]["response"]
+    metadata = response_payload["metadata"]
+    assert "followthrough_catchup_payload" in metadata
+    assert "gesture_look_center" in metadata["followthrough_catchup_payload"]
+    assert "Runtime catch-up:" in response_payload["instructions"]
+    assert api._consume_followthrough_catchup_payload(turn_id="turn_1") == ""
+
+
 def test_dispatch_required_deliverable_followthrough_increments_input_event_key_with_retry_budget() -> None:
     api = _make_api()
     api._required_deliverable_materialization_retry_counts = {"turn_1": 2}
