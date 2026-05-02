@@ -79,9 +79,9 @@ async def read_environment() -> dict[str, Any]:
     return tool_runtime.read_environment()
 
 
-async def read_runtime_diagnostics() -> dict[str, Any]:
+async def read_runtime_diagnostics(mode: str = "full") -> dict[str, Any]:
     """Return the current runtime diagnostics bundle, including continuity state."""
-    return tool_runtime.read_runtime_diagnostics()
+    return tool_runtime.read_runtime_diagnostics(mode=mode)
 
 
 async def get_session_ledger_status(
@@ -582,6 +582,8 @@ tools.append(
             "Fetch your current runtime diagnostics bundle. This includes connected/ready session health, "
             "memory retrieval health, rate limits, sensor aggregation counters, silent-turn incidents, and a "
             "compact read-only continuity snapshot with stance, settlement, and bounded counts. "
+            "Use mode='summary' for compact conversational diagnostics and mode='full' for deep debugging. "
+            "Default mode is 'full' for backward compatibility. "
             "Use this when the user asks for diagnostics or runtime continuity state, including questions like "
             "'what is your continuity state?', 'what diagnostics do you have right now?', "
             "'are you in the middle of something?', or 'do you still have an unresolved follow-up?'. "
@@ -590,7 +592,14 @@ tools.append(
         ),
         "parameters": {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": ["summary", "full"],
+                    "default": "full",
+                    "description": "summary returns compact diagnostics; full returns the complete diagnostics payload.",
+                },
+            },
             "required": [],
         },
     }
