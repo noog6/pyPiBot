@@ -140,6 +140,7 @@ from ai.interruption_recovery import (
 )
 from ai.reflection import ReflectionCoordinator, ReflectionContext
 from ai.stimuli_coordinator import StimuliCoordinator
+from ai.situation_snapshot import SituationSnapshot, build_situation_snapshot
 from ai.governance import (
     ActionPacket,
     GovernanceLayer,
@@ -4119,6 +4120,11 @@ class RealtimeAPI:
         """Expose the existing runtime diagnostics bundle after init dependencies are ready."""
 
         tool_runtime.set_runtime_diagnostics_provider(self.get_session_health)
+
+    def build_situation_snapshot(self) -> SituationSnapshot:
+        """Build a read-only projection of current runtime/service situation."""
+
+        return build_situation_snapshot(self)
 
     def get_session_health(self) -> dict[str, Any]:
         injection_ready_result = self.is_ready_for_injections(with_reason=True)

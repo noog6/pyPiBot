@@ -176,6 +176,12 @@ def _collect_host_status() -> dict[str, Any]:
 
 
 def _read_battery_snapshot() -> dict[str, Any]:
+    return read_cached_battery_status()
+
+
+def read_cached_battery_status() -> dict[str, Any]:
+    """Return cached battery-monitor telemetry without triggering fresh sensor reads."""
+
     latest_event = BatteryMonitor.get_instance().get_latest_event()
     if latest_event is None:
         return {
@@ -274,6 +280,25 @@ def get_tool_call_motion_state(tool_call_id: str | None) -> dict[str, Any] | Non
         return {key: value for key, value in state.items() if not str(key).startswith("_")}
 
 
+
+
+def read_motion_status(*, limit: int = 20) -> dict[str, Any]:
+    """Return a read-only summary of tracked motion requests."""
+
+    bounded_limit = max(0, int(limit))
+    with _motion_state_lock:
+        states = [
+            {key: value for key, value in state.items() if not str(key).startswith("_")}
+            for state in _motion_state_by_request_key.values()
+            if isinstance(state, dict)
+        ]
+    states.sort(key=lambda item: float(item.get("queued_monotonic_s") or 0.0), reverse=True)
+    active = [item for item in states if str(item.get("status") or "") in {"queued", "started"}]
+    return {
+        "active_request_count": len(active),
+        "is_busy": bool(active),
+        "active_requests": active[:bounded_limit],
+    }
 def is_tool_call_motion_completed(tool_call_id: str | None) -> bool | None:
     state = get_tool_call_motion_state(tool_call_id)
     if state is None:
