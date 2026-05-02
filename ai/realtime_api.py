@@ -4119,12 +4119,32 @@ class RealtimeAPI:
     def _register_runtime_diagnostics_provider(self) -> None:
         """Expose the existing runtime diagnostics bundle after init dependencies are ready."""
 
-        tool_runtime.set_runtime_diagnostics_provider(self.get_session_health)
+        tool_runtime.set_runtime_diagnostics_provider(self.get_runtime_diagnostics)
 
-    def build_situation_snapshot(self) -> SituationSnapshot:
+    def build_situation_snapshot(self, *, health: dict[str, Any] | None = None) -> SituationSnapshot:
         """Build a read-only projection of current runtime/service situation."""
 
-        return build_situation_snapshot(self)
+        return build_situation_snapshot(self, health=health)
+
+    def get_situation_diagnostics(self) -> dict[str, Any]:
+        """Return read-only SituationSnapshot diagnostics for status tooling."""
+
+        health = self.get_session_health()
+        snapshot = self.build_situation_snapshot(health=health)
+        return {
+            "summary": snapshot.compact_summary(),
+            "snapshot": snapshot.to_dict(),
+        }
+
+    def get_runtime_diagnostics(self) -> dict[str, Any]:
+        """Return runtime diagnostics plus a compact/current situation projection."""
+
+        health = self.get_session_health()
+        snapshot = self.build_situation_snapshot(health=health)
+        diagnostics = dict(health)
+        diagnostics["situation_summary"] = snapshot.compact_summary()
+        diagnostics["situation_snapshot"] = snapshot.to_dict()
+        return diagnostics
 
     def get_session_health(self) -> dict[str, Any]:
         injection_ready_result = self.is_ready_for_injections(with_reason=True)

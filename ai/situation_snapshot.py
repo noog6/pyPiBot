@@ -94,6 +94,42 @@ class SituationSnapshot:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    def compact_summary(self) -> str:
+        obligation = "none"
+        continuity = self.continuity.continuity
+        if isinstance(continuity, dict):
+            counts = continuity.get("counts")
+            if isinstance(counts, dict):
+                unresolved = int(counts.get("unresolved", 0) or 0)
+                commitments = int(counts.get("commitments", 0) or 0)
+                if unresolved > 0:
+                    obligation = f"unresolved:{unresolved}"
+                elif commitments > 0:
+                    obligation = f"commitments:{commitments}"
+        queue_depth = int(self.response.pending_response_create_queue_depth or 0)
+        tool_count = int(self.tools.tool_followup_state_count or 0)
+        model_name = self.model.realtime_model or "unknown"
+        battery_voltage = self.battery.get("voltage") if isinstance(self.battery, dict) else "unknown"
+        if isinstance(battery_voltage, bool):
+            battery_token = "unknown"
+        elif isinstance(battery_voltage, (int, float)):
+            battery_token = f"{battery_voltage:.2f}".rstrip("0").rstrip(".")
+        elif isinstance(battery_voltage, str) and battery_voltage.strip():
+            battery_token = battery_voltage.strip()
+        else:
+            battery_token = "unknown"
+        return (
+            f"state={self.interaction.state} "
+            f"response_in_flight={str(self.response.response_in_flight).lower()} "
+            f"queue={queue_depth} "
+            f"obligation={obligation} "
+            f"tools={tool_count} "
+            f"motion={'busy' if self.motion.is_busy else 'idle'} "
+            f"battery={battery_token} "
+            f"startup={'ready' if self.startup.injection_ready else 'not_ready'} "
+            f"model={model_name}"
+        )
+
 
 def _copy_mapping(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
@@ -101,14 +137,15 @@ def _copy_mapping(value: Any) -> dict[str, Any]:
     return {}
 
 
-def build_situation_snapshot(runtime: Any) -> SituationSnapshot:
+def build_situation_snapshot(runtime: Any, *, health: dict[str, Any] | None = None) -> SituationSnapshot:
     now = time.time()
     monotonic_now = time.monotonic()
 
     pending = getattr(runtime, "_pending_response_create", None)
     queue = list(getattr(runtime, "_response_create_queue", ()) or ())
     tool_states = _copy_mapping(getattr(runtime, "_tool_followup_state_by_canonical_key", {}))
-    health = runtime.get_session_health() if callable(getattr(runtime, "get_session_health", None)) else {}
+    if health is None:
+        health = runtime.get_session_health() if callable(getattr(runtime, "get_session_health", None)) else {}
 
     battery_payload = _copy_mapping(tool_runtime.read_cached_battery_status())
     motion_payload = tool_runtime.read_motion_status(limit=20)
