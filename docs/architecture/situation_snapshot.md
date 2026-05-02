@@ -14,3 +14,20 @@
 - future harness-owned situated-core work (observability first)
 
 Authoritative seams remain unchanged (interaction lifecycle, response-create arbitration/runtime, continuity, tool governance/followup, and service owners).
+
+## Phase 2 observability exposure
+- `SituationSnapshot.compact_summary()` provides a concise deterministic summary string for humans, logs, and future context plumbing.
+- `RealtimeAPI.get_runtime_diagnostics()` now includes:
+  - `situation_summary` (compact string)
+  - `situation_snapshot` (serialized `to_dict()` payload)
+- `RealtimeAPI.get_situation_diagnostics()` provides a dedicated situation bundle with both summary and full snapshot.
+
+### Recursion guardrail
+- Snapshot building accepts optional precomputed health:
+  - `build_situation_snapshot(runtime, *, health: dict[str, Any] | None = None)`
+- Diagnostics paths compute `health` once and pass it into snapshot construction, avoiding `get_session_health()` recursion.
+
+### Side-effect + noise guardrails
+- Snapshot reads from existing read-only surfaces only (cached battery telemetry and motion status introspection).
+- No new runtime behavior is triggered by diagnostics reads (no response creation, model output, speech, tool calls, camera capture, or motion execution).
+- No per-turn INFO log emission is added; snapshot visibility is via explicit diagnostics reads and compact summary surfaces.

@@ -91,9 +91,9 @@ def test_read_runtime_diagnostics_reports_unavailable_without_provider() -> None
         tool_runtime.set_runtime_diagnostics_provider(original_provider)
 
 
-def test_realtime_api_registers_session_health_as_runtime_diagnostics_provider(monkeypatch) -> None:
+def test_realtime_api_registers_runtime_diagnostics_provider(monkeypatch) -> None:
     api = RealtimeAPI.__new__(RealtimeAPI)
-    api.get_session_health = lambda: {"ready": True}
+    api.get_runtime_diagnostics = lambda: {"ready": True}
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(
@@ -107,6 +107,32 @@ def test_realtime_api_registers_session_health_as_runtime_diagnostics_provider(m
     provider = captured.get("provider")
     assert callable(provider)
     assert provider() == {"ready": True}
+
+
+def test_get_runtime_diagnostics_includes_situation_without_recursion(monkeypatch) -> None:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    call_counts = {"health": 0}
+
+    def _health() -> dict[str, object]:
+        call_counts["health"] += 1
+        return {"ready": True, "continuity": {"counts": {"unresolved": 0, "commitments": 0}}}
+
+    class _SnapshotStub:
+        def compact_summary(self) -> str:
+            return "state=listening queue=0"
+
+        def to_dict(self) -> dict[str, object]:
+            return {"state": "listening"}
+
+    api.get_session_health = _health
+    api.build_situation_snapshot = lambda health=None: _SnapshotStub()
+
+    payload = RealtimeAPI.get_runtime_diagnostics(api)
+
+    assert call_counts["health"] == 1
+    assert payload["ready"] is True
+    assert payload["situation_summary"] == "state=listening queue=0"
+    assert payload["situation_snapshot"] == {"state": "listening"}
 
 
 def test_collect_host_status_includes_stable_unknown_reasons(monkeypatch) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import json
 
 from ai.situation_snapshot import SituationSnapshot, build_situation_snapshot
 from services import tool_runtime
@@ -85,3 +86,43 @@ def test_snapshot_serialization_and_copy_semantics(monkeypatch) -> None:
     assert snapshot.response.pending_response_create_queue_depth == 2
     assert snapshot.tools.tool_followup_state_count == 1
     assert snapshot.motion.active_requests[0]["meta"]["nested"] == 1
+
+
+def test_snapshot_compact_summary_is_deterministic(monkeypatch) -> None:
+    runtime = _StubRuntime()
+    monkeypatch.setattr(tool_runtime, "read_cached_battery_status", lambda: {"voltage": 11.9, "raw": {"nested": "ignore"}})
+    monkeypatch.setattr(tool_runtime, "read_motion_status", lambda limit=20: {"active_request_count": 0, "is_busy": False, "active_requests": []})
+
+    snapshot = build_situation_snapshot(runtime)
+    summary = snapshot.compact_summary()
+
+    assert "state=listening" in summary
+    assert "queue=2" in summary
+    assert "tools=1" in summary
+    assert "model=gpt-realtime" in summary
+    assert "battery=11.9" in summary
+    assert "active_requests" not in summary
+    assert "raw" not in summary
+
+
+def test_snapshot_compact_summary_uses_unknown_battery_token(monkeypatch) -> None:
+    runtime = _StubRuntime()
+    monkeypatch.setattr(tool_runtime, "read_cached_battery_status", lambda: {"voltage": "unknown", "samples": [1, 2, 3]})
+    monkeypatch.setattr(tool_runtime, "read_motion_status", lambda limit=20: {"active_request_count": 0, "is_busy": False, "active_requests": []})
+
+    summary = build_situation_snapshot(runtime).compact_summary()
+
+    assert "battery=unknown" in summary
+    assert "samples" not in summary
+
+
+def test_build_snapshot_uses_precomputed_health_without_runtime_callback(monkeypatch) -> None:
+    runtime = _StubRuntime()
+    runtime.get_session_health = lambda: (_ for _ in ()).throw(AssertionError("health callback should not be used"))
+    monkeypatch.setattr(tool_runtime, "read_cached_battery_status", lambda: {"voltage": "unknown"})
+    monkeypatch.setattr(tool_runtime, "read_motion_status", lambda limit=20: {"active_request_count": 0, "is_busy": False, "active_requests": []})
+
+    snapshot = build_situation_snapshot(runtime, health={"connected": True, "session_ready": False})
+    payload = snapshot.to_dict()
+    json.dumps(payload)
+    assert payload["session"]["connected"] is True
