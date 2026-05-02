@@ -31,3 +31,9 @@ Authoritative seams remain unchanged (interaction lifecycle, response-create arb
 - Snapshot reads from existing read-only surfaces only (cached battery telemetry and motion status introspection).
 - No new runtime behavior is triggered by diagnostics reads (no response creation, model output, speech, tool calls, camera capture, or motion execution).
 - No per-turn INFO log emission is added; snapshot visibility is via explicit diagnostics reads and compact summary surfaces.
+
+### Field-fidelity notes (Phase 2.01)
+- `interaction.state` resolves from `state_manager.state` first (authoritative lifecycle owner), then falls back to legacy runtime state fields.
+- `run_id` is best-effort and read-only: `_run_id`/`run_id`/`session_id`, then `_current_run_id()` if available.
+- `model.voice` resolves from session output voice configuration first, then legacy voice fields.
+- `compact_summary()` treats `injection_ready_reason=response_in_progress` as `startup=busy` (transient), while preserving the underlying startup snapshot fields unchanged.

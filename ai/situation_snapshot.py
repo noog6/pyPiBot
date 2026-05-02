@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from copy import deepcopy
+from enum import Enum
 import time
 from typing import Any
 
@@ -74,6 +75,16 @@ class SessionSnapshot:
     failures: int
 
 
+def _startup_summary_token(startup: StartupSnapshot) -> str:
+    if startup.injection_ready:
+        return "ready"
+    if startup.injection_ready_reason == "response_in_progress":
+        return "busy"
+    if startup.injection_ready_reason:
+        return f"blocked:{startup.injection_ready_reason}"
+    return "not_ready"
+
+
 @dataclass(frozen=True)
 class SituationSnapshot:
     timestamp: float
@@ -126,7 +137,7 @@ class SituationSnapshot:
             f"tools={tool_count} "
             f"motion={'busy' if self.motion.is_busy else 'idle'} "
             f"battery={battery_token} "
-            f"startup={'ready' if self.startup.injection_ready else 'not_ready'} "
+            f"startup={_startup_summary_token(self.startup)} "
             f"model={model_name}"
         )
 
@@ -135,6 +146,48 @@ def _copy_mapping(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return {str(k): deepcopy(v) for k, v in value.items()}
     return {}
+
+
+def _normalize_runtime_identifier(value: Any) -> str | None:
+    normalized = str(value or "").strip()
+    return normalized or None
+
+
+def _resolve_run_id(runtime: Any) -> str | None:
+    for candidate in ("_run_id", "run_id", "session_id"):
+        resolved = _normalize_runtime_identifier(getattr(runtime, candidate, None))
+        if resolved:
+            return resolved
+    current_run_id = getattr(runtime, "_current_run_id", None)
+    if callable(current_run_id):
+        try:
+            resolved = _normalize_runtime_identifier(current_run_id())
+        except Exception:
+            resolved = None
+        if resolved:
+            return resolved
+    return None
+
+
+def _resolve_interaction_state(runtime: Any) -> str:
+    state_manager = getattr(runtime, "state_manager", None)
+    managed_state = getattr(state_manager, "state", None)
+    if managed_state is not None:
+        if isinstance(managed_state, Enum):
+            return str(managed_state.value or "unknown")
+        return str(managed_state or "unknown")
+    state = getattr(runtime, "state", None)
+    if isinstance(state, Enum):
+        return str(state.value or "unknown")
+    return str(state or "unknown")
+
+
+def _resolve_model_voice(runtime: Any) -> str | None:
+    for candidate in ("_session_output_voice", "_voice", "voice"):
+        resolved = _normalize_runtime_identifier(getattr(runtime, candidate, None))
+        if resolved:
+            return resolved
+    return None
 
 
 def build_situation_snapshot(runtime: Any, *, health: dict[str, Any] | None = None) -> SituationSnapshot:
@@ -154,9 +207,9 @@ def build_situation_snapshot(runtime: Any, *, health: dict[str, Any] | None = No
         timestamp=now,
         source="ai.situation_snapshot.build_situation_snapshot",
         monotonic_time=monotonic_now,
-        run_id=str(getattr(runtime, "_run_id", "") or "").strip() or None,
+        run_id=_resolve_run_id(runtime),
         interaction=InteractionSnapshot(
-            state=str(getattr(runtime, "state", "unknown") or "unknown"),
+            state=_resolve_interaction_state(runtime),
             active_input_event_key=getattr(runtime, "_active_response_input_event_key", None),
             active_canonical_key=getattr(runtime, "_active_response_canonical_key", None),
             listening=bool(getattr(runtime, "_is_listening", False)),
@@ -193,7 +246,7 @@ def build_situation_snapshot(runtime: Any, *, health: dict[str, Any] | None = No
         ),
         model=ModelSnapshot(
             realtime_model=str(getattr(runtime, "_realtime_model", "") or "").strip() or None,
-            voice=str(getattr(runtime, "_voice", "") or "").strip() or None,
+            voice=_resolve_model_voice(runtime),
         ),
         session=SessionSnapshot(
             connected=bool((health or {}).get("connected", False)),
