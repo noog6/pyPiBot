@@ -41,3 +41,6 @@ Authoritative seams remain unchanged (interaction lifecycle, response-create arb
 - `run_id` is best-effort and read-only: `_run_id`/`run_id`/`session_id`, then `_current_run_id()` if available.
 - `model.voice` resolves from session output voice configuration first, then legacy voice fields.
 - `compact_summary()` treats `injection_ready_reason=response_in_progress` as `startup=busy` (transient), while preserving the underlying startup snapshot fields unchanged.
+
+## Phase 3A pointer
+- Situated posture policy documentation now lives in `docs/architecture/situated_behavior.md`.

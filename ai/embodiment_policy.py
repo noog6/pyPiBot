@@ -33,6 +33,21 @@ class EmbodimentDecision:
     reason: str
     cue_name: str | None = None
     delay_ms: int = 0
+    reason_codes: tuple[str, ...] = ()
+    posture: str = "suppressed"
+    allow_nonessential_gesture: bool = False
+
+
+@dataclass(frozen=True)
+class SituatedPostureDecision:
+    """First-class, deterministic posture decision for runtime state cues."""
+
+    posture: str
+    cue_name: str | None
+    allow_nonessential_gesture: bool
+    suppress_reason: str | None
+    reason_codes: tuple[str, ...]
+    delay_ms: int = 0
 
 
 def embodiment_decision_to_governance(decision: EmbodimentDecision) -> GovernanceDecision:
@@ -61,6 +76,9 @@ def embodiment_decision_to_governance(decision: EmbodimentDecision) -> Governanc
         "result_class": "noop" if decision.action == EmbodimentActionType.NONE else envelope_decision,
         "cue_name": decision.cue_name,
         "delay_ms": decision.delay_ms,
+        "posture": decision.posture,
+        "allow_nonessential_gesture": decision.allow_nonessential_gesture,
+        "reason_codes": list(decision.reason_codes),
     }
     return GovernanceDecision(
         decision=envelope_decision,
@@ -81,6 +99,66 @@ class EmbodimentPolicy:
         "gesture_speaking_settle",
     }
 
+    def decide_posture(
+        self,
+        *,
+        state: InteractionState,
+        turn_contract_blocks_gestures: bool,
+        attention: AttentionSnapshot,
+        random_delay_ms: Callable[[int, int], int],
+    ) -> SituatedPostureDecision:
+        """Returns a deterministic posture/gesture-family decision from runtime facts."""
+        if turn_contract_blocks_gestures:
+            return SituatedPostureDecision(
+                posture="followthrough",
+                cue_name=None,
+                allow_nonessential_gesture=False,
+                suppress_reason="turn_contract_no_gesture",
+                reason_codes=("followthrough_nonessential_suppressed",),
+            )
+
+        if state == InteractionState.THINKING and attention.active:
+            return SituatedPostureDecision(
+                posture="thinking",
+                cue_name=None,
+                allow_nonessential_gesture=False,
+                suppress_reason="attention_continuity_hold",
+                reason_codes=("attention_continuity_hold",),
+            )
+
+        if state == InteractionState.LISTENING:
+            return SituatedPostureDecision(
+                posture="listening",
+                cue_name="gesture_attention_hold",
+                allow_nonessential_gesture=True,
+                suppress_reason=None,
+                reason_codes=("state_listening_attention_hold",),
+            )
+        if state == InteractionState.THINKING:
+            return SituatedPostureDecision(
+                posture="thinking",
+                cue_name="gesture_curious_tilt",
+                allow_nonessential_gesture=True,
+                suppress_reason=None,
+                reason_codes=("state_thinking_curious_tilt",),
+                delay_ms=random_delay_ms(150, 300),
+            )
+        if state == InteractionState.SPEAKING:
+            return SituatedPostureDecision(
+                posture="speaking",
+                cue_name="gesture_speaking_posture",
+                allow_nonessential_gesture=True,
+                suppress_reason=None,
+                reason_codes=("state_speaking_posture",),
+            )
+        return SituatedPostureDecision(
+            posture="idle",
+            cue_name=None,
+            allow_nonessential_gesture=False,
+            suppress_reason="state_no_cue",
+            reason_codes=("no_state_posture",),
+        )
+
     def decide_state_cue(
         self,
         *,
@@ -95,27 +173,30 @@ class EmbodimentPolicy:
         random_delay_ms: Callable[[int, int], int],
         attention: AttentionSnapshot,
     ) -> EmbodimentDecision:
-        if turn_contract_blocks_gestures:
+        posture_decision = self.decide_posture(
+            state=state,
+            turn_contract_blocks_gestures=turn_contract_blocks_gestures,
+            attention=attention,
+            random_delay_ms=random_delay_ms,
+        )
+        if posture_decision.suppress_reason == "turn_contract_no_gesture":
             return EmbodimentDecision(
                 action=EmbodimentActionType.SUPPRESS,
                 reason="turn_contract_no_gesture",
+                reason_codes=posture_decision.reason_codes,
+                posture=posture_decision.posture,
+                allow_nonessential_gesture=posture_decision.allow_nonessential_gesture,
             )
-
-        if state == InteractionState.THINKING and attention.active:
-            return EmbodimentDecision(action=EmbodimentActionType.NONE, reason="attention_continuity_hold")
-
-        gesture_name: str | None = None
-        delay_ms = 0
-        if state == InteractionState.LISTENING:
-            gesture_name = "gesture_attention_hold"
-        elif state == InteractionState.THINKING:
-            gesture_name = "gesture_curious_tilt"
-            delay_ms = random_delay_ms(150, 300)
-        elif state == InteractionState.SPEAKING:
-            gesture_name = "gesture_speaking_posture"
-
-        if not gesture_name:
-            return EmbodimentDecision(action=EmbodimentActionType.NONE, reason="state_no_cue")
+        if posture_decision.suppress_reason is not None:
+            return EmbodimentDecision(
+                action=EmbodimentActionType.NONE,
+                reason=posture_decision.suppress_reason,
+                reason_codes=posture_decision.reason_codes,
+                posture=posture_decision.posture,
+                allow_nonessential_gesture=posture_decision.allow_nonessential_gesture,
+            )
+        gesture_name = posture_decision.cue_name
+        delay_ms = posture_decision.delay_ms
 
         global_elapsed = now_monotonic_s - last_gesture_time_s
         if (
@@ -127,6 +208,9 @@ class EmbodimentPolicy:
                 reason="global_cooldown_active",
                 cue_name=gesture_name,
                 delay_ms=delay_ms,
+                reason_codes=("cooldown_suppressed",),
+                posture=posture_decision.posture,
+                allow_nonessential_gesture=False,
             )
 
         per_cooldown = gesture_cooldowns_s.get(gesture_name, 0.0)
@@ -138,6 +222,9 @@ class EmbodimentPolicy:
                 reason="gesture_cooldown_active",
                 cue_name=gesture_name,
                 delay_ms=delay_ms,
+                reason_codes=("cooldown_suppressed",),
+                posture=posture_decision.posture,
+                allow_nonessential_gesture=False,
             )
 
         return EmbodimentDecision(
@@ -145,4 +232,7 @@ class EmbodimentPolicy:
             reason="state_cue_emission",
             cue_name=gesture_name,
             delay_ms=delay_ms,
+            reason_codes=posture_decision.reason_codes,
+            posture=posture_decision.posture,
+            allow_nonessential_gesture=posture_decision.allow_nonessential_gesture,
         )

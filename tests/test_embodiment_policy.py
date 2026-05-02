@@ -67,6 +67,7 @@ def test_decide_state_cue_emits_expected_gesture_for_listening() -> None:
     assert decision.action == EmbodimentActionType.EMIT_CUE
     assert decision.cue_name == "gesture_attention_hold"
     assert decision.delay_ms == 0
+    assert "state_listening_attention_hold" in decision.reason_codes
 
 
 def test_decide_state_cue_suppresses_when_global_cooldown_active() -> None:
@@ -109,6 +110,7 @@ def test_decide_state_cue_uses_delay_for_thinking_cue() -> None:
     assert decision.action == EmbodimentActionType.EMIT_CUE
     assert decision.cue_name == "gesture_curious_tilt"
     assert decision.delay_ms == 222
+    assert "state_thinking_curious_tilt" in decision.reason_codes
 
 
 def test_decide_state_cue_suppresses_thinking_gesture_when_attention_is_held() -> None:
@@ -129,6 +131,7 @@ def test_decide_state_cue_suppresses_thinking_gesture_when_attention_is_held() -
 
     assert decision.action == EmbodimentActionType.NONE
     assert decision.reason == "attention_continuity_hold"
+    assert decision.reason_codes == ("attention_continuity_hold",)
 
 
 def test_decide_state_cue_emits_speaking_posture() -> None:
@@ -150,6 +153,20 @@ def test_decide_state_cue_emits_speaking_posture() -> None:
     assert decision.action == EmbodimentActionType.EMIT_CUE
     assert decision.cue_name == "gesture_speaking_posture"
     assert decision.delay_ms == 0
+    assert "state_speaking_posture" in decision.reason_codes
+
+
+def test_decide_posture_followthrough_suppresses_nonessential_gestures() -> None:
+    policy = EmbodimentPolicy()
+    posture = policy.decide_posture(
+        state=InteractionState.THINKING,
+        turn_contract_blocks_gestures=True,
+        attention=_attention(),
+        random_delay_ms=lambda _low, _high: 200,
+    )
+    assert posture.allow_nonessential_gesture is False
+    assert posture.suppress_reason == "turn_contract_no_gesture"
+    assert "followthrough_nonessential_suppressed" in posture.reason_codes
 
 
 def test_decide_state_cue_speaking_posture_ignores_global_cooldown() -> None:
@@ -194,6 +211,9 @@ def test_embodiment_decision_adapter_returns_governance_envelope() -> None:
     assert envelope.reason_code == "state_cue_emission"
     assert envelope.subsystem == "embodiment"
     assert envelope.metadata["cue_name"] == "gesture_attention_hold"
+    assert envelope.metadata["posture"] == "listening"
+    assert envelope.metadata["allow_nonessential_gesture"] is True
+    assert envelope.metadata["reason_codes"] == ["state_listening_attention_hold"]
 
 
 def test_embodiment_adapter_maps_none_to_noop_semantics() -> None:
