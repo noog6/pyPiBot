@@ -69,10 +69,11 @@ def test_read_battery_voltage_tool_description_guides_first_person_reason_aware_
 
 
 def test_read_runtime_diagnostics_delegates_and_exposes_compact_continuity(monkeypatch) -> None:
-    called = {"count": 0}
+    called: dict[str, object] = {"count": 0}
 
-    def fake_read_runtime_diagnostics() -> dict[str, object]:
-        called["count"] += 1
+    def fake_read_runtime_diagnostics(mode: str = "full") -> dict[str, object]:
+        called["count"] = int(called["count"]) + 1
+        called["mode"] = mode
         return {
             "connected": True,
             "ready": True,
@@ -96,9 +97,10 @@ def test_read_runtime_diagnostics_delegates_and_exposes_compact_continuity(monke
 
     monkeypatch.setattr(ai_tools.tool_runtime, "read_runtime_diagnostics", fake_read_runtime_diagnostics)
 
-    payload = asyncio.run(ai_tools.read_runtime_diagnostics())
+    payload = asyncio.run(ai_tools.read_runtime_diagnostics(mode="summary"))
 
     assert called["count"] == 1
+    assert called["mode"] == "summary"
     assert payload["connected"] is True
     assert payload["ready"] is True
     assert payload["memory_retrieval"] == {"retrieval_count": 3}
@@ -126,12 +128,27 @@ def test_read_runtime_diagnostics_tool_description_mentions_continuity_diagnosti
     assert "runtime diagnostics bundle" in description
     assert "Fetch your current runtime diagnostics bundle." in description
     assert "continuity snapshot" in description
+    assert "mode='summary'" in description
+    assert "Default mode is 'full'" in description
     assert "what is your continuity state?" in description
     assert "are you in the middle of something?" in description
     assert "unresolved follow-up" in description
     assert "observational diagnostics only" in description
     assert "does not control scheduling, arbitration, or response gating" in description
     assert "Theo's current runtime diagnostics bundle" not in description
+
+
+def test_read_runtime_diagnostics_tool_schema_exposes_optional_mode_parameter() -> None:
+    diagnostics_tool = next(tool for tool in ai_tools.tools if tool.get("name") == "read_runtime_diagnostics")
+    mode_param = diagnostics_tool["parameters"]["properties"]["mode"]
+
+    assert mode_param["enum"] == ["summary", "full"]
+    assert mode_param["default"] == "full"
+
+
+def test_read_environment_tool_schema_does_not_expose_mode_parameter() -> None:
+    environment_tool = next(tool for tool in ai_tools.tools if tool.get("name") == "read_environment")
+    assert "mode" not in environment_tool["parameters"]["properties"]
 
 
 def test_get_current_time_delegates_and_keeps_payload_shape(monkeypatch) -> None:

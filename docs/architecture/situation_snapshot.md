@@ -21,6 +21,10 @@ Authoritative seams remain unchanged (interaction lifecycle, response-create arb
   - `situation_summary` (compact string)
   - `situation_snapshot` (serialized `to_dict()` payload)
 - `RealtimeAPI.get_situation_diagnostics()` provides a dedicated situation bundle with both summary and full snapshot.
+- Tool surface: `read_runtime_diagnostics(mode="full" | "summary")`.
+  - `mode="full"` preserves the existing rich runtime diagnostics payload (including full snapshot and deep metrics).
+  - `mode="summary"` returns a compact conversational/operator bundle (state/session/continuity/battery/memory/host essentials) and intentionally omits heavy nested diagnostics.
+  - This is read-only shaping only: no authority changes, no behavior changes, and no recurring diagnostics emission.
 
 ### Recursion guardrail
 - Snapshot building accepts optional precomputed health:

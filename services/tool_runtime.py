@@ -66,8 +66,8 @@ def set_runtime_diagnostics_provider(provider: Callable[[], dict[str, Any]] | No
     _runtime_diagnostics_provider = provider
 
 
-def read_runtime_diagnostics() -> dict[str, Any]:
-    """Return the current runtime diagnostics bundle if a provider is registered."""
+def read_runtime_diagnostics(mode: str = "full") -> dict[str, Any]:
+    """Return runtime diagnostics in full or compact summary mode."""
 
     provider = _runtime_diagnostics_provider
     if not callable(provider):
@@ -75,14 +75,96 @@ def read_runtime_diagnostics() -> dict[str, Any]:
             "status": "unavailable",
             "message": "Runtime diagnostics are not currently available.",
         }
+    normalized_mode = str(mode or "full").strip().lower()
+    if normalized_mode not in {"full", "summary"}:
+        return {
+            "status": "invalid_mode",
+            "message": "Unsupported diagnostics mode. Use 'full' or 'summary'.",
+            "mode": normalized_mode,
+            "allowed_modes": ["summary", "full"],
+        }
+
     payload = provider()
     if isinstance(payload, dict):
         diagnostics = dict(payload)
         diagnostics["host_status"] = _collect_host_status()
+        if normalized_mode == "summary":
+            return _compact_runtime_diagnostics_summary(diagnostics)
+        diagnostics["mode"] = "full"
         return diagnostics
     return {
         "status": "unavailable",
         "message": "Runtime diagnostics provider returned an unexpected payload.",
+    }
+
+
+def _compact_runtime_diagnostics_summary(diagnostics: dict[str, Any]) -> dict[str, Any]:
+    snapshot = diagnostics.get("situation_snapshot") if isinstance(diagnostics.get("situation_snapshot"), dict) else {}
+    interaction = snapshot.get("interaction") if isinstance(snapshot.get("interaction"), dict) else {}
+    response = snapshot.get("response") if isinstance(snapshot.get("response"), dict) else {}
+    startup = snapshot.get("startup") if isinstance(snapshot.get("startup"), dict) else {}
+    model = snapshot.get("model") if isinstance(snapshot.get("model"), dict) else {}
+    host_status = diagnostics.get("host_status") if isinstance(diagnostics.get("host_status"), dict) else {}
+    battery = host_status.get("battery") if isinstance(host_status.get("battery"), dict) else {}
+    continuity = diagnostics.get("continuity") if isinstance(diagnostics.get("continuity"), dict) else {}
+    counts = continuity.get("counts") if isinstance(continuity.get("counts"), dict) else {}
+    memory = diagnostics.get("memory_retrieval") if isinstance(diagnostics.get("memory_retrieval"), dict) else {}
+
+    injection_ready = startup.get("injection_ready")
+    injection_ready_reason = startup.get("injection_ready_reason")
+    if injection_ready is True:
+        startup_state = "ready"
+    elif injection_ready_reason == "response_in_progress":
+        startup_state = "busy"
+    elif injection_ready_reason:
+        startup_state = f"blocked:{injection_ready_reason}"
+    else:
+        startup_state = "not_ready"
+
+    return {
+        "mode": "summary",
+        "connected": diagnostics.get("connected"),
+        "ready": diagnostics.get("ready"),
+        "injection_ready": diagnostics.get("injection_ready"),
+        "injection_ready_reason": diagnostics.get("injection_ready_reason"),
+        "session_ready": diagnostics.get("session_ready"),
+        "situation_summary": diagnostics.get("situation_summary"),
+        "situation": {
+            "state": interaction.get("state"),
+            "response_in_flight": response.get("response_in_flight"),
+            "queue_depth": response.get("pending_response_create_queue_depth"),
+            "startup": startup_state,
+            "model": model.get("realtime_model"),
+            "voice": model.get("voice"),
+        },
+        "continuity": {
+            "stance": continuity.get("stance"),
+            "settlement": continuity.get("settlement"),
+            "counts": {
+                "ongoing": counts.get("ongoing"),
+                "blockers": counts.get("blockers"),
+                "unresolved": counts.get("unresolved"),
+                "commitments": counts.get("commitments"),
+            },
+            "active_substep": continuity.get("active_substep"),
+            "next_substep": continuity.get("next_substep"),
+        },
+        "battery": {
+            "voltage": battery.get("voltage"),
+            "amperage": battery.get("amperage"),
+            "power_watts": battery.get("power_watts"),
+        },
+        "memory": {
+            "semantic_provider_errors": memory.get("semantic_provider_errors"),
+            "semantic_timeout_count": memory.get("semantic_timeout_count"),
+            "embedding_coverage_pct": memory.get("embedding_coverage_pct"),
+            "pending_count": memory.get("pending_count"),
+        },
+        "host": {
+            "wifi_ssid": host_status.get("wifi_ssid"),
+            "primary_ip": host_status.get("primary_ip"),
+            "system_uptime": host_status.get("system_uptime"),
+        },
     }
 
 

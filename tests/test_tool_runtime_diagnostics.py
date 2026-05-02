@@ -49,6 +49,7 @@ def test_read_runtime_diagnostics_delegates_to_registered_provider_and_adds_host
         assert payload is not source_payload
         assert payload["connected"] is True
         assert payload["ready"] is False
+        assert payload["mode"] == "full"
         assert payload["host_status"] == {
             "wifi_ssid": "TheoWiFi",
             "primary_ip": "192.168.1.42",
@@ -87,6 +88,94 @@ def test_read_runtime_diagnostics_reports_unavailable_without_provider() -> None
             "status": "unavailable",
             "message": "Runtime diagnostics are not currently available.",
         }
+    finally:
+        tool_runtime.set_runtime_diagnostics_provider(original_provider)
+
+
+def test_read_runtime_diagnostics_summary_mode_returns_compact_payload(monkeypatch) -> None:
+    original_provider = tool_runtime._runtime_diagnostics_provider
+    call_counter = {"provider": 0}
+    source_payload = {
+        "connected": True,
+        "ready": False,
+        "injection_ready": False,
+        "injection_ready_reason": "response_in_progress",
+        "session_ready": True,
+        "situation_summary": "state=thinking response_in_flight=true startup=busy",
+        "situation_snapshot": {
+            "interaction": {"state": "thinking", "active_input_event_key": "evt-1", "listening": False},
+            "response": {
+                "response_in_flight": True,
+                "pending_response_create": False,
+                "pending_response_create_queue_depth": 0,
+            },
+            "startup": {
+                "injection_ready": False,
+                "injection_ready_reason": "response_in_progress",
+                "session_ready": True,
+            },
+            "model": {"realtime_model": "gpt-realtime-1.5", "voice": "ballad"},
+        },
+        "continuity": {
+            "stance": "awaiting_tool",
+            "settlement": "awaiting_tool",
+            "active_substep": "run a diagnostic.",
+            "next_substep": "tell me what your situational awareness says?",
+            "counts": {"ongoing": 1, "blockers": 1, "unresolved": 0, "commitments": 0},
+        },
+        "memory_retrieval": {
+            "semantic_provider_errors": 0,
+            "semantic_timeout_count": 0,
+            "embedding_coverage_pct": 100.0,
+            "pending_count": 0,
+            "latency_histogram_buckets": {"p95": 400},
+        },
+    }
+
+    try:
+        monkeypatch.setattr(
+            tool_runtime,
+            "_collect_host_status",
+            lambda: {
+                "wifi_ssid": "Home Network",
+                "primary_ip": "192.168.4.179",
+                "system_uptime": "up 3 days",
+                "battery": {"voltage": 8.18, "amperage": 0.07, "power_watts": 0.57},
+                "memory": {"ram_total": "8GiB"},
+            },
+        )
+        tool_runtime.set_runtime_diagnostics_provider(
+            lambda: call_counter.__setitem__("provider", call_counter["provider"] + 1) or source_payload
+        )
+
+        payload = tool_runtime.read_runtime_diagnostics(mode="summary")
+
+        assert call_counter["provider"] == 1
+        assert payload["mode"] == "summary"
+        assert payload["situation_summary"] == "state=thinking response_in_flight=true startup=busy"
+        assert payload["situation"]["state"] == "thinking"
+        assert payload["situation"]["response_in_flight"] is True
+        assert payload["situation"]["queue_depth"] == 0
+        assert payload["situation"]["startup"] == "busy"
+        assert payload["situation"]["model"] == "gpt-realtime-1.5"
+        assert payload["situation"]["voice"] == "ballad"
+        assert payload["battery"]["voltage"] == 8.18
+        assert payload["host"]["wifi_ssid"] == "Home Network"
+        assert payload["memory"]["embedding_coverage_pct"] == 100.0
+        assert "situation_snapshot" not in payload
+        assert "host_status" not in payload
+        assert "latency_histogram_buckets" not in payload["memory"]
+    finally:
+        tool_runtime.set_runtime_diagnostics_provider(original_provider)
+
+
+def test_read_runtime_diagnostics_rejects_invalid_mode(monkeypatch) -> None:
+    original_provider = tool_runtime._runtime_diagnostics_provider
+    try:
+        tool_runtime.set_runtime_diagnostics_provider(lambda: {"ready": True})
+        payload = tool_runtime.read_runtime_diagnostics(mode="nonsense")
+        assert payload["status"] == "invalid_mode"
+        assert payload["allowed_modes"] == ["summary", "full"]
     finally:
         tool_runtime.set_runtime_diagnostics_provider(original_provider)
 
