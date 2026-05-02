@@ -780,6 +780,9 @@ class RealtimeAPI:
         self._assistant_name = str(config.get("assistant_name", "Theo")).strip() or "Theo"
         realtime_cfg = dict(config.get("realtime") or {})
         self._realtime_model = str(realtime_cfg.get("model", "gpt-realtime"))
+        self._session_output_voice = str(
+            ((config.get("audio") or {}).get("output") or {}).get("voice", "ballad")
+        ).strip() or "ballad"
         logger.info("[Realtime] startup model=%s", self._realtime_model)
         audio_cfg = config.get("audio") or {}
         input_cfg = audio_cfg.get("input") or {}
@@ -18544,7 +18547,7 @@ class RealtimeAPI:
                         },
                     },
                     "output": {
-                        "voice": "ballad",
+                        "voice": self._session_output_voice,
                     },
                 },
                 "instructions": instructions,

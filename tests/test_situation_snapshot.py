@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import json
+from enum import Enum
 
 from ai.situation_snapshot import SituationSnapshot, build_situation_snapshot
 from services import tool_runtime
@@ -126,3 +127,56 @@ def test_build_snapshot_uses_precomputed_health_without_runtime_callback(monkeyp
     payload = snapshot.to_dict()
     json.dumps(payload)
     assert payload["session"]["connected"] is True
+
+
+def test_build_snapshot_reads_interaction_state_from_state_manager(monkeypatch) -> None:
+    class _State(Enum):
+        IDLE = "idle"
+
+    runtime = _StubRuntime()
+    runtime.state = "unknown"
+    runtime.state_manager = type("StateManager", (), {"state": _State.IDLE})()
+    monkeypatch.setattr(tool_runtime, "read_cached_battery_status", lambda: {"voltage": "unknown"})
+    monkeypatch.setattr(tool_runtime, "read_motion_status", lambda limit=20: {"active_request_count": 0, "is_busy": False, "active_requests": []})
+
+    snapshot = build_situation_snapshot(runtime)
+    assert snapshot.interaction.state == "idle"
+
+
+def test_build_snapshot_run_id_falls_back_to_current_run_id(monkeypatch) -> None:
+    runtime = _StubRuntime()
+    runtime._run_id = ""
+    runtime._current_run_id = lambda: "run-1011"
+    monkeypatch.setattr(tool_runtime, "read_cached_battery_status", lambda: {"voltage": "unknown"})
+    monkeypatch.setattr(tool_runtime, "read_motion_status", lambda limit=20: {"active_request_count": 0, "is_busy": False, "active_requests": []})
+
+    snapshot = build_situation_snapshot(runtime)
+    assert snapshot.run_id == "run-1011"
+
+
+def test_build_snapshot_reads_session_output_voice(monkeypatch) -> None:
+    runtime = _StubRuntime()
+    runtime._voice = ""
+    runtime._session_output_voice = "ballad"
+    monkeypatch.setattr(tool_runtime, "read_cached_battery_status", lambda: {"voltage": "unknown"})
+    monkeypatch.setattr(tool_runtime, "read_motion_status", lambda limit=20: {"active_request_count": 0, "is_busy": False, "active_requests": []})
+
+    snapshot = build_situation_snapshot(runtime)
+    assert snapshot.model.voice == "ballad"
+
+
+def test_snapshot_compact_summary_marks_response_in_progress_startup_as_busy(monkeypatch) -> None:
+    runtime = _StubRuntime()
+    monkeypatch.setattr(tool_runtime, "read_cached_battery_status", lambda: {"voltage": "unknown"})
+    monkeypatch.setattr(tool_runtime, "read_motion_status", lambda limit=20: {"active_request_count": 0, "is_busy": False, "active_requests": []})
+
+    summary = build_situation_snapshot(
+        runtime,
+        health={
+            "injection_ready": False,
+            "injection_ready_reason": "response_in_progress",
+            "connected": True,
+        },
+    ).compact_summary()
+    assert "startup=busy" in summary
+    assert "startup=not_ready" not in summary
