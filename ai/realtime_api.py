@@ -22941,7 +22941,12 @@ class RealtimeAPI:
             marker="speech_stopped",
             when=self._response_start_monotonic,
         )
-        self._emit_situational_cue(event=SituationalCueEvent.SPEECH_STOPPED_ACK)
+        logger.debug(
+            "situational_cue_skipped event=%s reason=non_critical_hot_path run_id=%s turn_id=%s",
+            SituationalCueEvent.SPEECH_STOPPED_ACK.value,
+            self._current_run_id() or "",
+            turn_id,
+        )
 
     async def send_initial_prompts(self, websocket: Any) -> None:
         logger.info("Sending %s prompts: %s", len(self.prompts), self.prompts)
