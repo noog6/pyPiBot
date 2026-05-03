@@ -117,6 +117,7 @@ from ai.embodiment_policy import (
     EMBODIMENT_PRIORITY_ALLOW,
     EmbodimentActionType,
     EmbodimentPolicy,
+    SituationalCueEvent,
     embodiment_decision_to_governance,
 )
 from ai.interaction_lifecycle_controller import (
@@ -18358,6 +18359,37 @@ class RealtimeAPI:
         logger.info("speaking_settle_emitted source=%s state=%s", source, state.value)
         return True
 
+    def _emit_situational_cue(self, *, event: SituationalCueEvent) -> bool:
+        state = self.state_manager.state if getattr(self, "state_manager", None) is not None else InteractionState.IDLE
+        # Followthrough/nonessential suppression is currently owned by the turn-contract gate.
+        # We pass the same authoritative gate into both fields to keep intent explicit at the callsite
+        # without implying a separate seam exists today.
+        followthrough_nonessential_blocked = self._turn_contract_blocks_gesture_cues()
+        decision = self._embodiment_policy.decide_situational_cue(
+            event=event,
+            interaction_state=state,
+            response_in_flight=bool(getattr(self, "_response_in_flight", False)),
+            motion_busy=bool(self._is_motion_busy()),
+            turn_contract_blocks_gestures=followthrough_nonessential_blocked,
+            followthrough_active=followthrough_nonessential_blocked,
+        )
+        logger.debug(
+            "situational_cue_decision event=%s cue=%s suppress_reason=%s reason_codes=%s",
+            event.value,
+            decision.cue_name or "none",
+            decision.suppress_reason or "none",
+            ",".join(decision.reason_codes) or "none",
+        )
+        if decision.suppress_reason or not decision.cue_name:
+            return False
+        return self._enqueue_gesture_cue(
+            state=state,
+            gesture_name=decision.cue_name,
+            delay_ms=decision.delay_ms,
+            policy_reason=event.value,
+            enforce_motion_guards=True,
+        )
+
     def _on_playback_complete(self) -> None:
         if self.exit_event.is_set():
             logger.info("Playback complete during shutdown -> skipping mic restart")
@@ -20312,6 +20344,8 @@ class RealtimeAPI:
                 turn_id=resolved_turn_id,
                 input_event_key=input_event_key,
             )
+            if attention_reason == "direct_address":
+                self._emit_situational_cue(event=SituationalCueEvent.DIRECT_ADDRESS_ACK)
         if transcript:
             self._signal_server_auto_transcript_final(turn_id=resolved_turn_id)
         if (
@@ -22907,6 +22941,7 @@ class RealtimeAPI:
             marker="speech_stopped",
             when=self._response_start_monotonic,
         )
+        self._emit_situational_cue(event=SituationalCueEvent.SPEECH_STOPPED_ACK)
 
     async def send_initial_prompts(self, websocket: Any) -> None:
         logger.info("Sending %s prompts: %s", len(self.prompts), self.prompts)

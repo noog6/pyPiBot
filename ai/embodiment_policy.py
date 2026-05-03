@@ -100,6 +100,13 @@ class LifecyclePostureEvent(str, Enum):
     SHUTDOWN = "shutdown"
 
 
+class SituationalCueEvent(str, Enum):
+    """Situational events eligible for deterministic cue selection."""
+
+    SPEECH_STOPPED_ACK = "speech_stopped_ack"
+    DIRECT_ADDRESS_ACK = "direct_address_ack"
+
+
 class EmbodimentPolicy:
     """Owns deterministic policy for state-driven embodiment cues."""
 
@@ -107,6 +114,74 @@ class EmbodimentPolicy:
         "gesture_speaking_posture",
         "gesture_speaking_settle",
     }
+
+    def decide_situational_cue(
+        self,
+        *,
+        event: str | SituationalCueEvent,
+        interaction_state: InteractionState,
+        response_in_flight: bool,
+        motion_busy: bool,
+        turn_contract_blocks_gestures: bool,
+        followthrough_active: bool,
+    ) -> SituatedPostureDecision:
+        """Map turn-boundary situations to deterministic embodied cue selections."""
+        if response_in_flight or interaction_state == InteractionState.SPEAKING:
+            return SituatedPostureDecision(
+                posture="suppressed",
+                cue_name=None,
+                allow_nonessential_gesture=False,
+                suppress_reason="situational_cue_suppressed_response_in_flight",
+                reason_codes=("situational_cue_suppressed_response_in_flight",),
+            )
+        if motion_busy:
+            return SituatedPostureDecision(
+                posture="suppressed",
+                cue_name=None,
+                allow_nonessential_gesture=False,
+                suppress_reason="situational_cue_suppressed_motion_busy",
+                reason_codes=("situational_cue_suppressed_motion_busy",),
+            )
+        if turn_contract_blocks_gestures:
+            return SituatedPostureDecision(
+                posture="suppressed",
+                cue_name=None,
+                allow_nonessential_gesture=False,
+                suppress_reason="situational_cue_suppressed_turn_contract",
+                reason_codes=("situational_cue_suppressed_turn_contract",),
+            )
+        if followthrough_active:
+            return SituatedPostureDecision(
+                posture="suppressed",
+                cue_name=None,
+                allow_nonessential_gesture=False,
+                suppress_reason="situational_cue_suppressed_followthrough",
+                reason_codes=("situational_cue_suppressed_followthrough",),
+            )
+        event_value = event.value if isinstance(event, SituationalCueEvent) else str(event).strip().lower()
+        if event_value == SituationalCueEvent.SPEECH_STOPPED_ACK.value:
+            return SituatedPostureDecision(
+                posture="situational",
+                cue_name="gesture_nod",
+                allow_nonessential_gesture=True,
+                suppress_reason=None,
+                reason_codes=("speech_stopped_ack",),
+            )
+        if event_value == SituationalCueEvent.DIRECT_ADDRESS_ACK.value:
+            return SituatedPostureDecision(
+                posture="situational",
+                cue_name="gesture_attention_snap",
+                allow_nonessential_gesture=True,
+                suppress_reason=None,
+                reason_codes=("direct_address_ack",),
+            )
+        return SituatedPostureDecision(
+            posture="idle",
+            cue_name=None,
+            allow_nonessential_gesture=False,
+            suppress_reason="situational_event_no_cue",
+            reason_codes=("situational_event_no_cue",),
+        )
 
     def decide_lifecycle_posture(
         self,

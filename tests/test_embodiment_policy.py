@@ -14,6 +14,7 @@ from ai.embodiment_policy import (
     EmbodimentDecision,
     EmbodimentPolicy,
     LifecyclePostureEvent,
+    SituationalCueEvent,
     embodiment_decision_to_governance,
 )
 from interaction import InteractionState
@@ -285,3 +286,82 @@ def test_decide_lifecycle_posture_unmapped_event_returns_noop() -> None:
     assert decision.cue_name is None
     assert decision.suppress_reason == "lifecycle_event_no_cue"
     assert decision.reason_codes == ("lifecycle_event_no_cue",)
+
+
+def test_decide_situational_cue_maps_speech_stopped_ack() -> None:
+    policy = EmbodimentPolicy()
+    decision = policy.decide_situational_cue(
+        event=SituationalCueEvent.SPEECH_STOPPED_ACK,
+        interaction_state=InteractionState.LISTENING,
+        response_in_flight=False,
+        motion_busy=False,
+        turn_contract_blocks_gestures=False,
+        followthrough_active=False,
+    )
+    assert decision.cue_name == "gesture_nod"
+    assert decision.reason_codes == ("speech_stopped_ack",)
+
+
+def test_decide_situational_cue_maps_direct_address_ack() -> None:
+    policy = EmbodimentPolicy()
+    decision = policy.decide_situational_cue(
+        event=SituationalCueEvent.DIRECT_ADDRESS_ACK,
+        interaction_state=InteractionState.LISTENING,
+        response_in_flight=False,
+        motion_busy=False,
+        turn_contract_blocks_gestures=False,
+        followthrough_active=False,
+    )
+    assert decision.cue_name == "gesture_attention_snap"
+    assert decision.reason_codes == ("direct_address_ack",)
+
+
+def test_decide_situational_cue_suppresses_on_response_in_flight() -> None:
+    policy = EmbodimentPolicy()
+    decision = policy.decide_situational_cue(
+        event=SituationalCueEvent.SPEECH_STOPPED_ACK,
+        interaction_state=InteractionState.LISTENING,
+        response_in_flight=True,
+        motion_busy=False,
+        turn_contract_blocks_gestures=False,
+        followthrough_active=False,
+    )
+    assert decision.cue_name is None
+    assert decision.suppress_reason == "situational_cue_suppressed_response_in_flight"
+
+
+def test_decide_situational_cue_suppresses_on_turn_contract_and_motion_busy() -> None:
+    policy = EmbodimentPolicy()
+    blocked = policy.decide_situational_cue(
+        event=SituationalCueEvent.SPEECH_STOPPED_ACK,
+        interaction_state=InteractionState.LISTENING,
+        response_in_flight=False,
+        motion_busy=False,
+        turn_contract_blocks_gestures=True,
+        followthrough_active=False,
+    )
+    assert blocked.suppress_reason == "situational_cue_suppressed_turn_contract"
+
+    motion_busy = policy.decide_situational_cue(
+        event=SituationalCueEvent.SPEECH_STOPPED_ACK,
+        interaction_state=InteractionState.LISTENING,
+        response_in_flight=False,
+        motion_busy=True,
+        turn_contract_blocks_gestures=False,
+        followthrough_active=False,
+    )
+    assert motion_busy.suppress_reason == "situational_cue_suppressed_motion_busy"
+
+
+def test_decide_situational_cue_suppresses_on_followthrough_active() -> None:
+    policy = EmbodimentPolicy()
+    decision = policy.decide_situational_cue(
+        event=SituationalCueEvent.DIRECT_ADDRESS_ACK,
+        interaction_state=InteractionState.LISTENING,
+        response_in_flight=False,
+        motion_busy=False,
+        turn_contract_blocks_gestures=False,
+        followthrough_active=True,
+    )
+    assert decision.cue_name is None
+    assert decision.suppress_reason == "situational_cue_suppressed_followthrough"
