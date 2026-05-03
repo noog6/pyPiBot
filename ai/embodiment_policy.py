@@ -91,6 +91,15 @@ def embodiment_decision_to_governance(decision: EmbodimentDecision) -> Governanc
     )
 
 
+
+
+class LifecyclePostureEvent(str, Enum):
+    """Lifecycle-owned events eligible for situated embodiment cue selection."""
+
+    STARTUP = "startup"
+    SHUTDOWN = "shutdown"
+
+
 class EmbodimentPolicy:
     """Owns deterministic policy for state-driven embodiment cues."""
 
@@ -98,6 +107,38 @@ class EmbodimentPolicy:
         "gesture_speaking_posture",
         "gesture_speaking_settle",
     }
+
+    def decide_lifecycle_posture(
+        self,
+        *,
+        event: str | LifecyclePostureEvent,
+    ) -> SituatedPostureDecision:
+        """Map lifecycle situations to named, deterministic embodied cue selections."""
+
+        event_value = event.value if isinstance(event, LifecyclePostureEvent) else str(event).strip().lower()
+        if event_value == LifecyclePostureEvent.STARTUP.value:
+            return SituatedPostureDecision(
+                posture="startup",
+                cue_name="gesture_startup_presence",
+                allow_nonessential_gesture=False,
+                suppress_reason=None,
+                reason_codes=("lifecycle_startup_presence",),
+            )
+        if event_value == LifecyclePostureEvent.SHUTDOWN.value:
+            return SituatedPostureDecision(
+                posture="shutdown",
+                cue_name="gesture_shutdown_rest",
+                allow_nonessential_gesture=False,
+                suppress_reason=None,
+                reason_codes=("lifecycle_shutdown_settle",),
+            )
+        return SituatedPostureDecision(
+            posture="idle",
+            cue_name=None,
+            allow_nonessential_gesture=False,
+            suppress_reason="lifecycle_event_no_cue",
+            reason_codes=("lifecycle_event_no_cue",),
+        )
 
     def decide_posture(
         self,

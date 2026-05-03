@@ -146,3 +146,17 @@ def gesture_attention_snap(delay_ms: int = 0, intensity: float = 1.0) -> Action:
 
     library = GestureLibrary.get_instance()
     return library.build_action("gesture_attention_snap", delay_ms=delay_ms, intensity=intensity)
+
+
+def gesture_startup_presence(delay_ms: int = 0, intensity: float = 1.0) -> Action:
+    """Build the lifecycle startup presence gesture action."""
+
+    library = GestureLibrary.get_instance()
+    return library.build_action("gesture_startup_presence", delay_ms=delay_ms, intensity=intensity)
+
+
+def gesture_shutdown_rest(delay_ms: int = 0, intensity: float = 1.0) -> Action:
+    """Build the lifecycle shutdown rest gesture action."""
+
+    library = GestureLibrary.get_instance()
+    return library.build_action("gesture_shutdown_rest", delay_ms=delay_ms, intensity=intensity)

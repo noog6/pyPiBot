@@ -9,6 +9,7 @@ import traceback
 from dataclasses import dataclass
 from typing import Callable
 
+from ai.embodiment_policy import EmbodimentPolicy, LifecyclePostureEvent
 from hardware.servo_registry import ServoRegistry
 from motion.action import Action
 from motion.keyframe import Keyframe
@@ -174,15 +175,7 @@ class MotionController:
     def start_control_loop(self, control_loop_period_ms: int = 20) -> None:
         if self._control_loop_thread is None or not self._control_loop_thread.is_alive():
             self.control_loop_period_ms = control_loop_period_ms
-            starting_frame = self.generate_base_keyframe(pan_degrees=0, tilt_degrees=-40)
-            starting_frame.name = "Starting Frame - 1"
-            while not self.move_to_keyframe(starting_frame):
-                time.sleep(0.02)
-            time.sleep(1.0)
-            starting_frame = self.generate_base_keyframe(pan_degrees=0, tilt_degrees=25)
-            starting_frame.name = "Starting Frame - 2"
-            while not self.move_to_keyframe(starting_frame):
-                time.sleep(0.02)
+            self._run_lifecycle_posture_blocking(event=LifecyclePostureEvent.STARTUP)
             self._stop_event.clear()
             self.control_loop_period_ms = control_loop_period_ms
             self._control_loop_thread = threading.Thread(target=self._control_loop, daemon=True)
@@ -193,15 +186,37 @@ class MotionController:
             self._stop_event.set()
             self._control_loop_thread.join()
             self._control_loop_thread = None
-            sit_frame = self.generate_base_keyframe(pan_degrees=0, tilt_degrees=-40)
-            sit_frame.name = "Ending Frame - 1"
-            sit_frame.final_target_time = 1000
-            sit_frame.deadline_ms = None
-            while not self.move_to_keyframe(sit_frame):
-                time.sleep(0.02)
+            self._run_lifecycle_posture_blocking(event=LifecyclePostureEvent.SHUTDOWN)
             self.relax_all_servos()
             log_info(f"[MOTION] control loop stopped at index: {self.control_loop_index}")
             self.control_loop_index = 0
+
+    def _run_lifecycle_posture_blocking(self, *, event: LifecyclePostureEvent) -> None:
+        decision = EmbodimentPolicy().decide_lifecycle_posture(event=event)
+        log_info(
+            "[MOTION] lifecycle posture decision event=%s cue=%s reason_codes=%s",
+            event.value,
+            decision.cue_name,
+            list(decision.reason_codes),
+        )
+        if decision.cue_name is None:
+            return
+        self._run_lifecycle_gesture_blocking(gesture_name=decision.cue_name)
+
+
+    def _run_lifecycle_gesture_blocking(self, *, gesture_name: str) -> None:
+        from motion.gesture_library import GestureLibrary
+
+        if gesture_name not in {"gesture_startup_presence", "gesture_shutdown_rest"}:
+            raise ValueError(f"Unsupported lifecycle gesture: {gesture_name}")
+
+        action = GestureLibrary.get_instance().build_action(gesture_name)
+        log_info("[MOTION] lifecycle gesture dispatch gesture=%s", gesture_name)
+        frame = action.current_frame
+        while frame is not None:
+            while not self.move_to_keyframe(frame):
+                time.sleep(0.02)
+            frame = frame.next
 
     def _control_loop(self) -> None:
         next_control_loop_time = millis()

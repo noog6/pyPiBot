@@ -28,6 +28,7 @@ class GestureFrameSpec:
     pan_offset: float
     tilt_offset: float
     duration_ms: int
+    absolute_target: bool = False
 
     def to_dict(self) -> dict[str, float | int | str]:
         """Return the spec as a serializable dictionary."""
@@ -37,6 +38,7 @@ class GestureFrameSpec:
             "pan_offset": self.pan_offset,
             "tilt_offset": self.tilt_offset,
             "duration_ms": self.duration_ms,
+            "absolute_target": self.absolute_target,
         }
 
     @classmethod
@@ -48,6 +50,7 @@ class GestureFrameSpec:
             pan_offset=float(payload["pan_offset"]),
             tilt_offset=float(payload["tilt_offset"]),
             duration_ms=int(payload["duration_ms"]),
+            absolute_target=bool(payload.get("absolute_target", False)),
         )
 
 
@@ -293,6 +296,39 @@ DEFAULT_GESTURES = (
                 pan_offset=0.0,
                 tilt_offset=0.0,
                 duration_ms=450,
+            ),
+        ),
+    ),
+    GestureDefinition(
+        name="gesture_startup_presence",
+        priority=3,
+        frames=(
+            GestureFrameSpec(
+                name="startup-frame-1",
+                pan_offset=0.0,
+                tilt_offset=-40.0,
+                duration_ms=1500,
+                absolute_target=True,
+            ),
+            GestureFrameSpec(
+                name="startup-frame-2",
+                pan_offset=0.0,
+                tilt_offset=25.0,
+                duration_ms=1500,
+                absolute_target=True,
+            ),
+        ),
+    ),
+    GestureDefinition(
+        name="gesture_shutdown_rest",
+        priority=3,
+        frames=(
+            GestureFrameSpec(
+                name="shutdown-frame-1",
+                pan_offset=0.0,
+                tilt_offset=-40.0,
+                duration_ms=1000,
+                absolute_target=True,
             ),
         ),
     ),
@@ -630,8 +666,12 @@ class GestureLibrary:
             target_pan = self._clamp(_CANONICAL_CENTER_PAN_DEGREES, pan_min, pan_max)
             target_tilt = self._clamp(_CANONICAL_CENTER_TILT_DEGREES, tilt_min, tilt_max)
         else:
-            target_pan = self._clamp(base_pan + spec.pan_offset * intensity, pan_min, pan_max)
-            target_tilt = self._clamp(base_tilt + spec.tilt_offset * intensity, tilt_min, tilt_max)
+            if spec.absolute_target:
+                target_pan = self._clamp(spec.pan_offset, pan_min, pan_max)
+                target_tilt = self._clamp(spec.tilt_offset, tilt_min, tilt_max)
+            else:
+                target_pan = self._clamp(base_pan + spec.pan_offset * intensity, pan_min, pan_max)
+                target_tilt = self._clamp(base_tilt + spec.tilt_offset * intensity, tilt_min, tilt_max)
         frame = controller.generate_base_keyframe(
             pan_degrees=target_pan,
             tilt_degrees=target_tilt,

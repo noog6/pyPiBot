@@ -13,6 +13,7 @@ from ai.embodiment_policy import (
     EmbodimentActionType,
     EmbodimentDecision,
     EmbodimentPolicy,
+    LifecyclePostureEvent,
     embodiment_decision_to_governance,
 )
 from interaction import InteractionState
@@ -260,3 +261,27 @@ def test_embodiment_adapter_raises_for_unsupported_action() -> None:
         assert "Unsupported embodiment action" in str(exc)
     else:
         raise AssertionError("Expected ValueError for unsupported embodiment action")
+
+
+def test_decide_lifecycle_posture_maps_startup_event() -> None:
+    policy = EmbodimentPolicy()
+    decision = policy.decide_lifecycle_posture(event=LifecyclePostureEvent.STARTUP)
+    assert decision.posture == "startup"
+    assert decision.cue_name == "gesture_startup_presence"
+    assert decision.reason_codes == ("lifecycle_startup_presence",)
+
+
+def test_decide_lifecycle_posture_maps_shutdown_event() -> None:
+    policy = EmbodimentPolicy()
+    decision = policy.decide_lifecycle_posture(event="shutdown")
+    assert decision.posture == "shutdown"
+    assert decision.cue_name == "gesture_shutdown_rest"
+    assert decision.reason_codes == ("lifecycle_shutdown_settle",)
+
+
+def test_decide_lifecycle_posture_unmapped_event_returns_noop() -> None:
+    policy = EmbodimentPolicy()
+    decision = policy.decide_lifecycle_posture(event="reboot")
+    assert decision.cue_name is None
+    assert decision.suppress_reason == "lifecycle_event_no_cue"
+    assert decision.reason_codes == ("lifecycle_event_no_cue",)
