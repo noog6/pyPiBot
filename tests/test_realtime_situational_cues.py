@@ -30,12 +30,34 @@ def _make_api() -> RealtimeAPI:
     return api
 
 
-def test_handle_speech_stopped_requests_situational_ack() -> None:
+def test_handle_speech_stopped_does_not_emit_situational_ack() -> None:
     api = _make_api()
-    recorded: list[SituationalCueEvent] = []
-    api._emit_situational_cue = lambda **kwargs: recorded.append(kwargs["event"]) or True
+
+    def _blocking_emit(**_kwargs: object) -> bool:
+        raise AssertionError("speech-stopped hot path should not call situational cue emission")
+
+    api._emit_situational_cue = _blocking_emit
     asyncio.run(api.handle_speech_stopped(websocket=None))
-    assert recorded == [SituationalCueEvent.SPEECH_STOPPED_ACK]
+
+
+def test_handle_speech_stopped_records_timing_markers() -> None:
+    api = _make_api()
+    seen_markers: list[str] = []
+    seen_followup_markers: list[str] = []
+
+    def _mark_latency(**kwargs: object) -> None:
+        seen_markers.append(str(kwargs.get("marker")))
+
+    def _mark_followup(*, marker: str, **_kwargs: object) -> None:
+        seen_followup_markers.append(marker)
+
+    api._mark_turn_latency_marker = _mark_latency
+    api._mark_tool_followup_timing = _mark_followup
+
+    asyncio.run(api.handle_speech_stopped(websocket=None))
+
+    assert seen_markers == ["speech_stopped"]
+    assert seen_followup_markers == ["speech_stopped"]
 
 
 def test_emit_situational_cue_direct_address_enqueues_expected_gesture() -> None:
