@@ -249,6 +249,7 @@ def _prime_response_done_api(
     api._log_turn_conversation_efficiency = lambda **_kwargs: None
     api._cancel_micro_ack = lambda **_kwargs: None
     api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._intent_ledger = {}
     api._response_trace_by_id = lambda: api._response_trace_context_by_id
     api._build_confirmation_transition_decision = lambda **_kwargs: type(
         "_Transition",
@@ -1722,6 +1723,7 @@ def test_tool_followup_response_scheduled_exactly_once_per_tool_call_id(monkeypa
     api._current_response_turn_id = "turn_tool_1"
     api._current_input_event_key = "item_user_1"
     api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._intent_ledger = {}
 
     async def _fake_add_no_tools(*_args, **_kwargs) -> None:
         return None
@@ -6177,6 +6179,69 @@ def test_execute_function_call_local_companion_call_schedules_plain_response_cre
     assert metadata.get("followthrough_step_output_policy") == "required_deliverable"
     assert metadata.get("followthrough_post_completion_reason") == "required_deliverable_owed"
     assert metadata.get("input_event_key") == "item_parent_local_compgest_final"
+
+
+def test_execute_function_call_bypasses_generic_tool_followup_and_dispatches_required_deliverable(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_response_turn_id = "turn_req_dispatch"
+    api._active_input_event_key_by_turn_id["turn_req_dispatch"] = "item_parent_req_dispatch"
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._intent_ledger = {}
+    api._resolve_continuity_tool_event_owner_turn = lambda *, fallback_turn_id: ("turn_req_dispatch", False, "")
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=False: False
+    api._turn_has_active_required_deliverable_step = lambda *, turn_id: turn_id == "turn_req_dispatch"
+
+    dispatched: list[dict[str, object]] = []
+
+    async def _fake_dispatch_required(**kwargs):
+        dispatched.append(kwargs)
+        return True
+
+    api._dispatch_required_deliverable_followthrough_response_create = _fake_dispatch_required
+
+    async def _fake_diag(**_kwargs):
+        return {"ok": True}
+
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "read_runtime_diagnostics", _fake_diag)
+
+    asyncio.run(api.execute_function_call("read_runtime_diagnostics", "call_req_dispatch", {}, ws))
+
+    response_creates = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert response_creates == []
+    assert len(dispatched) == 1
+    assert dispatched[0]["turn_id"] == "turn_req_dispatch"
+
+
+def test_execute_function_call_preserves_generic_followup_when_non_report_steps_remain(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_response_turn_id = "turn_non_report_remaining"
+    api._active_input_event_key_by_turn_id["turn_non_report_remaining"] = "item_parent_non_report_remaining"
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._intent_ledger = {}
+    api._resolve_continuity_tool_event_owner_turn = lambda *, fallback_turn_id: ("turn_non_report_remaining", False, "")
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=False: True
+    api._turn_has_active_required_deliverable_step = lambda *, turn_id: True
+
+    async def _fake_dispatch_required(**_kwargs):
+        raise AssertionError("required-deliverable dispatch should not run while non-report followthrough remains")
+
+    api._dispatch_required_deliverable_followthrough_response_create = _fake_dispatch_required
+
+    async def _fake_diag(**_kwargs):
+        return {"ok": True}
+
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "read_runtime_diagnostics", _fake_diag)
+
+    asyncio.run(api.execute_function_call("read_runtime_diagnostics", "call_non_report_remaining", {}, ws))
+
+    response_creates = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert len(response_creates) == 1
 
 
 def test_send_followthrough_runtime_status_update_deduplicates_per_step_call() -> None:
