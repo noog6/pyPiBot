@@ -21985,13 +21985,17 @@ class RealtimeAPI:
         if str(suppression_reason or "").strip().lower() != "gesture_intermediate_inject_only":
             return
         normalized_trigger_tool = str(triggering_tool_name or "").strip().lower()
-        if not self._is_low_risk_reversible_gesture_tool(tool_name=normalized_trigger_tool):
-            return
         continuity_turn_id, _allow_rebind, _rebind_reason = self._resolve_continuity_tool_event_owner_turn(
             fallback_turn_id=self._current_turn_id_or_unknown(),
         )
         normalized_turn_id = str(continuity_turn_id or "").strip()
         if not normalized_turn_id:
+            return
+        local_runtime_continuation_tool = normalized_trigger_tool in {"read_runtime_diagnostics"}
+        if not (
+            self._is_low_risk_reversible_gesture_tool(tool_name=normalized_trigger_tool)
+            or local_runtime_continuation_tool
+        ):
             return
         runtime_step_descriptor = self._deterministic_followthrough_runtime_descriptor(turn_id=normalized_turn_id)
         if runtime_step_descriptor is None:

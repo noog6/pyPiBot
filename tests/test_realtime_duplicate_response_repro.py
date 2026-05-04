@@ -6415,6 +6415,64 @@ def test_execute_function_call_preserves_generic_followup_when_non_report_steps_
     assert len(response_creates) == 1
 
 
+def test_execute_function_call_inject_only_diagnostics_dispatches_next_gesture_without_generic_followup(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_response_turn_id = "turn_diag_to_center"
+    api._active_input_event_key_by_turn_id["turn_diag_to_center"] = "item_parent_diag_to_center"
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._intent_ledger = {}
+    api._last_user_input_text = "center, run diagnostics, center again, then report"
+    api._resolve_continuity_tool_event_owner_turn = lambda *, fallback_turn_id: ("turn_diag_to_center", False, "")
+    api._deterministic_followthrough_runtime_descriptor = lambda *, turn_id: {
+        "request_id": "req_diag_to_center",
+        "step_id": "step_4",
+        "tool_name": "gesture_look_center",
+        "tool_args": {},
+    }
+
+    def _fake_followup_event(**_kwargs):
+        return (
+            {
+                "type": "response.create",
+                "response": {
+                    "metadata": {
+                        "tool_followup_create_suppressed": "true",
+                        "tool_followup_create_suppression_reason": "gesture_intermediate_inject_only",
+                    }
+                },
+            },
+            api._canonical_utterance_key(
+                turn_id="turn_diag_to_center",
+                input_event_key="tool:call_diag_step_3",
+            ),
+        )
+
+    api._build_tool_followup_response_create_event = _fake_followup_event
+    dispatched: list[dict[str, object]] = []
+
+    async def _fake_dispatch(**kwargs):
+        dispatched.append(kwargs)
+        return {"outcome": "allow", "executed": True}
+
+    api._submit_companion_gesture_tool_request = _fake_dispatch
+
+    async def _fake_diag(**_kwargs):
+        return {"ok": True}
+
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "read_runtime_diagnostics", _fake_diag)
+
+    asyncio.run(api.execute_function_call("read_runtime_diagnostics", "call_diag_step_3", {}, ws))
+
+    assert [event for event in ws.sent if event.get("type") == "response.create"] == []
+    assert len(dispatched) == 1
+    dispatch_call = dispatched[0]
+    assert dispatch_call["tool_name"] == "gesture_look_center"
+    assert dispatch_call["source"] == "deterministic_followthrough_inject_only"
+
+
 def test_send_followthrough_runtime_status_update_deduplicates_per_step_call() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
