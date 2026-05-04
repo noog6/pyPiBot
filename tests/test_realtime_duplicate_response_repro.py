@@ -5626,8 +5626,8 @@ def test_low_risk_gesture_followup_started_motion_stays_status_only_when_only_re
     assert metadata.get("tool_followup_status_only") == "true"
     assert metadata.get("tool_followup_silent_audio") == "true"
     assert metadata.get("tool_followup_silent_user_facing_output") == "true"
-    assert metadata.get("tool_followup_step_output_policy") == "silent_intermediate"
-    assert metadata.get("tool_followup_post_completion_reason") == "status_only_intermediate_response"
+    assert metadata.get("tool_followup_step_output_policy") == "model_context_injection_only"
+    assert metadata.get("tool_followup_post_completion_reason") == "gesture_intermediate_inject_only"
     assert "Required user deliverable is still owed for the parent turn." not in instructions
 
 
@@ -5671,8 +5671,8 @@ def test_low_risk_gesture_followup_queued_motion_only_report_remaining_stays_sta
     assert metadata.get("tool_followup_silent_user_facing_output") == "true"
     assert metadata.get("tool_followup_tool_choice") is None
     assert metadata.get("tool_followup_tool_choice_reason") is None
-    assert metadata.get("tool_followup_step_output_policy") == "silent_intermediate"
-    assert metadata.get("tool_followup_post_completion_reason") == "status_only_intermediate_response"
+    assert metadata.get("tool_followup_step_output_policy") == "model_context_injection_only"
+    assert metadata.get("tool_followup_post_completion_reason") == "gesture_intermediate_inject_only"
     assert "Required user deliverable is still owed for the parent turn." not in instructions
 
 
@@ -5756,7 +5756,7 @@ def test_low_risk_gesture_followup_marks_inject_only_no_create_for_intermediate_
     assert metadata.get("tool_followup_create_suppression_reason") == "gesture_intermediate_inject_only"
 
 
-def test_low_risk_gesture_followup_keeps_create_for_non_gesture_intermediate_without_runtime_descriptor() -> None:
+def test_low_risk_gesture_followup_suppresses_create_for_non_gesture_intermediate_without_distinct_info() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
     api._current_response_turn_id = "turn_gesture_to_diagnostics"
@@ -5790,10 +5790,51 @@ def test_low_risk_gesture_followup_keeps_create_for_non_gesture_intermediate_wit
     assert metadata.get("tool_followup_status_only") == "true"
     assert metadata.get("tool_followup_step_output_policy") == "model_context_injection_only"
     assert metadata.get("tool_followup_post_completion_reason") == "gesture_intermediate_inject_only"
-    assert metadata.get("tool_followup_create_suppressed") is None
-    assert metadata.get("tool_followup_create_unsuppressed_reason") == (
-        "non_gesture_followthrough_requires_model_dispatch"
+    assert metadata.get("tool_followup_create_suppressed") == "true"
+    assert metadata.get("tool_followup_create_suppression_reason") == "gesture_intermediate_inject_only"
+    assert metadata.get("tool_followup_create_unsuppressed_reason") is None
+    assert payload.get("tool_choice") == "required"
+
+
+
+
+def test_low_risk_gesture_followup_keeps_create_for_non_gesture_intermediate_with_distinct_info() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    api._current_response_turn_id = "turn_gesture_to_diagnostics_distinct"
+    api._active_input_event_key_by_turn_id["turn_gesture_to_diagnostics_distinct"] = "item_parent_gesture_to_diagnostics_distinct"
+    api.get_gesture_motion_state = lambda *, tool_call_id: {"status": "completed"}
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True: True
+    api._deterministic_followthrough_runtime_descriptor = lambda *, turn_id: None
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
+        compound_request=types.SimpleNamespace(
+            steps=(
+                types.SimpleNamespace(step_id="step_1", kind="gesture", status="completed"),
+                types.SimpleNamespace(step_id="step_2", kind="diagnostics", status="active"),
+                types.SimpleNamespace(step_id="step_3", kind="report", status="pending"),
+            ),
+            active_step_index=1,
+            recent_completed_step_id="step_1",
+            next_pending_step_id="step_2",
+            final_followup_pending=True,
+        )
     )
+
+    response_create_event, _ = api._build_tool_followup_response_create_event(
+        call_id="call_gesture_to_diagnostics_distinct",
+        response_create_event={"type": "response.create"},
+        tool_name="gesture_look_center",
+        tool_result_has_distinct_info=True,
+    )
+
+    payload = response_create_event.get("response") or {}
+    metadata = payload.get("metadata") or {}
+
+    assert metadata.get("tool_followup_status_only") == "true"
+    assert metadata.get("tool_followup_step_output_policy") == "silent_intermediate"
+    assert metadata.get("tool_followup_post_completion_reason") == "status_only_intermediate_response"
+    assert metadata.get("tool_followup_create_suppressed") is None
+    assert metadata.get("tool_followup_create_unsuppressed_reason") is None
     assert payload.get("tool_choice") == "required"
 
 

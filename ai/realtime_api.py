@@ -10565,6 +10565,7 @@ class RealtimeAPI:
                         create_suppression_reason == "gesture_intermediate_inject_only"
                         and non_report_followthrough_remaining
                         and runtime_step_descriptor is None
+                        and tool_result_has_distinct_info
                     ):
                         active_non_report_kind = self._active_followthrough_non_report_step_kind(
                             turn_id=followthrough_turn_id
@@ -10572,7 +10573,7 @@ class RealtimeAPI:
                         if active_non_report_kind and active_non_report_kind != "gesture":
                             create_suppression_reason = ""
                             metadata["tool_followup_create_unsuppressed_reason"] = (
-                                "non_gesture_followthrough_requires_model_dispatch"
+                                "non_gesture_followthrough_requires_model_dispatch_distinct_tool_info"
                             )
                     if create_suppression_reason:
                         metadata["tool_followup_create_suppressed"] = "true"
