@@ -10007,6 +10007,13 @@ class RealtimeAPI:
             metadata["followthrough_post_completion_reason"] = post_completion_reason
         normalized_turn_id = str(turn_id or "").strip() or self._current_turn_id_or_unknown()
         metadata["turn_id"] = normalized_turn_id
+        existing_input_event_key = str(metadata.get("input_event_key") or "").strip()
+        if ":required_deliverable_followthrough:" in existing_input_event_key:
+            metadata["parent_input_event_key"] = self._parent_input_event_key_for_tool_followup(turn_id=normalized_turn_id)
+            metadata["consumes_canonical_slot"] = "false"
+            metadata["explicit_multipart"] = "true"
+            metadata["local_runtime_followthrough"] = "true"
+            return
         parent_input_event_key = self._parent_input_event_key_for_tool_followup(turn_id=normalized_turn_id)
         if parent_input_event_key:
             metadata["input_event_key"] = parent_input_event_key
