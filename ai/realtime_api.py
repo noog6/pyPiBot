@@ -10471,8 +10471,24 @@ class RealtimeAPI:
         parent_turn_id = str(semantic_owner_turn_id or turn_id).strip() or turn_id
         parent_input_event_key = self._parent_input_event_key_for_tool_followup(turn_id=parent_turn_id)
         tool_input_event_key = self._tool_followup_input_event_key(call_id=tool_call_id)
+        required_deliverable_followthrough_input_event_key = ""
+        if (
+            parent_input_event_key
+            and not str(tool_name or "").strip().lower().startswith("gesture_")
+            and self._turn_has_active_required_deliverable_step(turn_id=parent_turn_id)
+            and not self._turn_followthrough_chain_remaining(
+                turn_id=parent_turn_id,
+                include_report_followup=False,
+            )
+        ):
+            required_deliverable_followthrough_input_event_key = (
+                f"{parent_input_event_key}:required_deliverable_followthrough:0"
+            )
+            metadata["consumes_canonical_slot"] = "false"
+            metadata["local_runtime_followthrough"] = "true"
+            metadata["explicit_multipart"] = "true"
         metadata["turn_id"] = turn_id
-        metadata["input_event_key"] = tool_input_event_key
+        metadata["input_event_key"] = required_deliverable_followthrough_input_event_key or tool_input_event_key
         metadata["parent_turn_id"] = parent_turn_id
         if parent_input_event_key:
             metadata["parent_input_event_key"] = parent_input_event_key
@@ -10647,7 +10663,10 @@ class RealtimeAPI:
             )
         if tool_result_has_distinct_info:
             metadata["tool_result_has_distinct_info"] = "true"
-        canonical_key = self._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_input_event_key)
+        canonical_key = self._canonical_utterance_key(
+            turn_id=turn_id,
+            input_event_key=str(metadata.get("input_event_key") or tool_input_event_key),
+        )
         self._record_tool_followup_metadata(canonical_key=canonical_key, metadata=metadata)
         return event, canonical_key
 
