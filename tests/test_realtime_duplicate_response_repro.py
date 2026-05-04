@@ -6215,6 +6215,72 @@ def test_execute_function_call_bypasses_generic_tool_followup_and_dispatches_req
     assert dispatched[0]["turn_id"] == "turn_req_dispatch"
 
 
+
+
+def test_execute_function_call_bypasses_generic_followup_when_required_dispatch_is_queued(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_response_turn_id = "turn_req_dispatch_queued"
+    api._active_input_event_key_by_turn_id["turn_req_dispatch_queued"] = "item_parent_req_dispatch_queued"
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._intent_ledger = {}
+    api._resolve_continuity_tool_event_owner_turn = lambda *, fallback_turn_id: ("turn_req_dispatch_queued", False, "")
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=False: False
+    api._turn_has_active_required_deliverable_step = lambda *, turn_id: turn_id == "turn_req_dispatch_queued"
+
+    dispatched: list[dict[str, object]] = []
+
+    async def _fake_dispatch_required(**kwargs):
+        dispatched.append(kwargs)
+        return False
+
+    api._dispatch_required_deliverable_followthrough_response_create = _fake_dispatch_required
+    api._has_required_deliverable_followthrough_materialization_pending = lambda *, turn_id: turn_id == "turn_req_dispatch_queued"
+
+    async def _fake_diag(**_kwargs):
+        return {"ok": True}
+
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "read_runtime_diagnostics", _fake_diag)
+
+    asyncio.run(api.execute_function_call("read_runtime_diagnostics", "call_req_dispatch_queued", {}, ws))
+
+    assert len(dispatched) == 1
+    response_creates = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert response_creates == []
+
+
+def test_execute_function_call_allows_generic_followup_when_required_dispatch_fails(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_response_turn_id = "turn_req_dispatch_fallback"
+    api._active_input_event_key_by_turn_id["turn_req_dispatch_fallback"] = "item_parent_req_dispatch_fallback"
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._intent_ledger = {}
+    api._resolve_continuity_tool_event_owner_turn = lambda *, fallback_turn_id: ("turn_req_dispatch_fallback", False, "")
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=False: False
+    api._turn_has_active_required_deliverable_step = lambda *, turn_id: turn_id == "turn_req_dispatch_fallback"
+
+    async def _fake_dispatch_required(**_kwargs):
+        return False
+
+    api._dispatch_required_deliverable_followthrough_response_create = _fake_dispatch_required
+    api._has_required_deliverable_followthrough_materialization_pending = lambda *, turn_id: False
+
+    async def _fake_diag(**_kwargs):
+        return {"ok": True}
+
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "read_runtime_diagnostics", _fake_diag)
+
+    asyncio.run(api.execute_function_call("read_runtime_diagnostics", "call_req_dispatch_fallback", {}, ws))
+
+    response_creates = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert len(response_creates) == 1
+    metadata = response_creates[0].get("response", {}).get("metadata", {})
+    assert metadata.get("tool_call_id") == "call_req_dispatch_fallback"
 def test_execute_function_call_preserves_generic_followup_when_non_report_steps_remain(monkeypatch) -> None:
     api = _make_api_stub()
     _wire_runtime(api)

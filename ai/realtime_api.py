@@ -21899,10 +21899,21 @@ class RealtimeAPI:
                 websocket=websocket,
                 turn_id=continuity_turn_id_after_tool_result,
             )
-            if dispatched:
+            pending_required_deliverable_materialization = (
+                self._has_required_deliverable_followthrough_materialization_pending(
+                    turn_id=continuity_turn_id_after_tool_result,
+                )
+            )
+            if dispatched or pending_required_deliverable_materialization:
                 self.function_call = None
                 self.function_call_args = ""
                 return
+            if not local_companion_runtime_call:
+                self._set_tool_followup_state(
+                    canonical_key=tool_followup_canonical_key,
+                    state="new",
+                    reason="required_deliverable_dispatch_failed_fallback_to_generic",
+                )
         if force_no_tools_followup:
             response_payload = response_create_event.setdefault("response", {})
             if not isinstance(response_payload, dict):
