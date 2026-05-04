@@ -21859,6 +21859,50 @@ class RealtimeAPI:
             self.function_call = None
             self.function_call_args = ""
             return
+        continuity_turn_id_after_tool_result, _allow_rebind_after_tool_result, _rebind_reason_after_tool_result = (
+            self._resolve_continuity_tool_event_owner_turn(
+                fallback_turn_id=self._current_turn_id_or_unknown(),
+            )
+        )
+        should_dispatch_required_deliverable_directly = (
+            not local_companion_runtime_call
+            and not function_name.startswith("gesture_")
+            and not self._turn_followthrough_chain_remaining(
+                turn_id=continuity_turn_id_after_tool_result,
+                include_report_followup=False,
+            )
+            and self._turn_has_active_required_deliverable_step(
+                turn_id=continuity_turn_id_after_tool_result,
+            )
+        )
+        if should_dispatch_required_deliverable_directly:
+            if not local_companion_runtime_call:
+                self._set_tool_followup_state(
+                    canonical_key=tool_followup_canonical_key,
+                    state="dropped",
+                    reason="required_deliverable_dispatched_after_tool_result",
+                )
+                self._mark_tool_followup_timing(
+                    turn_id=self._current_turn_id_or_unknown(),
+                    marker="tool_followup_response_not_scheduled",
+                    call_id=call_id,
+                    canonical_key=tool_followup_canonical_key,
+                    is_tool_followup=True,
+                )
+            logger.info(
+                "tool_followup_response_not_scheduled call_id=%s canonical_key=%s reason=%s",
+                call_id,
+                tool_followup_canonical_key,
+                "required_deliverable_dispatched_after_tool_result",
+            )
+            dispatched = await self._dispatch_required_deliverable_followthrough_response_create(
+                websocket=websocket,
+                turn_id=continuity_turn_id_after_tool_result,
+            )
+            if dispatched:
+                self.function_call = None
+                self.function_call_args = ""
+                return
         if force_no_tools_followup:
             response_payload = response_create_event.setdefault("response", {})
             if not isinstance(response_payload, dict):
