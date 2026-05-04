@@ -261,7 +261,7 @@ class ContinuityBriefLogFingerprint:
 
 @dataclass(frozen=True)
 class DeterministicFollowthroughStepDescriptor:
-    """Authoritative descriptor for runtime-executable deterministic gesture steps."""
+    """Authoritative descriptor for runtime-executable deterministic followthrough steps."""
 
     request_id: str
     step_id: str
@@ -391,7 +391,7 @@ class ContinuityLedger:
         """Return a deterministic runtime descriptor for the active gesture followthrough step.
 
         This remains bookkeeping-derived metadata. It is intentionally narrow and
-        only emits descriptors for unambiguous low-risk gesture directions.
+        only emits descriptors for unambiguous low-risk gesture/diagnostics steps.
         """
 
         state = self._compound_state
@@ -401,6 +401,13 @@ class ContinuityLedger:
         if not isinstance(active_idx, int) or not (0 <= active_idx < len(state.steps)):
             return None
         step = state.steps[active_idx]
+        if step.kind == "diagnostics":
+            return DeterministicFollowthroughStepDescriptor(
+                request_id=state.request_id,
+                step_id=step.step_id,
+                tool_name="read_runtime_diagnostics",
+                tool_args=(("mode", "summary"),),
+            )
         if step.kind != "gesture":
             return None
         if bool(step.requires_perception):

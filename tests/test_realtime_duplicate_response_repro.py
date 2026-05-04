@@ -18,6 +18,7 @@ from ai.realtime.types import PendingResponseCreate
 from ai.realtime.response_terminal_handlers import ResponseTerminalHandlers
 from ai.realtime_api import InteractionState, PendingServerAutoResponse, RealtimeAPI
 from ai.interaction_lifecycle_controller import InteractionLifecycleState
+from ai.continuity import ContinuityLedger
 from core.logging import logger
 
 
@@ -6076,6 +6077,69 @@ def test_execute_function_call_intermediate_inject_only_dispatches_next_determin
     assert dispatch_call["allow_followthrough_execution"] is True
 
 
+def test_execute_function_call_inject_only_gesture_dispatches_runtime_diagnostics_without_generic_followup(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_response_turn_id = "turn_center_to_diag"
+    api._active_input_event_key_by_turn_id["turn_center_to_diag"] = "item_parent_center_to_diag"
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._intent_ledger = {}
+    api._last_user_input_text = "move back to center, run diagnostics, and tell me if anything is wrong"
+    api._resolve_continuity_tool_event_owner_turn = lambda *, fallback_turn_id: ("turn_center_to_diag", False, "")
+    api._deterministic_followthrough_runtime_descriptor = lambda *, turn_id: {
+        "request_id": "req_center_to_diag",
+        "step_id": "step_2",
+        "tool_name": "read_runtime_diagnostics",
+        "tool_args": {"mode": "summary"},
+    }
+
+    def _fake_followup_event(**_kwargs):
+        return (
+            {
+                "type": "response.create",
+                "response": {
+                    "metadata": {
+                        "tool_followup_create_suppressed": "true",
+                        "tool_followup_create_suppression_reason": "gesture_intermediate_inject_only",
+                    }
+                },
+            },
+            api._canonical_utterance_key(
+                turn_id="turn_center_to_diag",
+                input_event_key="tool:call_center_step_1",
+            ),
+        )
+
+    api._build_tool_followup_response_create_event = _fake_followup_event
+    dispatched: list[dict[str, object]] = []
+
+    async def _fake_dispatch(**kwargs):
+        dispatched.append(kwargs)
+        return {"outcome": "allow", "executed": True}
+
+    api._submit_companion_gesture_tool_request = _fake_dispatch
+
+    async def _fake_gesture(**_kwargs):
+        return {"ok": True, "motion_request_key": "mrk-center-step-1"}
+
+    monkeypatch.setitem(
+        __import__("ai.tools", fromlist=["function_map"]).function_map,
+        "gesture_look_center",
+        _fake_gesture,
+    )
+
+    asyncio.run(api.execute_function_call("gesture_look_center", "call_center_step_1", {"target": "center"}, ws))
+
+    assert [event for event in ws.sent if event.get("type") == "response.create"] == []
+    assert len(dispatched) == 1
+    dispatch_call = dispatched[0]
+    assert dispatch_call["tool_name"] == "read_runtime_diagnostics"
+    assert dispatch_call["tool_args"] == {"mode": "summary"}
+    assert dispatch_call["source"] == "deterministic_followthrough_inject_only"
+
+
 def test_execute_function_call_local_companion_call_skips_provider_function_output_and_followup_state(monkeypatch) -> None:
     api = _make_api_stub()
     _wire_runtime(api)
@@ -6542,6 +6606,26 @@ def test_deterministic_inject_only_dispatch_dedupe_only_latches_after_executed()
     )
 
     assert len(attempts) == 2
+
+def test_realtime_descriptor_fallback_returns_runtime_diagnostics_for_active_diagnostics_step() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ledger = ContinuityLedger()
+    ledger.update_from_event(
+        "transcript_final",
+        text="go back to center, run diagnostics, then tell me what's wrong",
+        source="input_audio_transcription",
+        turn_id="turn_diag_descriptor",
+    )
+    ledger.update_from_event("tool_result_received", tool_name="gesture_look_center", turn_id="turn_diag_descriptor")
+    api._continuity_ledger_instance = lambda: ledger
+
+    descriptor = api._deterministic_followthrough_runtime_descriptor(turn_id="turn_diag_descriptor")
+
+    assert descriptor is not None
+    assert descriptor["step_id"] == "step_2"
+    assert descriptor["tool_name"] == "read_runtime_diagnostics"
+    assert descriptor["tool_args"] == {"mode": "summary"}
 
 
 def test_deterministic_inject_only_no_descriptor_dispatches_required_deliverable_when_motion_closed() -> None:

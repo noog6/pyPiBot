@@ -174,6 +174,41 @@ def test_deterministic_followthrough_step_descriptor_tracks_active_directional_g
     assert descriptor.tool_name == "gesture_look_right"
 
 
+def test_deterministic_followthrough_step_descriptor_returns_runtime_diagnostics_for_active_diagnostics() -> None:
+    ledger = ContinuityLedger()
+    ledger.update_from_event(
+        "transcript_final",
+        text="look left, run diagnostics, then tell me if anything is wrong",
+        source="input_audio_transcription",
+        turn_id="turn_1",
+    )
+    ledger.update_from_event("tool_result_received", tool_name="gesture_look_left", turn_id="turn_1")
+
+    descriptor = ledger.deterministic_followthrough_step()
+
+    assert descriptor is not None
+    assert descriptor.step_id == "step_2"
+    assert descriptor.tool_name == "read_runtime_diagnostics"
+    assert dict(descriptor.tool_args) == {"mode": "summary"}
+
+
+def test_deterministic_followthrough_step_descriptor_keeps_safe_none_for_unknown_active_step_kind() -> None:
+    ledger = ContinuityLedger()
+    ledger.update_from_event(
+        "transcript_final",
+        text="look left then report",
+        source="input_audio_transcription",
+        turn_id="turn_1",
+    )
+    state = ledger._compound_state
+    assert state is not None
+    steps = list(state.steps)
+    steps[0] = replace(steps[0], kind="followup")
+    ledger._compound_state = replace(state, steps=tuple(steps), active_step_index=0)
+
+    assert ledger.deterministic_followthrough_step() is None
+
+
 def test_compound_parser_ignores_plain_declarative_description() -> None:
     ledger = ContinuityLedger()
 
