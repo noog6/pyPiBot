@@ -10753,3 +10753,65 @@ def test_build_tool_followup_event_keeps_tool_key_for_non_required_followthrough
     )
     metadata = ((event.get("response") or {}).get("metadata") or {})
     assert str(metadata["input_event_key"]).startswith("tool:call_diag_non_required")
+
+
+def test_strip_tool_followup_metadata_preserves_required_deliverable_followthrough_key() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    turn_id = "turn_required_diag_strip"
+    parent_input_event_key = "item_parent_required_diag_strip"
+    followthrough_key = f"{parent_input_event_key}:required_deliverable_followthrough:0"
+    event = {
+        "type": "response.create",
+        "response": {
+            "metadata": {
+                "turn_id": turn_id,
+                "input_event_key": followthrough_key,
+                "tool_followup": "true",
+                "tool_followup_step_output_policy": "required_deliverable",
+                "tool_followup_post_completion_reason": "required_deliverable_owed",
+            }
+        },
+    }
+    api._active_input_event_key_by_turn_id[turn_id] = parent_input_event_key
+
+    api._strip_tool_followup_metadata_for_local_runtime_call(
+        response_create_event=event,
+        turn_id=turn_id,
+    )
+
+    metadata = ((event.get("response") or {}).get("metadata") or {})
+    assert metadata.get("input_event_key") == followthrough_key
+    assert metadata.get("parent_input_event_key") == parent_input_event_key
+    assert metadata.get("consumes_canonical_slot") == "false"
+    assert metadata.get("local_runtime_followthrough") == "true"
+    assert metadata.get("explicit_multipart") == "true"
+    assert metadata.get("followthrough_step_output_policy") == "required_deliverable"
+    assert metadata.get("followthrough_post_completion_reason") == "required_deliverable_owed"
+
+
+def test_strip_tool_followup_metadata_non_required_uses_parent_key() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    turn_id = "turn_non_required_strip"
+    parent_input_event_key = "item_parent_non_required_strip"
+    event = {
+        "type": "response.create",
+        "response": {
+            "metadata": {
+                "turn_id": turn_id,
+                "input_event_key": "tool:call_non_required_strip",
+                "tool_followup": "true",
+            }
+        },
+    }
+    api._active_input_event_key_by_turn_id[turn_id] = parent_input_event_key
+
+    api._strip_tool_followup_metadata_for_local_runtime_call(
+        response_create_event=event,
+        turn_id=turn_id,
+    )
+
+    metadata = ((event.get("response") or {}).get("metadata") or {})
+    assert metadata.get("input_event_key") == parent_input_event_key
+    assert metadata.get("parent_input_event_key") == parent_input_event_key
