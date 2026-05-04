@@ -10705,3 +10705,51 @@ def test_stale_pending_upgraded_response_is_dropped_before_send() -> None:
 
     assert ws.sent == []
     assert api._pending_response_create is None
+
+
+def test_build_tool_followup_event_uses_required_deliverable_followthrough_key_after_diagnostics() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    turn_id = "turn_required_diag"
+    parent_input_event_key = "item_parent_required_diag"
+    api._current_turn_id = turn_id
+    api._active_input_event_key_by_turn_id[turn_id] = parent_input_event_key
+    api._resolve_continuity_tool_event_owner_turn = lambda *, fallback_turn_id: ("turn_required_diag", False, "")
+    api._turn_has_active_required_deliverable_step = lambda *, turn_id: turn_id == "turn_required_diag"
+    api._turn_followthrough_chain_remaining = (
+        lambda *, turn_id, include_report_followup=True, **_kwargs: include_report_followup
+    )
+
+    event, canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_diag",
+        response_create_event={"type": "response.create"},
+        tool_name="read_runtime_diagnostics",
+    )
+    metadata = ((event.get("response") or {}).get("metadata") or {})
+    assert metadata["input_event_key"] == f"{parent_input_event_key}:required_deliverable_followthrough:0"
+    assert canonical_key != api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    assert canonical_key == api._canonical_utterance_key(
+        turn_id=str(metadata.get("turn_id") or ""),
+        input_event_key=metadata["input_event_key"],
+    )
+    assert metadata.get("consumes_canonical_slot") == "false"
+    assert metadata.get("local_runtime_followthrough") == "true"
+
+
+def test_build_tool_followup_event_keeps_tool_key_for_non_required_followthrough() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    turn_id = "turn_non_required_diag"
+    parent_input_event_key = "item_parent_non_required_diag"
+    api._current_turn_id = turn_id
+    api._active_input_event_key_by_turn_id[turn_id] = parent_input_event_key
+    api._turn_has_active_required_deliverable_step = lambda *, turn_id: False
+    api._turn_followthrough_chain_remaining = lambda **_kwargs: False
+
+    event, _canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_diag_non_required",
+        response_create_event={"type": "response.create"},
+        tool_name="read_runtime_diagnostics",
+    )
+    metadata = ((event.get("response") or {}).get("metadata") or {})
+    assert str(metadata["input_event_key"]).startswith("tool:call_diag_non_required")
