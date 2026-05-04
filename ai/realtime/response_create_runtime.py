@@ -222,6 +222,13 @@ class ResponseCreateRuntime:
         if len(metadata) <= self._PROVIDER_METADATA_MAX_PROPERTIES:
             return
 
+        required_deliverable_followthrough = (
+            str(metadata.get("tool_followup_step_output_policy") or "").strip().lower() == "required_deliverable"
+            or str(metadata.get("followthrough_step_output_policy") or "").strip().lower() == "required_deliverable"
+            or str(metadata.get("tool_followup_post_completion_reason") or "").strip().lower() == "required_deliverable_owed"
+            or str(metadata.get("followthrough_post_completion_reason") or "").strip().lower() == "required_deliverable_owed"
+        )
+
         drop_priority = (
             "tool_name",
             "tool_followup_tool_choice",
@@ -231,7 +238,7 @@ class ResponseCreateRuntime:
             "followthrough_runtime_step_id",
             "followthrough_runtime_tool_name",
             "followthrough_runtime_tool_args",
-            "followthrough_catchup_payload",
+            *(() if required_deliverable_followthrough else ("followthrough_catchup_payload",)),
             "gesture_motion_status",
             "tool_result_has_distinct_info",
             "tool_followup_no_create",
@@ -247,6 +254,20 @@ class ResponseCreateRuntime:
                 metadata.pop(key, None)
                 dropped_keys.append(key)
 
+        if len(metadata) > self._PROVIDER_METADATA_MAX_PROPERTIES and required_deliverable_followthrough:
+            duplicate_drop_priority = (
+                "tool_followup_step_output_policy",
+                "tool_followup_post_completion_reason",
+                "tool_followup_required_tool_name",
+            )
+            for key in duplicate_drop_priority:
+                if len(metadata) <= self._PROVIDER_METADATA_MAX_PROPERTIES:
+                    break
+                # Prefer canonical followthrough_* marker variants when both exist.
+                if key in metadata:
+                    metadata.pop(key, None)
+                    dropped_keys.append(key)
+
         if len(metadata) > self._PROVIDER_METADATA_MAX_PROPERTIES:
             required_keys = {
                 "turn_id",
@@ -257,18 +278,24 @@ class ResponseCreateRuntime:
                 "blocked_by_response_id",
                 "parent_turn_id",
                 "parent_input_event_key",
-                "tool_followup_step_output_policy",
                 "followthrough_step_output_policy",
-                "tool_followup_post_completion_reason",
                 "followthrough_post_completion_reason",
+                "local_runtime_followthrough",
                 "followthrough_required_tool_name",
-                "tool_followup_required_tool_name",
                 "followthrough_required_tool_already_executed",
                 "tool_followup_suppress_if_parent_covered",
                 "tool_followup_status_only",
                 "tool_followup_silent_audio",
                 "tool_followup_silent_user_facing_output",
             }
+            if "tool_followup_step_output_policy" in metadata and "followthrough_step_output_policy" not in metadata:
+                required_keys.add("tool_followup_step_output_policy")
+            if "tool_followup_post_completion_reason" in metadata and "followthrough_post_completion_reason" not in metadata:
+                required_keys.add("tool_followup_post_completion_reason")
+            if "tool_followup_required_tool_name" in metadata and "followthrough_required_tool_name" not in metadata:
+                required_keys.add("tool_followup_required_tool_name")
+            if required_deliverable_followthrough:
+                required_keys.add("followthrough_catchup_payload")
             for key in tuple(metadata.keys()):
                 if len(metadata) <= self._PROVIDER_METADATA_MAX_PROPERTIES:
                     break
