@@ -20345,7 +20345,13 @@ class RealtimeAPI:
                 input_event_key=input_event_key,
             )
             if attention_reason == "direct_address":
-                self._emit_situational_cue(event=SituationalCueEvent.DIRECT_ADDRESS_ACK)
+                logger.debug(
+                    "situational_cue_skipped event=%s reason=non_critical_transcript_final_hot_path run_id=%s turn_id=%s input_event_key=%s",
+                    SituationalCueEvent.DIRECT_ADDRESS_ACK.value,
+                    self._current_run_id() or "",
+                    resolved_turn_id,
+                    input_event_key,
+                )
         if transcript:
             self._signal_server_auto_transcript_final(turn_id=resolved_turn_id)
         if (

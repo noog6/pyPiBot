@@ -1300,6 +1300,11 @@ def test_direct_address_visual_question_runs_verify_path_after_attention_admissi
     api._has_active_confirmation_token = lambda: False
     api._is_awaiting_confirmation_phase = lambda: False
     api._evaluate_attention_gate_admission = lambda **_kwargs: (True, "direct_address")
+
+    def _blocking_emit(**_kwargs):
+        raise AssertionError("direct-address transcript-final hot path should not emit situational cue synchronously")
+
+    api._emit_situational_cue = _blocking_emit
     api._asr_verify_short_utterance_ms = 1200
     api._vad_turn_detection = {}
     api._utterance_trust_snapshot_by_input_event_key = {}
