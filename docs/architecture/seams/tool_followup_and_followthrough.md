@@ -44,6 +44,7 @@ Control whether tool-followup outputs are released, held, or suppressed; preserv
 - Suppress only when parent coverage is actually qualified.
 - Hold is transitional and should resolve into release/suppress deterministically.
 - Non-distinct or gesture-only outputs should not consume final deliverable ownership.
+- Local runtime tool results that deterministically advance continuity to an active low-risk gesture step should dispatch that gesture before generic tool-output `response.create` scheduling; if no safe descriptor exists, leave the generic fallback path intact.
 - `gesture_intermediate_inject_only` suppression is valid only when runtime can deterministically dispatch the next non-report step; if the active next step is non-gesture and no runtime descriptor exists, keep `response.create` enabled so model dispatch can continue the chain.
 - `followthrough_remaining` settlement alone is insufficient to keep a followup open: guard decisions must also confirm a still-open non-report step, a pending required report step, or motion that is physically still in `queued/started`.
 
@@ -52,6 +53,7 @@ Control whether tool-followup outputs are released, held, or suppressed; preserv
 - Tool executes but no visible followup output appears.
 - Redundant followups after already-final parent response.
 - Followup stuck in hold due to parent classification never resolving.
+- Local runtime diagnostics completes between gestures, then generic response-create is blocked by followthrough exclusivity before the next deterministic gesture dispatches.
 
 ## I) Known tricky handoffs
 
@@ -69,7 +71,7 @@ Control whether tool-followup outputs are released, held, or suppressed; preserv
 ## K) First places to inspect
 
 1. `ai/tool_followup_arbitration.py` decision reason path.
-2. `ai/realtime_api.py` parent coverage evaluation + queue release logs.
+2. `ai/realtime_api.py` parent coverage evaluation, local runtime post-tool deterministic dispatch, and queue release logs.
 3. `ai/realtime/response_create_runtime.py` metadata capping path (`_enforce_tool_followup_metadata_limit`) when arbitration reasons unexpectedly shift (for example `non_gesture_tool` after queue drain).
 4. `ai/realtime/response_terminal_handlers.py` followthrough guard + selection reason.
 5. Logs: `queue_release_parent_eval`, `tool_followup_*`, `response_done_followthrough_guard_decision`, `tool_followup_metadata_capped`.
