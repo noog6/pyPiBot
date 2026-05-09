@@ -531,6 +531,104 @@ def test_dispatch_required_deliverable_followthrough_increments_input_event_key_
     assert metadata["input_event_key"] == "item_1:required_deliverable_followthrough:2"
 
 
+
+def test_dispatch_required_deliverable_followthrough_uses_stable_parent_key_for_retry() -> None:
+    api = _make_api()
+    api._required_deliverable_materialization_retry_counts = {"turn_1": 1}
+    api._turn_has_active_required_deliverable_step = lambda *, turn_id: turn_id == "turn_1"
+    api._parent_input_event_key_for_tool_followup = (
+        lambda *, turn_id: "item_1:required_deliverable_followthrough:0"
+    )
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
+        compound_request=types.SimpleNamespace(
+            active_step_index=1,
+            steps=(
+                types.SimpleNamespace(kind="diagnostics", status="completed", step_output_policy="status_only", summary="run diagnostics"),
+                types.SimpleNamespace(
+                    kind="report",
+                    status="pending",
+                    step_output_policy="required_deliverable",
+                    summary="say if anything is wrong",
+                ),
+            ),
+        )
+    )
+
+    sent_events: list[dict[str, object]] = []
+
+    async def _fake_send_response_create(_websocket, response_event, **_kwargs):
+        sent_events.append(response_event)
+        return True
+
+    api._send_response_create = _fake_send_response_create
+
+    dispatched = asyncio.run(
+        api._dispatch_required_deliverable_followthrough_response_create(
+            websocket=None,
+            turn_id="turn_1",
+        )
+    )
+
+    assert dispatched is True
+    metadata = sent_events[0]["response"]["metadata"]
+    assert metadata["parent_input_event_key"] == "item_1"
+    assert metadata["input_event_key"] == "item_1:required_deliverable_followthrough:1"
+
+
+def test_dispatch_required_deliverable_followthrough_marks_completed_diagnostics_prerequisite() -> None:
+    api = _make_api()
+    api._turn_has_active_required_deliverable_step = lambda *, turn_id: turn_id == "turn_1"
+    api._parent_input_event_key_for_tool_followup = lambda *, turn_id: "item_1"
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
+        compound_request=types.SimpleNamespace(
+            active_step_index=2,
+            steps=(
+                types.SimpleNamespace(kind="gesture", status="completed", step_output_policy="status_only", summary="look center"),
+                types.SimpleNamespace(kind="diagnostics", status="completed", step_output_policy="status_only", summary="run diagnostics"),
+                types.SimpleNamespace(
+                    kind="report",
+                    status="pending",
+                    step_output_policy="required_deliverable",
+                    summary="let me know if anything is wrong",
+                ),
+            ),
+        )
+    )
+    api._tool_call_records = [
+        {
+            "name": "read_runtime_diagnostics",
+            "turn_id": "turn_1",
+            "call_id": "call_diag_1",
+            "result": {"status": "ok"},
+        }
+    ]
+
+    sent_events: list[dict[str, object]] = []
+
+    async def _fake_send_response_create(_websocket, response_event, **_kwargs):
+        sent_events.append(response_event)
+        return True
+
+    api._send_response_create = _fake_send_response_create
+
+    dispatched = asyncio.run(
+        api._dispatch_required_deliverable_followthrough_response_create(
+            websocket=None,
+            turn_id="turn_1",
+        )
+    )
+
+    assert dispatched is True
+    response_payload = sent_events[0]["response"]
+    metadata = response_payload["metadata"]
+    assert response_payload["tool_choice"] == "none"
+    assert "read_runtime_diagnostics tool result is already available" in response_payload["instructions"]
+    assert "say you are about to run diagnostics" in response_payload["instructions"]
+    assert metadata["followthrough_required_tool_name"] == "read_runtime_diagnostics"
+    assert metadata["tool_followup_required_tool_name"] == "read_runtime_diagnostics"
+    assert metadata["followthrough_required_tool_already_executed"] == "true"
+    assert metadata["followthrough_required_tool_execution"] == "false"
+
 def test_runtime_gesture_suppressed_for_owner_turn_when_only_report_followup_remains() -> None:
     api = _make_api()
     api._current_turn_id_or_unknown = lambda: "turn_owner"

@@ -46,6 +46,12 @@ Ensure user-visible required deliverables (especially report/followthrough outpu
 - Required-deliverable paths must not settle on bridge/progress-only output.
 - Missing tool execution should block completion even if text exists.
 - Redrive budget must be bounded and explicit.
+- Required-deliverable followthrough retry keys must remain parent-scoped
+  (`parent:required_deliverable_followthrough:<n>`) and must not append retry
+  suffixes onto a prior followthrough key.
+- When a report follows a completed deterministic diagnostics step, first-attempt
+  materialization should mark the diagnostics result as already available and
+  instruct the model to deliver the report now rather than narrating progress.
 - Required-deliverable `tool_output` response.done candidates must not be
   demoted by report-step self-precedence; only remaining **non-report**
   followthrough may block terminal selection.
@@ -73,4 +79,5 @@ Ensure user-visible required deliverables (especially report/followthrough outpu
 1. Required-deliverable checks inside `handle_response_done` terminal path.
 2. `RealtimeAPI._response_done_marks_required_deliverable_followthrough(...)`.
 3. `ContinuityLedger` required step pending/completion transitions.
-4. Logs: `required_deliverable_completion_rejected`, `required_deliverable_followthrough_materialization_redrive*`.
+4. Followthrough create lineage: `input_event_key`, `parent_input_event_key`, retry count, and already-executed markers (`followthrough_required_tool_already_executed`).
+5. Logs: `required_deliverable_completion_rejected`, `required_deliverable_followthrough_materialization_redrive*`.

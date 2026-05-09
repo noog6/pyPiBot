@@ -6416,6 +6416,94 @@ def test_execute_function_call_diagnostics_to_required_report_still_uses_require
     assert dispatched[0]["turn_id"] == "turn_diag_to_required_report"
 
 
+def test_execute_function_call_required_deliverable_dispatch_sees_completed_diagnostics_record(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    turn_id = "turn_req_dispatch_order"
+    api._current_response_turn_id = turn_id
+    api._active_input_event_key_by_turn_id[turn_id] = "item_parent_req_dispatch_order"
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._intent_ledger = {}
+    api._resolve_continuity_tool_event_owner_turn = lambda *, fallback_turn_id: (turn_id, False, "")
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=False: False
+    api._turn_has_active_required_deliverable_step = lambda *, turn_id: turn_id == "turn_req_dispatch_order"
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
+        compound_request=types.SimpleNamespace(
+            active_step_index=1,
+            steps=(
+                types.SimpleNamespace(
+                    kind="diagnostics",
+                    status="completed",
+                    step_output_policy="status_only",
+                    summary="run diagnostics",
+                ),
+                types.SimpleNamespace(
+                    kind="report",
+                    status="pending",
+                    step_output_policy="required_deliverable",
+                    summary="let me know if anything is wrong",
+                ),
+            ),
+        )
+    )
+
+    helper_calls: list[str | None] = []
+    original_completed_prerequisite = (
+        RealtimeAPI._completed_required_deliverable_prerequisite_tool_name.__get__(api, RealtimeAPI)
+    )
+
+    def _spy_completed_prerequisite_tool_name(*, turn_id: str) -> str | None:
+        diagnostic_record = next(
+            (
+                record
+                for record in api._tool_call_records
+                if record.get("name") == "read_runtime_diagnostics"
+                and record.get("turn_id") == "turn_req_dispatch_order"
+            ),
+            None,
+        )
+        assert diagnostic_record is not None
+        assert diagnostic_record["call_id"] == "call_req_dispatch_order"
+        assert diagnostic_record["result"] == {"ok": True}
+        result = original_completed_prerequisite(turn_id=turn_id)
+        helper_calls.append(result)
+        return result
+
+    api._completed_required_deliverable_prerequisite_tool_name = _spy_completed_prerequisite_tool_name
+
+    sent_response_creates: list[dict[str, object]] = []
+
+    async def _fake_send_response_create(_websocket, event, origin, **_kwargs):
+        sent_response_creates.append({"event": event, "origin": origin})
+        return True
+
+    api._send_response_create = _fake_send_response_create
+
+    async def _fake_diag(**_kwargs):
+        return {"ok": True}
+
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "read_runtime_diagnostics", _fake_diag)
+
+    asyncio.run(api.execute_function_call("read_runtime_diagnostics", "call_req_dispatch_order", {}, ws))
+
+    assert helper_calls == ["read_runtime_diagnostics"]
+    response_creates = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert response_creates == []
+    assert len(sent_response_creates) == 1
+    assert sent_response_creates[0]["origin"] == "tool_output"
+    response = sent_response_creates[0]["event"]["response"]
+    metadata = response["metadata"]
+    assert metadata["input_event_key"] == "item_parent_req_dispatch_order:required_deliverable_followthrough:0"
+    assert metadata["followthrough_step_output_policy"] == "required_deliverable"
+    assert metadata["followthrough_required_tool_name"] == "read_runtime_diagnostics"
+    assert metadata["tool_followup_required_tool_name"] == "read_runtime_diagnostics"
+    assert metadata["followthrough_required_tool_already_executed"] == "true"
+    assert response["tool_choice"] == "none"
+    assert "read_runtime_diagnostics tool result is already available" in response["instructions"]
+
+
 def test_execute_function_call_bypasses_generic_tool_followup_and_dispatches_required_deliverable(monkeypatch) -> None:
     api = _make_api_stub()
     _wire_runtime(api)
