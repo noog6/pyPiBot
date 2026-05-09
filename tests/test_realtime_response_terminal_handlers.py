@@ -1706,6 +1706,7 @@ def test_handle_response_done_required_deliverable_sparse_trace_still_blocks_nor
     api._selected_response_has_terminal_text_evidence = lambda **_kwargs: False
     api._response_done_followthrough_chain_remaining = lambda **_kwargs: False
     api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._send_response_create = AsyncMock(return_value=True)
     api._build_confirmation_transition_decision = Mock(
         return_value=SimpleNamespace(
             allow_response_transition=True,
