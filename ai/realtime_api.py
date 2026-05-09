@@ -21891,6 +21891,19 @@ class RealtimeAPI:
                 fallback_turn_id=self._current_turn_id_or_unknown(),
             )
         )
+        deterministic_runtime_dispatched = await self._maybe_dispatch_deterministic_followthrough_after_runtime_tool_result(
+            websocket=websocket,
+            triggering_tool_name=function_name,
+            triggering_call_id=call_id,
+            triggering_result=result,
+            turn_id=continuity_turn_id_after_tool_result,
+            local_companion_runtime_call=local_companion_runtime_call,
+            tool_followup_canonical_key=tool_followup_canonical_key,
+        )
+        if deterministic_runtime_dispatched:
+            self.function_call = None
+            self.function_call_args = ""
+            return
         should_dispatch_required_deliverable_directly = (
             not local_companion_runtime_call
             and not function_name.startswith("gesture_")
@@ -21974,6 +21987,116 @@ class RealtimeAPI:
         self.function_call = None
         self.function_call_args = ""
 
+    async def _maybe_dispatch_deterministic_followthrough_after_runtime_tool_result(
+        self,
+        *,
+        websocket: Any,
+        triggering_tool_name: str,
+        triggering_call_id: str,
+        triggering_result: Any,
+        turn_id: str,
+        local_companion_runtime_call: bool,
+        tool_followup_canonical_key: str,
+    ) -> bool:
+        if not local_companion_runtime_call:
+            return False
+        normalized_trigger_tool = str(triggering_tool_name or "").strip().lower()
+        if normalized_trigger_tool not in {"read_runtime_diagnostics"}:
+            return False
+        if self._tool_result_has_distinct_followup_info(
+            tool_name=normalized_trigger_tool,
+            result=triggering_result,
+        ):
+            return False
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return False
+        if not self._turn_followthrough_chain_remaining(
+            turn_id=normalized_turn_id,
+            include_report_followup=False,
+        ):
+            return False
+        runtime_step_descriptor = self._deterministic_followthrough_runtime_descriptor(turn_id=normalized_turn_id)
+        runtime_tool_name = str((runtime_step_descriptor or {}).get("tool_name") or "").strip().lower()
+        if runtime_step_descriptor is None or not self._is_low_risk_reversible_gesture_tool(tool_name=runtime_tool_name):
+            return False
+        dispatched = await self._dispatch_deterministic_followthrough_runtime_step(
+            websocket=websocket,
+            turn_id=normalized_turn_id,
+            runtime_step_descriptor=runtime_step_descriptor,
+            source="deterministic_followthrough_post_runtime_tool_result",
+        )
+        if not dispatched:
+            return False
+        reason = "deterministic_followthrough_post_runtime_tool_result_dispatched"
+        logger.info(
+            "tool_followup_response_not_scheduled call_id=%s canonical_key=%s reason=%s",
+            triggering_call_id,
+            tool_followup_canonical_key,
+            reason,
+        )
+        return True
+
+    async def _dispatch_deterministic_followthrough_runtime_step(
+        self,
+        *,
+        websocket: Any,
+        turn_id: str,
+        runtime_step_descriptor: dict[str, Any],
+        source: str,
+    ) -> bool:
+        normalized_turn_id = str(turn_id or "").strip()
+        step_id = str(runtime_step_descriptor.get("step_id") or "").strip()
+        if not normalized_turn_id or not step_id:
+            return False
+        dispatch_registry = getattr(self, "_deterministic_followthrough_dispatched_steps", None)
+        if not isinstance(dispatch_registry, set):
+            dispatch_registry = set()
+            self._deterministic_followthrough_dispatched_steps = dispatch_registry
+        inflight_registry = getattr(self, "_deterministic_followthrough_dispatch_inflight", None)
+        if not isinstance(inflight_registry, set):
+            inflight_registry = set()
+            self._deterministic_followthrough_dispatch_inflight = inflight_registry
+        dispatch_key = (normalized_turn_id, step_id)
+        if dispatch_key in dispatch_registry:
+            logger.info(
+                "deterministic_followthrough_dispatch_skipped run_id=%s turn_id=%s step_id=%s reason=already_dispatched",
+                self._current_run_id() or "",
+                normalized_turn_id,
+                step_id,
+            )
+            return False
+        if dispatch_key in inflight_registry:
+            logger.info(
+                "deterministic_followthrough_dispatch_skipped run_id=%s turn_id=%s step_id=%s reason=already_inflight",
+                self._current_run_id() or "",
+                normalized_turn_id,
+                step_id,
+            )
+            return False
+        request_fn = getattr(self, "_submit_companion_gesture_tool_request", None)
+        if not callable(request_fn):
+            return False
+        inflight_registry.add(dispatch_key)
+        try:
+            dispatch_outcome = await request_fn(
+                tool_name=str(runtime_step_descriptor.get("tool_name") or "").strip(),
+                tool_args=dict(runtime_step_descriptor.get("tool_args") or {}),
+                websocket=websocket,
+                source=source,
+                turn_id=normalized_turn_id,
+                query=str(getattr(self, "_last_user_input_text", "") or ""),
+                allow_followthrough_execution=True,
+            )
+        finally:
+            inflight_registry.discard(dispatch_key)
+        if bool((dispatch_outcome or {}).get("executed")):
+            dispatch_registry.add(dispatch_key)
+            self._prune_deterministic_followthrough_dispatch_registry()
+            return True
+        self._prune_deterministic_followthrough_dispatch_registry()
+        return False
+
     async def _maybe_continue_deterministic_followthrough_after_inject_only(
         self,
         *,
@@ -22014,53 +22137,12 @@ class RealtimeAPI:
                 fallback_outcome,
             )
             return
-        step_id = str(runtime_step_descriptor.get("step_id") or "").strip()
-        if not step_id:
-            return
-        dispatch_registry = getattr(self, "_deterministic_followthrough_dispatched_steps", None)
-        if not isinstance(dispatch_registry, set):
-            dispatch_registry = set()
-            self._deterministic_followthrough_dispatched_steps = dispatch_registry
-        inflight_registry = getattr(self, "_deterministic_followthrough_dispatch_inflight", None)
-        if not isinstance(inflight_registry, set):
-            inflight_registry = set()
-            self._deterministic_followthrough_dispatch_inflight = inflight_registry
-        dispatch_key = (normalized_turn_id, step_id)
-        if dispatch_key in dispatch_registry:
-            logger.info(
-                "deterministic_followthrough_dispatch_skipped run_id=%s turn_id=%s step_id=%s reason=already_dispatched",
-                self._current_run_id() or "",
-                normalized_turn_id,
-                step_id,
-            )
-            return
-        if dispatch_key in inflight_registry:
-            logger.info(
-                "deterministic_followthrough_dispatch_skipped run_id=%s turn_id=%s step_id=%s reason=already_inflight",
-                self._current_run_id() or "",
-                normalized_turn_id,
-                step_id,
-            )
-            return
-        request_fn = getattr(self, "_submit_companion_gesture_tool_request", None)
-        if not callable(request_fn):
-            return
-        inflight_registry.add(dispatch_key)
-        try:
-            dispatch_outcome = await request_fn(
-                tool_name=str(runtime_step_descriptor.get("tool_name") or "").strip(),
-                tool_args=dict(runtime_step_descriptor.get("tool_args") or {}),
-                websocket=websocket,
-                source="deterministic_followthrough_inject_only",
-                turn_id=normalized_turn_id,
-                query=str(getattr(self, "_last_user_input_text", "") or ""),
-                allow_followthrough_execution=True,
-            )
-        finally:
-            inflight_registry.discard(dispatch_key)
-        if bool((dispatch_outcome or {}).get("executed")):
-            dispatch_registry.add(dispatch_key)
-        self._prune_deterministic_followthrough_dispatch_registry()
+        await self._dispatch_deterministic_followthrough_runtime_step(
+            websocket=websocket,
+            turn_id=normalized_turn_id,
+            runtime_step_descriptor=runtime_step_descriptor,
+            source="deterministic_followthrough_inject_only",
+        )
 
     async def _maybe_dispatch_required_deliverable_after_motion_completion(
         self,

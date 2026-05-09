@@ -174,6 +174,29 @@ def test_deterministic_followthrough_step_descriptor_tracks_active_directional_g
     assert descriptor.tool_name == "gesture_look_right"
 
 
+def test_deterministic_followthrough_step_descriptor_maps_come_back_to_center_again() -> None:
+    ledger = ContinuityLedger()
+    ledger.update_from_event(
+        "transcript_final",
+        text=(
+            "come back to center, turn all the way right, run diagnostics, "
+            "come back to center again, then report diagnostic"
+        ),
+        source="input_audio_transcription",
+        turn_id="turn_1",
+    )
+    ledger.update_from_event("tool_result_received", tool_name="gesture_look_center", turn_id="turn_1")
+    ledger.update_from_event("tool_result_received", tool_name="gesture_look_right", turn_id="turn_1")
+    ledger.update_from_event("tool_result_received", tool_name="read_runtime_diagnostics", turn_id="turn_1")
+
+    descriptor = ledger.deterministic_followthrough_step()
+
+    assert descriptor is not None
+    assert descriptor.step_id == "step_4"
+    assert descriptor.tool_name == "gesture_look_center"
+    assert dict(descriptor.tool_args) == {}
+
+
 def test_deterministic_followthrough_step_descriptor_returns_runtime_diagnostics_for_active_diagnostics() -> None:
     ledger = ContinuityLedger()
     ledger.update_from_event(

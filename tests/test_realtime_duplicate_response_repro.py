@@ -6286,6 +6286,136 @@ def test_execute_function_call_local_companion_call_schedules_plain_response_cre
     assert metadata.get("input_event_key") == "item_parent_local_compgest_final"
 
 
+def test_execute_function_call_diagnostics_between_gestures_dispatches_next_gesture_before_generic_response_create(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_response_turn_id = "turn_diag_between_gestures"
+    api._active_input_event_key_by_turn_id["turn_diag_between_gestures"] = "item_parent_diag_between_gestures"
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._intent_ledger = {}
+    api._last_user_input_text = (
+        "come back to center, turn all the way right, run diagnostics, "
+        "come back to center again, then report diagnostic"
+    )
+    api._resolve_continuity_tool_event_owner_turn = lambda *, fallback_turn_id: (
+        "turn_diag_between_gestures",
+        False,
+        "",
+    )
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=False: True
+    api._deterministic_followthrough_runtime_descriptor = lambda *, turn_id: {
+        "request_id": "req_diag_between_gestures",
+        "step_id": "step_4",
+        "tool_name": "gesture_look_center",
+        "tool_args": {},
+    }
+
+    dispatched: list[dict[str, object]] = []
+
+    async def _fake_dispatch(**kwargs):
+        dispatched.append(kwargs)
+        return {"outcome": "allow", "executed": True}
+
+    api._submit_companion_gesture_tool_request = _fake_dispatch
+    info_logs: list[str] = []
+
+    def _capture_info(message, *args, **_kwargs):
+        info_logs.append(str(message) % args if args else str(message))
+
+    monkeypatch.setattr(logger, "info", _capture_info)
+
+    async def _fake_diag(**_kwargs):
+        return {"ok": True}
+
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "read_runtime_diagnostics", _fake_diag)
+
+    asyncio.run(api.execute_function_call("read_runtime_diagnostics", "compgest_diag_between_gestures", {}, ws))
+
+    assert len(dispatched) == 1
+    dispatch_call = dispatched[0]
+    assert dispatch_call["tool_name"] == "gesture_look_center"
+    assert dispatch_call["tool_args"] == {}
+    assert dispatch_call["source"] == "deterministic_followthrough_post_runtime_tool_result"
+    assert dispatch_call["allow_followthrough_execution"] is True
+    assert [event for event in ws.sent if event.get("type") == "response.create"] == []
+    assert any(
+        "tool_followup_response_not_scheduled" in line
+        and "deterministic_followthrough_post_runtime_tool_result_dispatched" in line
+        for line in info_logs
+    )
+
+
+def test_execute_function_call_diagnostics_between_gestures_descriptor_absent_falls_back_without_inventing_tool(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_response_turn_id = "turn_diag_unknown_step"
+    api._active_input_event_key_by_turn_id["turn_diag_unknown_step"] = "item_parent_diag_unknown_step"
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._intent_ledger = {}
+    api._resolve_continuity_tool_event_owner_turn = lambda *, fallback_turn_id: ("turn_diag_unknown_step", False, "")
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=False: True
+    api._deterministic_followthrough_runtime_descriptor = lambda *, turn_id: None
+
+    dispatched: list[dict[str, object]] = []
+
+    async def _fake_dispatch(**kwargs):
+        dispatched.append(kwargs)
+        return {"outcome": "allow", "executed": True}
+
+    api._submit_companion_gesture_tool_request = _fake_dispatch
+
+    async def _fake_diag(**_kwargs):
+        return {"ok": True}
+
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "read_runtime_diagnostics", _fake_diag)
+
+    asyncio.run(api.execute_function_call("read_runtime_diagnostics", "compgest_diag_unknown_step", {}, ws))
+
+    assert dispatched == []
+    response_creates = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert len(response_creates) == 1
+    metadata = response_creates[0].get("response", {}).get("metadata", {})
+    assert metadata.get("local_runtime_followthrough") == "true"
+    assert metadata.get("input_event_key") == "item_parent_diag_unknown_step"
+
+
+def test_execute_function_call_diagnostics_to_required_report_still_uses_required_deliverable_path(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    api._current_response_turn_id = "turn_diag_to_required_report"
+    api._active_input_event_key_by_turn_id["turn_diag_to_required_report"] = "item_parent_diag_to_required_report"
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._intent_ledger = {}
+    api._resolve_continuity_tool_event_owner_turn = lambda *, fallback_turn_id: ("turn_diag_to_required_report", False, "")
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=False: False
+    api._turn_has_active_required_deliverable_step = lambda *, turn_id: turn_id == "turn_diag_to_required_report"
+
+    dispatched: list[dict[str, object]] = []
+
+    async def _fake_dispatch_required(**kwargs):
+        dispatched.append(kwargs)
+        return True
+
+    api._dispatch_required_deliverable_followthrough_response_create = _fake_dispatch_required
+
+    async def _fake_diag(**_kwargs):
+        return {"ok": True}
+
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "read_runtime_diagnostics", _fake_diag)
+
+    asyncio.run(api.execute_function_call("read_runtime_diagnostics", "call_diag_to_required_report", {}, ws))
+
+    assert [event for event in ws.sent if event.get("type") == "response.create"] == []
+    assert len(dispatched) == 1
+    assert dispatched[0]["turn_id"] == "turn_diag_to_required_report"
+
+
 def test_execute_function_call_bypasses_generic_tool_followup_and_dispatches_required_deliverable(monkeypatch) -> None:
     api = _make_api_stub()
     _wire_runtime(api)
