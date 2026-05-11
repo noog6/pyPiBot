@@ -623,6 +623,8 @@ def test_dispatch_required_deliverable_followthrough_marks_completed_diagnostics
     metadata = response_payload["metadata"]
     assert response_payload["tool_choice"] == "none"
     assert "read_runtime_diagnostics tool result is already available" in response_payload["instructions"]
+    assert "Completed read_runtime_diagnostics result summary" in response_payload["instructions"]
+    assert "status=ok" in response_payload["instructions"]
     assert "say you are about to run diagnostics" in response_payload["instructions"]
     assert metadata["followthrough_required_tool_name"] == "read_runtime_diagnostics"
     assert metadata["tool_followup_required_tool_name"] == "read_runtime_diagnostics"

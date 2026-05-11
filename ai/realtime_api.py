@@ -10706,21 +10706,103 @@ class RealtimeAPI:
             self._followthrough_catchup_buffer_by_turn = store
         return store
 
+    def _compact_required_deliverable_tool_result_summary(
+        self,
+        *,
+        tool_name: str,
+        result: Any,
+    ) -> str:
+        normalized_tool_name = str(tool_name or "").strip().lower()
+        if not isinstance(result, dict):
+            return ""
+        summary_parts: list[str] = []
+        if "ok" in result:
+            summary_parts.append(f"ok={str(bool(result.get('ok'))).lower()}")
+        if "status" in result:
+            summary_parts.append(f"status={str(result.get('status') or '').strip()}")
+        if normalized_tool_name == "read_runtime_diagnostics":
+            for key in ("ready", "connected", "session_ready"):
+                if key in result:
+                    summary_parts.append(f"{key}={str(bool(result.get(key))).lower()}")
+            situation_summary = str(result.get("situation_summary") or "").strip()
+            if situation_summary:
+                summary_parts.append(f"situation={situation_summary}")
+            situation = result.get("situation")
+            if isinstance(situation, dict):
+                state = str(situation.get("state") or "").strip()
+                startup = str(situation.get("startup") or "").strip()
+                queue_depth = situation.get("queue_depth")
+                if state:
+                    summary_parts.append(f"state={state}")
+                if startup:
+                    summary_parts.append(f"startup={startup}")
+                if queue_depth is not None:
+                    summary_parts.append(f"queue_depth={queue_depth}")
+            continuity = result.get("continuity")
+            if isinstance(continuity, dict):
+                for key in ("stance", "settlement"):
+                    value = str(continuity.get(key) or "").strip()
+                    if value:
+                        summary_parts.append(f"continuity_{key}={value}")
+            battery = result.get("battery")
+            if isinstance(battery, dict):
+                for key in ("voltage", "amperage", "power_watts"):
+                    value = battery.get(key)
+                    if value is not None:
+                        summary_parts.append(f"battery_{key}={value}")
+            memory = result.get("memory")
+            if isinstance(memory, dict):
+                coverage = memory.get("embedding_coverage_pct")
+                if coverage is not None:
+                    summary_parts.append(f"memory_embedding_coverage_pct={coverage}")
+        compact = "; ".join(part for part in summary_parts if part)
+        return compact[:600]
+
+    def _required_deliverable_completed_tool_result_summary(
+        self,
+        *,
+        turn_id: str,
+        tool_name: str,
+    ) -> str:
+        normalized_turn_id = str(turn_id or "").strip()
+        normalized_tool_name = str(tool_name or "").strip().lower()
+        if not normalized_turn_id or not normalized_tool_name:
+            return ""
+        for record in reversed(tuple(getattr(self, "_tool_call_records", ()) or ())):
+            record_turn_id = str(record.get("turn_id") or "").strip()
+            if record_turn_id and record_turn_id != normalized_turn_id:
+                continue
+            if str(record.get("name") or "").strip().lower() != normalized_tool_name:
+                continue
+            return self._compact_required_deliverable_tool_result_summary(
+                tool_name=normalized_tool_name,
+                result=record.get("result"),
+            )
+        return ""
+
     def _buffer_followthrough_completion_fact(
         self,
         *,
         turn_id: str,
         tool_name: str,
         call_id: str,
+        result: Any | None = None,
     ) -> None:
         normalized_turn_id = str(turn_id or "").strip()
         if not normalized_turn_id:
             return
+        normalized_tool_name = str(tool_name or "").strip().lower()
         record = {
-            "tool_name": str(tool_name or "").strip().lower(),
+            "tool_name": normalized_tool_name,
             "call_id": str(call_id or "").strip(),
             "ts": datetime.utcnow().isoformat(),
         }
+        result_summary = self._compact_required_deliverable_tool_result_summary(
+            tool_name=normalized_tool_name,
+            result=result,
+        )
+        if result_summary:
+            record["result_summary"] = result_summary
         buffer_store = self._followthrough_catchup_buffer_store()
         facts = buffer_store.setdefault(normalized_turn_id, [])
         facts.append(record)
@@ -21702,19 +21784,23 @@ class RealtimeAPI:
                         allow_cross_turn_rebind="true" if continuity_rebind_allowed else "",
                         cross_turn_rebind_reason=continuity_rebind_reason,
                     )
-                    if function_name.startswith("gesture_"):
-                        non_report_followthrough_remaining = self._turn_followthrough_chain_remaining(
+                    non_report_followthrough_remaining = self._turn_followthrough_chain_remaining(
+                        turn_id=continuity_turn_id,
+                        include_report_followup=False,
+                    )
+                    if (
+                        function_name.startswith("gesture_")
+                        or str(function_name or "").strip().lower() == "read_runtime_diagnostics"
+                    ) and (
+                        non_report_followthrough_remaining
+                        or self._turn_has_active_required_deliverable_step(turn_id=continuity_turn_id)
+                    ):
+                        self._buffer_followthrough_completion_fact(
                             turn_id=continuity_turn_id,
-                            include_report_followup=False,
+                            tool_name=function_name,
+                            call_id=call_id,
+                            result=result,
                         )
-                        if non_report_followthrough_remaining or self._turn_has_active_required_deliverable_step(
-                            turn_id=continuity_turn_id
-                        ):
-                            self._buffer_followthrough_completion_fact(
-                                turn_id=continuity_turn_id,
-                                tool_name=function_name,
-                                call_id=call_id,
-                            )
             except Exception as exc:
                 error_message = f"Error executing function '{function_name}': {exc}"
                 log_error(error_message)
@@ -21920,8 +22006,13 @@ class RealtimeAPI:
             self.function_call = None
             self.function_call_args = ""
             return
+        normalized_function_name = str(function_name or "").strip().lower()
+        local_required_deliverable_tool_result = (
+            local_companion_runtime_call
+            and normalized_function_name == "read_runtime_diagnostics"
+        )
         should_dispatch_required_deliverable_directly = (
-            not local_companion_runtime_call
+            (not local_companion_runtime_call or local_required_deliverable_tool_result)
             and not function_name.startswith("gesture_")
             and not self._turn_followthrough_chain_remaining(
                 turn_id=continuity_turn_id_after_tool_result,
@@ -22353,6 +22444,17 @@ class RealtimeAPI:
         if required_tool_name:
             response_event["response"]["metadata"]["followthrough_required_tool_name"] = required_tool_name
             response_event["response"]["metadata"]["tool_followup_required_tool_name"] = required_tool_name
+        if required_tool_already_executed and required_tool_name:
+            completed_tool_result_summary = self._required_deliverable_completed_tool_result_summary(
+                turn_id=turn_id,
+                tool_name=required_tool_name,
+            )
+            if completed_tool_result_summary:
+                response_event["response"]["instructions"] = (
+                    f'{response_event["response"]["instructions"]} '
+                    f"Completed {required_tool_name} result summary: {completed_tool_result_summary}. "
+                    "Answer from this completed diagnostic result now; do not narrate diagnostics as future work."
+                )
         if required_tool_already_executed:
             response_event["response"]["metadata"]["followthrough_required_tool_already_executed"] = "true"
         sent = await self._send_response_create(

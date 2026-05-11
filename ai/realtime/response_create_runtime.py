@@ -258,7 +258,6 @@ class ResponseCreateRuntime:
             duplicate_drop_priority = (
                 "tool_followup_step_output_policy",
                 "tool_followup_post_completion_reason",
-                "tool_followup_required_tool_name",
             )
             for key in duplicate_drop_priority:
                 if len(metadata) <= self._PROVIDER_METADATA_MAX_PROPERTIES:
@@ -282,12 +281,18 @@ class ResponseCreateRuntime:
                 "followthrough_post_completion_reason",
                 "local_runtime_followthrough",
                 "followthrough_required_tool_name",
+                "tool_followup_required_tool_name",
                 "followthrough_required_tool_already_executed",
                 "tool_followup_suppress_if_parent_covered",
-                "tool_followup_status_only",
-                "tool_followup_silent_audio",
-                "tool_followup_silent_user_facing_output",
             }
+            if not required_deliverable_followthrough:
+                required_keys.update(
+                    {
+                        "tool_followup_status_only",
+                        "tool_followup_silent_audio",
+                        "tool_followup_silent_user_facing_output",
+                    }
+                )
             if "tool_followup_step_output_policy" in metadata and "followthrough_step_output_policy" not in metadata:
                 required_keys.add("tool_followup_step_output_policy")
             if "tool_followup_post_completion_reason" in metadata and "followthrough_post_completion_reason" not in metadata:

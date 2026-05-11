@@ -6416,6 +6416,79 @@ def test_execute_function_call_diagnostics_to_required_report_still_uses_require
     assert dispatched[0]["turn_id"] == "turn_diag_to_required_report"
 
 
+
+def test_execute_function_call_local_companion_diagnostics_required_report_uses_dedicated_dispatcher(monkeypatch) -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    ws = _RecordingWs()
+    api.websocket = ws
+    turn_id = "turn_local_diag_required_report"
+    api._current_response_turn_id = turn_id
+    api._active_input_event_key_by_turn_id[turn_id] = "item_parent_local_diag_required_report"
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._intent_ledger = {}
+    api._resolve_continuity_tool_event_owner_turn = lambda *, fallback_turn_id: (turn_id, False, "")
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=False: False
+    api._turn_has_active_required_deliverable_step = lambda *, turn_id: turn_id == "turn_local_diag_required_report"
+    api.get_continuity_brief = lambda **_kwargs: types.SimpleNamespace(
+        compound_request=types.SimpleNamespace(
+            active_step_index=1,
+            steps=(
+                types.SimpleNamespace(
+                    kind="diagnostics",
+                    status="completed",
+                    step_output_policy="status_only",
+                    summary="run diagnostics",
+                ),
+                types.SimpleNamespace(
+                    kind="report",
+                    status="pending",
+                    step_output_policy="required_deliverable",
+                    summary="tell me if everything is okay",
+                ),
+            ),
+        )
+    )
+
+    sent_response_creates: list[dict[str, object]] = []
+
+    async def _fake_send_response_create(_websocket, event, origin, **_kwargs):
+        sent_response_creates.append({"event": event, "origin": origin})
+        return True
+
+    api._send_response_create = _fake_send_response_create
+
+    async def _fake_diag(**_kwargs):
+        return {
+            "ready": True,
+            "connected": True,
+            "status": "ok",
+            "situation_summary": "state=idle queue=0",
+            "continuity": {"stance": "awaiting_user", "settlement": "settled"},
+        }
+
+    monkeypatch.setitem(__import__("ai.tools", fromlist=["function_map"]).function_map, "read_runtime_diagnostics", _fake_diag)
+
+    asyncio.run(api.execute_function_call("read_runtime_diagnostics", "compgest_diag_required_report", {}, ws))
+
+    assert [event for event in ws.sent if event.get("type") == "response.create"] == []
+    assert len(sent_response_creates) == 1
+    response = sent_response_creates[0]["event"]["response"]
+    metadata = response["metadata"]
+    assert sent_response_creates[0]["origin"] == "tool_output"
+    assert metadata["input_event_key"] == "item_parent_local_diag_required_report:required_deliverable_followthrough:0"
+    assert metadata["followthrough_required_tool_name"] == "read_runtime_diagnostics"
+    assert metadata["tool_followup_required_tool_name"] == "read_runtime_diagnostics"
+    assert metadata["followthrough_required_tool_already_executed"] == "true"
+    assert metadata["followthrough_required_tool_execution"] == "false"
+    assert response["tool_choice"] == "none"
+    assert "read_runtime_diagnostics tool result is already available" in response["instructions"]
+    assert "Completed read_runtime_diagnostics result summary" in response["instructions"]
+    assert "ready=true" in response["instructions"]
+    assert "connected=true" in response["instructions"]
+    assert "do not narrate diagnostics as future work" in response["instructions"]
+
+
 def test_execute_function_call_required_deliverable_dispatch_sees_completed_diagnostics_record(monkeypatch) -> None:
     api = _make_api_stub()
     _wire_runtime(api)

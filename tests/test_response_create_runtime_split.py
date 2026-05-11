@@ -1019,6 +1019,9 @@ def test_tool_followup_metadata_cap_preserves_required_deliverable_markers() -> 
                 "followthrough_step_output_policy": "required_deliverable",
                 "tool_followup_post_completion_reason": "required_deliverable_owed",
                 "followthrough_post_completion_reason": "required_deliverable_owed",
+                "followthrough_required_tool_name": "read_runtime_diagnostics",
+                "tool_followup_required_tool_name": "read_runtime_diagnostics",
+                "followthrough_required_tool_already_executed": "true",
                 "followthrough_catchup_payload": "{\"turn_id\":\"turn-cap\",\"completed_steps\":[{\"tool_name\":\"gesture_look_center\"}]}",
                 "local_runtime_followthrough": "true",
                 "followthrough_dispatch_source": "deterministic_followthrough_motion_gate",
@@ -1037,6 +1040,9 @@ def test_tool_followup_metadata_cap_preserves_required_deliverable_markers() -> 
     assert len(metadata) <= runtime._PROVIDER_METADATA_MAX_PROPERTIES
     assert metadata.get("followthrough_step_output_policy") == "required_deliverable"
     assert metadata.get("followthrough_post_completion_reason") == "required_deliverable_owed"
+    assert metadata.get("followthrough_required_tool_name") == "read_runtime_diagnostics"
+    assert metadata.get("tool_followup_required_tool_name") == "read_runtime_diagnostics"
+    assert metadata.get("followthrough_required_tool_already_executed") == "true"
     assert "followthrough_catchup_payload" in metadata
     assert metadata.get("tool_followup_step_output_policy") is None
     assert metadata.get("tool_followup_post_completion_reason") is None
