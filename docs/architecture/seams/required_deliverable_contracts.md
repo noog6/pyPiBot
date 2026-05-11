@@ -50,8 +50,14 @@ Ensure user-visible required deliverables (especially report/followthrough outpu
   (`parent:required_deliverable_followthrough:<n>`) and must not append retry
   suffixes onto a prior followthrough key.
 - When a report follows a completed deterministic diagnostics step, first-attempt
-  materialization should mark the diagnostics result as already available and
-  instruct the model to deliver the report now rather than narrating progress.
+  materialization should mark the diagnostics result as already available, include
+  a compact completed-result summary, and instruct the model to deliver the report
+  now rather than narrating progress. Local companion diagnostics at the report
+  boundary must use the dedicated required-deliverable dispatcher rather than a
+  generic tool-followup create.
+- Metadata capping must preserve both required-tool aliases
+  (`followthrough_required_tool_name` and `tool_followup_required_tool_name`) plus
+  `followthrough_required_tool_already_executed` for required-deliverable creates.
 - Required-deliverable `tool_output` response.done candidates must not be
   demoted by report-step self-precedence; only remaining **non-report**
   followthrough may block terminal selection.
@@ -79,5 +85,6 @@ Ensure user-visible required deliverables (especially report/followthrough outpu
 1. Required-deliverable checks inside `handle_response_done` terminal path.
 2. `RealtimeAPI._response_done_marks_required_deliverable_followthrough(...)`.
 3. `ContinuityLedger` required step pending/completion transitions.
-4. Followthrough create lineage: `input_event_key`, `parent_input_event_key`, retry count, and already-executed markers (`followthrough_required_tool_already_executed`).
-5. Logs: `required_deliverable_completion_rejected`, `required_deliverable_followthrough_materialization_redrive*`.
+4. Followthrough create lineage: `input_event_key`, `parent_input_event_key`, retry count, required-tool aliases, and already-executed markers (`followthrough_required_tool_already_executed`).
+5. First-attempt instructions for completed diagnostics: verify the dedicated dispatcher included a completed diagnostic result summary and did not route through generic tool-followup materialization.
+6. Logs: `required_deliverable_completion_rejected`, `required_deliverable_followthrough_materialization_redrive*`.
