@@ -23,7 +23,7 @@ class ServoRegistry:
     def _create_servos(self) -> dict[str, ServoActuator]:
         servos = {
             "pan": ServoActuator(
-                id=9,
+                id=12,
                 name="Pan_Servo",
                 min_angle=-90,
                 max_angle=90,
