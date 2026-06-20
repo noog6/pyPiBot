@@ -27,10 +27,32 @@ class Keyframe:
     start_time_ms: int | None = None
     duration_ms: int | None = None
     last_pan_log_ms: int | None = None
-    start_pos: dict[str, float] = field(default_factory=lambda: {"pan": 0.0, "tilt_left": 0.0, "tilt_right": 0.0, "ear_left": 0.0, "ear_right": 0.0})
-    delta_pos: dict[str, float] = field(default_factory=lambda: {"pan": 0.0, "tilt_left": 0.0, "tilt_right": 0.0, "ear_left": 0.0, "ear_right": 0.0})
+    start_pos: dict[str, float] = field(
+        default_factory=lambda: {
+            "pan": 0.0,
+            "tilt": 0.0,
+            "roll": 0.0,
+            "ear_left": 0.0,
+            "ear_right": 0.0,
+        }
+    )
+    delta_pos: dict[str, float] = field(
+        default_factory=lambda: {
+            "pan": 0.0,
+            "tilt": 0.0,
+            "roll": 0.0,
+            "ear_left": 0.0,
+            "ear_right": 0.0,
+        }
+    )
     servo_destination: dict[str, float] = field(
-        default_factory=lambda: {"pan": 0.0, "tilt_left": 0.0, "tilt_right": 0.0, "ear_left": 0.0, "ear_right": 0.0}
+        default_factory=lambda: {
+            "pan": 0.0,
+            "tilt": 0.0,
+            "roll": 0.0,
+            "ear_left": 0.0,
+            "ear_right": 0.0,
+        }
     )
     audio: Any | None = None
     next: "Keyframe | None" = None
@@ -50,8 +72,8 @@ class Keyframe:
     def __str__(self) -> str:
         return (
             f"pan       :{self.servo_destination['pan']:.3f} "
-            f"tilt_left :{self.servo_destination['tilt_left']:.3f}"
-            f"tilt_right:{self.servo_destination['tilt_right']:.3f}"
+            f"tilt     :{self.servo_destination['tilt']:.3f}"
+            f"roll     :{self.servo_destination['roll']:.3f}"
             f"ear_left  :{self.servo_destination['ear_left']:.3f}"
             f"ear_right :{self.servo_destination['ear_right']:.3f}"
         )

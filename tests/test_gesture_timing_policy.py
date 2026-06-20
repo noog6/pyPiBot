@@ -11,7 +11,9 @@ import types
 def _load_gesture_library_module():
     fake_core = types.ModuleType("core")
     fake_core_logging = types.ModuleType("core.logging")
-    fake_core_logging.logger = types.SimpleNamespace(warning=lambda *args, **kwargs: None)
+    fake_core_logging.logger = types.SimpleNamespace(
+        warning=lambda *args, **kwargs: None
+    )
     fake_core.logging = fake_core_logging
     sys.modules["core"] = fake_core
     sys.modules["core.logging"] = fake_core_logging
@@ -63,7 +65,9 @@ def _load_gesture_library_module():
     sys.modules["storage.controller"] = fake_storage_controller
 
     module_path = Path(__file__).resolve().parents[1] / "motion" / "gesture_library.py"
-    spec = importlib.util.spec_from_file_location("gesture_library_timing_for_test", module_path)
+    spec = importlib.util.spec_from_file_location(
+        "gesture_library_timing_for_test", module_path
+    )
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -190,3 +194,53 @@ def test_non_look_gesture_keeps_authored_duration() -> None:
     )
 
     assert duration == spec.duration_ms
+
+
+def test_tilt_offsets_remain_logical_tilt_with_zero_roll() -> None:
+    gesture_library = _load_gesture_library_module()
+    library = gesture_library.GestureLibrary.__new__(gesture_library.GestureLibrary)
+    definition = _definition(gesture_library, "gesture_curious_tilt")
+    spec = definition.frames[0]
+
+    class _Servo:
+        def __init__(self, minimum: float, maximum: float) -> None:
+            self.min_angle = minimum
+            self.max_angle = maximum
+
+    class _Controller:
+        def __init__(self) -> None:
+            self.servo_registry = types.SimpleNamespace(
+                servos={
+                    "pan": _Servo(-90.0, 90.0),
+                    "tilt_left": _Servo(-45.0, 45.0),
+                    "tilt_right": _Servo(-45.0, 45.0),
+                    "ear_left": _Servo(-90.0, 90.0),
+                    "ear_right": _Servo(-90.0, 90.0),
+                }
+            )
+
+        def generate_base_keyframe(self, *, pan_degrees: float, tilt_degrees: float):
+            frame = gesture_library.Keyframe()
+            frame.servo_destination = {
+                "pan": pan_degrees,
+                "tilt": tilt_degrees,
+                "roll": 0.0,
+                "ear_left": 0.0,
+                "ear_right": 0.0,
+            }
+            return frame
+
+    frame = library._create_keyframe(
+        _Controller(),
+        definition=definition,
+        spec=spec,
+        base_pan=0.0,
+        base_tilt=2.0,
+        transition_pan=0.0,
+        transition_tilt=2.0,
+        intensity=1.0,
+        style="neutral",
+    )
+
+    assert frame.servo_destination["tilt"] == 10.0
+    assert frame.servo_destination["roll"] == 0.0

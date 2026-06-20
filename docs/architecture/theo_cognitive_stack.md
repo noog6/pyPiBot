@@ -20,7 +20,7 @@ Theo is no longer at a "continuity missing" stage.
 
 **Anchors:** `motion/*`, `services/tool_runtime.py`, gesture tools in `ai/tools.py`.
 
-**Notes:** Motion/gesture behavior is exposed through deterministic tool calls; this is an execution substrate, not cognition.
+**Notes:** Motion/gesture behavior is exposed through deterministic tool calls; this is an execution substrate, not cognition. Public motion requests remain logical (`pan`, `tilt`, `roll`, ears); the motion controller ramps those logical axes and owns translation to physical servo targets for current five-servo head hardware.
 
 ---
 

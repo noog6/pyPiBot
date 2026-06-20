@@ -49,6 +49,10 @@ class MotionTuning:
 
 TUNING = MotionTuning()
 
+# Isolate logical roll sign convention here so hardware/IMU validation can flip it.
+ROLL_TO_TILT_SIGN = 1.0
+LOGICAL_POSE_AXES = ("pan", "tilt", "roll", "ear_left", "ear_right")
+
 
 def limit_step(
     current: float,
@@ -98,13 +102,17 @@ def limit_step(
     return nxt
 
 
-def scaled_step(dist_deg: float, step_min: float, step_max: float, scale_deg: float) -> float:
+def scaled_step(
+    dist_deg: float, step_min: float, step_max: float, scale_deg: float
+) -> float:
     ratio = clamp01(abs(dist_deg) / max(scale_deg, 1e-6))
     ratio = smoothstep(ratio)
     return step_min + (step_max - step_min) * ratio
 
 
-def axis_step_v_max(axis: str, dist_deg: float, nominal_dt_s: float, tuning: MotionTuning) -> float:
+def axis_step_v_max(
+    axis: str, dist_deg: float, nominal_dt_s: float, tuning: MotionTuning
+) -> float:
     if axis == "pan":
         step_deg = scaled_step(
             dist_deg,
@@ -144,9 +152,12 @@ class MotionController:
         self.control_loop_start_time = [0] * 100
         self.transition_time = 1500
         self.servo_registry = ServoRegistry.get_instance()
-        self.current_servo_position = {"pan": 0.0, "tilt_left": 0.0, "tilt_right": 0.0, "ear_left": 0.0, "ear_right": 0.0}
-        self.axis_v = {"pan": 0.0, "tilt_left": 0.0, "tilt_right": 0.0, "ear_left": 0.0, "ear_right": 0.0}
-        self.axis_v_max = {"pan": 0.0, "tilt_left": 0.0, "tilt_right": 0.0, "ear_left": 0.0, "ear_right": 0.0}
+        self.current_logical_pose = {axis: 0.0 for axis in LOGICAL_POSE_AXES}
+        # Compatibility alias for older call sites/tests; this now stores logical pose,
+        # not raw physical servo positions.
+        self.current_servo_position = self.current_logical_pose
+        self.axis_v = {axis: 0.0 for axis in LOGICAL_POSE_AXES}
+        self.axis_v_max = {axis: 0.0 for axis in LOGICAL_POSE_AXES}
         self.action_queue: list[Action] = []
         self.current_action: Action | None = None
         self._action_lifecycle_callbacks: list[Callable[[str, Action], None]] = []
@@ -173,12 +184,17 @@ class MotionController:
             self.start_control_loop()
 
     def start_control_loop(self, control_loop_period_ms: int = 20) -> None:
-        if self._control_loop_thread is None or not self._control_loop_thread.is_alive():
+        if (
+            self._control_loop_thread is None
+            or not self._control_loop_thread.is_alive()
+        ):
             self.control_loop_period_ms = control_loop_period_ms
             self._run_lifecycle_posture_blocking(event=LifecyclePostureEvent.STARTUP)
             self._stop_event.clear()
             self.control_loop_period_ms = control_loop_period_ms
-            self._control_loop_thread = threading.Thread(target=self._control_loop, daemon=True)
+            self._control_loop_thread = threading.Thread(
+                target=self._control_loop, daemon=True
+            )
             self._control_loop_thread.start()
 
     def stop_control_loop(self) -> None:
@@ -188,7 +204,9 @@ class MotionController:
             self._control_loop_thread = None
             self._run_lifecycle_posture_blocking(event=LifecyclePostureEvent.SHUTDOWN)
             self.relax_all_servos()
-            log_info(f"[MOTION] control loop stopped at index: {self.control_loop_index}")
+            log_info(
+                f"[MOTION] control loop stopped at index: {self.control_loop_index}"
+            )
             self.control_loop_index = 0
 
     def _run_lifecycle_posture_blocking(self, *, event: LifecyclePostureEvent) -> None:
@@ -202,7 +220,6 @@ class MotionController:
         if decision.cue_name is None:
             return
         self._run_lifecycle_gesture_blocking(gesture_name=decision.cue_name)
-
 
     def _run_lifecycle_gesture_blocking(self, *, gesture_name: str) -> None:
         from motion.gesture_library import GestureLibrary
@@ -232,7 +249,9 @@ class MotionController:
                     log_error(f"[MOTION] Error in control loop (retrying): {exc}")
                     traceback.print_exc()
 
-                self.control_loop_start_time.append(current_time - next_control_loop_time)
+                self.control_loop_start_time.append(
+                    current_time - next_control_loop_time
+                )
                 if len(self.control_loop_start_time) > 100:
                     self.control_loop_start_time.pop(0)
                 next_control_loop_time += self.control_loop_period_ms
@@ -246,12 +265,68 @@ class MotionController:
 
         if self.current_action:
             if self.move_to_keyframe(self.current_action.current_frame):
-                self.current_action.current_frame = self.current_action.current_frame.next
+                self.current_action.current_frame = (
+                    self.current_action.current_frame.next
+                )
 
                 if self.current_action.current_frame is None:
                     completed_action = self.current_action
                     self._emit_action_lifecycle("completed", completed_action)
                     self.current_action = self.get_next_action()
+
+    def _clamp_servo_target(self, servo_name: str, value: float) -> float:
+        servo = self.servo_registry.servos[servo_name]
+        minimum = float(servo.min_angle)
+        maximum = float(servo.max_angle)
+        raw_value = float(value)
+        clamped = max(minimum, min(maximum, raw_value))
+        if clamped != raw_value:
+            log_warning(
+                "[MOTION] physical servo target clamped servo=%s requested=%.3f clamped=%.3f min=%.3f max=%.3f",
+                servo_name,
+                raw_value,
+                clamped,
+                minimum,
+                maximum,
+            )
+        return clamped
+
+    def _logical_pose_to_servo_targets(
+        self, logical_pose: dict[str, float]
+    ) -> dict[str, float]:
+        """Translate public logical pose axes to private physical servo targets."""
+
+        pan = float(logical_pose.get("pan", 0.0))
+        tilt = float(logical_pose.get("tilt", 0.0))
+        roll = float(logical_pose.get("roll", 0.0)) * ROLL_TO_TILT_SIGN
+        targets = {
+            "pan": pan,
+            "tilt_left": tilt + roll,
+            "tilt_right": tilt - roll,
+            "ear_left": float(logical_pose.get("ear_left", 0.0)),
+            "ear_right": float(logical_pose.get("ear_right", 0.0)),
+        }
+        return {
+            name: self._clamp_servo_target(name, value)
+            for name, value in targets.items()
+        }
+
+    def get_current_logical_pose(self) -> dict[str, float]:
+        """Return the current public/logical motion pose."""
+
+        return {
+            axis: float(self.current_logical_pose.get(axis, 0.0))
+            for axis in LOGICAL_POSE_AXES
+        }
+
+    def _axis_v_max_for_remaining(
+        self, axis: str, remaining: float, nominal_dt_s: float
+    ) -> float:
+        shaped_axis = "pan" if axis == "pan" else "tilt"
+        return axis_step_v_max(shaped_axis, remaining, nominal_dt_s, TUNING)
+
+    def _axis_a_max(self, axis: str) -> float:
+        return TUNING.pan_a_max if axis == "pan" else TUNING.tilt_a_max
 
     def move_to_keyframe(self, new_frame: Keyframe) -> bool:
         self._moving_event.set()
@@ -262,98 +337,84 @@ class MotionController:
 
         dt_s = self._compute_dt_s(now_ms)
         nominal_dt_s = self._compute_nominal_dt_s()
-        desired_pan = new_frame.servo_destination["pan"]
-        desired_tilt = new_frame.servo_destination["tilt"]
-        pan_remaining = desired_pan - self.current_servo_position["pan"]
-        tilt_remaining = desired_tilt - self.current_servo_position["tilt"]
-        pan_v_max_raw = axis_step_v_max("pan", pan_remaining, nominal_dt_s, TUNING)
-        tilt_v_max_raw = axis_step_v_max("tilt", tilt_remaining, nominal_dt_s, TUNING)
-        pan_v_max = self._smooth_v_max("pan", pan_v_max_raw, nominal_dt_s)
-        tilt_v_max = self._smooth_v_max("tilt", tilt_v_max_raw, nominal_dt_s)
-        pan_a_max = TUNING.pan_a_max
-        tilt_a_max = TUNING.tilt_a_max
+        desired_pose = {
+            axis: float(new_frame.servo_destination.get(axis, 0.0))
+            for axis in LOGICAL_POSE_AXES
+        }
 
-        limited_pan = limit_step(
-            self.current_servo_position["pan"],
-            desired_pan,
-            self.axis_v,
-            "pan",
-            dt_s,
-            pan_v_max,
-            pan_a_max,
-            eps=TUNING.position_eps_deg,
-        )
+        limited_pose: dict[str, float] = {}
+        axis_v_max_by_axis: dict[str, float] = {}
+        for axis, desired_value in desired_pose.items():
+            remaining = desired_value - self.current_logical_pose[axis]
+            v_max_raw = self._axis_v_max_for_remaining(axis, remaining, nominal_dt_s)
+            v_max = self._smooth_v_max(axis, v_max_raw, nominal_dt_s)
+            axis_v_max_by_axis[axis] = v_max
+            limited_pose[axis] = limit_step(
+                self.current_logical_pose[axis],
+                desired_value,
+                self.axis_v,
+                axis,
+                dt_s,
+                v_max,
+                self._axis_a_max(axis),
+                eps=TUNING.position_eps_deg,
+            )
 
-        limited_tilt = limit_step(
-            self.current_servo_position["tilt"],
-            desired_tilt,
-            self.axis_v,
-            "tilt",
-            dt_s,
-            tilt_v_max,
-            tilt_a_max,
-            eps=TUNING.position_eps_deg,
-        )
+        physical_targets = self._logical_pose_to_servo_targets(limited_pose)
 
-        if abs(limited_pan - self.current_servo_position["pan"]) > 1.0:
+        if abs(limited_pose["pan"] - self.current_logical_pose["pan"]) > 1.0:
             last_pan_log_ms = new_frame.last_pan_log_ms
             if last_pan_log_ms is None or now_ms - last_pan_log_ms >= 200:
                 log_info(
-                    "[MOTION] [%s] 'pan' servo to (%.2f) (wanted: %.2f) "
-                    "(PAN_V_MAX:%.3f) (Elapsed ms:%s)",
+                    "[MOTION] [%s] 'pan' servo to (%.2f) (wanted: %.2f) (PAN_V_MAX:%.3f) (Elapsed ms:%s)",
                     new_frame.name,
-                    limited_pan,
-                    desired_pan,
-                    pan_v_max,
+                    limited_pose["pan"],
+                    desired_pose["pan"],
+                    axis_v_max_by_axis["pan"],
                     now_ms - new_frame.start_time_ms,
                 )
                 new_frame.last_pan_log_ms = now_ms
 
-        self.current_servo_position["pan"] = limited_pan
-        self.current_servo_position["tilt"] = limited_tilt
-        self.servo_registry.servos["pan"].write_value(limited_pan)
-        self.servo_registry.servos["tilt"].write_value(limited_tilt)
+        self.current_logical_pose.update(limited_pose)
+        for servo_name, target in physical_targets.items():
+            self.servo_registry.servos[servo_name].write_value(target)
 
         eps = TUNING.at_dest_eps_deg
-        at_dest = (
-            abs(self.current_servo_position["pan"] - desired_pan) <= eps
-            and abs(self.current_servo_position["tilt"] - desired_tilt) <= eps
+        at_dest = all(
+            abs(self.current_logical_pose[axis] - desired_pose[axis]) <= eps
+            for axis in LOGICAL_POSE_AXES
         )
 
         if self._should_emit_motion_debug_log(now_ms):
             log_info(
-                "[MOTION][debug] dt=%.4f pan_v=%.2f pan_vmax=%.2f tilt_v=%.2f tilt_vmax=%.2f "
-                "pan_err=%.2f tilt_err=%.2f",
+                "[MOTION][debug] dt=%.4f pan_v=%.2f pan_vmax=%.2f tilt_v=%.2f tilt_vmax=%.2f roll_v=%.2f roll_vmax=%.2f pan_err=%.2f tilt_err=%.2f roll_err=%.2f",
                 dt_s,
                 self.axis_v["pan"],
-                pan_v_max,
+                axis_v_max_by_axis["pan"],
                 self.axis_v["tilt"],
-                tilt_v_max,
-                desired_pan - self.current_servo_position["pan"],
-                desired_tilt - self.current_servo_position["tilt"],
+                axis_v_max_by_axis["tilt"],
+                self.axis_v["roll"],
+                axis_v_max_by_axis["roll"],
+                desired_pose["pan"] - self.current_logical_pose["pan"],
+                desired_pose["tilt"] - self.current_logical_pose["tilt"],
+                desired_pose["roll"] - self.current_logical_pose["roll"],
             )
 
         done = self._frame_done(new_frame, at_dest, now_ms)
-
         if done:
-            self.current_servo_position["pan"] = desired_pan
-            self.current_servo_position["tilt"] = desired_tilt
-            self.servo_registry.servos["pan"].write_value(desired_pan)
-            self.servo_registry.servos["tilt"].write_value(desired_tilt)
-
+            self.current_logical_pose.update(desired_pose)
+            for servo_name, target in self._logical_pose_to_servo_targets(
+                desired_pose
+            ).items():
+                self.servo_registry.servos[servo_name].write_value(target)
             elapsed_ms = now_ms - new_frame.start_time_ms
             log_debug(
-                "[MOTION] 'pan' servo move completed (Cmd: %.3f) "
-                "(Position: %.2f) (Elapsed ms: %s)",
-                desired_pan,
-                desired_pan,
-                elapsed_ms,
-            )
-            log_debug(
-                "[MOTION] 'tilt' servo move completed (Cmd: %.3f) "
-                "(Position: %.2f) (Elapsed ms: %s)",
-                desired_tilt,
-                desired_tilt,
+                "[MOTION] logical pose move completed pan=%.3f tilt=%.3f roll=%.3f ear_left=%.3f ear_right=%.3f elapsed_ms=%s",
+                desired_pose["pan"],
+                desired_pose["tilt"],
+                desired_pose["roll"],
+                desired_pose["ear_left"],
+                desired_pose["ear_right"],
                 elapsed_ms,
             )
             self._moving_event.clear()
@@ -424,23 +485,30 @@ class MotionController:
         frame.duration_ms = max(1, dur)
 
         frame.start_pos = {
-            "pan": float(self.current_servo_position["pan"]),
-            "tilt": float(self.current_servo_position["tilt"]),
+            axis: float(self.current_logical_pose.get(axis, 0.0))
+            for axis in LOGICAL_POSE_AXES
         }
         frame.delta_pos = {
-            "pan": float(frame.servo_destination["pan"]) - frame.start_pos["pan"],
-            "tilt": float(frame.servo_destination["tilt"]) - frame.start_pos["tilt"],
+            axis: float(frame.servo_destination.get(axis, 0.0)) - frame.start_pos[axis]
+            for axis in LOGICAL_POSE_AXES
         }
 
         log_info(
-            "[MOTION] New motion frame started (Name:%s) (Duration:%sms) "
-            "pan %.2f->%.2f tilt %.2f->%.2f (deadline_ms:%s)",
+            "[MOTION] New motion frame started name=%s duration_ms=%s "
+            "pan=%.2f->%.2f tilt=%.2f->%.2f roll=%.2f->%.2f "
+            "ear_left=%.2f->%.2f ear_right=%.2f->%.2f deadline_ms=%s",
             frame.name,
             frame.duration_ms,
-            self.current_servo_position["pan"],
-            frame.servo_destination["pan"],
-            self.current_servo_position["tilt"],
-            frame.servo_destination["tilt"],
+            self.current_logical_pose["pan"],
+            frame.servo_destination.get("pan", 0.0),
+            self.current_logical_pose["tilt"],
+            frame.servo_destination.get("tilt", 0.0),
+            self.current_logical_pose["roll"],
+            frame.servo_destination.get("roll", 0.0),
+            self.current_logical_pose["ear_left"],
+            frame.servo_destination.get("ear_left", 0.0),
+            self.current_logical_pose["ear_right"],
+            frame.servo_destination.get("ear_right", 0.0),
             frame.deadline_ms,
         )
         frame.is_initialized = True
@@ -473,15 +541,29 @@ class MotionController:
 
         return False
 
-    def generate_base_keyframe(self, pan_degrees: int, tilt_degrees: int) -> Keyframe:
+    def generate_base_keyframe(
+        self,
+        pan_degrees: int,
+        tilt_degrees: int,
+        roll_degrees: int = 0,
+        ear_left_degrees: int = 0,
+        ear_right_degrees: int = 0,
+    ) -> Keyframe:
         new_frame = Keyframe(final_target_time=self.transition_time, name="base")
-        new_frame.servo_destination["pan"] = pan_degrees
-        new_frame.servo_destination["tilt"] = tilt_degrees
+        new_frame.servo_destination.update(
+            {
+                "pan": pan_degrees,
+                "tilt": tilt_degrees,
+                "roll": roll_degrees,
+                "ear_left": ear_left_degrees,
+                "ear_right": ear_right_degrees,
+            }
+        )
         return new_frame
 
     def relax_all_servos(self) -> None:
-        self.servo_registry.servos["pan"].relax()
-        self.servo_registry.servos["tilt"].relax()
+        for servo in self.servo_registry.servos.values():
+            servo.relax()
 
     def get_next_action(self) -> Action | None:
         next_action = None
@@ -499,7 +581,9 @@ class MotionController:
             heapq.heappush(self.action_queue, new_action)
         self._emit_action_lifecycle("queued", new_action)
 
-    def register_action_lifecycle_callback(self, callback: Callable[[str, Action], None]) -> None:
+    def register_action_lifecycle_callback(
+        self, callback: Callable[[str, Action], None]
+    ) -> None:
         if not callable(callback):
             return
         if callback not in self._action_lifecycle_callbacks:
