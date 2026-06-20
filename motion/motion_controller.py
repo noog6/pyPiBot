@@ -144,9 +144,9 @@ class MotionController:
         self.control_loop_start_time = [0] * 100
         self.transition_time = 1500
         self.servo_registry = ServoRegistry.get_instance()
-        self.current_servo_position = {"pan": 0.0, "tilt": 0.0}
-        self.axis_v = {"pan": 0.0, "tilt": 0.0}
-        self.axis_v_max = {"pan": 0.0, "tilt": 0.0}
+        self.current_servo_position = {"pan": 0.0, "tilt_left": 0.0, "tilt_right": 0.0, "ear_left": 0.0, "ear_right": 0.0}
+        self.axis_v = {"pan": 0.0, "tilt_left": 0.0, "tilt_right": 0.0, "ear_left": 0.0, "ear_right": 0.0}
+        self.axis_v_max = {"pan": 0.0, "tilt_left": 0.0, "tilt_right": 0.0, "ear_left": 0.0, "ear_right": 0.0}
         self.action_queue: list[Action] = []
         self.current_action: Action | None = None
         self._action_lifecycle_callbacks: list[Callable[[str, Action], None]] = []
