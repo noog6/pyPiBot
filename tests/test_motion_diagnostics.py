@@ -107,17 +107,17 @@ def test_five_servo_validation_uses_logical_keyframe_sequence(monkeypatch) -> No
     assert result.status is DiagnosticStatus.PASS
     assert [name for name, _pose in FIVE_SERVO_VALIDATION_POSES] == [
         "center",
-        "pan-plus-5",
-        "pan-minus-5",
-        "tilt-plus-5",
-        "tilt-minus-5",
-        "roll-plus-5",
-        "roll-minus-5",
-        "ear-left-plus-5",
-        "ear-left-minus-5",
-        "ear-right-plus-5",
-        "ear-right-minus-5",
-        "tilt-5-roll-5",
+        "pan-plus-15",
+        "pan-minus-15",
+        "tilt-plus-15",
+        "tilt-minus-15",
+        "roll-plus-15",
+        "roll-minus-15",
+        "ear-left-plus-25",
+        "ear-left-minus-25",
+        "ear-right-plus-25",
+        "ear-right-minus-25",
+        "tilt-15-roll-15",
         "return-center",
     ]
     assert controller.generated == [pose for _name, pose in FIVE_SERVO_VALIDATION_POSES]
