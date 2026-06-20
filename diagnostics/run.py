@@ -16,7 +16,11 @@ from interaction.diagnostics import probe as audio_probe
 from interaction.microphone_hal import FakeInputBackend
 from interaction.microphone_diagnostics import probe as microphone_probe
 from hardware.diagnostics import HardwareProbeConfig, probe as hardware_probe
-from motion.diagnostics import MotionProbeConfig, probe as motion_probe
+from motion.diagnostics import (
+    MotionProbeConfig,
+    probe as motion_probe,
+    run_five_servo_validation,
+)
 from services.diagnostics import probe as services_probe
 from storage.diagnostics import probe as storage_probe
 
@@ -36,6 +40,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Optional base directory for offline diagnostics.",
     )
+    parser.add_argument(
+        "--five-servo-validation",
+        action="store_true",
+        help="Run the manual five-servo motion validation sequence and exit.",
+    )
     return parser.parse_args(argv)
 
 
@@ -44,6 +53,15 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parse_args(argv)
     base_dir = args.base_dir
+
+    if args.five_servo_validation:
+        if args.offline:
+            parser_error = "--five-servo-validation cannot be combined with --offline"
+            print(parser_error)
+            return 2
+        result = run_five_servo_validation()
+        print(format_results([result]))
+        return 1 if result.status is DiagnosticStatus.FAIL else 0
 
     if args.offline and base_dir is None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -56,7 +74,9 @@ def main(argv: list[str] | None = None) -> int:
             services_dir = tmp_base / "services"
             services_dir.mkdir(parents=True, exist_ok=True)
             (services_dir / "__init__.py").write_text("", encoding="utf-8")
-            (services_dir / "offline_service.py").write_text("# offline", encoding="utf-8")
+            (services_dir / "offline_service.py").write_text(
+                "# offline", encoding="utf-8"
+            )
 
             def config_probe_offline():
                 return config_probe(base_dir=tmp_base)
@@ -81,7 +101,13 @@ def main(argv: list[str] | None = None) -> int:
 
             def motion_probe_offline():
                 return motion_probe(
-                    servo_names=["pan", "tilt"],
+                    servo_names=[
+                        "pan",
+                        "tilt_left",
+                        "tilt_right",
+                        "ear_left",
+                        "ear_right",
+                    ],
                     config=MotionProbeConfig(),
                 )
 
@@ -105,6 +131,7 @@ def main(argv: list[str] | None = None) -> int:
                 ]
             )
     else:
+
         def config_probe_with_base():
             return config_probe(base_dir=base_dir)
 

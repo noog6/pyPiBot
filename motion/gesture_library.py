@@ -506,10 +506,14 @@ class GestureLibrary:
 
         definition = self.get(name)
         controller = MotionController.get_instance()
-        pan_servo = controller.servo_registry.servos["pan"]
-        tilt_servo = controller.servo_registry.servos["tilt"]
-        current_pan = float(pan_servo.read_value())
-        current_tilt = float(tilt_servo.read_value())
+        if hasattr(controller, "get_current_logical_pose"):
+            current_pose = controller.get_current_logical_pose()
+        else:
+            current_pose = getattr(
+                controller, "current_servo_position", {"pan": 0.0, "tilt": 0.0}
+            )
+        current_pan = float(current_pose.get("pan", 0.0))
+        current_tilt = float(current_pose.get("tilt", 0.0))
 
         frames = self._build_keyframe_chain(
             controller=controller,
@@ -527,6 +531,8 @@ class GestureLibrary:
         )
 
     def _resolve_library_path(self) -> Path:
+        if not hasattr(self._storage, "get_storage_info"):
+            return Path("var") / "gesture_library.json"
         storage_info = self._storage.get_storage_info()
         return storage_info.log_dir / "gesture_library.json"
 
@@ -546,17 +552,31 @@ class GestureLibrary:
     def _persist_library(self) -> None:
         with self._lock:
             payload = {
-                "gestures": [definition.to_dict() for definition in self._definitions.values()]
+                "gestures": [
+                    definition.to_dict() for definition in self._definitions.values()
+                ]
             }
             try:
                 self._library_path.parent.mkdir(parents=True, exist_ok=True)
-                self._library_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                self._library_path.write_text(
+                    json.dumps(payload, indent=2), encoding="utf-8"
+                )
             except OSError as exc:
                 LOGGER.warning("Failed to persist gesture library: %s", exc)
 
     def _get_servo_limits(
         self, controller: MotionController, name: str
     ) -> tuple[float, float]:
+        if name == "tilt":
+            if "tilt" in controller.servo_registry.servos:
+                servo = controller.servo_registry.servos["tilt"]
+                return float(servo.min_angle), float(servo.max_angle)
+            left = controller.servo_registry.servos["tilt_left"]
+            right = controller.servo_registry.servos["tilt_right"]
+            return (
+                max(float(left.min_angle), float(right.min_angle)),
+                min(float(left.max_angle), float(right.max_angle)),
+            )
         servo = controller.servo_registry.servos[name]
         return float(servo.min_angle), float(servo.max_angle)
 
@@ -633,8 +653,7 @@ class GestureLibrary:
         distance = pan_delta + tilt_delta
         baseline_ms = int(
             round(
-                float(spec.duration_ms)
-                * max(distance / _DISTANCE_SCALE_DEGREES, 0.35)
+                float(spec.duration_ms) * max(distance / _DISTANCE_SCALE_DEGREES, 0.35)
             )
         )
 
@@ -664,14 +683,20 @@ class GestureLibrary:
         tilt_min, tilt_max = self._get_servo_limits(controller, "tilt")
         if definition.name == "gesture_look_center":
             target_pan = self._clamp(_CANONICAL_CENTER_PAN_DEGREES, pan_min, pan_max)
-            target_tilt = self._clamp(_CANONICAL_CENTER_TILT_DEGREES, tilt_min, tilt_max)
+            target_tilt = self._clamp(
+                _CANONICAL_CENTER_TILT_DEGREES, tilt_min, tilt_max
+            )
         else:
             if spec.absolute_target:
                 target_pan = self._clamp(spec.pan_offset, pan_min, pan_max)
                 target_tilt = self._clamp(spec.tilt_offset, tilt_min, tilt_max)
             else:
-                target_pan = self._clamp(base_pan + spec.pan_offset * intensity, pan_min, pan_max)
-                target_tilt = self._clamp(base_tilt + spec.tilt_offset * intensity, tilt_min, tilt_max)
+                target_pan = self._clamp(
+                    base_pan + spec.pan_offset * intensity, pan_min, pan_max
+                )
+                target_tilt = self._clamp(
+                    base_tilt + spec.tilt_offset * intensity, tilt_min, tilt_max
+                )
         frame = controller.generate_base_keyframe(
             pan_degrees=target_pan,
             tilt_degrees=target_tilt,
