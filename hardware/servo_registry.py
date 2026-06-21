@@ -49,7 +49,7 @@ class ServoRegistry:
                 max_angle=45,
                 offset=0,
                 neutral_angle=0,
-                is_reversed=False,
+                is_reversed=True,
                 pwm=self.pwm,
             ),
             "ear_left": ServoActuator(
