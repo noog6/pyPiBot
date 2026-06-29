@@ -150,12 +150,16 @@ DEFAULT_GESTURES = (
                 pan_offset=0.0,
                 tilt_offset=-10.0,
                 duration_ms=350,
+                ear_left_offset=2.0,
+                ear_right_offset=2.0,
             ),
             GestureFrameSpec(
                 name="nod-up",
                 pan_offset=0.0,
                 tilt_offset=10.0,
                 duration_ms=350,
+                ear_left_offset=1.0,
+                ear_right_offset=1.0,
             ),
             GestureFrameSpec(
                 name="nod-center",
@@ -174,12 +178,16 @@ DEFAULT_GESTURES = (
                 pan_offset=-12.0,
                 tilt_offset=0.0,
                 duration_ms=300,
+                ear_left_offset=1.5,
+                ear_right_offset=-1.0,
             ),
             GestureFrameSpec(
                 name="no-right",
                 pan_offset=12.0,
                 tilt_offset=0.0,
                 duration_ms=300,
+                ear_left_offset=-1.0,
+                ear_right_offset=1.5,
             ),
             GestureFrameSpec(
                 name="no-left-return",
@@ -204,12 +212,16 @@ DEFAULT_GESTURES = (
                 pan_offset=-16.0,
                 tilt_offset=3.0,
                 duration_ms=700,
+                ear_left_offset=2.0,
+                ear_right_offset=1.0,
             ),
             GestureFrameSpec(
                 name="look-right",
                 pan_offset=16.0,
                 tilt_offset=3.0,
                 duration_ms=800,
+                ear_left_offset=1.0,
+                ear_right_offset=2.0,
             ),
             GestureFrameSpec(
                 name="look-center",
@@ -291,14 +303,20 @@ DEFAULT_GESTURES = (
             GestureFrameSpec(
                 name="tilt-up",
                 pan_offset=0.0,
-                tilt_offset=8.0,
+                tilt_offset=7.0,
                 duration_ms=500,
+                roll_offset=4.0,
+                ear_left_offset=3.0,
+                ear_right_offset=-2.0,
             ),
             GestureFrameSpec(
                 name="tilt-down",
                 pan_offset=0.0,
-                tilt_offset=-8.0,
+                tilt_offset=-7.0,
                 duration_ms=500,
+                roll_offset=-3.0,
+                ear_left_offset=-2.0,
+                ear_right_offset=3.0,
             ),
             GestureFrameSpec(
                 name="tilt-center",
@@ -318,6 +336,8 @@ DEFAULT_GESTURES = (
                 tilt_offset=-40.0,
                 duration_ms=1500,
                 absolute_target=True,
+                ear_left_offset=3.0,
+                ear_right_offset=3.0,
             ),
             GestureFrameSpec(
                 name="startup-frame-2",
@@ -325,6 +345,8 @@ DEFAULT_GESTURES = (
                 tilt_offset=25.0,
                 duration_ms=1500,
                 absolute_target=True,
+                ear_left_offset=0.0,
+                ear_right_offset=0.0,
             ),
         ),
     ),
@@ -374,12 +396,16 @@ DEFAULT_GESTURES = (
                 pan_offset=6.0,
                 tilt_offset=1.5,
                 duration_ms=260,
+                ear_left_offset=4.0,
+                ear_right_offset=4.0,
             ),
             GestureFrameSpec(
                 name="attention-hold",
                 pan_offset=6.0,
                 tilt_offset=1.5,
                 duration_ms=900,
+                ear_left_offset=4.0,
+                ear_right_offset=4.0,
             ),
         ),
     ),
@@ -404,6 +430,7 @@ DEFAULT_GESTURES = (
                 pan_offset=0.0,
                 tilt_offset=0.0,
                 duration_ms=220,
+                absolute_target=True,
             ),
         ),
     ),
@@ -416,12 +443,16 @@ DEFAULT_GESTURES = (
                 pan_offset=0.0,
                 tilt_offset=2.5,
                 duration_ms=280,
+                ear_left_offset=1.5,
+                ear_right_offset=1.5,
             ),
             GestureFrameSpec(
                 name="speaking-posture-hold",
                 pan_offset=0.0,
                 tilt_offset=2.5,
                 duration_ms=520,
+                ear_left_offset=1.0,
+                ear_right_offset=1.0,
             ),
         ),
     ),
@@ -440,6 +471,7 @@ DEFAULT_GESTURES = (
                 pan_offset=0.0,
                 tilt_offset=0.0,
                 duration_ms=260,
+                absolute_target=True,
             ),
         ),
     ),
@@ -489,14 +521,14 @@ class GestureLibrary:
             self._persist_library()
 
     def ensure_defaults(self) -> None:
-        """Ensure the base gestures are present in the library."""
+        """Ensure bundled default gestures are present and current."""
 
-        added = False
+        changed = False
         for definition in DEFAULT_GESTURES:
-            if definition.name not in self._definitions:
+            if self._definitions.get(definition.name) != definition:
                 self._definitions[definition.name] = definition
-                added = True
-        if added:
+                changed = True
+        if changed:
             self._persist_library()
 
     def build_action(

@@ -236,7 +236,7 @@ def test_non_look_gesture_keeps_authored_duration() -> None:
     assert duration == spec.duration_ms
 
 
-def test_tilt_offsets_remain_logical_tilt_with_zero_roll() -> None:
+def test_tilt_offsets_remain_logical_tilt_with_authored_roll() -> None:
     gesture_library = _load_gesture_library_module()
     library = gesture_library.GestureLibrary.__new__(gesture_library.GestureLibrary)
     definition = _definition(gesture_library, "gesture_curious_tilt")
@@ -272,9 +272,9 @@ def test_tilt_offsets_remain_logical_tilt_with_zero_roll() -> None:
             frame.servo_destination = {
                 "pan": pan_degrees,
                 "tilt": tilt_degrees,
-                "roll": 0.0,
-                "ear_left": 0.0,
-                "ear_right": 0.0,
+                "roll": roll_degrees,
+                "ear_left": ear_left_degrees,
+                "ear_right": ear_right_degrees,
             }
             return frame
 
@@ -290,5 +290,7 @@ def test_tilt_offsets_remain_logical_tilt_with_zero_roll() -> None:
         style="neutral",
     )
 
-    assert frame.servo_destination["tilt"] == 10.0
-    assert frame.servo_destination["roll"] == 0.0
+    assert frame.servo_destination["tilt"] == 9.0
+    assert frame.servo_destination["roll"] == 4.0
+    assert frame.servo_destination["ear_left"] == 3.0
+    assert frame.servo_destination["ear_right"] == -2.0

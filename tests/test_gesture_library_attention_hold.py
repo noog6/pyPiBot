@@ -28,7 +28,13 @@ def _load_gesture_library_module(monkeypatch):
             self.next = None
 
     class _FakeController:
-        current_servo_position = {"pan": 11.0, "tilt": 9.0}
+        current_servo_position = {
+            "pan": 11.0,
+            "tilt": 9.0,
+            "roll": 0.0,
+            "ear_left": 0.0,
+            "ear_right": 0.0,
+        }
         transition_time = 1500
         servo_registry = types.SimpleNamespace(
             servos={
@@ -44,6 +50,9 @@ def _load_gesture_library_module(monkeypatch):
         @classmethod
         def get_instance(cls):
             return cls()
+
+        def get_current_logical_pose(self):
+            return dict(self.current_servo_position)
 
         def generate_base_keyframe(
             self,
@@ -95,6 +104,15 @@ def _gesture(module, name: str):
     return next(g for g in module.DEFAULT_GESTURES if g.name == name)
 
 
+def _frames(action):
+    frames = []
+    frame = action.current_frame
+    while frame is not None:
+        frames.append(frame)
+        frame = frame.next
+    return frames
+
+
 def test_attention_hold_has_no_immediate_recenter_tail(monkeypatch) -> None:
     module = _load_gesture_library_module(monkeypatch)
     hold = _gesture(module, "gesture_attention_hold")
@@ -108,6 +126,52 @@ def test_attention_release_recenters_to_neutral(monkeypatch) -> None:
     assert release.frames[-1].name == "attention-release-neutral"
     assert release.frames[-1].pan_offset == 0.0
     assert release.frames[-1].tilt_offset == 0.0
+
+
+def test_attention_release_runtime_final_frame_neutralizes_held_ears(
+    monkeypatch,
+) -> None:
+    module = _load_gesture_library_module(monkeypatch)
+    module.MotionController.current_servo_position = {
+        "pan": 6.0,
+        "tilt": 1.5,
+        "roll": 0.0,
+        "ear_left": 4.0,
+        "ear_right": 4.0,
+    }
+    library = module.GestureLibrary.get_instance()
+
+    final_frame = _frames(library.build_action("gesture_attention_release"))[-1]
+
+    assert final_frame.name == "attention-release-neutral"
+    assert final_frame.servo_destination["pan"] == 0.0
+    assert final_frame.servo_destination["tilt"] == 0.0
+    assert final_frame.servo_destination["roll"] == 0.0
+    assert final_frame.servo_destination["ear_left"] == 0.0
+    assert final_frame.servo_destination["ear_right"] == 0.0
+
+
+def test_speaking_settle_runtime_final_frame_neutralizes_posture_ears(
+    monkeypatch,
+) -> None:
+    module = _load_gesture_library_module(monkeypatch)
+    module.MotionController.current_servo_position = {
+        "pan": 0.0,
+        "tilt": 2.5,
+        "roll": 0.0,
+        "ear_left": 1.0,
+        "ear_right": 1.0,
+    }
+    library = module.GestureLibrary.get_instance()
+
+    final_frame = _frames(library.build_action("gesture_speaking_settle"))[-1]
+
+    assert final_frame.name == "speaking-settle-neutral"
+    assert final_frame.servo_destination["pan"] == 0.0
+    assert final_frame.servo_destination["tilt"] == 0.0
+    assert final_frame.servo_destination["roll"] == 0.0
+    assert final_frame.servo_destination["ear_left"] == 0.0
+    assert final_frame.servo_destination["ear_right"] == 0.0
 
 
 def test_lifecycle_startup_and_shutdown_gestures_preserve_absolute_targets(
@@ -165,11 +229,26 @@ def test_legacy_frame_payload_defaults_new_axes_to_zero(monkeypatch) -> None:
     assert spec.ear_right_offset == 0.0
 
 
-def test_old_pan_tilt_gestures_build_zero_roll_and_ears(monkeypatch) -> None:
+def test_legacy_pan_tilt_gesture_builds_zero_roll_and_ears(monkeypatch) -> None:
     module = _load_gesture_library_module(monkeypatch)
     library = module.GestureLibrary.get_instance()
+    library.register(
+        module.GestureDefinition(
+            name="gesture_legacy_pan_tilt",
+            priority=1,
+            frames=(
+                module.GestureFrameSpec(
+                    name="legacy-frame",
+                    pan_offset=0.0,
+                    tilt_offset=-10.0,
+                    duration_ms=350,
+                ),
+            ),
+        ),
+        persist=False,
+    )
 
-    action = library.build_action("gesture_nod")
+    action = library.build_action("gesture_legacy_pan_tilt")
     frame = action.current_frame
 
     assert frame.servo_destination["pan"] == 11.0
