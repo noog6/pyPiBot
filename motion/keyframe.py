@@ -45,6 +45,8 @@ class Keyframe:
             "ear_right": 0.0,
         }
     )
+    # Legacy public field name: these are logical pose destinations, not raw
+    # physical servo targets. MotionController maps them to physical servos.
     servo_destination: dict[str, float] = field(
         default_factory=lambda: {
             "pan": 0.0,

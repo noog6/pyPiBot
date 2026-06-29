@@ -202,6 +202,26 @@ def test_generate_base_keyframe_defaults_to_logical_zero_roll_and_neutral_ears()
     }
 
 
+def test_generate_base_keyframe_accepts_explicit_logical_roll_and_ears() -> None:
+    controller = _controller()
+
+    frame = controller.generate_base_keyframe(
+        pan_degrees=3.0,
+        tilt_degrees=10.0,
+        roll_degrees=4.0,
+        ear_left_degrees=5.0,
+        ear_right_degrees=-6.0,
+    )
+
+    assert frame.servo_destination == {
+        "pan": 3.0,
+        "tilt": 10.0,
+        "roll": 4.0,
+        "ear_left": 5.0,
+        "ear_right": -6.0,
+    }
+
+
 def test_relax_all_servos_relaxes_registered_physical_servos() -> None:
     controller = _controller()
 

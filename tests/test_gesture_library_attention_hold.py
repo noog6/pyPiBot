@@ -18,22 +18,47 @@ def _load_gesture_library_module(monkeypatch):
         def __init__(self, final_target_time=1500, name="base"):
             self.final_target_time = final_target_time
             self.name = name
-            self.servo_destination = {"pan": 0.0, "tilt": 0.0}
+            self.servo_destination = {
+                "pan": 0.0,
+                "tilt": 0.0,
+                "roll": 0.0,
+                "ear_left": 0.0,
+                "ear_right": 0.0,
+            }
             self.next = None
 
     class _FakeController:
         current_servo_position = {"pan": 11.0, "tilt": 9.0}
         transition_time = 1500
-        servo_registry = types.SimpleNamespace(servos={"pan": types.SimpleNamespace(min_angle=-90, max_angle=90, read_value=lambda: 11.0), "tilt": types.SimpleNamespace(min_angle=-90, max_angle=90, read_value=lambda: 9.0)})
+        servo_registry = types.SimpleNamespace(
+            servos={
+                "pan": types.SimpleNamespace(
+                    min_angle=-90, max_angle=90, read_value=lambda: 11.0
+                ),
+                "tilt": types.SimpleNamespace(
+                    min_angle=-90, max_angle=90, read_value=lambda: 9.0
+                ),
+            }
+        )
 
         @classmethod
         def get_instance(cls):
             return cls()
 
-        def generate_base_keyframe(self, pan_degrees, tilt_degrees):
+        def generate_base_keyframe(
+            self,
+            pan_degrees,
+            tilt_degrees,
+            roll_degrees=0.0,
+            ear_left_degrees=0.0,
+            ear_right_degrees=0.0,
+        ):
             frame = _FakeKeyframe(final_target_time=self.transition_time, name="base")
             frame.servo_destination["pan"] = pan_degrees
             frame.servo_destination["tilt"] = tilt_degrees
+            frame.servo_destination["roll"] = roll_degrees
+            frame.servo_destination["ear_left"] = ear_left_degrees
+            frame.servo_destination["ear_right"] = ear_right_degrees
             return frame
 
     class _FakeAction:
@@ -55,7 +80,9 @@ def _load_gesture_library_module(monkeypatch):
     monkeypatch.setitem(sys.modules, "motion.motion_controller", fake_motion_controller)
 
     module_path = Path(__file__).resolve().parents[1] / "motion" / "gesture_library.py"
-    spec = importlib.util.spec_from_file_location("gesture_library_for_test", module_path)
+    spec = importlib.util.spec_from_file_location(
+        "gesture_library_for_test", module_path
+    )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, "gesture_library_for_test", module)
@@ -83,7 +110,9 @@ def test_attention_release_recenters_to_neutral(monkeypatch) -> None:
     assert release.frames[-1].tilt_offset == 0.0
 
 
-def test_lifecycle_startup_and_shutdown_gestures_preserve_absolute_targets(monkeypatch) -> None:
+def test_lifecycle_startup_and_shutdown_gestures_preserve_absolute_targets(
+    monkeypatch,
+) -> None:
     module = _load_gesture_library_module(monkeypatch)
     library = module.GestureLibrary.get_instance()
 
@@ -91,7 +120,13 @@ def test_lifecycle_startup_and_shutdown_gestures_preserve_absolute_targets(monke
     startup_frames = []
     frame = startup_action.current_frame
     while frame is not None:
-        startup_frames.append((frame.servo_destination["pan"], frame.servo_destination["tilt"], frame.final_target_time))
+        startup_frames.append(
+            (
+                frame.servo_destination["pan"],
+                frame.servo_destination["tilt"],
+                frame.final_target_time,
+            )
+        )
         frame = frame.next
 
     shutdown_action = library.build_action("gesture_shutdown_rest")
@@ -99,7 +134,11 @@ def test_lifecycle_startup_and_shutdown_gestures_preserve_absolute_targets(monke
 
     assert startup_frames == [(0.0, -40.0, 1500), (0.0, 25.0, 1500)]
     assert shutdown_frame is not None
-    assert (shutdown_frame.servo_destination["pan"], shutdown_frame.servo_destination["tilt"], shutdown_frame.final_target_time) == (0.0, -40.0, 1000)
+    assert (
+        shutdown_frame.servo_destination["pan"],
+        shutdown_frame.servo_destination["tilt"],
+        shutdown_frame.final_target_time,
+    ) == (0.0, -40.0, 1000)
 
 
 def test_non_lifecycle_idle_center_remains_relative(monkeypatch) -> None:
@@ -108,3 +147,33 @@ def test_non_lifecycle_idle_center_remains_relative(monkeypatch) -> None:
     assert idle.frames[-1].name == "idle-center"
     assert idle.frames[-1].absolute_target is False
 
+
+def test_legacy_frame_payload_defaults_new_axes_to_zero(monkeypatch) -> None:
+    module = _load_gesture_library_module(monkeypatch)
+
+    spec = module.GestureFrameSpec.from_dict(
+        {
+            "name": "legacy",
+            "pan_offset": 1.0,
+            "tilt_offset": 2.0,
+            "duration_ms": 300,
+        }
+    )
+
+    assert spec.roll_offset == 0.0
+    assert spec.ear_left_offset == 0.0
+    assert spec.ear_right_offset == 0.0
+
+
+def test_old_pan_tilt_gestures_build_zero_roll_and_ears(monkeypatch) -> None:
+    module = _load_gesture_library_module(monkeypatch)
+    library = module.GestureLibrary.get_instance()
+
+    action = library.build_action("gesture_nod")
+    frame = action.current_frame
+
+    assert frame.servo_destination["pan"] == 11.0
+    assert frame.servo_destination["tilt"] == -1.0
+    assert frame.servo_destination["roll"] == 0.0
+    assert frame.servo_destination["ear_left"] == 0.0
+    assert frame.servo_destination["ear_right"] == 0.0

@@ -9,6 +9,19 @@ import types
 
 
 def _load_gesture_library_module():
+    module_names = (
+        "core",
+        "core.logging",
+        "motion",
+        "motion.action",
+        "motion.keyframe",
+        "motion.motion_controller",
+        "storage",
+        "storage.controller",
+        "gesture_library_timing_for_test",
+    )
+    original_modules = {name: sys.modules.get(name) for name in module_names}
+
     fake_core = types.ModuleType("core")
     fake_core_logging = types.ModuleType("core.logging")
     fake_core_logging.logger = types.SimpleNamespace(
@@ -29,7 +42,13 @@ def _load_gesture_library_module():
 
     class _Keyframe:
         def __init__(self):
-            self.servo_destination = {"pan": 0.0, "tilt": 0.0}
+            self.servo_destination = {
+                "pan": 0.0,
+                "tilt": 0.0,
+                "roll": 0.0,
+                "ear_left": 0.0,
+                "ear_right": 0.0,
+            }
             self.name = ""
             self.final_target_time = 0
             self.next = None
@@ -72,7 +91,14 @@ def _load_gesture_library_module():
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules["gesture_library_timing_for_test"] = module
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        for name, original in original_modules.items():
+            if original is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = original
     return module
 
 
@@ -156,9 +182,23 @@ def test_look_center_targets_canonical_pose_regardless_of_starting_pose() -> Non
                 }
             )
 
-        def generate_base_keyframe(self, *, pan_degrees: float, tilt_degrees: float):
+        def generate_base_keyframe(
+            self,
+            *,
+            pan_degrees: float,
+            tilt_degrees: float,
+            roll_degrees: float = 0.0,
+            ear_left_degrees: float = 0.0,
+            ear_right_degrees: float = 0.0,
+        ):
             frame = gesture_library.Keyframe()
-            frame.servo_destination = {"pan": pan_degrees, "tilt": tilt_degrees}
+            frame.servo_destination = {
+                "pan": pan_degrees,
+                "tilt": tilt_degrees,
+                "roll": roll_degrees,
+                "ear_left": ear_left_degrees,
+                "ear_right": ear_right_degrees,
+            }
             return frame
 
     frame = library._create_keyframe(
@@ -219,7 +259,15 @@ def test_tilt_offsets_remain_logical_tilt_with_zero_roll() -> None:
                 }
             )
 
-        def generate_base_keyframe(self, *, pan_degrees: float, tilt_degrees: float):
+        def generate_base_keyframe(
+            self,
+            *,
+            pan_degrees: float,
+            tilt_degrees: float,
+            roll_degrees: float = 0.0,
+            ear_left_degrees: float = 0.0,
+            ear_right_degrees: float = 0.0,
+        ):
             frame = gesture_library.Keyframe()
             frame.servo_destination = {
                 "pan": pan_degrees,
