@@ -693,7 +693,7 @@ tools.append(
         "type": "function",
         "name": "gesture_idle",
         "description": (
-            "Queue a gentle idle gesture on the pan/tilt rig. "
+            "Queue a gentle idle gesture on the head-and-ear motion rig. "
             "Provide an optional delay in milliseconds and intensity (1.0 is normal)."
         ),
         "parameters": {
@@ -714,7 +714,7 @@ tools.append(
         "type": "function",
         "name": "gesture_nod",
         "description": (
-            "Queue a nod gesture on the pan/tilt rig. "
+            "Queue a nod gesture on the head-and-ear motion rig. "
             "Provide an optional delay in milliseconds and intensity (1.0 is normal)."
         ),
         "parameters": {
@@ -735,7 +735,7 @@ tools.append(
         "type": "function",
         "name": "gesture_no",
         "description": (
-            "Queue a head shake (no) gesture on the pan/tilt rig. "
+            "Queue a head shake (no) gesture on the head-and-ear motion rig. "
             "Provide an optional delay in milliseconds and intensity (1.0 is normal)."
         ),
         "parameters": {
@@ -756,7 +756,7 @@ tools.append(
         "type": "function",
         "name": "gesture_look_around",
         "description": (
-            "Queue a casual look around gesture on the pan/tilt rig. "
+            "Queue a casual look around gesture on the head-and-ear motion rig. "
             "Use for short embodied direction requests like 'look around' or 'look around a bit'. "
             "Do not use for web or research lookups. "
             "Provide an optional delay in milliseconds and intensity (1.0 is normal)."
@@ -894,7 +894,7 @@ tools.append(
         "type": "function",
         "name": "gesture_curious_tilt",
         "description": (
-            "Queue a curious tilt gesture on the pan/tilt rig. "
+            "Queue a curious tilt gesture on the head-and-ear motion rig, including expressive ear movement. "
             "Provide an optional delay in milliseconds and intensity (1.0 is normal)."
         ),
         "parameters": {
@@ -915,7 +915,7 @@ tools.append(
         "type": "function",
         "name": "gesture_attention_snap",
         "description": (
-            "Queue a quick attention snap gesture on the pan/tilt rig. "
+            "Queue a quick attention snap gesture on the head-and-ear motion rig. "
             "Provide an optional delay in milliseconds and intensity (1.0 is normal)."
         ),
         "parameters": {
