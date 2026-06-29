@@ -36,3 +36,13 @@ def test_build_session_instructions_defaults_to_soul_text_when_name_missing(
     instructions = utils.build_session_instructions()
 
     assert instructions == "I am Theo."
+
+
+def test_repo_soul_body_model_mentions_expressive_ears() -> None:
+    soul_text = Path(__file__).resolve().parents[1].joinpath("config", "SOUL.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "expressive left/right ear servos" in soul_text
+    assert "I should not claim that I do not have ears" in soul_text
+    assert "not biological hearing organs" in soul_text
