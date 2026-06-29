@@ -12,6 +12,11 @@ from typing import Callable
 from ai.embodiment_policy import EmbodimentPolicy, LifecyclePostureEvent
 from hardware.servo_registry import ServoRegistry
 from motion.action import Action
+from motion.body_model import (
+    DEFAULT_ROLL_TO_TILT_SIGN,
+    LOGICAL_POSE_AXES,
+    map_logical_pose_to_physical_targets,
+)
 from motion.keyframe import Keyframe
 from motion.logging import log_debug, log_error, log_info, log_warning
 
@@ -50,8 +55,7 @@ class MotionTuning:
 TUNING = MotionTuning()
 
 # Isolate logical roll sign convention here so hardware/IMU validation can flip it.
-ROLL_TO_TILT_SIGN = 1.0
-LOGICAL_POSE_AXES = ("pan", "tilt", "roll", "ear_left", "ear_right")
+ROLL_TO_TILT_SIGN = DEFAULT_ROLL_TO_TILT_SIGN
 
 
 def limit_step(
@@ -274,42 +278,26 @@ class MotionController:
                     self._emit_action_lifecycle("completed", completed_action)
                     self.current_action = self.get_next_action()
 
-    def _clamp_servo_target(self, servo_name: str, value: float) -> float:
-        servo = self.servo_registry.servos[servo_name]
-        minimum = float(servo.min_angle)
-        maximum = float(servo.max_angle)
-        raw_value = float(value)
-        clamped = max(minimum, min(maximum, raw_value))
-        if clamped != raw_value:
-            log_warning(
-                "[MOTION] physical servo target clamped servo=%s requested=%.3f clamped=%.3f min=%.3f max=%.3f",
-                servo_name,
-                raw_value,
-                clamped,
-                minimum,
-                maximum,
-            )
-        return clamped
-
     def _logical_pose_to_servo_targets(
         self, logical_pose: dict[str, float]
     ) -> dict[str, float]:
         """Translate public logical pose axes to private physical servo targets."""
 
-        pan = float(logical_pose.get("pan", 0.0))
-        tilt = float(logical_pose.get("tilt", 0.0))
-        roll = float(logical_pose.get("roll", 0.0)) * ROLL_TO_TILT_SIGN
-        targets = {
-            "pan": pan,
-            "tilt_left": tilt + roll,
-            "tilt_right": tilt - roll,
-            "ear_left": float(logical_pose.get("ear_left", 0.0)),
-            "ear_right": float(logical_pose.get("ear_right", 0.0)),
-        }
-        return {
-            name: self._clamp_servo_target(name, value)
-            for name, value in targets.items()
-        }
+        targets, clamp_events = map_logical_pose_to_physical_targets(
+            logical_pose,
+            self.servo_registry.servos,
+            roll_to_tilt_sign=ROLL_TO_TILT_SIGN,
+        )
+        for event in clamp_events:
+            log_warning(
+                "[MOTION] physical servo target clamped servo=%s requested=%.3f clamped=%.3f min=%.3f max=%.3f",
+                event.servo_name,
+                event.requested,
+                event.clamped,
+                event.minimum,
+                event.maximum,
+            )
+        return targets
 
     def get_current_logical_pose(self) -> dict[str, float]:
         """Return the current public/logical motion pose."""
@@ -543,12 +531,14 @@ class MotionController:
 
     def generate_base_keyframe(
         self,
-        pan_degrees: int,
-        tilt_degrees: int,
-        roll_degrees: int = 0,
-        ear_left_degrees: int = 0,
-        ear_right_degrees: int = 0,
+        pan_degrees: float,
+        tilt_degrees: float,
+        roll_degrees: float = 0.0,
+        ear_left_degrees: float = 0.0,
+        ear_right_degrees: float = 0.0,
     ) -> Keyframe:
+        """Build a keyframe destination in public logical-pose coordinates."""
+
         new_frame = Keyframe(final_target_time=self.transition_time, name="base")
         new_frame.servo_destination.update(
             {

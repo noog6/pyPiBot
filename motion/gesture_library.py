@@ -29,6 +29,9 @@ class GestureFrameSpec:
     tilt_offset: float
     duration_ms: int
     absolute_target: bool = False
+    roll_offset: float = 0.0
+    ear_left_offset: float = 0.0
+    ear_right_offset: float = 0.0
 
     def to_dict(self) -> dict[str, float | int | str]:
         """Return the spec as a serializable dictionary."""
@@ -39,6 +42,9 @@ class GestureFrameSpec:
             "tilt_offset": self.tilt_offset,
             "duration_ms": self.duration_ms,
             "absolute_target": self.absolute_target,
+            "roll_offset": self.roll_offset,
+            "ear_left_offset": self.ear_left_offset,
+            "ear_right_offset": self.ear_right_offset,
         }
 
     @classmethod
@@ -51,6 +57,9 @@ class GestureFrameSpec:
             tilt_offset=float(payload["tilt_offset"]),
             duration_ms=int(payload["duration_ms"]),
             absolute_target=bool(payload.get("absolute_target", False)),
+            roll_offset=float(payload.get("roll_offset", 0.0)),
+            ear_left_offset=float(payload.get("ear_left_offset", 0.0)),
+            ear_right_offset=float(payload.get("ear_right_offset", 0.0)),
         )
 
 
@@ -514,12 +523,18 @@ class GestureLibrary:
             )
         current_pan = float(current_pose.get("pan", 0.0))
         current_tilt = float(current_pose.get("tilt", 0.0))
+        current_roll = float(current_pose.get("roll", 0.0))
+        current_ear_left = float(current_pose.get("ear_left", 0.0))
+        current_ear_right = float(current_pose.get("ear_right", 0.0))
 
         frames = self._build_keyframe_chain(
             controller=controller,
             definition=definition,
             base_pan=current_pan,
             base_tilt=current_tilt,
+            base_roll=current_roll,
+            base_ear_left=current_ear_left,
+            base_ear_right=current_ear_right,
             intensity=float(intensity),
             style=(style or definition.timing_style),
         )
@@ -593,6 +608,9 @@ class GestureLibrary:
         definition: GestureDefinition,
         base_pan: float,
         base_tilt: float,
+        base_roll: float,
+        base_ear_left: float,
+        base_ear_right: float,
         intensity: float,
         style: str,
     ) -> Keyframe:
@@ -606,6 +624,9 @@ class GestureLibrary:
             first_spec,
             base_pan=base_pan,
             base_tilt=base_tilt,
+            base_roll=base_roll,
+            base_ear_left=base_ear_left,
+            base_ear_right=base_ear_right,
             transition_pan=transition_pan,
             transition_tilt=transition_tilt,
             intensity=intensity,
@@ -622,6 +643,9 @@ class GestureLibrary:
                 spec,
                 base_pan=base_pan,
                 base_tilt=base_tilt,
+                base_roll=base_roll,
+                base_ear_left=base_ear_left,
+                base_ear_right=base_ear_right,
                 transition_pan=transition_pan,
                 transition_tilt=transition_tilt,
                 intensity=intensity,
@@ -672,6 +696,9 @@ class GestureLibrary:
         transition_tilt: float,
         intensity: float,
         style: str,
+        base_roll: float = 0.0,
+        base_ear_left: float = 0.0,
+        base_ear_right: float = 0.0,
     ) -> Keyframe:
         """Create a runtime keyframe from a gesture spec frame.
 
@@ -686,10 +713,16 @@ class GestureLibrary:
             target_tilt = self._clamp(
                 _CANONICAL_CENTER_TILT_DEGREES, tilt_min, tilt_max
             )
+            target_roll = 0.0
+            target_ear_left = 0.0
+            target_ear_right = 0.0
         else:
             if spec.absolute_target:
                 target_pan = self._clamp(spec.pan_offset, pan_min, pan_max)
                 target_tilt = self._clamp(spec.tilt_offset, tilt_min, tilt_max)
+                target_roll = spec.roll_offset
+                target_ear_left = spec.ear_left_offset
+                target_ear_right = spec.ear_right_offset
             else:
                 target_pan = self._clamp(
                     base_pan + spec.pan_offset * intensity, pan_min, pan_max
@@ -697,9 +730,15 @@ class GestureLibrary:
                 target_tilt = self._clamp(
                     base_tilt + spec.tilt_offset * intensity, tilt_min, tilt_max
                 )
+                target_roll = base_roll + spec.roll_offset * intensity
+                target_ear_left = base_ear_left + spec.ear_left_offset * intensity
+                target_ear_right = base_ear_right + spec.ear_right_offset * intensity
         frame = controller.generate_base_keyframe(
             pan_degrees=target_pan,
             tilt_degrees=target_tilt,
+            roll_degrees=target_roll,
+            ear_left_degrees=target_ear_left,
+            ear_right_degrees=target_ear_right,
         )
         frame.name = spec.name
         frame.final_target_time = self._duration_for_frame(

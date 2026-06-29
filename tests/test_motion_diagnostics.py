@@ -5,7 +5,9 @@ from __future__ import annotations
 import types
 
 from diagnostics.models import DiagnosticStatus
+import motion.diagnostics as motion_diagnostics
 from motion.diagnostics import MotionProbeConfig, probe
+from motion.keyframe import Keyframe
 
 
 def test_motion_probe_offline_pass() -> None:
@@ -75,8 +77,6 @@ def test_five_servo_validation_uses_logical_keyframe_sequence(monkeypatch) -> No
             ear_left_degrees,
             ear_right_degrees,
         ):
-            from motion.keyframe import Keyframe
-
             pose = {
                 "pan": pan_degrees,
                 "tilt": tilt_degrees,
@@ -95,7 +95,8 @@ def test_five_servo_validation_uses_logical_keyframe_sequence(monkeypatch) -> No
 
     logs: list[tuple[str, tuple[object, ...]]] = []
     monkeypatch.setattr(
-        "motion.diagnostics.log_info",
+        motion_diagnostics,
+        "log_info",
         lambda message, *args: logs.append((message, args)),
     )
     controller = _Controller()
@@ -107,17 +108,17 @@ def test_five_servo_validation_uses_logical_keyframe_sequence(monkeypatch) -> No
     assert result.status is DiagnosticStatus.PASS
     assert [name for name, _pose in FIVE_SERVO_VALIDATION_POSES] == [
         "center",
-        "pan-plus-15",
-        "pan-minus-15",
-        "tilt-plus-15",
-        "tilt-minus-15",
-        "roll-plus-15",
-        "roll-minus-15",
-        "ear-left-plus-25",
-        "ear-left-minus-25",
-        "ear-right-plus-25",
-        "ear-right-minus-25",
-        "tilt-15-roll-15",
+        "pan-plus-5",
+        "pan-minus-5",
+        "tilt-plus-5",
+        "tilt-minus-5",
+        "roll-plus-5",
+        "roll-minus-5",
+        "ear-left-plus-5",
+        "ear-left-minus-5",
+        "ear-right-plus-5",
+        "ear-right-minus-5",
+        "tilt-5-roll-5",
         "return-center",
     ]
     assert controller.generated == [pose for _name, pose in FIVE_SERVO_VALIDATION_POSES]
@@ -158,8 +159,6 @@ def test_five_servo_validation_reports_timeout() -> None:
             }
 
         def generate_base_keyframe(self, **kwargs):
-            from motion.keyframe import Keyframe
-
             return Keyframe(name="never-settles")
 
         def move_to_keyframe(self, frame):

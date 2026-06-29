@@ -7,6 +7,7 @@ import time
 
 from diagnostics.models import DiagnosticResult, DiagnosticStatus
 from motion.action import Action
+from motion.body_model import PHYSICAL_SERVO_NAMES
 from motion.keyframe import Keyframe
 from motion.logging import log_info
 from motion.motion_controller import MotionController, limit_step
@@ -16,22 +17,10 @@ from motion.motion_controller import MotionController, limit_step
 class MotionProbeConfig:
     """Configuration for motion diagnostics."""
 
-    expected_servos: tuple[str, ...] = (
-        "pan",
-        "tilt_left",
-        "tilt_right",
-        "ear_left",
-        "ear_right",
-    )
+    expected_servos: tuple[str, ...] = PHYSICAL_SERVO_NAMES
 
 
-FIVE_SERVO_VALIDATION_EXPECTED_SERVOS = {
-    "pan",
-    "tilt_left",
-    "tilt_right",
-    "ear_left",
-    "ear_right",
-}
+FIVE_SERVO_VALIDATION_EXPECTED_SERVOS = set(PHYSICAL_SERVO_NAMES)
 
 
 FIVE_SERVO_VALIDATION_POSES: tuple[tuple[str, dict[str, float]], ...] = (
