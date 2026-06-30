@@ -126,6 +126,8 @@ def test_attention_release_recenters_to_neutral(monkeypatch) -> None:
     assert release.frames[-1].name == "attention-release-neutral"
     assert release.frames[-1].pan_offset == 0.0
     assert release.frames[-1].tilt_offset == 0.0
+    assert release.frames[-1].absolute_target is False
+    assert release.frames[-1].reset_expression_axes is True
 
 
 def test_attention_release_runtime_final_frame_neutralizes_held_ears(
@@ -144,8 +146,8 @@ def test_attention_release_runtime_final_frame_neutralizes_held_ears(
     final_frame = _frames(library.build_action("gesture_attention_release"))[-1]
 
     assert final_frame.name == "attention-release-neutral"
-    assert final_frame.servo_destination["pan"] == 0.0
-    assert final_frame.servo_destination["tilt"] == 0.0
+    assert final_frame.servo_destination["pan"] == 6.0
+    assert final_frame.servo_destination["tilt"] == 1.5
     assert final_frame.servo_destination["roll"] == 0.0
     assert final_frame.servo_destination["ear_left"] == 0.0
     assert final_frame.servo_destination["ear_right"] == 0.0
@@ -156,7 +158,7 @@ def test_speaking_settle_runtime_final_frame_neutralizes_posture_ears(
 ) -> None:
     module = _load_gesture_library_module(monkeypatch)
     module.MotionController.current_servo_position = {
-        "pan": 0.0,
+        "pan": -18.0,
         "tilt": 2.5,
         "roll": 0.0,
         "ear_left": 1.0,
@@ -167,8 +169,8 @@ def test_speaking_settle_runtime_final_frame_neutralizes_posture_ears(
     final_frame = _frames(library.build_action("gesture_speaking_settle"))[-1]
 
     assert final_frame.name == "speaking-settle-neutral"
-    assert final_frame.servo_destination["pan"] == 0.0
-    assert final_frame.servo_destination["tilt"] == 0.0
+    assert final_frame.servo_destination["pan"] == -18.0
+    assert final_frame.servo_destination["tilt"] == 2.5
     assert final_frame.servo_destination["roll"] == 0.0
     assert final_frame.servo_destination["ear_left"] == 0.0
     assert final_frame.servo_destination["ear_right"] == 0.0
@@ -227,6 +229,102 @@ def test_legacy_frame_payload_defaults_new_axes_to_zero(monkeypatch) -> None:
     assert spec.roll_offset == 0.0
     assert spec.ear_left_offset == 0.0
     assert spec.ear_right_offset == 0.0
+    assert spec.reset_expression_axes is False
+
+
+def test_reset_expression_axes_round_trips_through_serialization(monkeypatch) -> None:
+    module = _load_gesture_library_module(monkeypatch)
+
+    spec = module.GestureFrameSpec(
+        name="neutral-expression",
+        pan_offset=0.0,
+        tilt_offset=0.0,
+        duration_ms=200,
+        reset_expression_axes=True,
+    )
+
+    assert module.GestureFrameSpec.from_dict(spec.to_dict()) == spec
+
+
+def test_reset_expression_axes_preserves_gaze_and_neutralizes_expression(
+    monkeypatch,
+) -> None:
+    module = _load_gesture_library_module(monkeypatch)
+    module.MotionController.current_servo_position = {
+        "pan": -25.0,
+        "tilt": 12.0,
+        "roll": 5.0,
+        "ear_left": 7.0,
+        "ear_right": -6.0,
+    }
+    library = module.GestureLibrary.get_instance()
+    library.register(
+        module.GestureDefinition(
+            name="gesture_reset_expression_only",
+            priority=1,
+            frames=(
+                module.GestureFrameSpec(
+                    name="neutral-expression",
+                    pan_offset=0.0,
+                    tilt_offset=0.0,
+                    duration_ms=200,
+                    reset_expression_axes=True,
+                ),
+            ),
+        ),
+        persist=False,
+    )
+
+    frame = library.build_action("gesture_reset_expression_only").current_frame
+
+    assert frame.servo_destination["pan"] == -25.0
+    assert frame.servo_destination["tilt"] == 12.0
+    assert frame.servo_destination["roll"] == 0.0
+    assert frame.servo_destination["ear_left"] == 0.0
+    assert frame.servo_destination["ear_right"] == 0.0
+
+
+def test_off_center_expressive_gestures_neutralize_expression_without_recentering(
+    monkeypatch,
+) -> None:
+    module = _load_gesture_library_module(monkeypatch)
+    library = module.GestureLibrary.get_instance()
+
+    for gesture_name in ("gesture_nod", "gesture_no", "gesture_curious_tilt"):
+        module.MotionController.current_servo_position = {
+            "pan": -25.0,
+            "tilt": 12.0,
+            "roll": 5.0,
+            "ear_left": 7.0,
+            "ear_right": -6.0,
+        }
+        final_frame = _frames(library.build_action(gesture_name))[-1]
+
+        assert final_frame.servo_destination["pan"] == -25.0
+        assert final_frame.servo_destination["tilt"] == 12.0
+        assert final_frame.servo_destination["roll"] == 0.0
+        assert final_frame.servo_destination["ear_left"] == 0.0
+        assert final_frame.servo_destination["ear_right"] == 0.0
+
+
+def test_look_center_globally_resets_gaze_and_expression(monkeypatch) -> None:
+    module = _load_gesture_library_module(monkeypatch)
+    module.MotionController.current_servo_position = {
+        "pan": -25.0,
+        "tilt": 12.0,
+        "roll": 5.0,
+        "ear_left": 7.0,
+        "ear_right": -6.0,
+    }
+    library = module.GestureLibrary.get_instance()
+
+    frame = library.build_action("gesture_look_center").current_frame
+
+    assert frame.servo_destination["pan"] == 0.0
+    assert frame.servo_destination["tilt"] == 0.0
+    assert frame.servo_destination["roll"] == 0.0
+    assert frame.servo_destination["ear_left"] == 0.0
+    assert frame.servo_destination["ear_right"] == 0.0
 
 
 def test_legacy_pan_tilt_gesture_builds_zero_roll_and_ears(monkeypatch) -> None:

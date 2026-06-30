@@ -29,11 +29,12 @@ class GestureFrameSpec:
     tilt_offset: float
     duration_ms: int
     absolute_target: bool = False
+    reset_expression_axes: bool = False
     roll_offset: float = 0.0
     ear_left_offset: float = 0.0
     ear_right_offset: float = 0.0
 
-    def to_dict(self) -> dict[str, float | int | str]:
+    def to_dict(self) -> dict[str, float | int | str | bool]:
         """Return the spec as a serializable dictionary."""
 
         return {
@@ -42,13 +43,14 @@ class GestureFrameSpec:
             "tilt_offset": self.tilt_offset,
             "duration_ms": self.duration_ms,
             "absolute_target": self.absolute_target,
+            "reset_expression_axes": self.reset_expression_axes,
             "roll_offset": self.roll_offset,
             "ear_left_offset": self.ear_left_offset,
             "ear_right_offset": self.ear_right_offset,
         }
 
     @classmethod
-    def from_dict(cls, payload: dict[str, float | int | str]) -> "GestureFrameSpec":
+    def from_dict(cls, payload: dict[str, float | int | str | bool]) -> "GestureFrameSpec":
         """Build a spec from a dictionary payload."""
 
         return cls(
@@ -57,6 +59,7 @@ class GestureFrameSpec:
             tilt_offset=float(payload["tilt_offset"]),
             duration_ms=int(payload["duration_ms"]),
             absolute_target=bool(payload.get("absolute_target", False)),
+            reset_expression_axes=bool(payload.get("reset_expression_axes", False)),
             roll_offset=float(payload.get("roll_offset", 0.0)),
             ear_left_offset=float(payload.get("ear_left_offset", 0.0)),
             ear_right_offset=float(payload.get("ear_right_offset", 0.0)),
@@ -126,18 +129,25 @@ DEFAULT_GESTURES = (
                 pan_offset=-4.0,
                 tilt_offset=2.5,
                 duration_ms=1200,
+                roll_offset=1.5,
+                ear_left_offset=1.0,
+                ear_right_offset=0.5,
             ),
             GestureFrameSpec(
                 name="idle-right",
                 pan_offset=4.0,
                 tilt_offset=-2.5,
                 duration_ms=1200,
+                roll_offset=-1.5,
+                ear_left_offset=0.5,
+                ear_right_offset=1.0,
             ),
             GestureFrameSpec(
                 name="idle-center",
                 pan_offset=0.0,
                 tilt_offset=0.0,
                 duration_ms=1000,
+                reset_expression_axes=True,
             ),
         ),
     ),
@@ -148,24 +158,27 @@ DEFAULT_GESTURES = (
             GestureFrameSpec(
                 name="nod-down",
                 pan_offset=0.0,
-                tilt_offset=-10.0,
+                tilt_offset=-11.0,
                 duration_ms=350,
-                ear_left_offset=2.0,
-                ear_right_offset=2.0,
+                roll_offset=1.0,
+                ear_left_offset=4.0,
+                ear_right_offset=4.0,
             ),
             GestureFrameSpec(
                 name="nod-up",
                 pan_offset=0.0,
-                tilt_offset=10.0,
+                tilt_offset=9.0,
                 duration_ms=350,
-                ear_left_offset=1.0,
-                ear_right_offset=1.0,
+                roll_offset=-1.0,
+                ear_left_offset=2.0,
+                ear_right_offset=2.0,
             ),
             GestureFrameSpec(
                 name="nod-center",
                 pan_offset=0.0,
                 tilt_offset=0.0,
                 duration_ms=400,
+                reset_expression_axes=True,
             ),
         ),
     ),
@@ -178,16 +191,18 @@ DEFAULT_GESTURES = (
                 pan_offset=-12.0,
                 tilt_offset=0.0,
                 duration_ms=300,
-                ear_left_offset=1.5,
-                ear_right_offset=-1.0,
+                roll_offset=2.0,
+                ear_left_offset=3.0,
+                ear_right_offset=-2.0,
             ),
             GestureFrameSpec(
                 name="no-right",
                 pan_offset=12.0,
                 tilt_offset=0.0,
                 duration_ms=300,
-                ear_left_offset=-1.0,
-                ear_right_offset=1.5,
+                roll_offset=-2.0,
+                ear_left_offset=-2.0,
+                ear_right_offset=3.0,
             ),
             GestureFrameSpec(
                 name="no-left-return",
@@ -200,6 +215,7 @@ DEFAULT_GESTURES = (
                 pan_offset=0.0,
                 tilt_offset=0.0,
                 duration_ms=350,
+                reset_expression_axes=True,
             ),
         ),
     ),
@@ -212,6 +228,7 @@ DEFAULT_GESTURES = (
                 pan_offset=-16.0,
                 tilt_offset=3.0,
                 duration_ms=700,
+                roll_offset=2.0,
                 ear_left_offset=2.0,
                 ear_right_offset=1.0,
             ),
@@ -220,6 +237,7 @@ DEFAULT_GESTURES = (
                 pan_offset=16.0,
                 tilt_offset=3.0,
                 duration_ms=800,
+                roll_offset=-2.0,
                 ear_left_offset=1.0,
                 ear_right_offset=2.0,
             ),
@@ -228,6 +246,7 @@ DEFAULT_GESTURES = (
                 pan_offset=0.0,
                 tilt_offset=0.0,
                 duration_ms=700,
+                reset_expression_axes=True,
             ),
         ),
     ),
@@ -239,8 +258,9 @@ DEFAULT_GESTURES = (
             GestureFrameSpec(
                 name="look-up",
                 pan_offset=0.0,
-                tilt_offset=999.0,
+                tilt_offset=44.0,
                 duration_ms=600,
+                absolute_target=True,
             ),
         ),
     ),
@@ -278,8 +298,9 @@ DEFAULT_GESTURES = (
             GestureFrameSpec(
                 name="look-down",
                 pan_offset=0.0,
-                tilt_offset=-999.0,
+                tilt_offset=-44.0,
                 duration_ms=600,
+                absolute_target=True,
             ),
         ),
     ),
@@ -293,6 +314,7 @@ DEFAULT_GESTURES = (
                 pan_offset=0.0,
                 tilt_offset=0.0,
                 duration_ms=600,
+                absolute_target=True,
             ),
         ),
     ),
@@ -323,6 +345,7 @@ DEFAULT_GESTURES = (
                 pan_offset=0.0,
                 tilt_offset=0.0,
                 duration_ms=450,
+                reset_expression_axes=True,
             ),
         ),
     ),
@@ -372,6 +395,8 @@ DEFAULT_GESTURES = (
                 pan_offset=10.0,
                 tilt_offset=2.0,
                 duration_ms=250,
+                ear_left_offset=3.0,
+                ear_right_offset=3.0,
             ),
             GestureFrameSpec(
                 name="snap-hold",
@@ -384,6 +409,7 @@ DEFAULT_GESTURES = (
                 pan_offset=0.0,
                 tilt_offset=0.0,
                 duration_ms=400,
+                reset_expression_axes=True,
             ),
         ),
     ),
@@ -430,7 +456,7 @@ DEFAULT_GESTURES = (
                 pan_offset=0.0,
                 tilt_offset=0.0,
                 duration_ms=220,
-                absolute_target=True,
+                reset_expression_axes=True,
             ),
         ),
     ),
@@ -451,8 +477,7 @@ DEFAULT_GESTURES = (
                 pan_offset=0.0,
                 tilt_offset=2.5,
                 duration_ms=520,
-                ear_left_offset=1.0,
-                ear_right_offset=1.0,
+                reset_expression_axes=True,
             ),
         ),
     ),
@@ -471,7 +496,7 @@ DEFAULT_GESTURES = (
                 pan_offset=0.0,
                 tilt_offset=0.0,
                 duration_ms=260,
-                absolute_target=True,
+                reset_expression_axes=True,
             ),
         ),
     ),
@@ -762,9 +787,14 @@ class GestureLibrary:
                 target_tilt = self._clamp(
                     base_tilt + spec.tilt_offset * intensity, tilt_min, tilt_max
                 )
-                target_roll = base_roll + spec.roll_offset * intensity
-                target_ear_left = base_ear_left + spec.ear_left_offset * intensity
-                target_ear_right = base_ear_right + spec.ear_right_offset * intensity
+                if spec.reset_expression_axes:
+                    target_roll = spec.roll_offset
+                    target_ear_left = spec.ear_left_offset
+                    target_ear_right = spec.ear_right_offset
+                else:
+                    target_roll = base_roll + spec.roll_offset * intensity
+                    target_ear_left = base_ear_left + spec.ear_left_offset * intensity
+                    target_ear_right = base_ear_right + spec.ear_right_offset * intensity
         frame = controller.generate_base_keyframe(
             pan_degrees=target_pan,
             tilt_degrees=target_tilt,

@@ -79,15 +79,55 @@ def test_look_up_and_look_down_do_not_roll_near_tilt_limits() -> None:
         assert all(frame.roll_offset == 0.0 for frame in definition.frames)
 
 
+def test_look_up_and_look_down_use_absolute_safe_margin_targets() -> None:
+    look_up = _definition("gesture_look_up").frames[0]
+    look_down = _definition("gesture_look_down").frames[0]
+
+    assert look_up.absolute_target is True
+    assert look_up.tilt_offset == 44.0
+    assert look_down.absolute_target is True
+    assert look_down.tilt_offset == -44.0
+
+
+def test_direct_horizontal_looks_do_not_leave_persistent_ear_offsets() -> None:
+    for gesture_name in ("gesture_look_left", "gesture_look_right"):
+        definition = _definition(gesture_name)
+        assert all(frame.ear_left_offset == 0.0 for frame in definition.frames)
+        assert all(frame.ear_right_offset == 0.0 for frame in definition.frames)
+
+
 def test_look_center_returns_roll_and_ears_to_neutral() -> None:
     center = _definition("gesture_look_center")
     frame = center.frames[-1]
 
+    assert frame.absolute_target is True
     assert frame.pan_offset == 0.0
     assert frame.tilt_offset == 0.0
     assert frame.roll_offset == 0.0
     assert frame.ear_left_offset == 0.0
     assert frame.ear_right_offset == 0.0
+
+
+def test_default_gesture_frames_stay_inside_physical_tilt_safety_bounds() -> None:
+    for definition in DEFAULT_GESTURES:
+        if definition.name in {"gesture_look_up", "gesture_look_down"}:
+            continue
+        for frame in definition.frames:
+            if frame.absolute_target:
+                tilt = frame.tilt_offset
+                roll = frame.roll_offset
+            else:
+                tilt = frame.tilt_offset
+                roll = frame.roll_offset
+            physical = compose_physical_targets({"tilt": tilt, "roll": roll})
+            assert abs(physical["tilt_left"]) < SAFE_TILT_LIMIT, (
+                definition.name,
+                frame.name,
+            )
+            assert abs(physical["tilt_right"]) < SAFE_TILT_LIMIT, (
+                definition.name,
+                frame.name,
+            )
 
 
 def test_old_public_gesture_names_remain_available() -> None:
@@ -116,6 +156,7 @@ def test_legacy_pan_tilt_frame_payload_compatibility_is_preserved() -> None:
     assert frame.roll_offset == 0.0
     assert frame.ear_left_offset == 0.0
     assert frame.ear_right_offset == 0.0
+    assert frame.reset_expression_axes is False
 
 
 def test_roll_and_ear_fields_round_trip_through_serialization() -> None:
