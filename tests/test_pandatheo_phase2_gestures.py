@@ -39,6 +39,8 @@ def test_attention_hold_uses_symmetric_ear_alert() -> None:
     assert any(frame.ear_right_offset != 0.0 for frame in hold.frames)
     assert all(frame.ear_left_offset == frame.ear_right_offset for frame in hold.frames)
     assert all(frame.roll_offset == 0.0 for frame in hold.frames)
+    assert all(frame.pan_offset == 0.0 for frame in hold.frames)
+    assert all(frame.tilt_offset == 0.0 for frame in hold.frames)
 
 
 def test_attention_release_returns_roll_and_ears_toward_neutral() -> None:
@@ -46,6 +48,11 @@ def test_attention_release_returns_roll_and_ears_toward_neutral() -> None:
     neutral = release.frames[-1]
 
     assert neutral.name == "attention-release-neutral"
+    assert neutral.reset_expression_axes is True
+    assert all(frame.pan_offset == 0.0 for frame in release.frames)
+    assert all(frame.tilt_offset == 0.0 for frame in release.frames)
+    assert all(frame.ear_left_offset <= 0.0 for frame in release.frames[:-1])
+    assert all(frame.ear_right_offset <= 0.0 for frame in release.frames[:-1])
     assert neutral.roll_offset == 0.0
     assert neutral.ear_left_offset == 0.0
     assert neutral.ear_right_offset == 0.0
@@ -60,6 +67,29 @@ def test_curious_tilt_uses_roll_and_asymmetric_ears() -> None:
         for frame in curious.frames
         if frame.ear_left_offset != 0.0 or frame.ear_right_offset != 0.0
     )
+    assert all(frame.absolute_target is False for frame in curious.frames)
+    assert curious.frames[-1].reset_expression_axes is True
+
+
+def test_nod_script_preserves_pan_and_resets_expression() -> None:
+    nod = _definition("gesture_nod")
+
+    assert all(frame.pan_offset == 0.0 for frame in nod.frames)
+    assert any(frame.tilt_offset != 0.0 for frame in nod.frames[:-1])
+    assert all(frame.ear_left_offset == frame.ear_right_offset for frame in nod.frames)
+    assert max(abs(frame.roll_offset) for frame in nod.frames) <= 1.0
+    assert nod.frames[-1].reset_expression_axes is True
+
+
+def test_no_script_uses_bounded_pan_shake_without_absolute_target() -> None:
+    no = _definition("gesture_no")
+
+    assert all(frame.absolute_target is False for frame in no.frames)
+    assert any(frame.pan_offset < 0.0 for frame in no.frames)
+    assert any(frame.pan_offset > 0.0 for frame in no.frames)
+    assert all(frame.tilt_offset == 0.0 for frame in no.frames)
+    assert max(abs(frame.roll_offset) for frame in no.frames) <= 3.0
+    assert no.frames[-1].reset_expression_axes is True
 
 
 def test_startup_presence_composed_tilts_stay_inside_safe_limits() -> None:
