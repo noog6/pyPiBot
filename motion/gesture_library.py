@@ -9,6 +9,10 @@ import threading
 
 from core.logging import logger as LOGGER
 from motion.action import Action
+from motion.body_model import (
+    EXPRESSIVE_TILT_SOFT_LIMIT_DEGREES,
+    constrain_expression_frame_to_tilt_envelope,
+)
 from motion.keyframe import Keyframe
 from motion.motion_controller import MotionController, millis
 from storage.controller import StorageController
@@ -119,6 +123,7 @@ _CANONICAL_CENTER_PAN_DEGREES = 0.0
 _CANONICAL_CENTER_TILT_DEGREES = 0.0
 SOFTEN_TILT_LIMIT_DEGREES = 35.0
 AUTOMATIC_GESTURE_SOURCES = frozenset({"micro_presence", "state_cue", "speaking"})
+EXPRESSIVE_GESTURE_SOURCES = frozenset({"user"})
 
 
 DEFAULT_GESTURES = (
@@ -688,6 +693,7 @@ class GestureLibrary:
             intensity=float(intensity),
             style=(style or definition.timing_style),
             soften_for_pose=soften_for_pose,
+            source=source,
         )
         return Action(
             priority=definition.priority,
@@ -765,6 +771,7 @@ class GestureLibrary:
         intensity: float,
         style: str,
         soften_for_pose: bool = False,
+        source: str = "user",
     ) -> Keyframe:
         iterator = iter(definition.frames)
         transition_pan = base_pan
@@ -784,6 +791,7 @@ class GestureLibrary:
             intensity=intensity,
             style=style,
             soften_for_pose=soften_for_pose,
+            source=source,
         )
         transition_pan = float(first_frame.servo_destination["pan"])
         transition_tilt = float(first_frame.servo_destination["tilt"])
@@ -804,6 +812,7 @@ class GestureLibrary:
                 intensity=intensity,
                 style=style,
                 soften_for_pose=soften_for_pose,
+                source=source,
             )
             current.next = next_frame
             current = next_frame
@@ -854,6 +863,7 @@ class GestureLibrary:
         base_roll: float = 0.0,
         base_ear_left: float = 0.0,
         base_ear_right: float = 0.0,
+        source: str = "user",
     ) -> Keyframe:
         """Create a runtime keyframe from a gesture spec frame.
 
@@ -899,6 +909,42 @@ class GestureLibrary:
 
         if soften_for_pose:
             target_roll = 0.0
+
+        should_shape_expression = (
+            source in EXPRESSIVE_GESTURE_SOURCES
+            and definition.name not in _LOOK_GESTURE_NAMES
+            and not spec.absolute_target
+            and not soften_for_pose
+        )
+        if should_shape_expression:
+            shaped = constrain_expression_frame_to_tilt_envelope(
+                target_tilt=target_tilt,
+                target_roll=target_roll,
+                soft_limit_degrees=EXPRESSIVE_TILT_SOFT_LIMIT_DEGREES,
+            )
+            if shaped.changed:
+                if shaped.tilt_changed:
+                    LOGGER.info(
+                        "[MOTION] gesture_shaped reason=tilt_envelope gesture=%s frame=%s current_tilt=%.1f requested_roll=%.1f shaped_roll=%.1f requested_tilt=%.1f shaped_tilt=%.1f policy=preserve_pan_ears",
+                        definition.name,
+                        spec.name,
+                        base_tilt,
+                        target_roll,
+                        shaped.roll,
+                        target_tilt,
+                        shaped.tilt,
+                    )
+                else:
+                    LOGGER.info(
+                        "[MOTION] gesture_shaped reason=tilt_envelope gesture=%s frame=%s current_tilt=%.1f requested_roll=%.1f shaped_roll=%.1f policy=preserve_pan_ears",
+                        definition.name,
+                        spec.name,
+                        base_tilt,
+                        target_roll,
+                        shaped.roll,
+                    )
+                target_tilt = shaped.tilt
+                target_roll = shaped.roll
 
         frame = controller.generate_base_keyframe(
             pan_degrees=target_pan,

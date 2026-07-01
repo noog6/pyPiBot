@@ -132,13 +132,13 @@ def test_explicit_look_down_is_not_softened(monkeypatch) -> None:
     assert frame.servo_destination["tilt"] == -44.0
 
 
-def test_explicit_no_is_not_softened_near_limit(monkeypatch) -> None:
+def test_explicit_no_is_not_automatic_ears_only_softened_near_limit(monkeypatch) -> None:
     library = _library_for_pose(monkeypatch, {"pan": 1.0, "tilt": 44.0, "roll": 2.0})
 
     frames = _frames(library.build_action("gesture_no", source="user"))
 
     assert frames[0].servo_destination["pan"] < 1.0
-    assert frames[0].servo_destination["roll"] > 2.0
+    assert frames[0].servo_destination["ear_left"] > 0.0
 
 
 def test_normal_automatic_idle_away_from_limits_is_unchanged(monkeypatch) -> None:
