@@ -151,6 +151,11 @@ DEFAULT_GESTURES = (
             ),
         ),
     ),
+    # Gesture: gesture_nod
+    # Meaning: acknowledgement / yes.
+    # Gaze policy: preserve current pan; use only a transient tilt bob.
+    # Expression policy: symmetric ear bounce with neutral roll/ears at end.
+    # Final frame: reset_expression_axes=True; should not recenter pan/tilt.
     GestureDefinition(
         name="gesture_nod",
         priority=2,
@@ -158,20 +163,20 @@ DEFAULT_GESTURES = (
             GestureFrameSpec(
                 name="nod-down",
                 pan_offset=0.0,
-                tilt_offset=-11.0,
-                duration_ms=350,
-                roll_offset=1.0,
-                ear_left_offset=4.0,
-                ear_right_offset=4.0,
+                tilt_offset=-13.0,
+                duration_ms=300,
+                roll_offset=0.75,
+                ear_left_offset=5.0,
+                ear_right_offset=5.0,
             ),
             GestureFrameSpec(
                 name="nod-up",
                 pan_offset=0.0,
-                tilt_offset=9.0,
-                duration_ms=350,
-                roll_offset=-1.0,
-                ear_left_offset=2.0,
-                ear_right_offset=2.0,
+                tilt_offset=10.0,
+                duration_ms=280,
+                roll_offset=-0.5,
+                ear_left_offset=3.0,
+                ear_right_offset=3.0,
             ),
             GestureFrameSpec(
                 name="nod-center",
@@ -182,33 +187,41 @@ DEFAULT_GESTURES = (
             ),
         ),
     ),
+    # Gesture: gesture_no
+    # Meaning: disagreement / no.
+    # Gaze policy: preserve baseline tilt; transient pan shake returns to baseline.
+    # Expression policy: alternating ears and bounded roll, then neutral expression.
+    # Final frame: reset_expression_axes=True; should not force global center.
     GestureDefinition(
         name="gesture_no",
         priority=2,
         frames=(
             GestureFrameSpec(
                 name="no-left",
-                pan_offset=-12.0,
+                pan_offset=-14.0,
                 tilt_offset=0.0,
-                duration_ms=300,
-                roll_offset=2.0,
-                ear_left_offset=3.0,
-                ear_right_offset=-2.0,
+                duration_ms=260,
+                roll_offset=2.5,
+                ear_left_offset=4.0,
+                ear_right_offset=-3.0,
             ),
             GestureFrameSpec(
                 name="no-right",
-                pan_offset=12.0,
+                pan_offset=14.0,
                 tilt_offset=0.0,
-                duration_ms=300,
-                roll_offset=-2.0,
-                ear_left_offset=-2.0,
-                ear_right_offset=3.0,
+                duration_ms=260,
+                roll_offset=-2.5,
+                ear_left_offset=-3.0,
+                ear_right_offset=4.0,
             ),
             GestureFrameSpec(
                 name="no-left-return",
-                pan_offset=-8.0,
+                pan_offset=-9.0,
                 tilt_offset=0.0,
-                duration_ms=250,
+                duration_ms=220,
+                roll_offset=1.5,
+                ear_left_offset=2.5,
+                ear_right_offset=-1.5,
             ),
             GestureFrameSpec(
                 name="no-center",
@@ -318,6 +331,11 @@ DEFAULT_GESTURES = (
             ),
         ),
     ),
+    # Gesture: gesture_curious_tilt
+    # Meaning: curiosity / "hmm?".
+    # Gaze policy: preserve current baseline; avoid absolute targets/global center.
+    # Expression policy: obvious asymmetric ears plus bounded head roll.
+    # Final frame: reset_expression_axes=True; should not steal gaze.
     GestureDefinition(
         name="gesture_curious_tilt",
         priority=1,
@@ -325,20 +343,20 @@ DEFAULT_GESTURES = (
             GestureFrameSpec(
                 name="tilt-up",
                 pan_offset=0.0,
-                tilt_offset=7.0,
-                duration_ms=500,
-                roll_offset=4.0,
-                ear_left_offset=3.0,
-                ear_right_offset=-2.0,
+                tilt_offset=5.0,
+                duration_ms=420,
+                roll_offset=6.0,
+                ear_left_offset=6.0,
+                ear_right_offset=-4.0,
             ),
             GestureFrameSpec(
                 name="tilt-down",
                 pan_offset=0.0,
-                tilt_offset=-7.0,
-                duration_ms=500,
-                roll_offset=-3.0,
-                ear_left_offset=-2.0,
-                ear_right_offset=3.0,
+                tilt_offset=-4.0,
+                duration_ms=420,
+                roll_offset=-4.5,
+                ear_left_offset=-3.0,
+                ear_right_offset=5.0,
             ),
             GestureFrameSpec(
                 name="tilt-center",
@@ -413,43 +431,57 @@ DEFAULT_GESTURES = (
             ),
         ),
     ),
+    # Gesture: gesture_attention_hold
+    # Meaning: active listening / "I'm with you".
+    # Gaze policy: preserve current pan/tilt instead of acquiring a new gaze target.
+    # Expression policy: sustained symmetric ear alert; no roll.
+    # Final frame: intentionally held expression; release gesture clears ears/roll.
     GestureDefinition(
         name="gesture_attention_hold",
         priority=2,
         frames=(
             GestureFrameSpec(
                 name="attention-hold-acquire",
-                pan_offset=6.0,
-                tilt_offset=1.5,
-                duration_ms=260,
-                ear_left_offset=4.0,
-                ear_right_offset=4.0,
+                pan_offset=0.0,
+                tilt_offset=0.0,
+                duration_ms=240,
+                ear_left_offset=5.0,
+                ear_right_offset=5.0,
             ),
             GestureFrameSpec(
                 name="attention-hold",
-                pan_offset=6.0,
-                tilt_offset=1.5,
+                pan_offset=0.0,
+                tilt_offset=0.0,
                 duration_ms=900,
-                ear_left_offset=4.0,
-                ear_right_offset=4.0,
+                ear_left_offset=5.0,
+                ear_right_offset=5.0,
             ),
         ),
     ),
+    # Gesture: gesture_attention_release
+    # Meaning: release active-listening expression after a conversational hold.
+    # Gaze policy: preserve current pan/tilt; never recenter as part of release.
+    # Expression policy: ease held ears down without a positive perk, then neutralize.
+    # Final frame: reset_expression_axes=True; should not steal gaze.
     GestureDefinition(
         name="gesture_attention_release",
         priority=2,
         frames=(
             GestureFrameSpec(
-                name="attention-release-center",
+                name="attention-release-soften",
                 pan_offset=0.0,
                 tilt_offset=0.0,
-                duration_ms=320,
+                duration_ms=220,
+                ear_left_offset=0.0,
+                ear_right_offset=0.0,
             ),
             GestureFrameSpec(
                 name="attention-release-settle",
-                pan_offset=1.0,
-                tilt_offset=-0.5,
+                pan_offset=0.0,
+                tilt_offset=0.0,
                 duration_ms=180,
+                ear_left_offset=0.0,
+                ear_right_offset=0.0,
             ),
             GestureFrameSpec(
                 name="attention-release-neutral",
