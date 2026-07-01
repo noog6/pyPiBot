@@ -6,25 +6,25 @@ from motion.action import Action
 from motion.gesture_library import GestureLibrary
 
 
-def gesture_idle(delay_ms: int = 0, intensity: float = 1.0) -> Action:
+def gesture_idle(delay_ms: int = 0, intensity: float = 1.0, source: str = "user") -> Action:
     """Build a gentle idle gesture action."""
 
     library = GestureLibrary.get_instance()
-    return library.build_action("gesture_idle", delay_ms=delay_ms, intensity=intensity)
+    return library.build_action("gesture_idle", delay_ms=delay_ms, intensity=intensity, source=source)
 
 
-def gesture_nod(delay_ms: int = 0, intensity: float = 1.0) -> Action:
+def gesture_nod(delay_ms: int = 0, intensity: float = 1.0, source: str = "user") -> Action:
     """Build a nod gesture action."""
 
     library = GestureLibrary.get_instance()
-    return library.build_action("gesture_nod", delay_ms=delay_ms, intensity=intensity)
+    return library.build_action("gesture_nod", delay_ms=delay_ms, intensity=intensity, source=source)
 
 
-def gesture_no(delay_ms: int = 0, intensity: float = 1.0) -> Action:
+def gesture_no(delay_ms: int = 0, intensity: float = 1.0, source: str = "user") -> Action:
     """Build a head shake gesture action."""
 
     library = GestureLibrary.get_instance()
-    return library.build_action("gesture_no", delay_ms=delay_ms, intensity=intensity)
+    return library.build_action("gesture_no", delay_ms=delay_ms, intensity=intensity, source=source)
 
 
 def gesture_look_around(delay_ms: int = 0, intensity: float = 1.0) -> Action:
@@ -105,47 +105,47 @@ def gesture_look_center(delay_ms: int = 0, style: str = "neutral") -> Action:
     return library.build_action("gesture_look_center", delay_ms=delay_ms, style=style)
 
 
-def gesture_curious_tilt(delay_ms: int = 0, intensity: float = 1.0) -> Action:
+def gesture_curious_tilt(delay_ms: int = 0, intensity: float = 1.0, source: str = "user") -> Action:
     """Build a curious tilt gesture action."""
 
     library = GestureLibrary.get_instance()
-    return library.build_action("gesture_curious_tilt", delay_ms=delay_ms, intensity=intensity)
+    return library.build_action("gesture_curious_tilt", delay_ms=delay_ms, intensity=intensity, source=source)
 
 
 
-def gesture_speaking_posture(delay_ms: int = 0, intensity: float = 1.0) -> Action:
+def gesture_speaking_posture(delay_ms: int = 0, intensity: float = 1.0, source: str = "user") -> Action:
     """Build a restrained speaking posture gesture action."""
 
     library = GestureLibrary.get_instance()
-    return library.build_action("gesture_speaking_posture", delay_ms=delay_ms, intensity=intensity)
+    return library.build_action("gesture_speaking_posture", delay_ms=delay_ms, intensity=intensity, source=source)
 
 
-def gesture_speaking_settle(delay_ms: int = 0, intensity: float = 1.0) -> Action:
+def gesture_speaking_settle(delay_ms: int = 0, intensity: float = 1.0, source: str = "user") -> Action:
     """Build a restrained settle gesture action after speaking."""
 
     library = GestureLibrary.get_instance()
-    return library.build_action("gesture_speaking_settle", delay_ms=delay_ms, intensity=intensity)
+    return library.build_action("gesture_speaking_settle", delay_ms=delay_ms, intensity=intensity, source=source)
 
 
-def gesture_attention_hold(delay_ms: int = 0, intensity: float = 1.0) -> Action:
+def gesture_attention_hold(delay_ms: int = 0, intensity: float = 1.0, source: str = "user") -> Action:
     """Build a sustained attention hold gesture action."""
 
     library = GestureLibrary.get_instance()
-    return library.build_action("gesture_attention_hold", delay_ms=delay_ms, intensity=intensity)
+    return library.build_action("gesture_attention_hold", delay_ms=delay_ms, intensity=intensity, source=source)
 
 
-def gesture_attention_release(delay_ms: int = 0, intensity: float = 1.0) -> Action:
+def gesture_attention_release(delay_ms: int = 0, intensity: float = 1.0, source: str = "user") -> Action:
     """Build a subtle release back toward neutral after attention hold."""
 
     library = GestureLibrary.get_instance()
-    return library.build_action("gesture_attention_release", delay_ms=delay_ms, intensity=intensity)
+    return library.build_action("gesture_attention_release", delay_ms=delay_ms, intensity=intensity, source=source)
 
 
-def gesture_attention_snap(delay_ms: int = 0, intensity: float = 1.0) -> Action:
+def gesture_attention_snap(delay_ms: int = 0, intensity: float = 1.0, source: str = "user") -> Action:
     """Build a quick attention snap gesture action."""
 
     library = GestureLibrary.get_instance()
-    return library.build_action("gesture_attention_snap", delay_ms=delay_ms, intensity=intensity)
+    return library.build_action("gesture_attention_snap", delay_ms=delay_ms, intensity=intensity, source=source)
 
 
 def gesture_startup_presence(delay_ms: int = 0, intensity: float = 1.0) -> Action:

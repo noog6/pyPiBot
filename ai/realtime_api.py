@@ -5031,21 +5031,21 @@ class RealtimeAPI:
 
         action = None
         if gesture_name == "gesture_attention_hold":
-            action = gesture_attention_hold(delay_ms=delay_ms)
+            action = gesture_attention_hold(delay_ms=delay_ms, source="state_cue")
         elif gesture_name == "gesture_attention_release":
-            action = gesture_attention_release(delay_ms=delay_ms)
+            action = gesture_attention_release(delay_ms=delay_ms, source="state_cue")
         elif gesture_name == "gesture_attention_snap":
-            action = gesture_attention_snap(delay_ms=delay_ms)
+            action = gesture_attention_snap(delay_ms=delay_ms, source="state_cue")
         elif gesture_name == "gesture_curious_tilt":
-            action = gesture_curious_tilt(delay_ms=delay_ms)
+            action = gesture_curious_tilt(delay_ms=delay_ms, source="state_cue")
         elif gesture_name == "gesture_nod":
-            action = gesture_nod(delay_ms=delay_ms)
+            action = gesture_nod(delay_ms=delay_ms, source="state_cue")
         elif gesture_name == "gesture_idle":
-            action = gesture_idle(delay_ms=delay_ms)
+            action = gesture_idle(delay_ms=delay_ms, source="state_cue")
         elif gesture_name == "gesture_speaking_posture":
-            action = gesture_speaking_posture(delay_ms=delay_ms)
+            action = gesture_speaking_posture(delay_ms=delay_ms, source="state_cue")
         elif gesture_name == "gesture_speaking_settle":
-            action = gesture_speaking_settle(delay_ms=delay_ms)
+            action = gesture_speaking_settle(delay_ms=delay_ms, source="state_cue")
 
         if action is None:
             logger.warning("Gesture cue skipped: no action built for %s.", gesture_name)

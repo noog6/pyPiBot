@@ -933,7 +933,7 @@ class OpsOrchestrator:
 
         delay_ms = random.randint(100, 350)
         intensity = random.uniform(0.6, 1.0)
-        action = gesture_idle(delay_ms=delay_ms, intensity=intensity)
+        action = gesture_idle(delay_ms=delay_ms, intensity=intensity, source="micro_presence")
         controller.add_action_to_queue(action)
         self._micro_presence_budget.record(now)
         if self._should_log_event("micro_presence"):
