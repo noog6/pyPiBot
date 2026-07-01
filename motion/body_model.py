@@ -20,11 +20,34 @@ PHYSICAL_SERVO_NAMES: tuple[str, ...] = (
     "ear_right",
 )
 DEFAULT_ROLL_TO_TILT_SIGN = 1.0
+EXPRESSIVE_TILT_SOFT_LIMIT_DEGREES = 44.0
 
 
 class ServoLimit(Protocol):
     min_angle: float
     max_angle: float
+
+
+@dataclass(frozen=True)
+class ExpressionTiltEnvelopeResult:
+    """Logical expression pose after soft-envelope tilt/roll shaping."""
+
+    tilt: float
+    roll: float
+    requested_tilt: float
+    requested_roll: float
+
+    @property
+    def changed(self) -> bool:
+        return self.tilt != self.requested_tilt or self.roll != self.requested_roll
+
+    @property
+    def tilt_changed(self) -> bool:
+        return self.tilt != self.requested_tilt
+
+    @property
+    def roll_changed(self) -> bool:
+        return self.roll != self.requested_roll
 
 
 @dataclass(frozen=True)
@@ -121,3 +144,53 @@ def map_logical_pose_to_physical_targets(
         roll_to_tilt_sign=roll_to_tilt_sign,
     )
     return clamp_physical_targets(composed, servo_limits)
+
+
+def constrain_expression_frame_to_tilt_envelope(
+    *,
+    target_tilt: float,
+    target_roll: float,
+    soft_limit_degrees: float = EXPRESSIVE_TILT_SOFT_LIMIT_DEGREES,
+    roll_to_tilt_sign: float = DEFAULT_ROLL_TO_TILT_SIGN,
+) -> ExpressionTiltEnvelopeResult:
+    """Shape logical tilt/roll so composed tilt servos stay in a soft envelope.
+
+    Roll is reduced before tilt because expressive overlays should preserve gaze
+    tilt whenever possible. If the tilt itself is outside the soft envelope,
+    roll is neutralized and tilt is brought back inside the envelope.
+    """
+
+    requested_tilt = float(target_tilt)
+    requested_roll = float(target_roll)
+    limit = abs(float(soft_limit_degrees))
+    if limit <= 0.0:
+        return ExpressionTiltEnvelopeResult(
+            tilt=0.0,
+            roll=0.0,
+            requested_tilt=requested_tilt,
+            requested_roll=requested_roll,
+        )
+
+    signed_requested_roll = requested_roll * float(roll_to_tilt_sign)
+    left = requested_tilt + signed_requested_roll
+    right = requested_tilt - signed_requested_roll
+    if -limit <= left <= limit and -limit <= right <= limit:
+        return ExpressionTiltEnvelopeResult(
+            tilt=requested_tilt,
+            roll=requested_roll,
+            requested_tilt=requested_tilt,
+            requested_roll=requested_roll,
+        )
+
+    shaped_tilt = max(-limit, min(limit, requested_tilt))
+    lower = max(-limit - shaped_tilt, shaped_tilt - limit)
+    upper = min(limit - shaped_tilt, shaped_tilt + limit)
+    shaped_signed_roll = max(lower, min(upper, signed_requested_roll))
+    sign = float(roll_to_tilt_sign)
+    shaped_roll = 0.0 if sign == 0.0 else shaped_signed_roll / sign
+    return ExpressionTiltEnvelopeResult(
+        tilt=shaped_tilt,
+        roll=shaped_roll,
+        requested_tilt=requested_tilt,
+        requested_roll=requested_roll,
+    )
