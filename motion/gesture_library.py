@@ -117,6 +117,8 @@ _LOOK_DURATION_MIN_MS = 160
 _LOOK_DURATION_MAX_MS = 1400
 _CANONICAL_CENTER_PAN_DEGREES = 0.0
 _CANONICAL_CENTER_TILT_DEGREES = 0.0
+SOFTEN_TILT_LIMIT_DEGREES = 35.0
+AUTOMATIC_GESTURE_SOURCES = frozenset({"micro_presence", "state_cue", "speaking"})
 
 
 DEFAULT_GESTURES = (
@@ -535,6 +537,50 @@ DEFAULT_GESTURES = (
 )
 
 
+def should_soften_gesture_for_pose(
+    *,
+    gesture_name: str,
+    source: str,
+    current_pose: dict[str, float] | None,
+    has_absolute_target: bool = False,
+    threshold_degrees: float = SOFTEN_TILT_LIMIT_DEGREES,
+) -> bool:
+    """Return True when an automatic gesture should be reduced to ears-only.
+
+    Absolute-target gestures intentionally opt out because softening is defined
+    for baseline-relative automatic expressions, not direct gaze acquisition.
+    """
+
+    del gesture_name  # Reserved for future per-gesture exceptions.
+    if has_absolute_target:
+        return False
+    if source not in AUTOMATIC_GESTURE_SOURCES:
+        return False
+    pose = current_pose or {}
+    current_tilt = float(pose.get("tilt", 0.0))
+    return abs(current_tilt) >= float(threshold_degrees)
+
+
+def soften_frame_spec_to_ears_only(spec: GestureFrameSpec) -> GestureFrameSpec:
+    """Return a runtime-only frame spec preserving only ear expression offsets.
+
+    The runtime keyframe builder neutralizes roll to 0.0 after target
+    calculation so ears_only does not hold the current roll baseline.
+    """
+
+    return GestureFrameSpec(
+        name=spec.name,
+        pan_offset=0.0,
+        tilt_offset=0.0,
+        duration_ms=spec.duration_ms,
+        absolute_target=spec.absolute_target,
+        reset_expression_axes=spec.reset_expression_axes,
+        roll_offset=0.0,
+        ear_left_offset=spec.ear_left_offset,
+        ear_right_offset=spec.ear_right_offset,
+    )
+
+
 class GestureLibrary:
     """Singleton library for storing gesture definitions."""
 
@@ -594,6 +640,7 @@ class GestureLibrary:
         delay_ms: int = 0,
         intensity: float = 1.0,
         style: str | None = None,
+        source: str = "user",
     ) -> Action:
         """Build an action from a gesture definition.
 
@@ -616,6 +663,20 @@ class GestureLibrary:
         current_ear_left = float(current_pose.get("ear_left", 0.0))
         current_ear_right = float(current_pose.get("ear_right", 0.0))
 
+        soften_for_pose = should_soften_gesture_for_pose(
+            gesture_name=definition.name,
+            source=source,
+            current_pose=current_pose,
+            has_absolute_target=any(frame.absolute_target for frame in definition.frames),
+        )
+        if soften_for_pose:
+            LOGGER.info(
+                "[MOTION] gesture_softened reason=near_tilt_limit source=%s gesture=%s current_tilt=%.1f policy=ears_only",
+                source,
+                definition.name,
+                current_tilt,
+            )
+
         frames = self._build_keyframe_chain(
             controller=controller,
             definition=definition,
@@ -626,6 +687,7 @@ class GestureLibrary:
             base_ear_right=current_ear_right,
             intensity=float(intensity),
             style=(style or definition.timing_style),
+            soften_for_pose=soften_for_pose,
         )
         return Action(
             priority=definition.priority,
@@ -702,6 +764,7 @@ class GestureLibrary:
         base_ear_right: float,
         intensity: float,
         style: str,
+        soften_for_pose: bool = False,
     ) -> Keyframe:
         iterator = iter(definition.frames)
         transition_pan = base_pan
@@ -720,6 +783,7 @@ class GestureLibrary:
             transition_tilt=transition_tilt,
             intensity=intensity,
             style=style,
+            soften_for_pose=soften_for_pose,
         )
         transition_pan = float(first_frame.servo_destination["pan"])
         transition_tilt = float(first_frame.servo_destination["tilt"])
@@ -739,6 +803,7 @@ class GestureLibrary:
                 transition_tilt=transition_tilt,
                 intensity=intensity,
                 style=style,
+                soften_for_pose=soften_for_pose,
             )
             current.next = next_frame
             current = next_frame
@@ -785,6 +850,7 @@ class GestureLibrary:
         transition_tilt: float,
         intensity: float,
         style: str,
+        soften_for_pose: bool = False,
         base_roll: float = 0.0,
         base_ear_left: float = 0.0,
         base_ear_right: float = 0.0,
@@ -795,6 +861,9 @@ class GestureLibrary:
         `Keyframe.final_target_time` as the per-frame nominal target time.
         Absolute runtime deadlines are derived later by `MotionController`.
         """
+        if soften_for_pose and not spec.absolute_target:
+            spec = soften_frame_spec_to_ears_only(spec)
+
         pan_min, pan_max = self._get_servo_limits(controller, "pan")
         tilt_min, tilt_max = self._get_servo_limits(controller, "tilt")
         if definition.name == "gesture_look_center":
@@ -827,6 +896,10 @@ class GestureLibrary:
                     target_roll = base_roll + spec.roll_offset * intensity
                     target_ear_left = base_ear_left + spec.ear_left_offset * intensity
                     target_ear_right = base_ear_right + spec.ear_right_offset * intensity
+
+        if soften_for_pose:
+            target_roll = 0.0
+
         frame = controller.generate_base_keyframe(
             pan_degrees=target_pan,
             tilt_degrees=target_tilt,
