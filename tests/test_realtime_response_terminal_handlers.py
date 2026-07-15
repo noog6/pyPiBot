@@ -3969,3 +3969,314 @@ def test_handle_response_done_expected_empty_tool_followup_closes_continuity_wit
     brief = api.get_continuity_brief("run-test", "turn_1", reason="post_expected_empty_tool_followup_terminal")
     settlement = api._continuity_ledger.build_turn_settlement(brief)
     assert settlement.settlement_state != "followthrough_remaining"
+
+
+def test_progress_ack_text_delta_classification_uses_accumulated_response_text() -> None:
+    api = _make_api()
+    api._canonical_response_state_store = RealtimeAPI._canonical_response_state_store.__get__(api, RealtimeAPI)
+    api._canonical_response_state = RealtimeAPI._canonical_response_state.__get__(api, RealtimeAPI)
+    api._canonical_response_state_mutate = RealtimeAPI._canonical_response_state_mutate.__get__(api, RealtimeAPI)
+    api._active_canonical_key_for_deliverable_marker = RealtimeAPI._active_canonical_key_for_deliverable_marker.__get__(api, RealtimeAPI)
+    api._mark_active_canonical_deliverable_observed = RealtimeAPI._mark_active_canonical_deliverable_observed.__get__(api, RealtimeAPI)
+    api._record_active_canonical_deliverable_class = RealtimeAPI._record_active_canonical_deliverable_class.__get__(api, RealtimeAPI)
+    api._classify_deliverable_text = RealtimeAPI._classify_deliverable_text.__get__(api, RealtimeAPI)
+    api._append_assistant_reply_text = RealtimeAPI._append_assistant_reply_text.__get__(api, RealtimeAPI)
+    api._assistant_reply_text_for_response = RealtimeAPI._assistant_reply_text_for_response.__get__(api, RealtimeAPI)
+    api._handle_event_legacy = RealtimeAPI._handle_event_legacy.__get__(api, RealtimeAPI)
+    api._should_process_response_event_ingress = lambda *_args, **_kwargs: True
+    api._allow_text_output_state_transition = lambda **_kwargs: True
+    api._is_active_response_guarded = lambda: False
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._mark_first_assistant_utterance_observed_if_needed = lambda _text: None
+    api.assistant_reply = ""
+    api._assistant_reply_accum = ""
+    api._assistant_reply_by_response_id = {}
+    api._assistant_reply_response_id = ""
+
+    asyncio.run(api._handle_event_legacy({"type": "response.output_text.delta", "response_id": "resp_1", "delta": "Checking my battery status now"}, api.websocket))
+    asyncio.run(api._handle_event_legacy({"type": "response.output_text.delta", "response_id": "resp_1", "delta": " so I can give you the exact voltage."}, api.websocket))
+
+    state = api._canonical_response_state("turn_1::input_evt_1")
+    assert state.deliverable_observed is True
+    assert state.deliverable_class == "progress"
+
+
+def test_required_deliverable_required_tool_name_infers_runtime_diagnostics() -> None:
+    from ai.continuity import ContinuityBrief, CompoundContinuityState, CompoundContinuityStep
+
+    api = _make_api()
+    report_step = CompoundContinuityStep(
+        step_id="step_report",
+        kind="report",
+        summary="let me know if there is anything wrong from the runtime diagnostics",
+        status="active",
+        step_output_policy="required_deliverable",
+    )
+    compound = CompoundContinuityState(
+        request_id="req_1",
+        summary="run diagnostics and report issues",
+        steps=(report_step,),
+        active_step_index=0,
+        completed_step_ids=(),
+        final_followup_pending=True,
+    )
+    api.get_continuity_brief = lambda **_kwargs: ContinuityBrief(
+        run_id="run-test",
+        turn_id="turn_1",
+        stance="assisting_query",
+        compound_request=compound,
+    )
+    api._required_deliverable_required_tool_name = RealtimeAPI._required_deliverable_required_tool_name.__get__(api, RealtimeAPI)
+
+    assert api._required_deliverable_required_tool_name(turn_id="turn_1") == "read_runtime_diagnostics"
+
+
+def test_required_deliverable_tool_execution_accepts_resolved_owner_turn_record() -> None:
+    from ai.continuity import ContinuityBrief, CompoundContinuityState, CompoundContinuityStep
+
+    api = _make_api()
+    report_step = CompoundContinuityStep(
+        step_id="step_report",
+        kind="report",
+        summary="report the current battery voltage",
+        status="active",
+        step_output_policy="required_deliverable",
+    )
+    compound = CompoundContinuityState(
+        request_id="req_battery",
+        summary="battery voltage report",
+        steps=(report_step,),
+        active_step_index=0,
+        completed_step_ids=(),
+        final_followup_pending=True,
+    )
+    api.get_continuity_brief = lambda **_kwargs: ContinuityBrief(
+        run_id="run-test",
+        turn_id="turn_owner",
+        stance="assisting_query",
+        compound_request=compound,
+    )
+    api._required_deliverable_required_tool_name = RealtimeAPI._required_deliverable_required_tool_name.__get__(api, RealtimeAPI)
+    api._required_deliverable_step_requires_tool_execution = RealtimeAPI._required_deliverable_step_requires_tool_execution.__get__(api, RealtimeAPI)
+    api._required_deliverable_tool_execution_missing = RealtimeAPI._required_deliverable_tool_execution_missing.__get__(api, RealtimeAPI)
+    api._response_trace_by_id = lambda: {}
+    api._tool_call_records = [
+        {
+            "name": "read_battery_voltage",
+            "call_id": "call_battery",
+            "turn_id": "turn_stale_runtime",
+            "owner_turn_id": "turn_owner",
+            "result": {"voltage": 7.64},
+        }
+    ]
+
+    assert api._required_deliverable_tool_execution_missing(
+        turn_id="turn_owner",
+        required_deliverable_followthrough=True,
+        trace_context={"turn_id": "turn_owner"},
+        stale_context={},
+    ) is False
+
+
+def test_progress_only_parent_text_defensively_blocks_tool_followup_suppression() -> None:
+    api = _make_api()
+    api._canonical_response_state_store = RealtimeAPI._canonical_response_state_store.__get__(api, RealtimeAPI)
+    api._canonical_response_state = RealtimeAPI._canonical_response_state.__get__(api, RealtimeAPI)
+    api._canonical_response_state_mutate = RealtimeAPI._canonical_response_state_mutate.__get__(api, RealtimeAPI)
+    api._terminal_deliverable_selection_store = RealtimeAPI._terminal_deliverable_selection_store.__get__(api, RealtimeAPI)
+    api._assistant_reply_text_for_response = RealtimeAPI._assistant_reply_text_for_response.__get__(api, RealtimeAPI)
+    api._classify_deliverable_text = RealtimeAPI._classify_deliverable_text.__get__(api, RealtimeAPI)
+    api._canonical_parent_text_deliverable_class = RealtimeAPI._canonical_parent_text_deliverable_class.__get__(api, RealtimeAPI)
+    api._should_suppress_tool_followup_after_turn_deliverable = RealtimeAPI._should_suppress_tool_followup_after_turn_deliverable.__get__(api, RealtimeAPI)
+    api._turn_followthrough_chain_remaining = lambda **_kwargs: False
+    api._terminal_response_text_by_response_id = {
+        "resp_progress": "Checking my battery status now so I can give you the exact voltage."
+    }
+    api._canonical_response_state_store()["turn_1::item_parent"] = CanonicalResponseState(
+        created=True,
+        done=True,
+        deliverable_observed=True,
+        deliverable_class="final",
+        origin="server_auto",
+        response_id="resp_progress",
+        turn_id="turn_1",
+        input_event_key="item_parent",
+    )
+
+    assert api._should_suppress_tool_followup_after_turn_deliverable(
+        turn_id="turn_1",
+        parent_input_event_key="item_parent",
+    ) is False
+
+
+def test_active_required_deliverable_keeps_tool_followup_eligible_after_parent_ack_done() -> None:
+    api = _make_api()
+    api._canonical_response_state_store = RealtimeAPI._canonical_response_state_store.__get__(api, RealtimeAPI)
+    api._canonical_parent_text_deliverable_class = RealtimeAPI._canonical_parent_text_deliverable_class.__get__(api, RealtimeAPI)
+    api._assistant_reply_text_for_response = RealtimeAPI._assistant_reply_text_for_response.__get__(api, RealtimeAPI)
+    api._classify_deliverable_text = RealtimeAPI._classify_deliverable_text.__get__(api, RealtimeAPI)
+    api._should_suppress_tool_followup_after_turn_deliverable = RealtimeAPI._should_suppress_tool_followup_after_turn_deliverable.__get__(api, RealtimeAPI)
+    api._apply_continuity_event(
+        "transcript_final",
+        text="run diagnostics and let me know if anything is wrong",
+        source="input_audio_transcription",
+        turn_id="turn_1",
+    )
+    api._apply_continuity_event(
+        "tool_result_received",
+        tool_name="read_runtime_diagnostics",
+        call_id="call_diag",
+        turn_id="turn_1",
+    )
+    api._terminal_response_text_by_response_id = {"resp_ack": "Let me check my runtime status."}
+    api._canonical_response_state_store()["turn_1::item_parent"] = CanonicalResponseState(
+        created=True,
+        done=True,
+        deliverable_observed=True,
+        deliverable_class="final",
+        origin="server_auto",
+        response_id="resp_ack",
+        turn_id="turn_1",
+        input_event_key="item_parent",
+    )
+
+    assert api._turn_has_active_required_deliverable_step(turn_id="turn_1") is True
+    assert api._turn_followthrough_chain_remaining(turn_id="turn_1", include_report_followup=True) is True
+    assert api._should_suppress_tool_followup_after_turn_deliverable(
+        turn_id="turn_1",
+        parent_input_event_key="item_parent",
+    ) is False
+
+
+def test_required_deliverable_tool_execution_rejects_unrelated_owner_turn_tool_record() -> None:
+    from ai.continuity import ContinuityBrief, CompoundContinuityState, CompoundContinuityStep
+
+    api = _make_api()
+    report_step = CompoundContinuityStep(
+        step_id="step_report",
+        kind="report",
+        summary="report the current battery voltage",
+        status="active",
+        step_output_policy="required_deliverable",
+    )
+    compound = CompoundContinuityState(
+        request_id="req_battery",
+        summary="battery voltage report",
+        steps=(report_step,),
+        active_step_index=0,
+        completed_step_ids=(),
+        final_followup_pending=True,
+    )
+    api.get_continuity_brief = lambda **_kwargs: ContinuityBrief(
+        run_id="run-test",
+        turn_id="turn_owner",
+        stance="assisting_query",
+        compound_request=compound,
+    )
+    api._required_deliverable_required_tool_name = RealtimeAPI._required_deliverable_required_tool_name.__get__(api, RealtimeAPI)
+    api._required_deliverable_step_requires_tool_execution = RealtimeAPI._required_deliverable_step_requires_tool_execution.__get__(api, RealtimeAPI)
+    api._required_deliverable_tool_execution_missing = RealtimeAPI._required_deliverable_tool_execution_missing.__get__(api, RealtimeAPI)
+    api._response_trace_by_id = lambda: {}
+    api._tool_call_records = [
+        {
+            "name": "read_runtime_diagnostics",
+            "call_id": "call_diag",
+            "turn_id": "turn_stale_runtime",
+            "owner_turn_id": "turn_owner",
+            "result": {"connected": True},
+        }
+    ]
+
+    assert api._required_deliverable_tool_execution_missing(
+        turn_id="turn_owner",
+        required_deliverable_followthrough=True,
+        trace_context={"turn_id": "turn_owner"},
+        stale_context={},
+    ) is True
+
+
+
+def test_battery_required_deliverable_orchestration_releases_one_voltage_followup_and_settles() -> None:
+    api = _make_api()
+    api._apply_continuity_event(
+        "transcript_final",
+        text="check battery and tell me voltage",
+        source="input_audio_transcription",
+        turn_id="turn_1",
+    )
+    api._apply_continuity_event(
+        "tool_result_received",
+        tool_name="read_battery_voltage",
+        call_id="call_battery",
+        turn_id="turn_1",
+    )
+    api._tool_call_records = [
+        {
+            "name": "read_battery_voltage",
+            "call_id": "call_battery",
+            "turn_id": "turn_stale_runtime",
+            "owner_turn_id": "turn_1",
+            "result": {"voltage": 7.64, "amperage": 0.5, "power_watts": 3.82},
+        }
+    ]
+    api._send_response_create = AsyncMock(return_value=True)
+
+    dispatched = asyncio.run(
+        api._dispatch_required_deliverable_followthrough_response_create(
+            websocket=api.websocket,
+            turn_id="turn_1",
+        )
+    )
+
+    assert dispatched is True
+    api._send_response_create.assert_awaited_once()
+    sent_event = api._send_response_create.await_args.args[1]
+    assert sent_event["response"]["metadata"]["tool_followup"] == "true"
+    assert sent_event["response"]["metadata"]["followthrough_required_tool_already_executed"] == "true"
+
+    apply_selection = Mock()
+    record_silent = Mock()
+    api._apply_terminal_deliverable_selection = apply_selection
+    api._record_silent_turn_incident = record_silent
+    api._dispatch_required_deliverable_followthrough_response_create = AsyncMock(return_value=True)
+    api._maybe_schedule_empty_response_retry = AsyncMock()
+    api._build_confirmation_transition_decision = Mock(
+        return_value=SimpleNamespace(
+            allow_response_transition=True,
+            close_reason="",
+            emit_reminder=False,
+            recover_mic=False,
+        )
+    )
+    api._active_response_origin = "tool_output"
+    api._active_response_input_event_key = "item_parent:required_deliverable_followthrough:0"
+    api._active_response_canonical_key = "turn_1::item_parent:required_deliverable_followthrough:0"
+    api._active_response_id = "resp_voltage_final"
+    api._response_trace_by_id_store = {
+        "resp_voltage_final": {
+            "turn_id": "turn_1",
+            "parent_turn_id": "turn_1",
+            "parent_input_event_key": "item_parent",
+            "origin": "tool_output",
+            "tool_followup": "true",
+            "followthrough_step_output_policy": "required_deliverable",
+            "followthrough_post_completion_reason": "required_deliverable_owed",
+            "followthrough_required_tool_name": "read_battery_voltage",
+        }
+    }
+    api._record_terminal_response_text(
+        response_id="resp_voltage_final",
+        text="Your current battery voltage is 7.64 volts.",
+    )
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": "resp_voltage_final"}}))
+
+    apply_selection.assert_called_once()
+    assert apply_selection.call_args.kwargs["selected"] is True
+    assert apply_selection.call_args.kwargs["selection_reason"] == "normal"
+    record_silent.assert_not_called()
+    api._dispatch_required_deliverable_followthrough_response_create.assert_not_awaited()
+    brief = api.get_continuity_brief("run-test", "turn_1", reason="post_battery_orchestration")
+    settlement = api._continuity_ledger.build_turn_settlement(brief)
+    assert settlement.settlement_state != "followthrough_remaining"
+    assert brief.compound_request is None or brief.compound_request.final_followup_pending is False

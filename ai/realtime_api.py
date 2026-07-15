@@ -11043,6 +11043,19 @@ class RealtimeAPI:
             return "redundant"
         return "unknown"
 
+    def _canonical_parent_text_deliverable_class(self, *, state: CanonicalResponseState) -> str:
+        response_id = str(getattr(state, "response_id", "") or "").strip()
+        if not response_id:
+            return ""
+        text = str(
+            self._terminal_response_text(response_id)
+            or self._assistant_reply_text_for_response(response_id)
+            or ""
+        ).strip()
+        if not text:
+            return ""
+        return self._classify_deliverable_text(text)
+
     def _should_suppress_tool_followup_after_turn_deliverable(
         self,
         *,
@@ -11070,8 +11083,18 @@ class RealtimeAPI:
                 continue
             if str(state.origin or "").strip().lower() == "micro_ack":
                 continue
-            if str(getattr(state, "deliverable_class", "unknown") or "unknown").strip().lower() == "final":
-                return True
+            if str(getattr(state, "deliverable_class", "unknown") or "unknown").strip().lower() != "final":
+                continue
+            text_deliverable_class = self._canonical_parent_text_deliverable_class(state=state)
+            if text_deliverable_class == "progress":
+                logger.info(
+                    "tool_followup_parent_final_coverage_rejected run_id=%s turn_id=%s response_id=%s reason=progress_only_parent_text",
+                    self._current_run_id() or "",
+                    normalized_turn_id,
+                    str(getattr(state, "response_id", "") or "").strip() or "none",
+                )
+                continue
+            return True
         return False
 
     def _canonical_state_for_response_id(
@@ -12918,7 +12941,10 @@ class RealtimeAPI:
         # `deliverable_observed=True` can be triggered by tool-call scaffolding alone
         # (for example, function-call argument streaming) and is too weak to suppress
         # a queued status follow-up by itself.
-        canonical_covered = deliverable_class in {"progress", "final"}
+        text_deliverable_class = self._canonical_parent_text_deliverable_class(state=parent_state)
+        if text_deliverable_class == "progress":
+            deliverable_class = "progress"
+        canonical_covered = deliverable_class == "final"
         normalized_response_id = str(getattr(parent_state, "response_id", "") or "").strip()
         terminal_selected = False
         terminal_reason = "unknown"
@@ -12958,7 +12984,13 @@ class RealtimeAPI:
         covered = canonical_covered and not terminal_non_selected_defers_coverage
         source = "canonical" if covered else "none"
         terminal_text_present = self._selected_response_has_substantive_evidence(response_id=selected_response_id)
-        if not covered and terminal_selected and terminal_reason == "normal" and terminal_text_present:
+        selected_text = str(
+            self._terminal_response_text(selected_response_id)
+            or self._assistant_reply_text_for_response(selected_response_id)
+            or ""
+        ).strip()
+        terminal_text_is_progress = bool(selected_text) and self._classify_deliverable_text(selected_text) == "progress"
+        if not covered and terminal_selected and terminal_reason == "normal" and terminal_text_present and not terminal_text_is_progress:
             covered = True
             source = "terminal_selection"
             deliverable_observed = True
@@ -20742,9 +20774,12 @@ class RealtimeAPI:
             self._mark_utterance_info_summary(deliverable_seen=True)
             self._mark_active_canonical_deliverable_observed(reason=event_type)
             self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
-            self._record_active_canonical_deliverable_class(text=delta, reason=event_type)
-            self._mark_first_assistant_utterance_observed_if_needed(delta)
             self._append_assistant_reply_text(delta, allow_separator=False, response_id=response_id)
+            self._record_active_canonical_deliverable_class(
+                text=self._assistant_reply_text_for_response(response_id),
+                reason=event_type,
+            )
+            self._mark_first_assistant_utterance_observed_if_needed(delta)
             self.state_manager.update_state(InteractionState.SPEAKING, "text output")
         elif event_type == "response.output_text.delta":
             if self._is_active_response_guarded():
@@ -20757,13 +20792,16 @@ class RealtimeAPI:
             self._mark_utterance_info_summary(deliverable_seen=True)
             self._mark_active_canonical_deliverable_observed(reason=event_type)
             self._cancel_micro_ack(turn_id=self._current_turn_id_or_unknown(), reason="response_started")
-            self._record_active_canonical_deliverable_class(text=delta, reason=event_type)
+            self._append_assistant_reply_text(delta, allow_separator=False, response_id=response_id)
+            self._record_active_canonical_deliverable_class(
+                text=self._assistant_reply_text_for_response(response_id),
+                reason=event_type,
+            )
             logger.debug(
                 "assistant_content_event_received event_type=response.output_text.delta delta_len=%s",
                 len(delta),
             )
             self._mark_first_assistant_utterance_observed_if_needed(delta)
-            self._append_assistant_reply_text(delta, allow_separator=False, response_id=response_id)
             self.state_manager.update_state(InteractionState.SPEAKING, "text output")
         elif event_type in {"response.output_text.done", "response.text.done"}:
             if self._is_active_response_guarded():
@@ -20781,9 +20819,12 @@ class RealtimeAPI:
                 return
             self._mark_utterance_info_summary(deliverable_seen=True)
             self._mark_active_canonical_deliverable_observed(reason=event_type)
-            self._record_active_canonical_deliverable_class(text=delta, reason=event_type)
-            self._mark_first_assistant_utterance_observed_if_needed(delta)
             self._append_assistant_reply_text(delta, allow_separator=False, response_id=response_id)
+            self._record_active_canonical_deliverable_class(
+                text=self._assistant_reply_text_for_response(response_id),
+                reason=event_type,
+            )
+            self._mark_first_assistant_utterance_observed_if_needed(delta)
         elif event_type == "response.output_audio_transcript.done":
             await self.handle_transcribe_response_done(event)
             self.state_manager.update_state(
@@ -21716,6 +21757,8 @@ class RealtimeAPI:
             )
         call_id = normalized_call_id
         owner_mismatch_blocked = False
+        runtime_turn_id = self._current_turn_id_or_unknown()
+        continuity_turn_id = runtime_turn_id
 
         if function_name in function_map:
             tool_latency_input_event_key = self._tool_followup_input_event_key(call_id=call_id)
@@ -21821,13 +21864,15 @@ class RealtimeAPI:
             self._record_intent_state(function_name, args, "failure")
             await self.send_error_message_to_assistant(error_message, websocket)
 
+        resolved_owner_turn_id = str(continuity_turn_id or runtime_turn_id or "").strip()
         self._tool_call_records.append(
             {
                 "name": function_name,
                 "call_id": call_id,
                 "args": args,
                 "result": result,
-                "turn_id": self._current_turn_id_or_unknown(),
+                "turn_id": runtime_turn_id,
+                "owner_turn_id": resolved_owner_turn_id,
                 "action_packet": action.to_payload() if action else None,
                 "staging": staging,
                 "timestamp": datetime.utcnow().isoformat(),
@@ -22577,8 +22622,12 @@ class RealtimeAPI:
             if str(getattr(step, "status", "") or "").strip().lower() != "completed":
                 continue
             for record in reversed(tuple(getattr(self, "_tool_call_records", ()) or ())):
-                record_turn_id = str(record.get("turn_id") or "").strip()
-                if record_turn_id and record_turn_id != normalized_turn_id:
+                record_turn_ids = {
+                    str(record.get("turn_id") or "").strip(),
+                    str(record.get("owner_turn_id") or "").strip(),
+                }
+                record_turn_ids.discard("")
+                if record_turn_ids and normalized_turn_id not in record_turn_ids:
                     continue
                 if str(record.get("name") or "").strip().lower() == "read_runtime_diagnostics":
                     return "read_runtime_diagnostics"
@@ -22616,6 +22665,8 @@ class RealtimeAPI:
         summary = str(getattr(active_step, "summary", "") or "").strip().lower()
         if not summary:
             return None
+        if any(token in summary for token in ("diagnostic", "diagnostics", "runtime status", "runtime health")):
+            return "read_runtime_diagnostics"
         if any(token in summary for token in ("time", "clock", "date", "day")):
             return "get_current_time"
         if any(
@@ -22708,11 +22759,17 @@ class RealtimeAPI:
             if already_executed in {"true", "1", "yes"}:
                 return False
 
-        tool_name_to_match = required_tool_name or "get_current_time"
+        if not required_tool_name:
+            return True
+        tool_name_to_match = required_tool_name
         candidate_turn_id_set = set(candidate_turn_ids)
         for record in reversed(tuple(getattr(self, "_tool_call_records", ()) or ())):
-            record_turn_id = str(record.get("turn_id") or "").strip()
-            if record_turn_id and record_turn_id not in candidate_turn_id_set:
+            record_turn_ids = {
+                str(record.get("turn_id") or "").strip(),
+                str(record.get("owner_turn_id") or "").strip(),
+            }
+            record_turn_ids.discard("")
+            if record_turn_ids and not record_turn_ids.intersection(candidate_turn_id_set):
                 continue
             if str(record.get("name") or "").strip().lower() == tool_name_to_match:
                 return False
