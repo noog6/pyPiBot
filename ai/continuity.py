@@ -30,7 +30,7 @@ ContinuityKind = Literal[
 ContinuityStatus = Literal["active", "blocked", "pending", "resolved", "expired"]
 ContinuityPriority = Literal["low", "medium", "high"]
 CompoundStepKind = Literal["gesture", "diagnostics", "observation", "followup", "report"]
-CompoundStepStatus = Literal["pending", "active", "completed"]
+CompoundStepStatus = Literal["pending", "active", "executing", "completed", "failed", "cancelled", "timed_out", "superseded"]
 StepOutputPolicy = Literal[
     "execution_state_update",
     "model_context_injection_only",
@@ -301,6 +301,8 @@ class ContinuityLedger:
             self._apply_tool_call_started(payload)
         elif normalized == "tool_result_received":
             self._apply_tool_result_received(payload)
+        elif normalized == "gesture_motion_registered":
+            self._apply_gesture_motion_registered(payload)
         elif normalized == "response_done":
             self._apply_response_done(payload)
         else:
@@ -343,7 +345,7 @@ class ContinuityLedger:
         }
 
     def _log_inspection_summary(self, *, event_type: str, payload: dict[str, object]) -> None:
-        if event_type not in {"transcript_final", "tool_call_started", "tool_result_received", "response_done"}:
+        if event_type not in {"transcript_final", "tool_call_started", "tool_result_received", "gesture_motion_registered", "response_done"}:
             return
         summary = self.inspect_state(
             run_id=self._clean_text(payload.get("run_id")),
@@ -401,6 +403,8 @@ class ContinuityLedger:
         if not isinstance(active_idx, int) or not (0 <= active_idx < len(state.steps)):
             return None
         step = state.steps[active_idx]
+        if step.status != "active":
+            return None
         if step.kind == "diagnostics":
             return DeterministicFollowthroughStepDescriptor(
                 request_id=state.request_id,
@@ -773,10 +777,25 @@ class ContinuityLedger:
         self._advance_compound_state_on_tool_result(
             tool_name=tool_name,
             turn_id=owner_turn_id,
+            call_id=call_id,
+            motion_request_key=self._clean_text(payload.get("motion_request_key")),
+            result=payload.get("result"),
             allow_cross_turn_rebind=allow_rebind,
             rebind_reason=rebind_reason,
         )
         self._stance = "idle"
+
+    def _apply_gesture_motion_registered(self, payload: dict[str, object]) -> None:
+        self._advance_compound_state_on_motion_event(
+            motion_request_key=self._clean_text(payload.get("motion_request_key") or payload.get("request_key")),
+            motion_status=self._clean_text(payload.get("motion_status") or payload.get("status")).lower(),
+            turn_id=self._clean_text(payload.get("turn_id") or payload.get("owner_turn_id")),
+            request_id=self._clean_text(payload.get("request_id") or payload.get("compound_request_id")),
+            step_id=self._clean_text(payload.get("step_id")),
+            tool_call_id=self._clean_text(payload.get("tool_call_id") or payload.get("call_id")),
+            allow_cross_turn_rebind=self._as_bool(payload.get("allow_cross_turn_rebind")),
+            rebind_reason=self._clean_text(payload.get("cross_turn_rebind_reason")) or "unspecified",
+        )
 
     def _apply_response_done(self, payload: dict[str, object]) -> None:
         close_ongoing = self._as_bool(payload.get("close_ongoing"))
@@ -816,8 +835,8 @@ class ContinuityLedger:
         *,
         tool_name: str,
         turn_id: str,
-        allow_cross_turn_rebind: bool,
-        rebind_reason: str,
+        allow_cross_turn_rebind: bool = False,
+        rebind_reason: str = "",
     ) -> None:
         state = self._compound_state
         if state is None:
@@ -853,6 +872,9 @@ class ContinuityLedger:
         *,
         tool_name: str,
         turn_id: str,
+        call_id: str = "",
+        motion_request_key: str = "",
+        result: object = None,
         allow_cross_turn_rebind: bool,
         rebind_reason: str,
     ) -> None:
@@ -883,7 +905,154 @@ class ContinuityLedger:
             )
         )
         if clear_match:
-            self._compound_state = self._replace_compound_step_status(state, idx, "completed")
+            async_queued = (
+                step.kind == "gesture"
+                and isinstance(result, dict)
+                and bool(result.get("queued"))
+                and bool(motion_request_key)
+            )
+            if async_queued:
+                self._compound_state = self._replace_compound_step_status(
+                    state,
+                    idx,
+                    "executing",
+                )
+                logger.info(
+                    "compound_async_step_registered owner_turn_id=%s request_id=%s step_id=%s tool_call_id=%s tool=%s motion_request_key=%s state=accepted",
+                    self._compound_owner_turn_id or "",
+                    state.request_id,
+                    step.step_id,
+                    call_id or "",
+                    tool_name,
+                    motion_request_key,
+                )
+            else:
+                self._compound_state = self._replace_compound_step_status(state, idx, "completed")
+
+    def _advance_compound_state_on_motion_event(
+        self,
+        *,
+        motion_request_key: str,
+        motion_status: str,
+        turn_id: str,
+        request_id: str = "",
+        step_id: str = "",
+        tool_call_id: str = "",
+        allow_cross_turn_rebind: bool,
+        rebind_reason: str,
+    ) -> None:
+        state = self._compound_state
+        if state is None or not motion_request_key:
+            logger.info(
+                "compound_async_step_completion_ignored reason=not_compound_owned motion_request_key=%s motion_status=%s",
+                motion_request_key,
+                motion_status,
+            )
+            return
+        if request_id and request_id != state.request_id:
+            logger.info(
+                "compound_async_step_completion_ignored reason=stale_request request_id=%s incoming_request_id=%s motion_request_key=%s motion_status=%s",
+                state.request_id,
+                request_id,
+                motion_request_key,
+                motion_status,
+            )
+            return
+        if turn_id and not self._ensure_compound_owner(
+            turn_id=turn_id,
+            allow_cross_turn_rebind=allow_cross_turn_rebind,
+            reason=rebind_reason,
+            event_type="gesture_motion_registered",
+        ):
+            logger.info(
+                "compound_async_step_completion_ignored reason=stale_turn motion_request_key=%s motion_status=%s",
+                motion_request_key,
+                motion_status,
+            )
+            return
+        idx = None
+        if step_id:
+            for candidate_idx, candidate in enumerate(state.steps):
+                if candidate.step_id == step_id:
+                    idx = candidate_idx
+                    break
+            if idx is None:
+                logger.info(
+                    "compound_async_step_completion_ignored reason=wrong_step request_id=%s step_id=%s motion_request_key=%s motion_status=%s",
+                    state.request_id,
+                    step_id,
+                    motion_request_key,
+                    motion_status,
+                )
+                return
+        else:
+            idx = state.active_step_index
+        if idx is None or not (0 <= idx < len(state.steps)):
+            logger.info(
+                "compound_async_step_completion_ignored reason=wrong_step request_id=%s step_id=%s motion_request_key=%s motion_status=%s",
+                state.request_id,
+                step_id or "none",
+                motion_request_key,
+                motion_status,
+            )
+            return
+        step = state.steps[idx]
+        if step.kind != "gesture":
+            logger.info(
+                "compound_async_step_completion_ignored reason=wrong_step request_id=%s step_id=%s step_kind=%s motion_request_key=%s motion_status=%s",
+                state.request_id,
+                step.step_id,
+                step.kind,
+                motion_request_key,
+                motion_status,
+            )
+            return
+        if step.status != "executing":
+            logger.info(
+                "compound_async_step_completion_ignored reason=already_terminal request_id=%s step_id=%s status=%s motion_request_key=%s motion_status=%s",
+                state.request_id,
+                step.step_id,
+                step.status,
+                motion_request_key,
+                motion_status,
+            )
+            return
+        logger.info(
+            "compound_async_step_completion_observed request_id=%s step_id=%s tool_call_id=%s motion_request_key=%s motion_status=%s match=true",
+            state.request_id,
+            step.step_id,
+            tool_call_id or "",
+            motion_request_key,
+            motion_status,
+        )
+        if motion_status == "completed":
+            updated = self._replace_compound_step_status(state, idx, "completed")
+            next_id = updated.next_pending_step_id or ""
+            next_step = next((candidate for candidate in updated.steps if candidate.step_id == next_id), None)
+            self._compound_state = None if self._compound_state_resolved(updated) else updated
+            logger.info(
+                "compound_async_step_advanced completed_step_id=%s next_step_id=%s next_step_kind=%s",
+                step.step_id,
+                next_id or "none",
+                "" if next_step is None else next_step.kind,
+            )
+            if self._compound_state is None:
+                self._compound_owner_turn_id = None
+            return
+        if motion_status in {"failed", "cancelled", "timed_out", "superseded"}:
+            self._compound_state = self._replace_compound_step_status(state, idx, motion_status)  # type: ignore[arg-type]
+            self._set_item(
+                ContinuityItem(
+                    id=f"blocker:compound_motion:{step.step_id}",
+                    kind="blocker",
+                    summary="Compound gesture motion did not complete.",
+                    status="blocked",
+                    priority="high",
+                    source="gesture_motion_registered",
+                    detail=f"request_id={state.request_id} step_id={step.step_id} motion_request_key={motion_request_key} motion_status={motion_status}",
+                    expires_after_turns=4,
+                )
+            )
 
     def _advance_compound_state_on_response_done(
         self,
@@ -1007,7 +1176,10 @@ class ContinuityLedger:
         if status == "completed" and next_pending_index is not None:
             next_step = updated_steps[next_pending_index]
             updated_steps[next_pending_index] = replace(next_step, status="active")
-        active_step_index = next((idx for idx, step in enumerate(updated_steps) if step.status == "active"), None)
+        active_step_index = next(
+            (idx for idx, step in enumerate(updated_steps) if step.status in {"active", "executing"}),
+            None,
+        )
         completed_ids = tuple(step.step_id for step in updated_steps if step.status == "completed")
         next_pending_id = next((step.step_id for step in updated_steps if step.status == "pending"), None)
         recent_completed = target.step_id if status == "completed" else state.recent_completed_step_id

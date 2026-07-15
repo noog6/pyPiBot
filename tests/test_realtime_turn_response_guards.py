@@ -4625,3 +4625,389 @@ def test_should_hold_turn_for_non_substantive_talk_over_when_interrupted_candida
     }
 
     assert api._should_hold_turn_for_non_substantive_talk_over() is True
+
+from ai.continuity import ContinuityLedger
+from services import tool_runtime as _tool_runtime
+
+
+def _make_async_compound_api() -> RealtimeAPI:
+    api = RealtimeAPI.__new__(RealtimeAPI)
+    api._continuity_ledger = ContinuityLedger()
+    api._compound_motion_correlations = {}
+    api._compound_motion_completed_dispatch_keys = set()
+    api._deterministic_followthrough_dispatched_steps = set()
+    api._deterministic_followthrough_dispatch_inflight = set()
+    api._current_run_id = lambda: "run-1078"
+    api._prune_deterministic_followthrough_dispatch_registry = lambda: None
+    api.websocket = object()
+    api.loop = None
+    api._last_user_input_text = "turn right, run diagnostics, return to center, report diagnostics"
+    api._turn_has_active_required_deliverable_step = lambda *, turn_id: False
+    return api
+
+
+async def _accept_async_compound_gesture(api: RealtimeAPI, *, turn_id: str, tool_name: str, call_id: str, motion_key: str) -> None:
+    descriptor = api._deterministic_followthrough_runtime_descriptor(turn_id=turn_id)
+    assert descriptor is not None
+    await api._register_async_gesture_tool_result_and_reconcile(
+        turn_id=turn_id,
+        tool_name=tool_name,
+        call_id=call_id,
+        result={"queued": True, "motion_request_key": motion_key},
+    )
+
+
+def _compound_statuses(api: RealtimeAPI, *, turn_id: str) -> list[str]:
+    brief = api.get_continuity_brief(run_id="run-1078", turn_id=turn_id, reason="test")
+    assert brief.compound_request is not None
+    return [step.status for step in brief.compound_request.steps]
+
+
+def test_runtime_async_compound_motion_observer_dispatches_next_step_once() -> None:
+    async def _run() -> None:
+        api = _make_async_compound_api()
+        api.loop = asyncio.get_running_loop()
+        diagnostics_dispatches: list[dict[str, object]] = []
+
+        async def _dispatch_runtime(**kwargs):
+            diagnostics_dispatches.append(kwargs)
+            return True
+
+        api._dispatch_deterministic_followthrough_runtime_step = _dispatch_runtime
+        unsubscribe = _tool_runtime.register_motion_lifecycle_observer(api._on_gesture_motion_lifecycle)
+        try:
+            api._apply_continuity_event(
+                "transcript_final",
+                run_id="run-1078",
+                turn_id="turn-1078",
+                text="Turn right, run a diagnostic, come back to center, and tell me what the diagnostic said.",
+                source="input_audio_transcription",
+            )
+            descriptor = api._deterministic_followthrough_runtime_descriptor(turn_id="turn-1078")
+            assert descriptor is not None
+            assert descriptor["tool_name"] == "gesture_look_right"
+
+            await _accept_async_compound_gesture(
+                api,
+                turn_id="turn-1078",
+                tool_name="gesture_look_right",
+                call_id="call-right",
+                motion_key="right-key",
+            )
+            assert _compound_statuses(api, turn_id="turn-1078")[:2] == ["executing", "pending"]
+            assert diagnostics_dispatches == []
+            assert "right-key" in api._compound_motion_correlations
+
+            _tool_runtime._notify_motion_observers({"request_key": "right-key", "status": "started", "tool_call_id": "call-right"})
+            await asyncio.sleep(0.05)
+            assert _compound_statuses(api, turn_id="turn-1078")[:2] == ["executing", "pending"]
+            assert diagnostics_dispatches == []
+
+            _tool_runtime._notify_motion_observers({"request_key": "right-key", "status": "completed", "tool_call_id": "call-right"})
+            await asyncio.sleep(0.05)
+            assert _compound_statuses(api, turn_id="turn-1078")[:2] == ["completed", "active"]
+            assert len(diagnostics_dispatches) == 1
+            assert diagnostics_dispatches[0]["runtime_step_descriptor"]["tool_name"] == "read_runtime_diagnostics"
+            assert "right-key" not in api._compound_motion_correlations
+
+            _tool_runtime._notify_motion_observers({"request_key": "right-key", "status": "completed", "tool_call_id": "call-right"})
+            await asyncio.sleep(0.05)
+            assert len(diagnostics_dispatches) == 1
+        finally:
+            unsubscribe()
+
+    asyncio.run(_run())
+
+
+def test_runtime_async_fast_completion_replay_dispatches_once() -> None:
+    async def _run() -> None:
+        api = _make_async_compound_api()
+        api.loop = asyncio.get_running_loop()
+        dispatches: list[dict[str, object]] = []
+        api._dispatch_deterministic_followthrough_runtime_step = lambda **kwargs: dispatches.append(kwargs) or asyncio.sleep(0, result=True)
+        api._apply_continuity_event(
+            "transcript_final",
+            run_id="run-1078",
+            turn_id="turn-fast",
+            text="Turn right, run a diagnostic, come back to center, and tell me what the diagnostic said.",
+            source="input_audio_transcription",
+        )
+        await _accept_async_compound_gesture(
+            api,
+            turn_id="turn-fast",
+            tool_name="gesture_look_right",
+            call_id="call-fast",
+            motion_key="fast-key",
+        )
+        await api._handle_compound_async_motion_event(
+            snapshot={"request_key": "fast-key", "status": "completed", "tool_call_id": "call-fast"},
+            dispatch_source="registration_reconcile",
+        )
+        await api._handle_compound_async_motion_event(
+            snapshot={"request_key": "fast-key", "status": "completed", "tool_call_id": "call-fast"},
+            dispatch_source="registration_reconcile_duplicate",
+        )
+        assert _compound_statuses(api, turn_id="turn-fast")[:2] == ["completed", "active"]
+        assert len(dispatches) == 1
+
+    asyncio.run(_run())
+
+
+def test_runtime_async_wrong_key_non_compound_and_stale_turn_do_not_advance() -> None:
+    async def _run() -> None:
+        api = _make_async_compound_api()
+        api.loop = asyncio.get_running_loop()
+        dispatches: list[dict[str, object]] = []
+        api._dispatch_deterministic_followthrough_runtime_step = lambda **kwargs: dispatches.append(kwargs) or asyncio.sleep(0, result=True)
+        api._apply_continuity_event(
+            "transcript_final",
+            run_id="run-1078",
+            turn_id="turn-stale",
+            text="Turn right, run a diagnostic, come back to center, and tell me what the diagnostic said.",
+            source="input_audio_transcription",
+        )
+        await _accept_async_compound_gesture(
+            api,
+            turn_id="turn-stale",
+            tool_name="gesture_look_right",
+            call_id="call-right",
+            motion_key="right-owned",
+        )
+        await api._handle_compound_async_motion_event(
+            snapshot={"request_key": "other-key", "status": "completed", "tool_call_id": "call-other"},
+            dispatch_source="test_wrong_key",
+        )
+        await api._handle_compound_async_motion_event(
+            snapshot={"request_key": "startup-gesture", "status": "completed", "tool_call_id": "startup"},
+            dispatch_source="test_non_compound",
+        )
+        api._continuity_ledger._compound_owner_turn_id = "newer-turn"
+        await api._handle_compound_async_motion_event(
+            snapshot={"request_key": "right-owned", "status": "completed", "tool_call_id": "call-right"},
+            dispatch_source="test_stale_turn",
+        )
+        assert _compound_statuses(api, turn_id="turn-stale")[:2] == ["executing", "pending"]
+        assert dispatches == []
+        assert "right-owned" not in api._compound_motion_correlations
+
+    asyncio.run(_run())
+
+
+def test_runtime_async_terminal_failure_blocks_once_and_cleans_correlation() -> None:
+    async def _run() -> None:
+        api = _make_async_compound_api()
+        api.loop = asyncio.get_running_loop()
+        dispatches: list[dict[str, object]] = []
+        api._dispatch_deterministic_followthrough_runtime_step = lambda **kwargs: dispatches.append(kwargs) or asyncio.sleep(0, result=True)
+        api._apply_continuity_event(
+            "transcript_final",
+            run_id="run-1078",
+            turn_id="turn-fail-runtime",
+            text="Turn right, run a diagnostic, and tell me what the diagnostic said.",
+            source="input_audio_transcription",
+        )
+        await _accept_async_compound_gesture(
+            api,
+            turn_id="turn-fail-runtime",
+            tool_name="gesture_look_right",
+            call_id="call-right",
+            motion_key="right-fail",
+        )
+        await api._handle_compound_async_motion_event(
+            snapshot={"request_key": "right-fail", "status": "timed_out", "tool_call_id": "call-right"},
+            dispatch_source="test_timeout",
+        )
+        await api._handle_compound_async_motion_event(
+            snapshot={"request_key": "right-fail", "status": "timed_out", "tool_call_id": "call-right"},
+            dispatch_source="test_timeout_duplicate",
+        )
+        brief = api.get_continuity_brief(run_id="run-1078", turn_id="turn-fail-runtime", reason="test")
+        assert brief.compound_request is not None
+        assert [step.status for step in brief.compound_request.steps][:2] == ["timed_out", "pending"]
+        assert len(brief.blockers) == 1
+        assert dispatches == []
+        assert "right-fail" not in api._compound_motion_correlations
+
+    asyncio.run(_run())
+
+
+def test_runtime_async_right_diagnostics_center_report_full_sequence() -> None:
+    async def _run() -> None:
+        api = _make_async_compound_api()
+        api.loop = asyncio.get_running_loop()
+        runtime_dispatches: list[dict[str, object]] = []
+        report_dispatches: list[dict[str, object]] = []
+
+        async def _dispatch_runtime(**kwargs):
+            runtime_dispatches.append(kwargs)
+            return True
+
+        async def _dispatch_report(**kwargs):
+            report_dispatches.append(kwargs)
+            return "dispatched"
+
+        api._dispatch_deterministic_followthrough_runtime_step = _dispatch_runtime
+        api._turn_has_active_required_deliverable_step = lambda *, turn_id: _compound_statuses(api, turn_id=turn_id)[-1] == "active"
+        api._maybe_dispatch_required_deliverable_after_motion_completion = _dispatch_report
+        api._apply_continuity_event(
+            "transcript_final",
+            run_id="run-1078",
+            turn_id="turn-full",
+            text="Turn right, run a diagnostic, come back to center, and tell me what the diagnostic said.",
+            source="input_audio_transcription",
+        )
+        await _accept_async_compound_gesture(api, turn_id="turn-full", tool_name="gesture_look_right", call_id="call-right", motion_key="right-full")
+        await api._handle_compound_async_motion_event(snapshot={"request_key": "right-full", "status": "completed", "tool_call_id": "call-right"}, dispatch_source="test")
+        assert len(runtime_dispatches) == 1
+        assert runtime_dispatches[-1]["runtime_step_descriptor"]["tool_name"] == "read_runtime_diagnostics"
+
+        api._apply_continuity_event("tool_result_received", run_id="run-1078", turn_id="turn-full", tool_name="read_runtime_diagnostics", call_id="call-diag")
+        assert _compound_statuses(api, turn_id="turn-full")[:3] == ["completed", "completed", "active"]
+
+        await _accept_async_compound_gesture(api, turn_id="turn-full", tool_name="gesture_look_center", call_id="call-center", motion_key="center-full")
+        assert _compound_statuses(api, turn_id="turn-full")[2:] == ["executing", "pending"]
+        assert len(report_dispatches) == 0
+        await api._handle_compound_async_motion_event(snapshot={"request_key": "center-full", "status": "completed", "tool_call_id": "call-center"}, dispatch_source="test")
+        assert _compound_statuses(api, turn_id="turn-full")[2:] == ["completed", "active"]
+        assert len(runtime_dispatches) == 1
+        assert len(report_dispatches) == 1
+
+    asyncio.run(_run())
+
+
+def test_motion_lifecycle_observer_register_unregister_and_replacement() -> None:
+    calls: list[str] = []
+
+    def first(snapshot: dict[str, object]) -> None:
+        calls.append(f"first:{snapshot['request_key']}")
+
+    def second(snapshot: dict[str, object]) -> None:
+        calls.append(f"second:{snapshot['request_key']}")
+
+    unsub_first = _tool_runtime.register_motion_lifecycle_observer(first)
+    unsub_first_duplicate = _tool_runtime.register_motion_lifecycle_observer(first)
+    try:
+        _tool_runtime._notify_motion_observers({"request_key": "one", "status": "completed"})
+        assert calls.count("first:one") == 1
+        unsub_first_duplicate()
+        _tool_runtime._notify_motion_observers({"request_key": "two", "status": "completed"})
+        assert "first:two" not in calls
+        unsub_second = _tool_runtime.register_motion_lifecycle_observer(second)
+        try:
+            _tool_runtime._notify_motion_observers({"request_key": "three", "status": "completed"})
+            assert "second:three" in calls
+        finally:
+            unsub_second()
+        _tool_runtime._notify_motion_observers({"request_key": "four", "status": "completed"})
+        assert "second:four" not in calls
+    finally:
+        unsub_first()
+
+
+def test_runtime_async_parent_progress_response_done_preserves_executing_correlation() -> None:
+    async def _run() -> None:
+        api = _make_async_compound_api()
+        api.loop = asyncio.get_running_loop()
+        dispatches: list[dict[str, object]] = []
+        api._dispatch_deterministic_followthrough_runtime_step = lambda **kwargs: dispatches.append(kwargs) or asyncio.sleep(0, result=True)
+        api._apply_continuity_event(
+            "transcript_final",
+            run_id="run-1078",
+            turn_id="turn-progress-done",
+            text="Turn right, run a diagnostic, come back to center, and tell me what the diagnostic said.",
+            source="input_audio_transcription",
+        )
+        await _accept_async_compound_gesture(
+            api,
+            turn_id="turn-progress-done",
+            tool_name="gesture_look_right",
+            call_id="call-right-progress",
+            motion_key="right-progress",
+        )
+        assert _compound_statuses(api, turn_id="turn-progress-done")[:2] == ["executing", "pending"]
+        api._apply_continuity_event("response_done", run_id="run-1078", turn_id="turn-progress-done", close_unresolved="")
+        assert "right-progress" in api._compound_motion_correlations
+        assert _compound_statuses(api, turn_id="turn-progress-done")[:2] == ["executing", "pending"]
+
+        await api._handle_compound_async_motion_event(
+            snapshot={"request_key": "right-progress", "status": "completed", "tool_call_id": "call-right-progress"},
+            dispatch_source="test_after_progress_done",
+        )
+        assert len(dispatches) == 1
+        assert dispatches[0]["runtime_step_descriptor"]["tool_name"] == "read_runtime_diagnostics"
+        assert "right-progress" not in api._compound_motion_correlations
+
+    asyncio.run(_run())
+
+
+def test_runtime_async_connection_cleanup_does_not_unregister_runtime_observer() -> None:
+    async def _run() -> None:
+        api = _make_async_compound_api()
+        api.loop = asyncio.get_running_loop()
+        calls: list[dict[str, object]] = []
+        original_handler = api._handle_compound_async_motion_event
+
+        async def _recording_handler(**kwargs):
+            calls.append(kwargs)
+            return await original_handler(**kwargs)
+
+        api._handle_compound_async_motion_event = _recording_handler
+        api._motion_lifecycle_unsubscribe = _tool_runtime.register_motion_lifecycle_observer(api._on_gesture_motion_lifecycle)
+        try:
+            # Simulate per-connection cleanup/reconnect boundary: the runtime-lifetime
+            # observer must remain registered and receive exactly one event.
+            api.websocket = None
+            api.websocket = object()
+            _tool_runtime._notify_motion_observers({"request_key": "unowned-reconnect", "status": "completed"})
+            await asyncio.sleep(0.05)
+            assert len(calls) == 1
+            assert calls[0]["snapshot"]["request_key"] == "unowned-reconnect"
+        finally:
+            api._unregister_motion_lifecycle_observer(reason="test_cleanup")
+
+    asyncio.run(_run())
+
+
+def test_runtime_async_stale_turn_completion_cleans_correlation() -> None:
+    async def _run() -> None:
+        api = _make_async_compound_api()
+        api.loop = asyncio.get_running_loop()
+        api._apply_continuity_event(
+            "transcript_final",
+            run_id="run-1078",
+            turn_id="turn-stale-clean",
+            text="Turn right, run a diagnostic, come back to center, and tell me what the diagnostic said.",
+            source="input_audio_transcription",
+        )
+        await _accept_async_compound_gesture(
+            api,
+            turn_id="turn-stale-clean",
+            tool_name="gesture_look_right",
+            call_id="call-stale-clean",
+            motion_key="right-stale-clean",
+        )
+        api._continuity_ledger._compound_owner_turn_id = "new-owner"
+        await api._handle_compound_async_motion_event(
+            snapshot={"request_key": "right-stale-clean", "status": "completed", "tool_call_id": "call-stale-clean"},
+            dispatch_source="test_stale_cleanup",
+        )
+        assert "right-stale-clean" not in api._compound_motion_correlations
+
+    asyncio.run(_run())
+
+
+def test_runtime_async_correlation_registry_prunes_stale_entries() -> None:
+    api = _make_async_compound_api()
+    now = time.monotonic()
+    for idx in range(70):
+        api._compound_motion_correlations[f"old-{idx}"] = __import__("ai.realtime_api", fromlist=["AsyncCompoundMotionCorrelation"]).AsyncCompoundMotionCorrelation(
+            owner_turn_id="turn-old",
+            compound_request_id="request-old",
+            step_id=f"step-{idx}",
+            tool_call_id=f"call-{idx}",
+            tool_name="gesture_look_right",
+            motion_request_key=f"old-{idx}",
+            registration_state="accepted",
+            accepted_monotonic_s=now - 1000.0,
+        )
+    assert api._compound_motion_registry() == {}

@@ -57,6 +57,7 @@ _motion_state_lock = threading.Lock()
 _motion_state_by_request_key: dict[str, dict[str, Any]] = {}
 _motion_request_key_by_tool_call_id: dict[str, str] = {}
 _motion_callbacks_registered_for_controller_id: int | None = None
+_motion_observers: list[Callable[[dict[str, Any]], None]] = []
 
 
 def set_runtime_diagnostics_provider(provider: Callable[[], dict[str, Any]] | None) -> None:
@@ -348,6 +349,33 @@ def register_tool_call_motion_request(*, tool_call_id: str | None, motion_reques
     )
 
 
+def register_motion_lifecycle_observer(observer: Callable[[dict[str, Any]], None] | None) -> Callable[[], None]:
+    if not callable(observer):
+        return lambda: None
+    with _motion_state_lock:
+        if observer not in _motion_observers:
+            _motion_observers.append(observer)
+    return lambda: unregister_motion_lifecycle_observer(observer)
+
+
+def unregister_motion_lifecycle_observer(observer: Callable[[dict[str, Any]], None] | None) -> None:
+    if not callable(observer):
+        return
+    with _motion_state_lock:
+        while observer in _motion_observers:
+            _motion_observers.remove(observer)
+
+
+def _notify_motion_observers(snapshot: dict[str, Any]) -> None:
+    with _motion_state_lock:
+        observers = list(_motion_observers)
+    for observer in observers:
+        try:
+            observer(dict(snapshot))
+        except Exception:
+            logger.exception("gesture_motion_lifecycle_observer_failed request_key=%s", snapshot.get("request_key"))
+
+
 def get_tool_call_motion_state(tool_call_id: str | None) -> dict[str, Any] | None:
     normalized_call_id = str(tool_call_id or "").strip()
     if not normalized_call_id:
@@ -396,6 +424,7 @@ def _on_motion_action_lifecycle(event: str, action: Any) -> None:
         return
     request_key = _motion_request_key(action)
     now = time.monotonic()
+    snapshot: dict[str, Any] | None = None
     with _motion_state_lock:
         state = _motion_state_by_request_key.get(request_key)
         if state is None:
@@ -417,6 +446,8 @@ def _on_motion_action_lifecycle(event: str, action: Any) -> None:
         elif event == "completed":
             state["status"] = "completed"
             state["completed_monotonic_s"] = now
+        if event in {"started", "completed"}:
+            snapshot = {key: value for key, value in state.items() if not str(key).startswith("_")}
     if event in {"started", "completed"}:
         logger.info(
             "gesture_motion_registered state=%s request_key=%s gesture=%s",
@@ -424,6 +455,8 @@ def _on_motion_action_lifecycle(event: str, action: Any) -> None:
             request_key,
             action_name,
         )
+        if snapshot is not None:
+            _notify_motion_observers(snapshot)
 
 
 def _ensure_motion_callbacks_registered(controller: MotionController) -> None:

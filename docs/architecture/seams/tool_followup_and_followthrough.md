@@ -91,3 +91,26 @@ Context lifecycle:
 5. `response.done` cleanup removes the process-local context when the trace metadata contains the id; stale entries are bounded by store size.
 
 This is an incremental migration boundary: the local context store currently provides retention/correlation and future migration scaffolding, not authoritative event-time rehydration. Additional verbose arbitration evidence, diagnostic summaries, and canonical lineage details should move behind local context ids rather than adding more provider metadata fields. Missing local context should fail visibly as a controlled lifecycle/context incident rather than silently settling a required deliverable.
+
+## M) Asynchronous gesture step completion
+
+Owning layer: Layer 1 runtime execution + Layer 2 continuity/compound-request state + Layer 3 deterministic followthrough dispatch.
+
+Ordered compound gestures distinguish **tool invocation acceptance** from **physical execution completion**. A gesture tool result with `queued=true` and `motion_request_key=<key>` means only that the motion substrate accepted the request; it does not complete the compound step. Continuity records that step as `executing`; runtime owns a bounded structured correlation registry keyed by `motion_request_key` with owner turn, compound request id, step id, tool call id, tool name, registration state, and last observed motion status.
+
+Step advancement rules:
+
+1. `tool_result_received` for a compound-owned gesture captures the active compound descriptor before the step transitions away from `active`, registers structured runtime correlation, then leaves the continuity step in `executing`.
+2. Motion-controller lifecycle callbacks must not mutate continuity directly. They capture immutable snapshots and schedule the runtime motion handler onto Theo's owning asyncio event loop.
+3. The event-loop handler validates `motion_request_key`, owner turn, compound request id, step id, tool call id, and current continuity status before applying a motion event.
+4. `gesture_motion_registered state=started` is observational; it keeps the step executing and must not dispatch the next ordered step.
+5. `gesture_motion_registered state=completed` for the matching structured correlation is the terminal-success signal. Only then does continuity mark the step `completed`, activate the next step, and allow deterministic followthrough dispatch.
+6. `failed`, `cancelled`, `timed_out`, and `superseded` are terminal non-success states. They block the chain with an observable continuity blocker and must not be treated as success.
+
+Race reconciliation: after a gesture tool result binds its `tool_call_id` to a `motion_request_key`, runtime rereads current motion state and routes any already-observed `started`/terminal status through the same event-loop-owned handler used for live observer events. This protects fast motions whose completion callback arrives before normal tool-result processing finishes.
+
+Correlation cleanup: runtime removes structured correlation after successful completion, terminal failure/cancellation/timeout/supersession, stale request/step/turn detection, actual required-deliverable/settled-turn cleanup, runtime shutdown, TTL expiry, or bounded-capacity pruning. Intermediate `response.done` events must preserve correlations whose same compound request still has the correlated gesture in `executing`. Observer registration returns an unsubscribe callback; runtime shutdown unregisters it so old `RealtimeAPI` instances are not retained by the process-global motion observer list. The observer is runtime-lifetime, not per-WebSocket-connection, so reconnect cleanup must not unregister it.
+
+Scope boundary: only gestures structurally owned by the active ordered compound request gate this chain. Runtime-only gestures such as thinking cues, speaking posture, attention holds, idle presence, startup, and shutdown gestures remain independent unless they are explicitly dispatched as the active compound step.
+
+Primary logs: `compound_async_step_registered`, `compound_async_step_motion_event_scheduled`, `compound_async_step_completion_observed`, `compound_async_step_advanced`, `compound_async_step_completion_ignored`, `compound_async_step_correlation_cleaned`, and `compound_async_step_failed`.
