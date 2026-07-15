@@ -44,7 +44,9 @@ Ensure user-visible required deliverables (especially report/followthrough outpu
 ## G) Core invariants
 
 - Required-deliverable paths must not settle on bridge/progress-only output.
-- Missing tool execution should block completion even if text exists.
+- Missing tool execution should block completion even if text exists; diagnostics/report required steps infer `read_runtime_diagnostics` as the required tool so completed diagnostics evidence can satisfy the report contract.
+- Tool execution evidence may include both the runtime-observed `turn_id` and the continuity-resolved `owner_turn_id`; required-tool matching must consider both while still requiring the specific inferred tool name.
+- Required-tool evidence remains exact-name matched; unrelated non-gesture tool calls must not satisfy an unknown required-tool contract by default.
 - Redrive budget must be bounded and explicit.
 - Required-deliverable followthrough retry keys must remain parent-scoped
   (`parent:required_deliverable_followthrough:<n>`) and must not append retry

@@ -41,7 +41,9 @@ Control whether tool-followup outputs are released, held, or suppressed; preserv
 
 ## G) Core invariants
 
-- Suppress only when parent coverage is actually qualified.
+- Suppress only when parent coverage is actually qualified; streaming text classification must use the accumulated response text, not an isolated delta, so progress acknowledgements such as “checking…” cannot become final coverage when later delta fragments omit progress words.
+- If completed parent text is available, defensive parent-coverage checks must reclassify that text and reject cached `final` state when the text is progress-only.
+- Active required-deliverable followthrough keeps the necessary post-tool follow-up eligible even after a parent acknowledgement response has completed.
 - Hold is transitional and should resolve into release/suppress deterministically.
 - Non-distinct or gesture-only outputs should not consume final deliverable ownership.
 - Local runtime tool results that deterministically advance continuity to an active low-risk gesture step should dispatch that gesture before generic tool-output `response.create` scheduling; if no safe descriptor exists, leave the generic fallback path intact.
