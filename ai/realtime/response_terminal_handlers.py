@@ -387,6 +387,9 @@ class ResponseTerminalHandlers:
                 state="done",
                 reason="response_done",
             )
+        cleanup_local_context = getattr(api, "_cleanup_response_create_local_context_by_metadata", None)
+        if callable(cleanup_local_context):
+            cleanup_local_context(trace_context)
         transcript_linked_input_event_key = str(api._active_input_event_key_for_turn(turn_id) or "").strip()
         transcript_final_linked = bool(transcript_linked_input_event_key and transcript_linked_input_event_key.startswith("item_"))
         selection_decision = api._response_done_deliverable_arbitration(

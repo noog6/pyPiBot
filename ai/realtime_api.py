@@ -7,6 +7,7 @@ import audioop
 import base64
 from collections import deque
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from enum import Enum
@@ -1263,6 +1264,11 @@ class RealtimeAPI:
         self._tool_followup_state_by_canonical_key: dict[str, str] = {}
         self._info_log_dedupe_signatures: set[tuple[str, tuple[Any, ...]]] = set()
         self._followthrough_guard_log_counts: dict[tuple[Any, ...], int] = {}
+        self._response_create_local_context_by_id: dict[str, dict[str, Any]] = {}
+        self._response_create_local_context_counter = 0
+        self._metadata_validation_retry_keys: set[str] = set()
+        self._last_sent_response_create_event: dict[str, Any] | None = None
+        self._last_sent_response_create_origin = "unknown"
         self._active_response_input_event_key: str | None = None
         self._active_response_canonical_key: str | None = None
         self._sync_active_response_legacy_fields()
@@ -10705,6 +10711,50 @@ class RealtimeAPI:
             store = {}
             self._followthrough_catchup_buffer_by_turn = store
         return store
+
+    def _store_response_create_local_context(self, payload: dict[str, Any]) -> str:
+        """Store verbose response-create orchestration context locally.
+
+        Provider metadata carries only the returned compact id. The store is
+        process-local and bounded; response.done cleanup removes contexts once
+        their compact id is observed through trace metadata.
+        """
+        store = getattr(self, "_response_create_local_context_by_id", None)
+        if not isinstance(store, dict):
+            store = {}
+            self._response_create_local_context_by_id = store
+        counter = int(getattr(self, "_response_create_local_context_counter", 0) or 0) + 1
+        self._response_create_local_context_counter = counter
+        context_id = f"rctx_{counter:06d}"
+        store[context_id] = {
+            "created_at": time.monotonic(),
+            "payload": dict(payload),
+        }
+        while len(store) > 128:
+            store.pop(next(iter(store)), None)
+        return context_id
+
+    def _response_create_local_context(self, *, context_id: str) -> dict[str, Any] | None:
+        store = getattr(self, "_response_create_local_context_by_id", None)
+        if not isinstance(store, dict):
+            return None
+        entry = store.get(str(context_id or "").strip())
+        return entry if isinstance(entry, dict) else None
+
+    def _cleanup_response_create_local_context_by_metadata(self, metadata: Mapping[str, Any] | None) -> None:
+        if not isinstance(metadata, Mapping):
+            return
+        context_id = str(metadata.get("followthrough_context_id") or "").strip()
+        if not context_id:
+            return
+        store = getattr(self, "_response_create_local_context_by_id", None)
+        if isinstance(store, dict):
+            store.pop(context_id, None)
+            logger.debug(
+                "response_create_local_context_cleaned run_id=%s context_id=%s reason=response_done",
+                self._current_run_id() or "",
+                context_id,
+            )
 
     def _compact_required_deliverable_tool_result_summary(
         self,
@@ -23306,6 +23356,85 @@ class RealtimeAPI:
     async def handle_response_completed(self, event: dict[str, Any] | None = None) -> None:
         await self._response_terminal_handlers_module().handle_response_completed(event)
 
+    async def _retry_last_response_create_after_metadata_rejection(
+        self,
+        *,
+        websocket: Any,
+        rejected_field: str,
+    ) -> bool:
+        event = getattr(self, "_last_sent_response_create_event", None)
+        if not isinstance(event, dict):
+            return False
+        response = event.get("response")
+        if not isinstance(response, dict):
+            return False
+        metadata = response.get("metadata")
+        if not isinstance(metadata, dict):
+            return False
+        if not self._trace_context_marks_required_deliverable_followthrough(metadata):
+            return False
+        input_event_key = str(metadata.get("input_event_key") or "").strip()
+        retry_key = f"{input_event_key}:{str(rejected_field or 'unknown').strip()}"
+        retry_keys = getattr(self, "_metadata_validation_retry_keys", None)
+        if not isinstance(retry_keys, set):
+            retry_keys = set()
+            self._metadata_validation_retry_keys = retry_keys
+        if retry_key in retry_keys:
+            return False
+        retry_keys.add(retry_key)
+
+        retry_event = deepcopy(event)
+        retry_response = retry_event.setdefault("response", {})
+        if not isinstance(retry_response, dict):
+            return False
+        retry_metadata = retry_response.setdefault("metadata", {})
+        if not isinstance(retry_metadata, dict):
+            return False
+        allowed_keys = {
+            "turn_id",
+            "input_event_key",
+            "parent_input_event_key",
+            "tool_followup",
+            "tool_followup_release",
+            "consumes_canonical_slot",
+            "explicit_multipart",
+            "local_runtime_followthrough",
+            "followthrough_step_output_policy",
+            "followthrough_post_completion_reason",
+            "followthrough_required_tool_name",
+            "followthrough_required_tool_already_executed",
+            "followthrough_context_id",
+            "metadata_schema_version",
+        }
+        for key in tuple(retry_metadata.keys()):
+            if key not in allowed_keys:
+                retry_metadata.pop(key, None)
+        retry_metadata["metadata_retry"] = "validation_reduced_envelope"
+        if len(retry_metadata) > 16:
+            retry_metadata.pop("metadata_schema_version", None)
+        instructions = str(retry_response.get("instructions") or "").strip()
+        fallback_instruction = (
+            "Provider metadata retry: deliver the required report now from already available completed-step context. "
+            "Do not call tools again and do not describe future work."
+        )
+        retry_response["instructions"] = f"{instructions} {fallback_instruction}".strip() if instructions else fallback_instruction
+        logger.error(
+            "response_create_metadata_validation_retry run_id=%s turn_id=%s input_event_key=%s rejected_field=%s envelope_fields=%s",
+            self._current_run_id() or "",
+            str(retry_metadata.get("turn_id") or self._current_turn_id_or_unknown()),
+            str(retry_metadata.get("input_event_key") or "unknown"),
+            str(rejected_field or "unknown"),
+            len(retry_metadata),
+        )
+        transport = self._get_or_create_transport()
+        log_ws_event("Outgoing", retry_event)
+        await transport.send_json(websocket, retry_event)
+        self._last_sent_response_create_event = deepcopy(retry_event)
+        self._last_response_create_ts = time.monotonic()
+        self._response_in_flight = True
+        self.response_in_progress = True
+        return True
+
     async def handle_error(self, event: dict[str, Any], websocket: Any) -> None:
         error_message = event.get("error", {}).get("message", "")
         if "no active response found" in error_message.lower():
@@ -23324,6 +23453,32 @@ class RealtimeAPI:
             logger.warning("Received 'active response' error despite response.create serialization.")
             self.response_in_progress = True
             self._response_in_flight = True
+        elif "response.metadata" in error_message and "maximum length" in error_message:
+            field_match = re.search(r"response\.metadata\.([A-Za-z0-9_:-]+)", error_message)
+            size_match = re.search(r"maximum length (\d+).*length (\d+)", error_message)
+            rejected_field = field_match.group(1) if field_match else "unknown"
+            limit = size_match.group(1) if size_match else "unknown"
+            observed = size_match.group(2) if size_match else "unknown"
+            logger.error(
+                "response_create_metadata_validation_rejected run_id=%s turn_id=%s field=%s observed_size=%s limit=%s active_response_id=%s canonical_key=%s recovery=preserve_pending_no_unhandled",
+                self._current_run_id() or "",
+                self._current_turn_id_or_unknown(),
+                rejected_field,
+                observed,
+                limit,
+                str(getattr(self, "_active_response_id", "") or ""),
+                str(getattr(self, "_active_response_canonical_key", "") or ""),
+            )
+            self.response_in_progress = False
+            self._response_in_flight = False
+            self._response_create_queue_drain_source = "active_cleared"
+            retried = await self._retry_last_response_create_after_metadata_rejection(
+                websocket=websocket,
+                rejected_field=rejected_field,
+            )
+            if not retried:
+                self._response_create_queue_drain_source = "active_cleared"
+                await self._drain_response_create_queue(source_trigger="active_cleared")
         else:
             logger.error("Unhandled error: %s", error_message)
 
