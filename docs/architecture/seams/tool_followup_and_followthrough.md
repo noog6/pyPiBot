@@ -77,3 +77,17 @@ Control whether tool-followup outputs are released, held, or suppressed; preserv
 3. `ai/realtime/response_create_runtime.py` metadata capping path (`_enforce_tool_followup_metadata_limit`) when arbitration reasons unexpectedly shift (for example `non_gesture_tool` after queue drain).
 4. `ai/realtime/response_terminal_handlers.py` followthrough guard + selection reason.
 5. Logs: `queue_release_parent_eval`, `tool_followup_*`, `response_done_followthrough_guard_decision`, `tool_followup_metadata_capped`.
+
+## L) Multi-step catch-up context ownership
+
+Completed-step catch-up material for required-deliverable followthrough is local orchestration context, not provider-visible metadata. The model-facing report instruction may include the completed-step facts needed to answer (for example that `gesture_look_right` and `read_runtime_diagnostics` already completed), but `response.metadata` carries only compact routing/contract fields and, when needed, a local `followthrough_context_id`.
+
+Context lifecycle:
+
+1. Tool-result and deterministic followthrough code buffers completed-step facts by turn.
+2. Required-deliverable dispatch consumes those facts into response instructions and response-create local context.
+3. Metadata normalization externalizes oversized `followthrough_catchup_payload` and sends the compact context id.
+4. Response events can inspect the id through echoed metadata/trace context, but current event-time behavior does not require rehydrating the context; the model-facing catch-up facts are still supplied through the response instructions.
+5. `response.done` cleanup removes the process-local context when the trace metadata contains the id; stale entries are bounded by store size.
+
+This is an incremental migration boundary: the local context store currently provides retention/correlation and future migration scaffolding, not authoritative event-time rehydration. Additional verbose arbitration evidence, diagnostic summaries, and canonical lineage details should move behind local context ids rather than adding more provider metadata fields. Missing local context should fail visibly as a controlled lifecycle/context incident rather than silently settling a required deliverable.

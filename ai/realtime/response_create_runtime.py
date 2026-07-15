@@ -26,6 +26,10 @@ from ai.realtime.types import PendingResponseCreate
 from core.logging import logger, log_ws_event
 from interaction import InteractionState
 from ai.realtime.types import UtteranceContext
+from ai.realtime.metadata_contract import (
+    PROVIDER_METADATA_MAX_PROPERTIES,
+    normalize_provider_metadata,
+)
 
 
 class ResponseCreateRuntimeAPI(Protocol):
@@ -107,9 +111,18 @@ class ResponseCreateExecutionDecision:
     should_log_arbitration: bool = True
 
 
+def json_safe_metadata_issues(issues: list[dict[str, Any]]) -> str:
+    if not issues:
+        return "none"
+    return ";".join(
+        f"{str(item.get('field') or 'unknown')}:{item.get('observed')}/{item.get('limit')}"
+        for item in issues
+    )
+
+
 @dataclass
 class ResponseCreateRuntime:
-    _PROVIDER_METADATA_MAX_PROPERTIES = 16
+    _PROVIDER_METADATA_MAX_PROPERTIES = PROVIDER_METADATA_MAX_PROPERTIES
 
     api: ResponseCreateRuntimeAPI
 
@@ -214,106 +227,30 @@ class ResponseCreateRuntime:
         response_create_event: dict[str, Any],
         canonical_key: str,
     ) -> None:
-        """Cap tool-followup response.create metadata for provider limits."""
+        """Normalize response.create metadata against the provider contract.
+
+        This is the provider-facing boundary: all metadata values must be
+        strings, have <=16 entries, keys <=64 chars, and values <=512 chars.
+        Rich followthrough catch-up payloads are local orchestration context and
+        are externalized behind a compact context id instead of being sent.
+        """
         api = self.api
         metadata = api._extract_response_create_metadata(response_create_event)
-        if str(metadata.get("tool_followup") or "").strip().lower() not in {"true", "1", "yes"}:
-            return
-        if len(metadata) <= self._PROVIDER_METADATA_MAX_PROPERTIES:
-            return
-
-        required_deliverable_followthrough = (
-            str(metadata.get("tool_followup_step_output_policy") or "").strip().lower() == "required_deliverable"
-            or str(metadata.get("followthrough_step_output_policy") or "").strip().lower() == "required_deliverable"
-            or str(metadata.get("tool_followup_post_completion_reason") or "").strip().lower() == "required_deliverable_owed"
-            or str(metadata.get("followthrough_post_completion_reason") or "").strip().lower() == "required_deliverable_owed"
+        context_store = getattr(api, "_store_response_create_local_context", None)
+        result = normalize_provider_metadata(
+            metadata,
+            store_local_context=context_store if callable(context_store) else None,
         )
-
-        drop_priority = (
-            "tool_name",
-            "tool_followup_tool_choice",
-            "tool_followup_tool_choice_reason",
-            "followthrough_runtime_contract_version",
-            "followthrough_runtime_step_available",
-            "followthrough_runtime_step_id",
-            "followthrough_runtime_tool_name",
-            "followthrough_runtime_tool_args",
-            *(() if required_deliverable_followthrough else ("followthrough_catchup_payload",)),
-            "gesture_motion_status",
-            "tool_result_has_distinct_info",
-            "tool_followup_no_create",
-            "tool_followup_no_create_reason",
-            "tool_followup_create_suppressed",
-            "tool_followup_create_suppression_reason",
-        )
-        dropped_keys: list[str] = []
-        for key in drop_priority:
-            if len(metadata) <= self._PROVIDER_METADATA_MAX_PROPERTIES:
-                break
-            if key in metadata:
-                metadata.pop(key, None)
-                dropped_keys.append(key)
-
-        if len(metadata) > self._PROVIDER_METADATA_MAX_PROPERTIES and required_deliverable_followthrough:
-            duplicate_drop_priority = (
-                "tool_followup_step_output_policy",
-                "tool_followup_post_completion_reason",
-            )
-            for key in duplicate_drop_priority:
-                if len(metadata) <= self._PROVIDER_METADATA_MAX_PROPERTIES:
-                    break
-                # Prefer canonical followthrough_* marker variants when both exist.
-                if key in metadata:
-                    metadata.pop(key, None)
-                    dropped_keys.append(key)
-
-        if len(metadata) > self._PROVIDER_METADATA_MAX_PROPERTIES:
-            required_keys = {
-                "turn_id",
-                "input_event_key",
-                "tool_followup",
-                "tool_call_id",
-                "tool_followup_release",
-                "blocked_by_response_id",
-                "parent_turn_id",
-                "parent_input_event_key",
-                "followthrough_step_output_policy",
-                "followthrough_post_completion_reason",
-                "local_runtime_followthrough",
-                "followthrough_required_tool_name",
-                "tool_followup_required_tool_name",
-                "followthrough_required_tool_already_executed",
-                "tool_followup_suppress_if_parent_covered",
-            }
-            if not required_deliverable_followthrough:
-                required_keys.update(
-                    {
-                        "tool_followup_status_only",
-                        "tool_followup_silent_audio",
-                        "tool_followup_silent_user_facing_output",
-                    }
-                )
-            if "tool_followup_step_output_policy" in metadata and "followthrough_step_output_policy" not in metadata:
-                required_keys.add("tool_followup_step_output_policy")
-            if "tool_followup_post_completion_reason" in metadata and "followthrough_post_completion_reason" not in metadata:
-                required_keys.add("tool_followup_post_completion_reason")
-            if "tool_followup_required_tool_name" in metadata and "followthrough_required_tool_name" not in metadata:
-                required_keys.add("tool_followup_required_tool_name")
-            if required_deliverable_followthrough:
-                required_keys.add("followthrough_catchup_payload")
-            for key in tuple(metadata.keys()):
-                if len(metadata) <= self._PROVIDER_METADATA_MAX_PROPERTIES:
-                    break
-                if key not in required_keys:
-                    metadata.pop(key, None)
-                    dropped_keys.append(key)
-
-        if dropped_keys:
+        metadata.clear()
+        metadata.update(result.metadata)
+        if result.dropped or result.externalized or result.oversized:
             logger.info(
-                "tool_followup_metadata_capped canonical_key=%s kept=%s dropped=%s",
+                "provider_metadata_normalized canonical_key=%s kept=%s dropped=%s externalized=%s oversized=%s",
                 canonical_key,
                 len(metadata),
-                ",".join(dropped_keys),
+                ",".join(result.dropped) or "none",
+                ",".join(result.externalized) or "none",
+                json_safe_metadata_issues(result.oversized),
             )
 
     def _normalize_execution_decision(
@@ -1405,6 +1342,9 @@ class ResponseCreateRuntime:
             response_create_event=response_create_event,
             canonical_key=canonical_key,
         )
+        if hasattr(api, "_last_sent_response_create_event"):
+            api._last_sent_response_create_event = deepcopy(response_create_event)
+            api._last_sent_response_create_origin = normalized_origin
         log_ws_event("Outgoing", response_create_event)
         api._track_outgoing_event(response_create_event, origin=origin)
         transport = api._get_or_create_transport()

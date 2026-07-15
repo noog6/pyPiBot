@@ -73,3 +73,18 @@ Decide whether a `response.create` attempt should `SEND`, `SCHEDULE`, `BLOCK`, o
 2. `ai/response_create_arbitration.py` candidate priorities.
 3. `ai/interaction_lifecycle_policy.py` reason-code candidate ordering.
 4. `response_create_*` + `create_seam_parent_coverage_eval` log families.
+
+## L) Provider metadata normalization boundary
+
+`ai/realtime/response_create_runtime.py` normalizes every outgoing `response.create.response.metadata` immediately before transport send through `ai/realtime/metadata_contract.py`. The enforced local provider contract is:
+
+- at most 16 metadata entries;
+- metadata keys are strings no longer than 64 characters;
+- metadata values are strings no longer than 512 characters;
+- non-string values are converted to deterministic string forms before send.
+
+The 512-character value limit is confirmed by the observed Realtime provider rejection. The 16-entry and 64-character key limits match OpenAI metadata limits documented on other API resources and are enforced here as Theo's defensive provider boundary for Realtime until Realtime-specific metadata documentation states otherwise.
+
+Field capping is envelope based: each response type must define a minimal provider envelope that fits in 16 fields before optional optimization and diagnostic-only fields are considered. Required-deliverable aliases are collapsed to canonical `followthrough_*` names before capping. Local-only orchestration fields, notably `followthrough_catchup_payload`, must not be sent as provider metadata. Oversized local followthrough context is externalized into Theo's process-local response-create context store and the provider receives only `metadata_schema_version=provider_metadata.v1` plus a compact `followthrough_context_id` when space allows.
+
+If the provider still rejects metadata, the error handler records `response_create_metadata_validation_rejected` with field, observed size, limit, run/turn, active response id, and canonical key. For required-deliverable followthrough it attempts at most one reduced-envelope retry, then falls back to draining pending queued creates rather than reporting a generic unhandled lifecycle error.
