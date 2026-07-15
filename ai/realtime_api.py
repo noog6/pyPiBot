@@ -578,6 +578,26 @@ class IntentLedgerEntry:
 
 
 @dataclass
+class AsyncCompoundMotionCorrelation:
+    owner_turn_id: str
+    compound_request_id: str
+    step_id: str
+    tool_call_id: str
+    tool_name: str
+    motion_request_key: str
+    registration_state: str
+    last_motion_status: str = "accepted"
+    accepted_monotonic_s: float = 0.0
+    started_monotonic_s: float | None = None
+    completed_monotonic_s: float | None = None
+    terminal: bool = False
+
+
+_COMPOUND_MOTION_CORRELATION_MAX_ENTRIES = 64
+_COMPOUND_MOTION_CORRELATION_TTL_S = 300.0
+
+
+@dataclass
 class ConversationEfficiencyState:
     ack_count: int = 0
     substantive_count: int = 0
@@ -874,6 +894,10 @@ class RealtimeAPI:
             continuity_cfg.get("debug_summary_on_turn_close", False)
         )
         self._continuity_ledger = ContinuityLedger()
+        self._compound_motion_correlations: dict[str, AsyncCompoundMotionCorrelation] = {}
+        self._motion_lifecycle_unsubscribe = tool_runtime.register_motion_lifecycle_observer(
+            self._on_gesture_motion_lifecycle
+        )
         self._continuity_turn_close_debug_logged: set[tuple[str, str]] = set()
         self._gesture_last_fired: dict[str, float] = {}
         self._last_gesture_time = 0.0
@@ -5485,6 +5509,490 @@ class RealtimeAPI:
         normalized_event = str(event_type or "").strip().lower()
         if normalized_event in {"transcript_final", "response_done"}:
             self._prune_deterministic_followthrough_dispatch_registry()
+            if normalized_event == "response_done":
+                self._cleanup_compound_motion_correlations_for_settled_turn(
+                    turn_id=str(payload.get("turn_id") or "").strip(),
+                    reason="response_done",
+                    complete_required_deliverable=self._as_bool_like(payload.get("complete_required_deliverable"))
+                    or self._as_bool_like(payload.get("complete_final_report")),
+                )
+
+    def _compound_motion_registry(self) -> dict[str, AsyncCompoundMotionCorrelation]:
+        registry = getattr(self, "_compound_motion_correlations", None)
+        if not isinstance(registry, dict):
+            registry = {}
+            self._compound_motion_correlations = registry
+        self._prune_compound_motion_correlations(registry=registry)
+        return registry
+
+    @staticmethod
+    def _as_bool_like(value: Any) -> bool:
+        return str(value or "").strip().lower() in {"1", "true", "yes", "on"} or value is True
+
+    def _prune_compound_motion_correlations(
+        self,
+        *,
+        registry: dict[str, AsyncCompoundMotionCorrelation] | None = None,
+    ) -> None:
+        registry = registry if isinstance(registry, dict) else getattr(self, "_compound_motion_correlations", {})
+        if not isinstance(registry, dict) or not registry:
+            return
+        now = time.monotonic()
+        for key, correlation in list(registry.items()):
+            if now - float(correlation.accepted_monotonic_s or now) > _COMPOUND_MOTION_CORRELATION_TTL_S:
+                self._cleanup_compound_motion_correlation(motion_request_key=key, reason="stale_ttl")
+        registry = getattr(self, "_compound_motion_correlations", {})
+        if not isinstance(registry, dict) or len(registry) <= _COMPOUND_MOTION_CORRELATION_MAX_ENTRIES:
+            return
+        ranked = sorted(
+            registry.values(),
+            key=lambda item: float(item.accepted_monotonic_s or 0.0),
+        )
+        overflow = len(registry) - _COMPOUND_MOTION_CORRELATION_MAX_ENTRIES
+        for correlation in ranked[:overflow]:
+            self._cleanup_compound_motion_correlation(
+                motion_request_key=correlation.motion_request_key,
+                reason="stale_capacity",
+            )
+
+    def _register_compound_motion_correlation(
+        self,
+        *,
+        owner_turn_id: str,
+        request_id: str,
+        step_id: str,
+        tool_call_id: str,
+        tool_name: str,
+        motion_request_key: str,
+    ) -> AsyncCompoundMotionCorrelation | None:
+        if not all(str(value or "").strip() for value in (owner_turn_id, request_id, step_id, tool_call_id, tool_name, motion_request_key)):
+            return None
+        correlation = AsyncCompoundMotionCorrelation(
+            owner_turn_id=str(owner_turn_id).strip(),
+            compound_request_id=str(request_id).strip(),
+            step_id=str(step_id).strip(),
+            tool_call_id=str(tool_call_id).strip(),
+            tool_name=str(tool_name).strip(),
+            motion_request_key=str(motion_request_key).strip(),
+            registration_state="accepted",
+            accepted_monotonic_s=time.monotonic(),
+        )
+        self._compound_motion_registry()[correlation.motion_request_key] = correlation
+        logger.info(
+            "compound_async_step_registered run_id=%s owner_turn_id=%s request_id=%s step_id=%s tool_call_id=%s tool=%s motion_request_key=%s state=accepted",
+            self._current_run_id() or "",
+            correlation.owner_turn_id,
+            correlation.compound_request_id,
+            correlation.step_id,
+            correlation.tool_call_id,
+            correlation.tool_name,
+            correlation.motion_request_key,
+        )
+        return correlation
+
+    async def _register_async_gesture_tool_result_and_reconcile(
+        self,
+        *,
+        turn_id: str,
+        tool_name: str,
+        call_id: str,
+        result: Any,
+        apply_continuity_result: bool = True,
+        continuity_rebind_allowed: bool = False,
+        continuity_rebind_reason: str = "",
+    ) -> None:
+        motion_request_key = ""
+        if isinstance(result, dict):
+            motion_request_key = str(result.get("motion_request_key") or "").strip()
+        if not str(tool_name or "").startswith("gesture_") or not motion_request_key:
+            if apply_continuity_result:
+                self._apply_continuity_event(
+                    "tool_result_received",
+                    run_id=self._current_run_id(),
+                    turn_id=turn_id,
+                    tool_name=tool_name,
+                    call_id=call_id,
+                    motion_request_key=motion_request_key,
+                    result=result,
+                    allow_cross_turn_rebind="true" if continuity_rebind_allowed else "",
+                    cross_turn_rebind_reason=continuity_rebind_reason,
+                )
+            return
+        tool_runtime.register_tool_call_motion_request(
+            tool_call_id=call_id,
+            motion_request_key=motion_request_key,
+        )
+        descriptor = self._deterministic_followthrough_runtime_descriptor(turn_id=turn_id)
+        if (
+            descriptor is not None
+            and str(descriptor.get("tool_name") or "").strip().lower()
+            == str(tool_name or "").strip().lower()
+        ):
+            self._register_compound_motion_correlation(
+                owner_turn_id=turn_id,
+                request_id=str(descriptor.get("request_id") or "").strip(),
+                step_id=str(descriptor.get("step_id") or "").strip(),
+                tool_call_id=call_id,
+                tool_name=tool_name,
+                motion_request_key=motion_request_key,
+            )
+        if apply_continuity_result:
+            self._apply_continuity_event(
+                "tool_result_received",
+                run_id=self._current_run_id(),
+                turn_id=turn_id,
+                tool_name=tool_name,
+                call_id=call_id,
+                motion_request_key=motion_request_key,
+                result=result,
+                allow_cross_turn_rebind="true" if continuity_rebind_allowed else "",
+                cross_turn_rebind_reason=continuity_rebind_reason,
+            )
+            motion_state = self.get_gesture_motion_state(tool_call_id=call_id) or {}
+            reconciled_status = str(motion_state.get("status") or "").strip().lower()
+            if reconciled_status in {"started", "completed", "failed", "cancelled", "timed_out", "superseded"}:
+                await self._handle_compound_async_motion_event(
+                    snapshot={
+                        **motion_state,
+                        "request_key": motion_request_key,
+                        "tool_call_id": call_id,
+                        "status": reconciled_status,
+                    },
+                    dispatch_source="registration_reconcile",
+                )
+
+    def _cleanup_compound_motion_correlation(self, *, motion_request_key: str, reason: str) -> None:
+        registry = getattr(self, "_compound_motion_correlations", None)
+        if not isinstance(registry, dict):
+            return
+        correlation = registry.pop(str(motion_request_key or "").strip(), None)
+        if correlation is None:
+            return
+        logger.info(
+            "compound_async_step_correlation_cleaned run_id=%s owner_turn_id=%s request_id=%s step_id=%s tool_call_id=%s tool=%s motion_request_key=%s reason=%s",
+            self._current_run_id() or "",
+            correlation.owner_turn_id,
+            correlation.compound_request_id,
+            correlation.step_id,
+            correlation.tool_call_id,
+            correlation.tool_name,
+            correlation.motion_request_key,
+            reason,
+        )
+
+    def _cleanup_compound_motion_correlations_for_settled_turn(
+        self,
+        *,
+        turn_id: str,
+        reason: str,
+        complete_required_deliverable: bool = False,
+    ) -> None:
+        normalized_turn_id = str(turn_id or "").strip()
+        registry = self._compound_motion_registry()
+        for key, correlation in list(registry.items()):
+            if normalized_turn_id and correlation.owner_turn_id != normalized_turn_id:
+                continue
+            if self._compound_motion_correlation_still_executing(correlation) and not complete_required_deliverable:
+                logger.info(
+                    "compound_async_step_correlation_preserved run_id=%s owner_turn_id=%s request_id=%s step_id=%s tool_call_id=%s tool=%s motion_request_key=%s reason=active_async_step_incomplete cleanup_reason=%s",
+                    self._current_run_id() or "",
+                    correlation.owner_turn_id,
+                    correlation.compound_request_id,
+                    correlation.step_id,
+                    correlation.tool_call_id,
+                    correlation.tool_name,
+                    correlation.motion_request_key,
+                    reason,
+                )
+                continue
+            self._cleanup_compound_motion_correlation(motion_request_key=key, reason=reason)
+
+    def _compound_motion_correlation_still_executing(
+        self,
+        correlation: AsyncCompoundMotionCorrelation,
+    ) -> bool:
+        brief = self.get_continuity_brief(
+            run_id=self._current_run_id() or "",
+            turn_id=correlation.owner_turn_id,
+            reason="compound_motion_cleanup_eval",
+        )
+        compound_state = getattr(brief, "compound_request", None)
+        if compound_state is None:
+            return False
+        if str(getattr(compound_state, "request_id", "") or "") != correlation.compound_request_id:
+            return False
+        for step in tuple(getattr(compound_state, "steps", ()) or ()):
+            if str(getattr(step, "step_id", "") or "") != correlation.step_id:
+                continue
+            return str(getattr(step, "status", "") or "") == "executing"
+        return False
+
+    def _unregister_motion_lifecycle_observer(self, *, reason: str) -> None:
+        unsubscribe = getattr(self, "_motion_lifecycle_unsubscribe", None)
+        if callable(unsubscribe):
+            unsubscribe()
+            self._motion_lifecycle_unsubscribe = None
+            logger.info(
+                "compound_async_step_motion_observer_unregistered run_id=%s reason=%s",
+                self._current_run_id() or "",
+                reason,
+            )
+
+    def _on_gesture_motion_lifecycle(self, snapshot: dict[str, Any]) -> None:
+        request_key = str(snapshot.get("request_key") or "").strip()
+        status = str(snapshot.get("status") or "").strip().lower()
+        if not request_key or status not in {"started", "completed", "failed", "cancelled", "timed_out", "superseded"}:
+            return
+        loop = getattr(self, "loop", None)
+        if loop is None or not getattr(loop, "is_running", lambda: False)():
+            logger.info(
+                "compound_async_step_completion_ignored reason=observer_unregistered run_id=%s motion_request_key=%s motion_status=%s",
+                self._current_run_id() or "",
+                request_key,
+                status,
+            )
+            return
+        immutable_snapshot = dict(snapshot)
+        logger.info(
+            "compound_async_step_motion_event_scheduled run_id=%s motion_request_key=%s motion_status=%s source_thread=%s",
+            self._current_run_id() or "",
+            request_key,
+            status,
+            threading.current_thread().name,
+        )
+        future = asyncio.run_coroutine_threadsafe(
+            self._handle_compound_async_motion_event(snapshot=immutable_snapshot, dispatch_source="observer"),
+            loop,
+        )
+        future.add_done_callback(self._log_compound_motion_event_future_result)
+
+    def _log_compound_motion_event_future_result(self, future: Any) -> None:
+        try:
+            future.result()
+        except Exception:
+            logger.exception("compound_async_step_motion_event_failed run_id=%s", self._current_run_id() or "")
+
+    async def _handle_compound_async_motion_event(
+        self,
+        *,
+        snapshot: dict[str, Any],
+        dispatch_source: str,
+    ) -> bool:
+        motion_request_key = str(snapshot.get("request_key") or snapshot.get("motion_request_key") or "").strip()
+        motion_status = str(snapshot.get("status") or snapshot.get("motion_status") or "").strip().lower()
+        tool_call_id = str(snapshot.get("tool_call_id") or snapshot.get("call_id") or "").strip()
+        if not motion_request_key or motion_status not in {"started", "completed", "failed", "cancelled", "timed_out", "superseded"}:
+            return False
+        correlation = self._compound_motion_registry().get(motion_request_key)
+        if correlation is None:
+            logger.info(
+                "compound_async_step_completion_ignored reason=not_compound_owned run_id=%s motion_request_key=%s motion_status=%s dispatch_source=%s",
+                self._current_run_id() or "",
+                motion_request_key,
+                motion_status,
+                dispatch_source,
+            )
+            return False
+        if tool_call_id and correlation.tool_call_id and tool_call_id != correlation.tool_call_id:
+            logger.info(
+                "compound_async_step_completion_ignored reason=wrong_request_key run_id=%s owner_turn_id=%s request_id=%s step_id=%s tool_call_id=%s incoming_tool_call_id=%s motion_request_key=%s motion_status=%s",
+                self._current_run_id() or "",
+                correlation.owner_turn_id,
+                correlation.compound_request_id,
+                correlation.step_id,
+                correlation.tool_call_id,
+                tool_call_id,
+                motion_request_key,
+                motion_status,
+            )
+            return False
+        current_owner = str(self._continuity_ledger_instance().compound_owner_turn_id() or "").strip()
+        if current_owner and current_owner != correlation.owner_turn_id:
+            logger.info(
+                "compound_async_step_completion_ignored reason=stale_turn run_id=%s owner_turn_id=%s current_owner_turn_id=%s request_id=%s step_id=%s motion_request_key=%s motion_status=%s",
+                self._current_run_id() or "",
+                correlation.owner_turn_id,
+                current_owner,
+                correlation.compound_request_id,
+                correlation.step_id,
+                motion_request_key,
+                motion_status,
+            )
+            self._cleanup_compound_motion_correlation(motion_request_key=motion_request_key, reason="stale_turn")
+            return False
+        brief = self.get_continuity_brief(
+            run_id=self._current_run_id() or "",
+            turn_id=correlation.owner_turn_id,
+            reason="compound_async_motion_event",
+        )
+        compound_state = getattr(brief, "compound_request", None)
+        if compound_state is None or str(getattr(compound_state, "request_id", "") or "") != correlation.compound_request_id:
+            logger.info(
+                "compound_async_step_completion_ignored reason=stale_request run_id=%s owner_turn_id=%s request_id=%s motion_request_key=%s motion_status=%s",
+                self._current_run_id() or "",
+                correlation.owner_turn_id,
+                correlation.compound_request_id,
+                motion_request_key,
+                motion_status,
+            )
+            self._cleanup_compound_motion_correlation(motion_request_key=motion_request_key, reason="stale_request")
+            return False
+        steps = tuple(getattr(compound_state, "steps", ()) or ())
+        step = next((candidate for candidate in steps if str(getattr(candidate, "step_id", "") or "") == correlation.step_id), None)
+        if step is None:
+            logger.info(
+                "compound_async_step_completion_ignored reason=wrong_step run_id=%s owner_turn_id=%s request_id=%s step_id=%s motion_request_key=%s motion_status=%s",
+                self._current_run_id() or "",
+                correlation.owner_turn_id,
+                correlation.compound_request_id,
+                correlation.step_id,
+                motion_request_key,
+                motion_status,
+            )
+            self._cleanup_compound_motion_correlation(motion_request_key=motion_request_key, reason="wrong_step")
+            return False
+        if str(getattr(step, "status", "") or "") != "executing":
+            logger.info(
+                "compound_async_step_completion_ignored reason=already_terminal run_id=%s owner_turn_id=%s request_id=%s step_id=%s step_status=%s motion_request_key=%s motion_status=%s",
+                self._current_run_id() or "",
+                correlation.owner_turn_id,
+                correlation.compound_request_id,
+                correlation.step_id,
+                str(getattr(step, "status", "") or ""),
+                motion_request_key,
+                motion_status,
+            )
+            if motion_status != "started":
+                self._cleanup_compound_motion_correlation(motion_request_key=motion_request_key, reason="already_terminal")
+            return False
+        now = time.monotonic()
+        previous_status = correlation.last_motion_status
+        correlation.last_motion_status = motion_status
+        correlation.registration_state = motion_status
+        if motion_status == "started" and correlation.started_monotonic_s is None:
+            correlation.started_monotonic_s = now
+        if motion_status in {"completed", "failed", "cancelled", "timed_out", "superseded"}:
+            if correlation.terminal:
+                logger.info(
+                    "compound_async_step_completion_ignored reason=already_terminal run_id=%s owner_turn_id=%s request_id=%s step_id=%s motion_request_key=%s motion_status=%s",
+                    self._current_run_id() or "",
+                    correlation.owner_turn_id,
+                    correlation.compound_request_id,
+                    correlation.step_id,
+                    motion_request_key,
+                    motion_status,
+                )
+                return False
+            correlation.terminal = True
+            correlation.completed_monotonic_s = now
+        self._apply_continuity_event(
+            "gesture_motion_registered",
+            run_id=self._current_run_id(),
+            turn_id=correlation.owner_turn_id,
+            owner_turn_id=correlation.owner_turn_id,
+            request_id=correlation.compound_request_id,
+            step_id=correlation.step_id,
+            tool_call_id=correlation.tool_call_id,
+            tool_name=correlation.tool_name,
+            motion_request_key=motion_request_key,
+            motion_status=motion_status,
+        )
+        if motion_status == "started":
+            logger.info(
+                "compound_async_step_completion_observed run_id=%s owner_turn_id=%s request_id=%s step_id=%s tool_call_id=%s tool=%s motion_request_key=%s motion_status=%s previous_status=%s accepted_to_started_ms=%s",
+                self._current_run_id() or "",
+                correlation.owner_turn_id,
+                correlation.compound_request_id,
+                correlation.step_id,
+                correlation.tool_call_id,
+                correlation.tool_name,
+                motion_request_key,
+                motion_status,
+                previous_status,
+                int((now - correlation.accepted_monotonic_s) * 1000),
+            )
+            return True
+        if motion_status == "completed":
+            started_to_completed_ms = (
+                None
+                if correlation.started_monotonic_s is None
+                else int((now - correlation.started_monotonic_s) * 1000)
+            )
+            dispatch_start = time.monotonic()
+            await self._continue_deterministic_followthrough_after_motion_completion(
+                websocket=getattr(self, "websocket", None),
+                turn_id=correlation.owner_turn_id,
+                motion_request_key=motion_request_key,
+                tool_call_id=correlation.tool_call_id,
+            )
+            logger.info(
+                "compound_async_step_advanced_timing run_id=%s owner_turn_id=%s request_id=%s step_id=%s tool_call_id=%s tool=%s motion_request_key=%s started_to_completed_ms=%s completed_to_next_dispatch_ms=%s",
+                self._current_run_id() or "",
+                correlation.owner_turn_id,
+                correlation.compound_request_id,
+                correlation.step_id,
+                correlation.tool_call_id,
+                correlation.tool_name,
+                motion_request_key,
+                "unknown" if started_to_completed_ms is None else started_to_completed_ms,
+                int((time.monotonic() - dispatch_start) * 1000),
+            )
+            self._cleanup_compound_motion_correlation(motion_request_key=motion_request_key, reason="completed")
+            return True
+        logger.info(
+            "compound_async_step_failed run_id=%s owner_turn_id=%s request_id=%s step_id=%s tool_call_id=%s tool=%s motion_request_key=%s motion_status=%s",
+            self._current_run_id() or "",
+            correlation.owner_turn_id,
+            correlation.compound_request_id,
+            correlation.step_id,
+            correlation.tool_call_id,
+            correlation.tool_name,
+            motion_request_key,
+            motion_status,
+        )
+        self._cleanup_compound_motion_correlation(motion_request_key=motion_request_key, reason=motion_status)
+        return True
+
+    async def _continue_deterministic_followthrough_after_motion_completion(
+        self,
+        *,
+        websocket: Any,
+        turn_id: str,
+        motion_request_key: str,
+        tool_call_id: str,
+    ) -> None:
+        runtime_step_descriptor = self._deterministic_followthrough_runtime_descriptor(turn_id=turn_id)
+        if runtime_step_descriptor is not None:
+            dispatched = await self._dispatch_deterministic_followthrough_runtime_step(
+                websocket=websocket,
+                turn_id=turn_id,
+                runtime_step_descriptor=runtime_step_descriptor,
+                source="deterministic_followthrough_motion_completion",
+            )
+            logger.info(
+                "compound_async_step_motion_resume run_id=%s turn_id=%s motion_request_key=%s tool_call_id=%s dispatched=%s",
+                self._current_run_id() or "",
+                turn_id,
+                motion_request_key,
+                tool_call_id or "",
+                dispatched,
+            )
+            return
+        if self._turn_has_active_required_deliverable_step(turn_id=turn_id):
+            outcome = await self._maybe_dispatch_required_deliverable_after_motion_completion(
+                websocket=websocket,
+                turn_id=turn_id,
+                triggering_tool_name="gesture",
+                triggering_call_id=tool_call_id,
+            )
+            logger.info(
+                "compound_async_step_motion_resume run_id=%s turn_id=%s motion_request_key=%s tool_call_id=%s required_deliverable_outcome=%s",
+                self._current_run_id() or "",
+                turn_id,
+                motion_request_key,
+                tool_call_id or "",
+                outcome,
+            )
 
     def build_continuity_brief(self, run_id: str, turn_id: str, reason: str) -> ContinuityBrief:
         return self._continuity_ledger_instance().build_brief(run_id=run_id, turn_id=turn_id, reason=reason)
@@ -18740,6 +19248,7 @@ class RealtimeAPI:
             self._runtime_task_registry().cancel_all("run_finally")
             await self._runtime_task_registry().await_all(timeout_s=1.0)
             self._event_injector.stop()
+            self._unregister_motion_lifecycle_observer(reason="run_finally")
 
     async def initialize_session(self, websocket: Any) -> None:
         profile_context = self.profile_manager.get_profile_context()
@@ -21852,11 +22361,6 @@ class RealtimeAPI:
                     motion_request_key = ""
                     if isinstance(result, dict):
                         motion_request_key = str(result.get("motion_request_key") or "").strip()
-                    if function_name.startswith("gesture_") and motion_request_key:
-                        tool_runtime.register_tool_call_motion_request(
-                            tool_call_id=call_id,
-                            motion_request_key=motion_request_key,
-                        )
                     self._record_intent_completion(function_name, args, idempotency_key=self._idempotency_key_for_action(action))
                     self._mark_tool_followup_timing(
                         turn_id=self._current_turn_id_or_unknown(),
@@ -21868,14 +22372,14 @@ class RealtimeAPI:
                             fallback_turn_id=self._current_turn_id_or_unknown(),
                         )
                     )
-                    self._apply_continuity_event(
-                        "tool_result_received",
-                        run_id=self._current_run_id(),
+                    await self._register_async_gesture_tool_result_and_reconcile(
                         turn_id=continuity_turn_id,
                         tool_name=function_name,
                         call_id=call_id,
-                        allow_cross_turn_rebind="true" if continuity_rebind_allowed else "",
-                        cross_turn_rebind_reason=continuity_rebind_reason,
+                        result=result,
+                        apply_continuity_result=True,
+                        continuity_rebind_allowed=continuity_rebind_allowed,
+                        continuity_rebind_reason=continuity_rebind_reason,
                     )
                     non_report_followthrough_remaining = self._turn_followthrough_chain_remaining(
                         turn_id=continuity_turn_id,
@@ -23989,6 +24493,8 @@ class RealtimeAPI:
 
     def _request_shutdown(self) -> None:
         self.exit_event.set()
+        self._unregister_motion_lifecycle_observer(reason="request_shutdown")
+        self._cleanup_compound_motion_correlations_for_settled_turn(turn_id="", reason="request_shutdown")
         coordinator = self._shutdown_coordinator()
         self._runtime_task_registry().cancel_all("request_shutdown")
         close_task = None

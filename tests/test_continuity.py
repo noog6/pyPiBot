@@ -1847,3 +1847,125 @@ def test_continuity_does_not_invent_authority_or_mutate_unrelated_runtime_state(
     assert api._response_in_flight is True
     assert api.function_call == {"name": "gesture_look_center"}
     assert api._active_response_origin == "server_auto"
+
+
+def test_async_gesture_tool_result_waits_for_motion_completion_before_advancing() -> None:
+    ledger = ContinuityLedger()
+    ledger.update_from_event(
+        "transcript_final",
+        text="Turn right, run a diagnostic, come back to center, and tell me what the diagnostic said.",
+        source="input_audio_transcription",
+        turn_id="turn-1078",
+    )
+
+    ledger.update_from_event(
+        "tool_result_received",
+        tool_name="gesture_look_right",
+        call_id="call-right",
+        turn_id="turn-1078",
+        motion_request_key="gesture_look_right:23453110",
+        result={"queued": True, "motion_request_key": "gesture_look_right:23453110"},
+    )
+    accepted = ledger.build_brief("run-1078", "turn-1078", "accepted")
+    assert accepted.compound_request is not None
+    assert [step.status for step in accepted.compound_request.steps] == [
+        "executing",
+        "pending",
+        "pending",
+        "pending",
+    ]
+    assert ledger.deterministic_followthrough_step() is None
+
+    ledger.update_from_event(
+        "gesture_motion_registered",
+        turn_id="turn-1078",
+        motion_request_key="gesture_look_right:23453110",
+        motion_status="started",
+    )
+    started = ledger.build_brief("run-1078", "turn-1078", "started")
+    assert started.compound_request is not None
+    assert [step.status for step in started.compound_request.steps] == [
+        "executing",
+        "pending",
+        "pending",
+        "pending",
+    ]
+    assert ledger.deterministic_followthrough_step() is None
+
+    ledger.update_from_event(
+        "gesture_motion_registered",
+        turn_id="turn-1078",
+        motion_request_key="gesture_look_right:23453110",
+        motion_status="completed",
+    )
+    completed = ledger.build_brief("run-1078", "turn-1078", "right_completed")
+    assert completed.compound_request is not None
+    assert [step.status for step in completed.compound_request.steps] == [
+        "completed",
+        "active",
+        "pending",
+        "pending",
+    ]
+    descriptor = ledger.deterministic_followthrough_step()
+    assert descriptor is not None
+    assert descriptor.tool_name == "read_runtime_diagnostics"
+
+
+def test_async_gesture_duplicate_and_wrong_completion_are_idempotent() -> None:
+    ledger = ContinuityLedger()
+    ledger.update_from_event(
+        "transcript_final",
+        text="Turn right, run a diagnostic, come back to center, and tell me what the diagnostic said.",
+        source="input_audio_transcription",
+        turn_id="turn-dup",
+    )
+    ledger.update_from_event(
+        "tool_result_received",
+        tool_name="gesture_look_right",
+        call_id="call-right",
+        turn_id="turn-dup",
+        motion_request_key="right-key",
+        result={"queued": True, "motion_request_key": "right-key"},
+    )
+    ledger.update_from_event(
+        "gesture_motion_registered",
+        turn_id="turn-dup",
+        step_id="step_1",
+        motion_request_key="right-key",
+        motion_status="completed",
+    )
+    ledger.update_from_event(
+        "gesture_motion_registered",
+        turn_id="turn-dup",
+        step_id="step_1",
+        motion_request_key="right-key",
+        motion_status="completed",
+    )
+    after_duplicate = ledger.build_brief("run-dup", "turn-dup", "after_duplicate")
+    assert after_duplicate.compound_request is not None
+    assert [step.status for step in after_duplicate.compound_request.steps][:2] == ["completed", "active"]
+    assert after_duplicate.compound_request.completed_step_ids == ("step_1",)
+
+
+def test_async_gesture_failure_blocks_without_advancing() -> None:
+    ledger = ContinuityLedger()
+    ledger.update_from_event(
+        "transcript_final",
+        text="Turn right, run a diagnostic, and tell me what the diagnostic said.",
+        source="input_audio_transcription",
+        turn_id="turn-fail",
+    )
+    ledger.update_from_event(
+        "tool_result_received",
+        tool_name="gesture_look_right",
+        call_id="call-right",
+        turn_id="turn-fail",
+        motion_request_key="right-key",
+        result={"queued": True, "motion_request_key": "right-key"},
+    )
+    ledger.update_from_event("gesture_motion_registered", turn_id="turn-fail", motion_request_key="right-key", motion_status="cancelled")
+    brief = ledger.build_brief("run-fail", "turn-fail", "after_cancel")
+    assert brief.compound_request is not None
+    assert [step.status for step in brief.compound_request.steps][:2] == ["cancelled", "pending"]
+    assert brief.blockers
+    assert ledger.deterministic_followthrough_step() is None
