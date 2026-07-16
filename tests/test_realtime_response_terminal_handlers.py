@@ -4280,3 +4280,40 @@ def test_battery_required_deliverable_orchestration_releases_one_voltage_followu
     settlement = api._continuity_ledger.build_turn_settlement(brief)
     assert settlement.settlement_state != "followthrough_remaining"
     assert brief.compound_request is None or brief.compound_request.final_followup_pending is False
+
+
+def test_terminal_selection_evidence_does_not_promote_progress_parent_to_final() -> None:
+    api = _make_api()
+    api._canonical_response_state_store = RealtimeAPI._canonical_response_state_store.__get__(api, RealtimeAPI)
+    api._canonical_response_state = RealtimeAPI._canonical_response_state.__get__(api, RealtimeAPI)
+    api._canonical_response_state_mutate = RealtimeAPI._canonical_response_state_mutate.__get__(api, RealtimeAPI)
+    api._terminal_deliverable_selection_store = RealtimeAPI._terminal_deliverable_selection_store.__get__(api, RealtimeAPI)
+    api._assistant_reply_text_for_response = RealtimeAPI._assistant_reply_text_for_response.__get__(api, RealtimeAPI)
+    api._selected_response_text = RealtimeAPI._selected_response_text.__get__(api, RealtimeAPI)
+    api._selected_response_text_deliverable_class = RealtimeAPI._selected_response_text_deliverable_class.__get__(api, RealtimeAPI)
+    api._classify_deliverable_text = RealtimeAPI._classify_deliverable_text.__get__(api, RealtimeAPI)
+    api._selected_response_has_substantive_evidence = RealtimeAPI._selected_response_has_substantive_evidence.__get__(api, RealtimeAPI)
+    api._promote_terminal_selection_evidence = RealtimeAPI._promote_terminal_selection_evidence.__get__(api, RealtimeAPI)
+    api._terminal_response_text_by_response_id = {
+        "resp_progress": "Let me check the latest battery reading so I can say it accurately."
+    }
+    api._terminal_deliverable_selection_store()["resp_progress"] = {
+        "selected": True,
+        "reason": "normal",
+        "canonical_key": "turn_1::item_parent",
+    }
+    api._canonical_response_state_store()["turn_1::item_parent"] = CanonicalResponseState(
+        created=True,
+        done=True,
+        deliverable_observed=True,
+        deliverable_class="progress",
+        origin="server_auto",
+        response_id="resp_progress",
+        turn_id="turn_1",
+        input_event_key="item_parent",
+    )
+
+    api._promote_terminal_selection_evidence(response_id="resp_progress")
+
+    state = api._canonical_response_state("turn_1::item_parent")
+    assert state.deliverable_class == "progress"

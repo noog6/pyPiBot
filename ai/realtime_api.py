@@ -1566,6 +1566,33 @@ class RealtimeAPI:
             normalized_value = str(value or "").strip()
             if normalized_value:
                 current[key] = normalized_value
+        coverage_asserted_this_update = str(fields.get("read_result_parent_covered") or "").strip().lower() in {"true", "1", "yes"}
+        if coverage_asserted_this_update:
+            parent_canonical_key = str(
+                fields.get("semantic_owner_canonical_key")
+                or fields.get("canonical_key")
+                or ""
+            ).strip()
+            tool_call_id = str(fields.get("tool_call_id") or fields.get("read_result_tool_call_id") or "").strip()
+            tool_name = str(fields.get("tool_name") or fields.get("read_result_tool_name") or "").strip().lower()
+            if parent_canonical_key and tool_call_id:
+                self._record_read_result_parent_coverage(
+                    parent_canonical_key=parent_canonical_key,
+                    parent_response_id=response_key,
+                    tool_call_id=tool_call_id,
+                    tool_name=tool_name,
+                    covered=True,
+                    source=str(fields.get("read_result_coverage_source") or "response_trace_context").strip() or "response_trace_context",
+                )
+            else:
+                logger.info(
+                    "read_result_coverage_record_skipped run_id=%s response_id=%s parent_canonical_key=%s tool_call_id=%s tool_name=%s reason=missing_current_assertion_identity",
+                    self._current_run_id() or "",
+                    response_key,
+                    parent_canonical_key or "none",
+                    tool_call_id or "none",
+                    tool_name or "none",
+                )
         return current
 
     def _turn_latency_state(
@@ -3303,6 +3330,19 @@ class RealtimeAPI:
         deliverable_class = str(getattr(state, "deliverable_class", "") or "").strip().lower()
         return bool(getattr(state, "audio_started", False)) or deliverable_class in {"progress", "final"}
 
+    def _selected_response_text(self, *, response_id: str | None) -> str:
+        normalized_response_id = str(response_id or "").strip()
+        if not normalized_response_id:
+            return ""
+        return str(
+            self._terminal_response_text(normalized_response_id)
+            or self._assistant_reply_text_for_response(normalized_response_id)
+            or ""
+        ).strip()
+
+    def _selected_response_text_deliverable_class(self, *, response_id: str | None) -> str:
+        return self._classify_deliverable_text(self._selected_response_text(response_id=response_id))
+
     def _selected_response_has_terminal_text_evidence(
         self,
         *,
@@ -3313,12 +3353,7 @@ class RealtimeAPI:
         Use this stricter seam where completion requires a spoken/textual report, not
         merely transport-side/audio lifecycle evidence.
         """
-        normalized_response_id = str(response_id or "").strip()
-        if not normalized_response_id:
-            return False
-        if bool(str(self._terminal_response_text(normalized_response_id) or "").strip()):
-            return True
-        return bool(str(self._assistant_reply_text_for_response(normalized_response_id) or "").strip())
+        return bool(self._selected_response_text(response_id=response_id))
 
     def _reconcile_terminal_substantive_response(
         self,
@@ -10484,6 +10519,27 @@ class RealtimeAPI:
             reason,
             prior_state,
         )
+        if normalized_state in {"done", "dropped", "delivered", "failed", "cancelled"}:
+            metadata = self._tool_followup_metadata_store().get(normalized_canonical_key, {})
+            if isinstance(metadata, dict):
+                read_purpose = self._read_result_purpose_for_tool_followup_metadata(metadata=metadata, canonical_key=normalized_canonical_key)
+                parent_turn_id = str(metadata.get("parent_turn_id") or "").strip()
+                parent_input_event_key = str(metadata.get("parent_input_event_key") or "").strip()
+                tool_call_id = str(metadata.get("tool_call_id") or "").strip()
+                parent_key = ""
+                if parent_turn_id and parent_input_event_key:
+                    parent_key = self._canonical_utterance_key(turn_id=parent_turn_id, input_event_key=parent_input_event_key)
+                if read_purpose == "user_requested_result" and parent_key and tool_call_id:
+                    self._cleanup_read_result_parent_coverage(parent_canonical_key=parent_key, tool_call_id=tool_call_id)
+                elif read_purpose == "user_requested_result":
+                    logger.info(
+                        "read_result_coverage_cleanup_skipped run_id=%s canonical_key=%s parent_canonical_key=%s tool_call_id=%s read_purpose=%s reason=missing_exact_identity",
+                        self._current_run_id() or "",
+                        normalized_canonical_key,
+                        parent_key or "none",
+                        tool_call_id or "none",
+                        read_purpose,
+                    )
         if normalized_state in {"done", "dropped"}:
             self._clear_stale_assistant_message_creates_for_tool_followup(
                 canonical_key=normalized_canonical_key,
@@ -11188,6 +11244,10 @@ class RealtimeAPI:
             )
         if tool_result_has_distinct_info:
             metadata["tool_result_has_distinct_info"] = "true"
+        read_purpose = self._read_result_purpose_for_tool_followup_metadata(metadata=metadata)
+        if read_purpose in {"user_requested_result", "compound_intermediate", "model_context_only", "internal_runtime_context"}:
+            metadata["read_purpose"] = read_purpose
+            metadata["tool_followup_read_purpose"] = read_purpose
         canonical_key = self._canonical_utterance_key(
             turn_id=turn_id,
             input_event_key=str(metadata.get("input_event_key") or tool_input_event_key),
@@ -11845,7 +11905,11 @@ class RealtimeAPI:
     ) -> ToolFollowupArbitrationArtifact:
         suppressible = str(response_metadata.get("tool_followup_suppress_if_parent_covered", "")).strip().lower() in {"true", "1", "yes"}
         tool_name = str(response_metadata.get("tool_name") or "").strip().lower()
+        read_purpose = self._read_result_purpose_for_tool_followup_metadata(metadata=response_metadata)
         is_low_risk_reversible_gesture_tool = self._is_low_risk_reversible_gesture_tool(tool_name=tool_name)
+        parent_coverage_can_suppress = is_low_risk_reversible_gesture_tool or read_purpose == "user_requested_result"
+        if read_purpose == "user_requested_result":
+            suppressible = True
         has_distinct_info = str(response_metadata.get("tool_result_has_distinct_info", "")).strip().lower() in {"true", "1", "yes"}
         followthrough_turn_id = str(
             response_metadata.get("parent_turn_id")
@@ -11901,6 +11965,36 @@ class RealtimeAPI:
                 str(terminal_selected).lower(),
                 terminal_reason,
             )
+            if read_purpose == "user_requested_result":
+                coverage_state, read_coverage_source = self._read_result_parent_coverage_state(
+                    parent_canonical_key=state_entry[0],
+                    parent_response_id=str(getattr(parent_state, "response_id", "") or "").strip(),
+                    response_metadata=response_metadata,
+                )
+                logger.info(
+                    "read_result_parent_coverage_evaluated run_id=%s turn_id=%s parent_response_id=%s parent_canonical_key=%s tool_call_id=%s tool_name=%s read_purpose=%s parent_class=%s coverage_state=%s coverage_source=%s selected=%s reason=%s",
+                    self._current_run_id() or "",
+                    followthrough_turn_id or str(response_metadata.get("turn_id") or "").strip() or "turn-unknown",
+                    str(getattr(parent_state, "response_id", "") or "").strip() or "none",
+                    state_entry[0],
+                    str(response_metadata.get("tool_call_id") or "").strip() or "unknown",
+                    str(response_metadata.get("tool_name") or "").strip().lower() or "unknown",
+                    read_purpose,
+                    deliverable_class or "unknown",
+                    coverage_state,
+                    read_coverage_source,
+                    str(terminal_selected).lower(),
+                    terminal_reason or "unknown",
+                )
+                if coverage_state == "result_covered_true":
+                    parent_covered = True
+                    coverage_source = read_coverage_source
+                    deliverable_class = "final"
+                else:
+                    parent_covered = False
+                    coverage_source = read_coverage_source if coverage_state == "result_covered_false" else "none"
+                    if coverage_state == "coverage_unknown":
+                        classification_pending = False
             if parent_covered:
                 self._log_info_once(
                     family="parent_deliverable_verdict",
@@ -11945,6 +12039,7 @@ class RealtimeAPI:
             has_distinct_info=has_distinct_info,
             followthrough_chain_remaining=followthrough_chain_remaining,
             is_low_risk_reversible_gesture_tool=is_low_risk_reversible_gesture_tool,
+            parent_coverage_can_suppress=parent_coverage_can_suppress,
             parent_resolved=state_entry is not None,
             parent_origin=parent_origin,
             parent_done=parent_done,
@@ -12152,12 +12247,182 @@ class RealtimeAPI:
         status_only = str(metadata.get("tool_followup_status_only") or "").strip().lower() in {"true", "1", "yes"}
         if not tool_name and not status_only:
             return
+        purpose = self._read_result_purpose_for_tool_followup_metadata(
+            metadata=metadata,
+            canonical_key=normalized_canonical_key,
+        )
         self._tool_followup_metadata_store()[normalized_canonical_key] = {
             "tool_name": tool_name,
+            "tool_call_id": str(metadata.get("tool_call_id") or "").strip(),
             "tool_followup_status_only": "true" if status_only else "false",
             "parent_turn_id": str(metadata.get("parent_turn_id") or "").strip(),
             "parent_input_event_key": str(metadata.get("parent_input_event_key") or "").strip(),
+            "followthrough_step_output_policy": str(metadata.get("followthrough_step_output_policy") or "").strip().lower(),
+            "tool_followup_step_output_policy": str(metadata.get("tool_followup_step_output_policy") or "").strip().lower(),
+            "tool_followup_silent_audio": str(metadata.get("tool_followup_silent_audio") or "").strip().lower(),
+            "tool_followup_silent_user_facing_output": str(metadata.get("tool_followup_silent_user_facing_output") or "").strip().lower(),
+            "read_purpose": purpose,
         }
+
+
+    def _read_result_coverage_store(self) -> dict[tuple[str, str], dict[str, str]]:
+        store = getattr(self, "_read_result_coverage_by_parent_and_tool", None)
+        if not isinstance(store, dict):
+            store = {}
+            self._read_result_coverage_by_parent_and_tool = store
+        return store
+
+    def _record_read_result_parent_coverage(
+        self,
+        *,
+        parent_canonical_key: str,
+        tool_call_id: str,
+        tool_name: str,
+        covered: bool,
+        source: str,
+        parent_response_id: str | None = None,
+    ) -> None:
+        normalized_parent_key = str(parent_canonical_key or "").strip()
+        normalized_tool_call_id = str(tool_call_id or "").strip()
+        if not normalized_parent_key or not normalized_tool_call_id:
+            return
+        store = self._read_result_coverage_store()
+        store[(normalized_parent_key, normalized_tool_call_id)] = {
+            "covered": "true" if covered else "false",
+            "source": str(source or "explicit_read_result_coverage").strip() or "explicit_read_result_coverage",
+            "tool_name": str(tool_name or "").strip().lower(),
+            "parent_response_id": str(parent_response_id or "").strip(),
+        }
+        while len(store) > 512:
+            store.pop(next(iter(store)), None)
+
+    def _cleanup_read_result_parent_coverage(self, *, parent_canonical_key: str | None = None, tool_call_id: str | None = None) -> None:
+        normalized_parent_key = str(parent_canonical_key or "").strip()
+        normalized_tool_call_id = str(tool_call_id or "").strip()
+        if not normalized_parent_key or not normalized_tool_call_id:
+            logger.info(
+                "read_result_coverage_cleanup_skipped run_id=%s parent_canonical_key=%s tool_call_id=%s reason=missing_exact_identity",
+                self._current_run_id() or "",
+                normalized_parent_key or "none",
+                normalized_tool_call_id or "none",
+            )
+            return
+        self._read_result_coverage_store().pop((normalized_parent_key, normalized_tool_call_id), None)
+
+    def _clear_all_read_result_parent_coverage(self, *, reason: str) -> None:
+        self._read_result_coverage_store().clear()
+        logger.info(
+            "read_result_coverage_cleared run_id=%s reason=%s",
+            self._current_run_id() or "",
+            str(reason or "unspecified").strip() or "unspecified",
+        )
+
+    def _read_result_parent_coverage_state(
+        self,
+        *,
+        parent_canonical_key: str | None,
+        parent_response_id: str | None,
+        response_metadata: dict[str, Any],
+    ) -> tuple[str, str]:
+        normalized_parent_key = str(parent_canonical_key or "").strip()
+        tool_call_id = str(response_metadata.get("tool_call_id") or "").strip()
+        if not normalized_parent_key or not tool_call_id:
+            return "coverage_unknown", "missing_identity"
+        record = self._read_result_coverage_store().get((normalized_parent_key, tool_call_id))
+        if not isinstance(record, dict):
+            return "coverage_unknown", "no_correlated_read_result_coverage"
+        expected_tool_name = str(response_metadata.get("tool_name") or "").strip().lower()
+        record_tool_name = str(record.get("tool_name") or "").strip().lower()
+        if expected_tool_name and record_tool_name and expected_tool_name != record_tool_name:
+            return "result_covered_false", "tool_name_mismatch"
+        record_response_id = str(record.get("parent_response_id") or "").strip()
+        normalized_response_id = str(parent_response_id or "").strip()
+        if record_response_id and normalized_response_id and record_response_id != normalized_response_id:
+            return "result_covered_false", "parent_response_mismatch"
+        covered = str(record.get("covered") or "").strip().lower() in {"true", "1", "yes"}
+        return ("result_covered_true" if covered else "result_covered_false"), str(record.get("source") or "explicit_read_result_coverage").strip() or "explicit_read_result_coverage"
+
+    def _read_result_purpose_for_tool_followup_metadata(self, *, metadata: dict[str, Any], canonical_key: str | None = None) -> str:
+        explicit = str(metadata.get("read_purpose") or metadata.get("tool_followup_read_purpose") or "").strip().lower()
+        if explicit:
+            return explicit
+        tool_name = str(metadata.get("tool_name") or "").strip().lower()
+        if not self._is_read_only_helper_tool_for_precedence(tool_name=tool_name):
+            return "not_read_helper"
+        step_policy = str(
+            metadata.get("followthrough_step_output_policy")
+            or metadata.get("tool_followup_step_output_policy")
+            or ""
+        ).strip().lower()
+        if step_policy in {"model_context_injection_only", "silent_intermediate", "execution_state_update"}:
+            return "compound_intermediate" if step_policy == "silent_intermediate" else "model_context_only"
+        status_only = str(metadata.get("tool_followup_status_only") or "").strip().lower() in {"true", "1", "yes"}
+        silent = (
+            str(metadata.get("tool_followup_silent_audio") or "").strip().lower() in {"true", "1", "yes"}
+            or str(metadata.get("tool_followup_silent_user_facing_output") or "").strip().lower() in {"true", "1", "yes"}
+        )
+        if status_only or silent:
+            return "compound_intermediate"
+        parent_turn_id = str(metadata.get("parent_turn_id") or metadata.get("turn_id") or "").strip()
+        if parent_turn_id and self._turn_followthrough_chain_remaining(turn_id=parent_turn_id, include_report_followup=False):
+            return "compound_intermediate"
+        if step_policy == "required_deliverable":
+            return "user_requested_result"
+        if str(metadata.get("tool_followup") or "").strip().lower() in {"true", "1", "yes"}:
+            return "user_requested_result"
+        return "internal_runtime_context"
+
+    def _pending_user_requested_read_followup_coverage_for_parent(
+        self,
+        *,
+        turn_id: str,
+        parent_response_id: str | None,
+    ) -> tuple[bool, str, str, str, str, str]:
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return False, "coverage_unknown", "missing_turn", "", "", ""
+        followup_states = getattr(self, "_tool_followup_state_by_canonical_key", None)
+        if not isinstance(followup_states, dict):
+            return False, "coverage_unknown", "no_followup_state", "", "", ""
+        pending_states = {"scheduled", "blocked_active_response", "scheduled_release", "released_on_response_done", "creating", "created"}
+        metadata_store = self._tool_followup_metadata_store()
+        turn_prefix = f":{normalized_turn_id}:"
+        saw_pending_read = False
+        first_covered: tuple[str, str, str, str] | None = None
+        for canonical_key, raw_state in followup_states.items():
+            normalized_canonical_key = str(canonical_key or "").strip()
+            if ":tool:" not in normalized_canonical_key or turn_prefix not in normalized_canonical_key:
+                continue
+            state = str(raw_state or "").strip().lower() or "new"
+            if state not in pending_states:
+                continue
+            metadata = metadata_store.get(normalized_canonical_key)
+            if not isinstance(metadata, dict):
+                continue
+            purpose = self._read_result_purpose_for_tool_followup_metadata(metadata=metadata, canonical_key=normalized_canonical_key)
+            if purpose != "user_requested_result":
+                continue
+            saw_pending_read = True
+            parent_turn_id = str(metadata.get("parent_turn_id") or "").strip()
+            parent_input_event_key = str(metadata.get("parent_input_event_key") or "").strip()
+            parent_canonical_key = self._canonical_utterance_key(turn_id=parent_turn_id or normalized_turn_id, input_event_key=parent_input_event_key)
+            coverage_state, coverage_source = self._read_result_parent_coverage_state(
+                parent_canonical_key=parent_canonical_key,
+                parent_response_id=parent_response_id,
+                response_metadata=metadata,
+            )
+            tool_call_id = str(metadata.get("tool_call_id") or "").strip()
+            tool_name = str(metadata.get("tool_name") or "").strip().lower()
+            if coverage_state != "result_covered_true":
+                return True, coverage_state, coverage_source, tool_call_id, tool_name, purpose
+            if first_covered is None:
+                first_covered = (coverage_state, coverage_source, tool_call_id, tool_name)
+        if not saw_pending_read:
+            return False, "coverage_unknown", "no_user_requested_read_followup", "", "", ""
+        if first_covered is None:
+            return True, "coverage_unknown", "no_correlated_read_result_coverage", "", "", "user_requested_result"
+        coverage_state, coverage_source, tool_call_id, tool_name = first_covered
+        return True, coverage_state, coverage_source, tool_call_id, tool_name, "user_requested_result"
 
     def _tool_followup_is_status_only_gesture(self, *, canonical_key: str) -> bool:
         normalized_canonical_key = str(canonical_key or "").strip()
@@ -12343,14 +12608,57 @@ class RealtimeAPI:
             and turn_has_pending_tool_followup
             and self._turn_pending_tool_followups_are_read_only_helpers(turn_id=turn_id)
         ):
-            turn_has_pending_tool_followup = False
-            logger.info(
-                "terminal_selection_read_only_helper_precedence_relaxed run_id=%s turn_id=%s origin=%s response_id=%s reason=parent_terminal_text_evidence",
-                self._current_run_id() or "",
-                turn_id,
-                normalized_origin,
-                str(response_id or "").strip() or "none",
+            parent_text_class = self._selected_response_text_deliverable_class(response_id=response_id)
+            (
+                read_pending,
+                coverage_state,
+                coverage_source,
+                read_tool_call_id,
+                read_tool_name,
+                read_purpose,
+            ) = self._pending_user_requested_read_followup_coverage_for_parent(
+                turn_id=turn_id,
+                parent_response_id=response_id,
             )
+            if read_pending and coverage_state != "result_covered_true":
+                logger.info(
+                    "read_result_parent_terminal_rejected run_id=%s turn_id=%s parent_response_id=%s parent_canonical_key=%s tool_call_id=%s tool_name=%s read_purpose=%s parent_class=%s coverage_state=%s coverage_source=%s selected=false reason=open_read_result_obligation_uncovered_parent",
+                    self._current_run_id() or "",
+                    turn_id,
+                    str(response_id or "").strip() or "none",
+                    done_canonical_key or "none",
+                    read_tool_call_id or "unknown",
+                    read_tool_name or "unknown",
+                    read_purpose or "user_requested_result",
+                    parent_text_class or "unknown",
+                    coverage_state,
+                    coverage_source,
+                )
+            elif parent_text_class == "progress":
+                logger.info(
+                    "read_result_parent_terminal_rejected run_id=%s turn_id=%s parent_response_id=%s parent_canonical_key=%s tool_call_id=%s tool_name=%s read_purpose=%s parent_class=%s coverage_state=%s coverage_source=%s selected=false reason=open_read_result_obligation_progress_parent",
+                    self._current_run_id() or "",
+                    turn_id,
+                    str(response_id or "").strip() or "none",
+                    done_canonical_key or "none",
+                    read_tool_call_id or "unknown",
+                    read_tool_name or "unknown",
+                    read_purpose or "unknown",
+                    parent_text_class,
+                    coverage_state,
+                    coverage_source,
+                )
+            else:
+                turn_has_pending_tool_followup = False
+                logger.info(
+                    "terminal_selection_read_only_helper_precedence_relaxed run_id=%s turn_id=%s origin=%s response_id=%s reason=parent_terminal_text_evidence coverage_state=%s coverage_source=%s",
+                    self._current_run_id() or "",
+                    turn_id,
+                    normalized_origin,
+                    str(response_id or "").strip() or "none",
+                    coverage_state,
+                    coverage_source,
+                )
         followthrough_chain_remaining = self._response_done_followthrough_chain_remaining(
             turn_id=turn_id,
             origin=normalized_origin,
@@ -13233,8 +13541,7 @@ class RealtimeAPI:
         selection_reason = str(selection_entry.get("reason") or "unknown").strip().lower() or "unknown"
         if selection_reason != "normal":
             return
-        if not self._selected_response_has_substantive_evidence(response_id=normalized_response_id):
-            return
+        selected_text_class = self._selected_response_text_deliverable_class(response_id=normalized_response_id)
         semantic_owner_key = (
             str(selection_entry.get("semantic_owner_canonical_key") or "").strip()
             or str(selection_entry.get("canonical_key") or "").strip()
@@ -13244,6 +13551,42 @@ class RealtimeAPI:
         semantic_owner_state = self._canonical_response_state(semantic_owner_key)
         semantic_owner_turn_id = str(getattr(semantic_owner_state, "turn_id", "") or "").strip()
         semantic_owner_input_event_key = str(getattr(semantic_owner_state, "input_event_key", "") or "").strip()
+        if selected_text_class == "progress":
+            logger.info(
+                "read_result_parent_coverage_evaluated run_id=%s parent_response_id=%s parent_class=%s coverage_state=result_covered_false coverage_source=progress_only_parent_text selected=true reason=progress_only_parent_text",
+                self._current_run_id() or "",
+                normalized_response_id,
+                selected_text_class,
+            )
+            return
+        (
+            read_pending,
+            coverage_state,
+            coverage_source,
+            read_tool_call_id,
+            read_tool_name,
+            read_purpose,
+        ) = self._pending_user_requested_read_followup_coverage_for_parent(
+            turn_id=semantic_owner_turn_id,
+            parent_response_id=normalized_response_id,
+        )
+        if read_pending and coverage_state != "result_covered_true":
+            logger.info(
+                "read_result_parent_coverage_evaluated run_id=%s turn_id=%s parent_response_id=%s parent_canonical_key=%s tool_call_id=%s tool_name=%s read_purpose=%s parent_class=%s coverage_state=%s coverage_source=%s selected=true reason=canonical_promotion_requires_correlated_result_coverage",
+                self._current_run_id() or "",
+                semantic_owner_turn_id or "turn-unknown",
+                normalized_response_id,
+                semantic_owner_key,
+                read_tool_call_id or "unknown",
+                read_tool_name or "unknown",
+                read_purpose or "user_requested_result",
+                selected_text_class or "unknown",
+                coverage_state,
+                coverage_source,
+            )
+            return
+        if not self._selected_response_has_substantive_evidence(response_id=normalized_response_id):
+            return
         self._canonical_response_state_mutate(
             canonical_key=semantic_owner_key,
             turn_id=semantic_owner_turn_id,

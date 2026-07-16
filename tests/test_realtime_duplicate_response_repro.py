@@ -2242,6 +2242,7 @@ def test_response_done_coherence_allows_execution_or_queued_canonical_after_tool
             setattr(record, "response_id", parent_response_id),
         ),
     )
+    api._record_response_trace_context = RealtimeAPI._record_response_trace_context.__get__(api, RealtimeAPI)
     api._record_response_trace_context(
         parent_response_id,
         turn_id=turn_id,
@@ -2382,6 +2383,7 @@ def test_parent_without_terminal_text_still_releases_child_followup_after_respon
             setattr(record, "response_id", parent_response_id),
         ),
     )
+    api._record_response_trace_context = RealtimeAPI._record_response_trace_context.__get__(api, RealtimeAPI)
     api._record_response_trace_context(
         parent_response_id,
         turn_id=turn_id,
@@ -4661,7 +4663,7 @@ def test_tool_followup_create_seam_suppresses_parent_covered_even_without_blocke
 
 
 
-def test_tool_followup_release_suppressed_when_parent_has_progress_deliverable_class() -> None:
+def test_tool_followup_release_not_suppressed_when_parent_has_progress_deliverable_class() -> None:
     api = _make_api_stub()
     _wire_runtime(api)
 
@@ -4697,8 +4699,8 @@ def test_tool_followup_release_suppressed_when_parent_has_progress_deliverable_c
         blocked_by_response_id=parent_response_id,
     )
 
-    assert should_drop is True
-    assert reason == "parent_covered_tool_result"
+    assert should_drop is False
+    assert reason in {"parent_not_coverage_qualified", "parent_terminal_selection_not_coverage_qualified"}
 
 def test_tool_followup_release_not_suppressed_when_parent_only_has_unclassified_deliverable_observed() -> None:
     api = _make_api_stub()
@@ -11164,3 +11166,312 @@ def test_strip_tool_followup_metadata_non_required_uses_parent_key() -> None:
     metadata = ((event.get("response") or {}).get("metadata") or {})
     assert metadata.get("input_event_key") == parent_input_event_key
     assert metadata.get("parent_input_event_key") == parent_input_event_key
+
+
+def _setup_user_requested_read_parent(api: RealtimeAPI, *, parent_text: str, tool_call_id: str = "call_voltage_cov") -> tuple[str, dict[str, object], str, str, str]:
+    _wire_runtime(api)
+    turn_id = "turn_read_cov"
+    parent_input_event_key = "item_parent_read_cov"
+    parent_response_id = "resp-parent-read-cov"
+    api._current_turn_id_or_unknown = lambda: turn_id
+    api._active_input_event_key_by_turn_id[turn_id] = parent_input_event_key
+    parent_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "server_auto"),
+            setattr(record, "response_id", parent_response_id),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "final"),
+            setattr(record, "done", True),
+        ),
+    )
+    api._record_terminal_response_text(response_id=parent_response_id, text=parent_text)
+    response_create_event, canonical_key = api._build_tool_followup_response_create_event(
+        call_id=tool_call_id,
+        response_create_event={"type": "response.create"},
+        tool_name="read_battery_voltage",
+    )
+    metadata = ((response_create_event.get("response") or {}).get("metadata") or {})
+    metadata["blocked_by_response_id"] = parent_response_id
+    metadata["parent_turn_id"] = turn_id
+    metadata["parent_input_event_key"] = parent_input_event_key
+    metadata["read_purpose"] = "user_requested_result"
+    metadata["tool_followup_read_purpose"] = "user_requested_result"
+    api._record_tool_followup_metadata(canonical_key=canonical_key, metadata=metadata)
+    api._set_tool_followup_state(canonical_key=canonical_key, state="blocked_active_response", reason="test_pending_read_result")
+    return parent_key, metadata, parent_response_id, canonical_key, turn_id
+
+
+def test_user_requested_read_non_progress_parent_without_correlated_result_preserves_followup() -> None:
+    api = _make_api_stub()
+    _parent_key, metadata, parent_response_id, _canonical_key, _turn_id = _setup_user_requested_read_parent(
+        api,
+        parent_text="The battery sensor is working normally.",
+    )
+
+    should_drop, _entry, reason = api._should_suppress_queued_tool_followup_release(
+        response_metadata=metadata,
+        blocked_by_response_id=parent_response_id,
+    )
+
+    assert should_drop is False
+    assert reason == "parent_not_coverage_qualified"
+
+
+def test_user_requested_read_unknown_parent_coverage_preserves_followup() -> None:
+    api = _make_api_stub()
+    _parent_key, metadata, parent_response_id, _canonical_key, _turn_id = _setup_user_requested_read_parent(
+        api,
+        parent_text="All systems are nominal.",
+    )
+
+    coverage_state, coverage_source = api._read_result_parent_coverage_state(
+        parent_canonical_key=_parent_key,
+        parent_response_id=parent_response_id,
+        response_metadata=metadata,
+    )
+    should_drop, _entry, reason = api._should_suppress_queued_tool_followup_release(
+        response_metadata=metadata,
+        blocked_by_response_id=parent_response_id,
+    )
+
+    assert coverage_state == "coverage_unknown"
+    assert coverage_source == "no_correlated_read_result_coverage"
+    assert should_drop is False
+    assert reason == "parent_not_coverage_qualified"
+
+
+def test_user_requested_read_parent_requires_positive_correlated_coverage_to_suppress_followup() -> None:
+    api = _make_api_stub()
+    parent_key, metadata, parent_response_id, _canonical_key, _turn_id = _setup_user_requested_read_parent(
+        api,
+        parent_text="My current battery voltage is 8.11 volts.",
+    )
+    api._record_read_result_parent_coverage(
+        parent_canonical_key=parent_key,
+        parent_response_id=parent_response_id,
+        tool_call_id="call_voltage_cov",
+        tool_name="read_battery_voltage",
+        covered=True,
+        source="test_correlated_tool_result_coverage",
+    )
+
+    should_drop, _entry, reason = api._should_suppress_queued_tool_followup_release(
+        response_metadata=metadata,
+        blocked_by_response_id=parent_response_id,
+    )
+
+    assert should_drop is True
+    assert reason == "parent_covered_tool_result"
+
+
+def test_user_requested_read_unrelated_number_does_not_satisfy_voltage_obligation() -> None:
+    api = _make_api_stub()
+    _parent_key, metadata, parent_response_id, _canonical_key, _turn_id = _setup_user_requested_read_parent(
+        api,
+        parent_text="I have two tools active and the system is ready.",
+    )
+
+    should_drop, _entry, reason = api._should_suppress_queued_tool_followup_release(
+        response_metadata=metadata,
+        blocked_by_response_id=parent_response_id,
+    )
+
+    assert should_drop is False
+    assert reason == "parent_not_coverage_qualified"
+
+
+def test_user_requested_read_gate_aggregates_multiple_pending_reads() -> None:
+    api = _make_api_stub()
+    parent_key, metadata, parent_response_id, _canonical_key, turn_id = _setup_user_requested_read_parent(
+        api,
+        parent_text="My current battery voltage is 8.11 volts.",
+        tool_call_id="call_voltage_multi",
+    )
+    api._record_read_result_parent_coverage(
+        parent_canonical_key=parent_key,
+        parent_response_id=parent_response_id,
+        tool_call_id="call_voltage_multi",
+        tool_name="read_battery_voltage",
+        covered=True,
+        source="test_correlated_tool_result_coverage",
+    )
+    wifi_event, wifi_key = api._build_tool_followup_response_create_event(
+        call_id="call_wifi_multi",
+        response_create_event={"type": "response.create"},
+        tool_name="read_wifi_status",
+    )
+    wifi_metadata = ((wifi_event.get("response") or {}).get("metadata") or {})
+    wifi_metadata["blocked_by_response_id"] = parent_response_id
+    wifi_metadata["parent_turn_id"] = turn_id
+    wifi_metadata["parent_input_event_key"] = "item_parent_read_cov"
+    wifi_metadata["read_purpose"] = "user_requested_result"
+    wifi_metadata["tool_followup_read_purpose"] = "user_requested_result"
+    api._record_tool_followup_metadata(canonical_key=wifi_key, metadata=wifi_metadata)
+    api._set_tool_followup_state(canonical_key=wifi_key, state="blocked_active_response", reason="test_pending_wifi")
+
+    read_pending, coverage_state, coverage_source, tool_call_id, tool_name, purpose = api._pending_user_requested_read_followup_coverage_for_parent(
+        turn_id=turn_id,
+        parent_response_id=parent_response_id,
+    )
+
+    assert read_pending is True
+    assert coverage_state == "coverage_unknown"
+    assert coverage_source == "no_correlated_read_result_coverage"
+    assert tool_call_id == "call_wifi_multi"
+    assert tool_name == "read_wifi_status"
+    assert purpose == "user_requested_result"
+
+
+def test_response_trace_context_records_correlated_read_result_coverage() -> None:
+    api = _make_api_stub()
+    parent_key, metadata, parent_response_id, _canonical_key, _turn_id = _setup_user_requested_read_parent(
+        api,
+        parent_text="My current battery voltage is 8.11 volts.",
+    )
+
+    api._record_response_trace_context = RealtimeAPI._record_response_trace_context.__get__(api, RealtimeAPI)
+    api._record_response_trace_context(
+        parent_response_id,
+        canonical_key=parent_key,
+        tool_call_id="call_voltage_cov",
+        tool_name="read_battery_voltage",
+        read_result_parent_covered="true",
+        read_result_coverage_source="test_trace_context",
+    )
+    coverage_state, coverage_source = api._read_result_parent_coverage_state(
+        parent_canonical_key=parent_key,
+        parent_response_id=parent_response_id,
+        response_metadata=metadata,
+    )
+
+    assert coverage_state == "result_covered_true"
+    assert coverage_source == "test_trace_context"
+
+
+def test_read_result_trace_coverage_does_not_bleed_to_later_tool_update() -> None:
+    api = _make_api_stub()
+    parent_key, metadata, parent_response_id, _canonical_key, _turn_id = _setup_user_requested_read_parent(
+        api,
+        parent_text="My current battery voltage is 8.11 volts.",
+        tool_call_id="call_voltage_sticky",
+    )
+    api._record_response_trace_context = RealtimeAPI._record_response_trace_context.__get__(api, RealtimeAPI)
+    api._record_response_trace_context(
+        parent_response_id,
+        canonical_key=parent_key,
+        tool_call_id="call_voltage_sticky",
+        tool_name="read_battery_voltage",
+        read_result_parent_covered="true",
+        read_result_coverage_source="test_voltage_assertion",
+    )
+    api._record_response_trace_context(
+        parent_response_id,
+        tool_call_id="call_wifi_sticky",
+        tool_name="read_wifi_status",
+    )
+    wifi_metadata = dict(metadata)
+    wifi_metadata["tool_call_id"] = "call_wifi_sticky"
+    wifi_metadata["tool_name"] = "read_wifi_status"
+
+    voltage_state, _ = api._read_result_parent_coverage_state(
+        parent_canonical_key=parent_key,
+        parent_response_id=parent_response_id,
+        response_metadata=metadata,
+    )
+    wifi_state, wifi_source = api._read_result_parent_coverage_state(
+        parent_canonical_key=parent_key,
+        parent_response_id=parent_response_id,
+        response_metadata=wifi_metadata,
+    )
+
+    assert voltage_state == "result_covered_true"
+    assert wifi_state == "coverage_unknown"
+    assert wifi_source == "no_correlated_read_result_coverage"
+
+
+def test_read_result_trace_explicit_second_coverage_records_second_tool() -> None:
+    api = _make_api_stub()
+    parent_key, metadata, parent_response_id, _canonical_key, _turn_id = _setup_user_requested_read_parent(
+        api,
+        parent_text="My current battery voltage is 8.11 volts and Wi-Fi is connected.",
+        tool_call_id="call_voltage_sticky2",
+    )
+    api._record_response_trace_context = RealtimeAPI._record_response_trace_context.__get__(api, RealtimeAPI)
+    api._record_response_trace_context(parent_response_id, canonical_key=parent_key, tool_call_id="call_voltage_sticky2", tool_name="read_battery_voltage", read_result_parent_covered="true")
+    api._record_response_trace_context(parent_response_id, canonical_key=parent_key, tool_call_id="call_wifi_sticky2", tool_name="read_wifi_status", read_result_parent_covered="true")
+    wifi_metadata = dict(metadata)
+    wifi_metadata["tool_call_id"] = "call_wifi_sticky2"
+    wifi_metadata["tool_name"] = "read_wifi_status"
+
+    wifi_state, _ = api._read_result_parent_coverage_state(parent_canonical_key=parent_key, parent_response_id=parent_response_id, response_metadata=wifi_metadata)
+
+    assert wifi_state == "result_covered_true"
+
+
+def test_read_result_trace_marker_without_identity_does_not_write_coverage() -> None:
+    api = _make_api_stub()
+    parent_key, metadata, parent_response_id, _canonical_key, _turn_id = _setup_user_requested_read_parent(
+        api,
+        parent_text="My current battery voltage is 8.11 volts.",
+    )
+    api._record_response_trace_context = RealtimeAPI._record_response_trace_context.__get__(api, RealtimeAPI)
+    api._record_response_trace_context(parent_response_id, read_result_parent_covered="true")
+
+    coverage_state, coverage_source = api._read_result_parent_coverage_state(parent_canonical_key=parent_key, parent_response_id=parent_response_id, response_metadata=metadata)
+
+    assert coverage_state == "coverage_unknown"
+    assert coverage_source == "no_correlated_read_result_coverage"
+
+
+def test_read_result_cleanup_missing_metadata_does_not_clear_all_records() -> None:
+    api = _make_api_stub()
+    parent_key, metadata, parent_response_id, _canonical_key, _turn_id = _setup_user_requested_read_parent(api, parent_text="Voltage and Wi-Fi covered.")
+    api._record_read_result_parent_coverage(parent_canonical_key=parent_key, parent_response_id=parent_response_id, tool_call_id="call_voltage_cov", tool_name="read_battery_voltage", covered=True, source="test")
+    api._record_read_result_parent_coverage(parent_canonical_key=parent_key, parent_response_id=parent_response_id, tool_call_id="call_wifi_cov", tool_name="read_wifi_status", covered=True, source="test")
+
+    api._set_tool_followup_state(canonical_key="run:turn:tool:missing", state="dropped", reason="missing_metadata")
+
+    assert len(api._read_result_coverage_store()) == 2
+    assert api._read_result_parent_coverage_state(parent_canonical_key=parent_key, parent_response_id=parent_response_id, response_metadata=metadata)[0] == "result_covered_true"
+
+
+def test_read_result_cleanup_exact_tuple_only() -> None:
+    api = _make_api_stub()
+    parent_key, metadata, parent_response_id, canonical_key, _turn_id = _setup_user_requested_read_parent(api, parent_text="Voltage and Wi-Fi covered.")
+    api._record_read_result_parent_coverage(parent_canonical_key=parent_key, parent_response_id=parent_response_id, tool_call_id="call_voltage_cov", tool_name="read_battery_voltage", covered=True, source="test")
+    api._record_read_result_parent_coverage(parent_canonical_key=parent_key, parent_response_id=parent_response_id, tool_call_id="call_wifi_cov", tool_name="read_wifi_status", covered=True, source="test")
+
+    api._set_tool_followup_state(canonical_key=canonical_key, state="delivered", reason="voltage_delivered")
+    wifi_metadata = dict(metadata)
+    wifi_metadata["tool_call_id"] = "call_wifi_cov"
+    wifi_metadata["tool_name"] = "read_wifi_status"
+
+    assert api._read_result_parent_coverage_state(parent_canonical_key=parent_key, parent_response_id=parent_response_id, response_metadata=metadata)[0] == "coverage_unknown"
+    assert api._read_result_parent_coverage_state(parent_canonical_key=parent_key, parent_response_id=parent_response_id, response_metadata=wifi_metadata)[0] == "result_covered_true"
+
+
+def test_read_result_cleanup_non_user_read_does_not_remove_user_coverage() -> None:
+    api = _make_api_stub()
+    parent_key, metadata, parent_response_id, _canonical_key, turn_id = _setup_user_requested_read_parent(api, parent_text="Voltage covered.")
+    api._record_read_result_parent_coverage(parent_canonical_key=parent_key, parent_response_id=parent_response_id, tool_call_id="call_voltage_cov", tool_name="read_battery_voltage", covered=True, source="test")
+    internal_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key="tool:internal_read")
+    api._record_tool_followup_metadata(canonical_key=internal_key, metadata={"tool_name": "read_runtime_diagnostics", "tool_call_id": "call_internal", "parent_turn_id": turn_id, "parent_input_event_key": "item_parent_read_cov", "read_purpose": "compound_intermediate"})
+
+    api._set_tool_followup_state(canonical_key=internal_key, state="done", reason="internal_done")
+
+    assert api._read_result_parent_coverage_state(parent_canonical_key=parent_key, parent_response_id=parent_response_id, response_metadata=metadata)[0] == "result_covered_true"
+
+
+def test_read_result_coverage_store_capacity_prunes_oldest() -> None:
+    api = _make_api_stub()
+    for index in range(520):
+        api._record_read_result_parent_coverage(parent_canonical_key=f"parent-{index}", parent_response_id=f"resp-{index}", tool_call_id=f"call-{index}", tool_name="read_sensor", covered=True, source="capacity_test")
+
+    store = api._read_result_coverage_store()
+    assert len(store) == 512
+    assert ("parent-0", "call-0") not in store
+    assert ("parent-519", "call-519") in store
