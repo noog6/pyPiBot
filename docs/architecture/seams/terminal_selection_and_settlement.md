@@ -73,3 +73,15 @@ Decide whether a terminal response event is the turn deliverable and apply settl
 2. `ai/realtime/response_terminal_handlers.py` around `selection_decision` and continuity handoff.
 3. `ai/realtime_api.py` selection store writer and final-deliverable checks.
 4. Logs: `terminal_deliverable_selection_applied`, `semantic_answer_owner_resolved`, `continuity_response_done_handoff`.
+
+## L) Progress parents with open read-result obligations
+
+Owning layer: Layer 3 terminal selection and canonical lifecycle.
+
+When a user-requested read-result obligation is open, terminal selection cannot let a progress-only parent response consume the terminal deliverable slot. A response classified as `progress` with `covered=false` remains a progress acknowledgement across `response.done`, playback completion, queue drain, and canonical projection unless new substantive response content is attached. The read-only-helper precedence relaxation is only valid when the parent text is not progress-only and there is genuine result coverage.
+
+Canonical projection and semantic coverage must not share a field in a way that silently upgrades progress to final. Any classification mutation requires new evidence and structured tracing with old/new class and coverage values. The defensive rejection log for this seam is `read_result_parent_terminal_rejected reason=open_read_result_obligation_progress_parent`.
+
+### Positive read-result coverage gate
+
+Terminal selection separates three facts: the response was selected, the response has user-facing text, and the response covers the requested read result. For an open user-requested read follow-up, selected text may relax pending read-helper precedence only when correlated result coverage is `result_covered_true`. `coverage_unknown` and `result_covered_false` both preserve follow-up precedence. This prevents substantive but incomplete parents such as “The battery sensor is working normally” from answering “What is the voltage?”.

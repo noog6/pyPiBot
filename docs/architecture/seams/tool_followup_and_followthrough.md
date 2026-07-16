@@ -114,3 +114,21 @@ Correlation cleanup: runtime removes structured correlation after successful com
 Scope boundary: only gestures structurally owned by the active ordered compound request gate this chain. Runtime-only gestures such as thinking cues, speaking posture, attention holds, idle presence, startup, and shutdown gestures remain independent unless they are explicitly dispatched as the active compound step.
 
 Primary logs: `compound_async_step_registered`, `compound_async_step_motion_event_scheduled`, `compound_async_step_completion_observed`, `compound_async_step_advanced`, `compound_async_step_completion_ignored`, `compound_async_step_correlation_cleaned`, and `compound_async_step_failed`.
+
+## N) User-initiated read-result delivery
+
+Owning layer: Layer 2 continuity/obligation state + Layer 3 tool-followup arbitration.
+
+A user-initiated read tool whose result is intended to answer the user's request creates a result-delivery obligation for the owning turn. The obligation is structural: it follows from the user request selecting a read tool whose output is needed for the answer, not from optional phrases such as “tell me” or “report back”. Internal runtime context reads, background observations, system-health polls, model-context-only reads, and compound-intermediate reads do not automatically create a spoken-result obligation.
+
+Progress acknowledgements are valid audible responses, but they are non-terminal and non-substantive for this obligation. Parent coverage may suppress a later tool followup only when the parent contains correlated tool-result evidence (for example, the actual voltage value for a voltage read). Text presence, audio start, canonical bookkeeping, playback completion, or queue draining are not result evidence.
+
+The queue release path must preserve one substantive followup while the read-result obligation remains open. Duplicate result events should be suppressed by stable turn/tool/canonical identities, and failures should produce one controlled failure response rather than fabricating a value or settling silently.
+
+Implemented read-result logs in this seam currently include `read_result_parent_coverage_evaluated` and `read_result_parent_terminal_rejected`. Additional obligation lifecycle logs remain future instrumentation, not current behavior.
+
+### Incremental obligation marker and positive coverage
+
+Pending user-facing read follow-up is currently the structural obligation marker at the tool-followup and terminal-selection seam. The observable states are: result owed (pending user-requested read follow-up exists), result available (tool result has produced a follow-up create), follow-up scheduled/released (tool-followup state is pending/release), and result delivered (the follow-up response becomes the terminal deliverable).
+
+For user-requested reads, parent suppression requires positive correlated coverage for the same parent canonical key and tool call. Negative evidence such as “the parent is not progress” is insufficient. If coverage is unknown, or known false, the follow-up remains authoritative and should be released once the response boundary permits. Compound-intermediate reads remain governed by the compound followthrough chain and do not independently create a standalone spoken-result obligation.

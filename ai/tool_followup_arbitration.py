@@ -57,6 +57,7 @@ def decide_tool_followup_arbitration(
     terminal_selected: bool,
     terminal_reason: str,
     classification_pending: bool,
+    parent_coverage_can_suppress: bool | None = None,
 ) -> ToolFollowupArbitrationDecision:
     normalized_parent_origin = str(parent_origin or "").strip().lower()
     normalized_coverage_source = str(coverage_source or "").strip().lower()
@@ -84,10 +85,15 @@ def decide_tool_followup_arbitration(
             parent_coverage_state="not_applicable",
             blocked_by_parent_final_coverage=None,
         )
-    if not is_low_risk_reversible_gesture_tool:
+    coverage_can_suppress = bool(
+        is_low_risk_reversible_gesture_tool
+        if parent_coverage_can_suppress is None
+        else parent_coverage_can_suppress
+    )
+    if not coverage_can_suppress:
         return ToolFollowupArbitrationDecision(
             action=ToolFollowupDecisionAction.RELEASE,
-            reason_code="non_gesture_tool",
+            reason_code="parent_coverage_not_suppressible_for_tool",
             parent_coverage_state="not_applicable",
             blocked_by_parent_final_coverage=None,
         )
