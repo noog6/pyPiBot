@@ -11574,3 +11574,284 @@ def test_multi_read_uncovered_user_requested_read_obligation_requires_all_covere
         turn_id=turn_id,
         parent_response_id=parent_response_id,
     ) is True
+
+
+def _capture_read_lifecycle_info_logs(monkeypatch) -> list[str]:
+    captured: list[str] = []
+
+    def _capture(message, *args, **_kwargs) -> None:
+        rendered = message % args if args else str(message)
+        captured.append(rendered)
+
+    monkeypatch.setattr("ai.realtime.response_terminal_handlers.logger.info", _capture)
+    monkeypatch.setattr("ai.realtime.response_create_runtime.logger.info", _capture)
+    monkeypatch.setattr("ai.realtime_api.logger.info", _capture)
+    return captured
+
+
+def _seed_voltage_read_result_lifecycle(api: RealtimeAPI, ws: _RecordingWs) -> dict[str, str]:
+    _wire_runtime(api)
+    api.websocket = ws
+    turn_id = "turn_voltage"
+    parent_input_event_key = "item_parent_voltage"
+    parent_response_id = "resp_parent_voltage"
+    tool_call_id = "call_voltage"
+    tool_name = "read_battery_voltage"
+    tool_input_event_key = f"tool:{tool_call_id}"
+    parent_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    tool_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_input_event_key)
+
+    api._apply_continuity_event(
+        "transcript_final",
+        text="What is your current voltage?",
+        source="input_audio_transcription",
+        turn_id=turn_id,
+    )
+    api._current_response_turn_id = turn_id
+    api._current_turn_id_or_unknown = lambda: turn_id
+    api._active_input_event_key_by_turn_id[turn_id] = parent_input_event_key
+    api._active_response_id = parent_response_id
+    api._active_response_origin = "server_auto"
+    api._active_response_input_event_key = parent_input_event_key
+    api._active_response_canonical_key = parent_canonical_key
+    api._active_response_consumes_canonical_slot = True
+    api._response_in_flight = True
+    api.response_in_progress = True
+    api._audio_playback_busy = True
+    api._record_terminal_response_text(
+        response_id=parent_response_id,
+        text="Let me check that for you.",
+    )
+    api._canonical_response_state_mutate(
+        canonical_key=parent_canonical_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "server_auto"),
+            setattr(record, "response_id", parent_response_id),
+            setattr(record, "created", True),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "progress"),
+        ),
+    )
+
+    metadata = {
+        "turn_id": turn_id,
+        "input_event_key": tool_input_event_key,
+        "origin": "tool_output",
+        "tool_followup": "true",
+        "tool_call_id": tool_call_id,
+        "tool_name": tool_name,
+        "read_purpose": "user_requested_result",
+        "parent_turn_id": turn_id,
+        "parent_input_event_key": parent_input_event_key,
+        "blocked_by_response_id": parent_response_id,
+    }
+    followup_event = {"type": "response.create", "response": {"metadata": metadata}}
+    api._response_create_queue.append(
+        {
+            "websocket": ws,
+            "event": followup_event,
+            "origin": "tool_output",
+            "turn_id": turn_id,
+            "record_ai_call": False,
+            "debug_context": {"tool_name": tool_name, "call_id": tool_call_id},
+            "memory_brief_note": None,
+            "enqueued_done_serial": 0,
+            "enqueue_seq": 1,
+        }
+    )
+    api._record_tool_followup_metadata(canonical_key=tool_canonical_key, metadata=metadata)
+    api._set_tool_followup_state(
+        canonical_key=tool_canonical_key,
+        state="blocked_active_response",
+        reason="test_seed_blocked_parent_response",
+    )
+    api._response_trace_context_by_id = {
+        parent_response_id: {
+            "turn_id": turn_id,
+            "input_event_key": parent_input_event_key,
+            "canonical_key": parent_canonical_key,
+            "origin": "server_auto",
+        }
+    }
+    api._stale_response_context = lambda _response_id: {}
+    api._response_obligation_key = lambda *, turn_id, input_event_key: f"{turn_id}:{input_event_key}"
+    api._log_lifecycle_event = lambda **_kwargs: None
+    api._debug_dump_canonical_key_timeline = lambda **_kwargs: None
+    api._record_response_trace_context = lambda *_args, **_kwargs: None
+    api._emit_response_lifecycle_trace = lambda **_kwargs: None
+    api._log_lifecycle_coherence = lambda **_kwargs: None
+    api._emit_startup_prompt_terminal = lambda **_kwargs: None
+    api._emit_utterance_info_summary = lambda **_kwargs: None
+    api._prune_curiosity_surface_candidates = lambda **_kwargs: None
+    api._record_silent_turn_incident = lambda **_kwargs: None
+    api._maybe_schedule_empty_response_retry = lambda **_kwargs: asyncio.sleep(0)
+    api._emit_preference_recall_skip_trace_if_needed = lambda **_kwargs: None
+    api._log_turn_conversation_efficiency = lambda **_kwargs: None
+    api._cancel_micro_ack = lambda **_kwargs: None
+    api._mark_utterance_info_summary = lambda **_kwargs: None
+    api._clear_cancelled_response_tracking = lambda *_args, **_kwargs: None
+    api._response_terminal_handlers = ResponseTerminalHandlers(api)
+    api.exit_event = type("_ExitEvent", (), {"is_set": lambda self: False})()
+
+    return {
+        "turn_id": turn_id,
+        "parent_input_event_key": parent_input_event_key,
+        "parent_response_id": parent_response_id,
+        "parent_canonical_key": parent_canonical_key,
+        "tool_input_event_key": tool_input_event_key,
+        "tool_canonical_key": tool_canonical_key,
+        "tool_call_id": tool_call_id,
+        "tool_name": tool_name,
+    }
+
+
+def test_run_1080_parent_response_done_preserves_uncovered_read_request(monkeypatch) -> None:
+    api = _make_api_stub()
+    ws = _RecordingWs()
+    ids = _seed_voltage_read_result_lifecycle(api, ws)
+    logs = _capture_read_lifecycle_info_logs(monkeypatch)
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": ids["parent_response_id"]}}))
+
+    coverage_state, _coverage_source = api._read_result_parent_coverage_state(
+        parent_canonical_key=ids["parent_canonical_key"],
+        parent_response_id=ids["parent_response_id"],
+        response_metadata=api._tool_followup_metadata_store()[ids["tool_canonical_key"]],
+    )
+    assert coverage_state == "coverage_unknown"
+    assert api._turn_has_open_uncovered_user_requested_read_obligation(
+        turn_id=ids["turn_id"],
+        parent_response_id=ids["parent_response_id"],
+    ) is True
+    assert any("read_result_terminal_close_guard" in entry and "obligation_open=true" in entry for entry in logs)
+    assert any(
+        "continuity_response_done_handoff" in entry
+        and "keep_ongoing=True" in entry
+        and "close_ongoing=False" in entry
+        and "close_unresolved=False" in entry
+        and "complete_required_deliverable=False" in entry
+        and "read_result_obligation_open=True" in entry
+        for entry in logs
+    )
+    selection = api._terminal_deliverable_selection_store().get(ids["parent_response_id"])
+    assert selection is not None
+    assert selection["selected"] is False
+    assert selection["reason"] == "tool_followup_precedence"
+    assert api._tool_followup_state(canonical_key=ids["tool_canonical_key"]) in {
+        "scheduled_release",
+        "released_on_response_done",
+        "creating",
+        "created",
+    }
+    assert api._tool_followup_state(canonical_key=ids["tool_canonical_key"]) not in {"dropped", "done"}
+    brief = api.get_continuity_brief("run-405-repro", ids["turn_id"], reason="after_parent_done")
+    settlement = api._continuity_ledger_instance().build_turn_settlement(brief)
+    assert settlement.settlement_state != "settled"
+    assert any(item.kind == "ongoing" for item in brief.current)
+    assert ws.sent == []
+
+
+def test_run_1080_read_result_sends_once_and_settles_after_result_response(monkeypatch) -> None:
+    api = _make_api_stub()
+    ws = _RecordingWs()
+    ids = _seed_voltage_read_result_lifecycle(api, ws)
+    logs = _capture_read_lifecycle_info_logs(monkeypatch)
+    silent_incidents: list[dict[str, object]] = []
+    api._record_silent_turn_incident = lambda **kwargs: silent_incidents.append(kwargs)
+    battery_tool_call_count = 1
+    progress_parent_count = 1
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": ids["parent_response_id"]}}))
+    parent_brief = api.get_continuity_brief("run-405-repro", ids["turn_id"], reason="after_parent_done")
+    parent_settlement = api._continuity_ledger_instance().build_turn_settlement(parent_brief)
+    assert parent_settlement.settlement_state != "settled"
+
+    api._audio_playback_busy = False
+    asyncio.run(api._drain_response_create_queue(source_trigger="playback_complete"))
+
+    response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert len(response_create_events) == 1
+    sent_metadata = ((response_create_events[0].get("response") or {}).get("metadata") or {})
+    assert sent_metadata["tool_call_id"] == ids["tool_call_id"]
+    assert sent_metadata["read_purpose"] == "user_requested_result"
+    assert any(
+        "read_result_generic_finality_override" in entry
+        and "decision=preserve_followup" in entry
+        and "coverage_state=coverage_unknown" in entry
+        for entry in logs
+    )
+    assert not any("tool_followup_final_deliverable_already_sent" in entry for entry in logs)
+    assert any(
+        "response_create_outcome" in entry
+        and "origin=tool_output" in entry
+        and "action=SEND" in entry
+        for entry in logs
+    )
+    assert api._tool_followup_state(canonical_key=ids["tool_canonical_key"]) == "creating"
+
+    asyncio.run(api._drain_response_create_queue(source_trigger="playback_complete"))
+    duplicate_response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert len(duplicate_response_create_events) == 1
+
+    result_response_id = "resp_voltage_result"
+    result_text = "My current voltage is 8.24 volts."
+    api._set_active_response_state(
+        response_id=result_response_id,
+        origin="tool_output",
+        input_event_key=ids["tool_input_event_key"],
+        canonical_key=ids["tool_canonical_key"],
+        consumes_canonical_slot=True,
+    )
+    api._response_in_flight = True
+    api.response_in_progress = True
+    api._response_trace_context_by_id[result_response_id] = {
+        "turn_id": ids["turn_id"],
+        "input_event_key": ids["tool_input_event_key"],
+        "canonical_key": ids["tool_canonical_key"],
+        "origin": "tool_output",
+        "tool_followup": "true",
+        "parent_turn_id": ids["turn_id"],
+        "parent_input_event_key": ids["parent_input_event_key"],
+    }
+    api._record_terminal_response_text(response_id=result_response_id, text=result_text)
+    assert api._terminal_response_text(result_response_id) == result_text
+    api._canonical_response_state_mutate(
+        canonical_key=ids["tool_canonical_key"],
+        turn_id=ids["turn_id"],
+        input_event_key=ids["tool_input_event_key"],
+        mutator=lambda record: (
+            setattr(record, "origin", "tool_output"),
+            setattr(record, "response_id", result_response_id),
+            setattr(record, "created", True),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "final"),
+        ),
+    )
+    api._set_tool_followup_state(
+        canonical_key=ids["tool_canonical_key"],
+        state="created",
+        reason="test_result_response_created",
+    )
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": result_response_id}}))
+
+    result_selection = api._terminal_deliverable_selection_store().get(result_response_id)
+    assert result_selection is not None
+    assert result_selection["selected"] is True
+    assert result_selection["reason"] == "normal"
+    assert api._tool_followup_state(canonical_key=ids["tool_canonical_key"]) == "done"
+    final_brief = api.get_continuity_brief("run-405-repro", ids["turn_id"], reason="after_result_done")
+    final_settlement = api._continuity_ledger_instance().build_turn_settlement(final_brief)
+    assert final_settlement.settlement_state == "settled"
+    assert battery_tool_call_count == 1
+    assert progress_parent_count == 1
+    assert len(response_create_events) == 1
+    assert any(
+        "terminal_answer_context_audit" in entry
+        and f"response_id={result_response_id}" in entry
+        and "terminal_text_present=true" in entry
+        for entry in logs
+    )
+    assert silent_incidents == []

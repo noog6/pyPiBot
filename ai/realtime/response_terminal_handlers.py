@@ -700,14 +700,15 @@ class ResponseTerminalHandlers:
             isinstance(obligations_map, dict)
             and any(str(key).startswith(f"{turn_id}:") for key in obligations_map)
         )
+        read_result_obligation_open = False
         if hasattr(api, "_turn_has_open_uncovered_user_requested_read_obligation"):
-            obligation_open = bool(
-                obligation_open
-                or api._turn_has_open_uncovered_user_requested_read_obligation(
+            read_result_obligation_open = bool(
+                api._turn_has_open_uncovered_user_requested_read_obligation(
                     turn_id=turn_id,
                     parent_response_id=resolved_response_id,
                 )
             )
+            obligation_open = bool(obligation_open or read_result_obligation_open)
         logger.info(
             "provisional_completion_eval run_id=%s turn_id=%s response_id=%s synthetic_key=%s canonical_key=%s transcript_linked=%s action=%s reason=%s",
             api._current_run_id() or "",
@@ -1088,8 +1089,13 @@ class ResponseTerminalHandlers:
             and selection_reason == "normal"
             and selected_response_has_terminal_text
         )
-        continuity_close_commitment = (
+        preserve_ongoing_for_read_result = bool(read_result_obligation_open)
+        continuity_close_ongoing = bool(
             continuity_close_allowed
+            and not preserve_ongoing_for_read_result
+        )
+        continuity_close_commitment = (
+            continuity_close_ongoing
             and continuity_origin == "tool_output"
             and not followthrough_chain_remaining_for_close
         )
@@ -1153,15 +1159,18 @@ class ResponseTerminalHandlers:
             )
 
         logger.info(
-            "continuity_response_done_handoff turn_id=%s continuity_turn_id=%s selected=%s selection_reason=%s close_commitment=%s close_unresolved=%s complete_required_deliverable=%s followthrough_chain_remaining=%s allow_cross_turn_rebind=%s rebind_reason=%s semantic_parent_turn_id=%s done_canonical_key=%s semantic_owner_canonical_key=%s",
+            "continuity_response_done_handoff turn_id=%s continuity_turn_id=%s selected=%s selection_reason=%s keep_ongoing=%s close_ongoing=%s close_commitment=%s close_unresolved=%s complete_required_deliverable=%s followthrough_chain_remaining=%s read_result_obligation_open=%s allow_cross_turn_rebind=%s rebind_reason=%s semantic_parent_turn_id=%s done_canonical_key=%s semantic_owner_canonical_key=%s",
             turn_id,
             continuity_turn_id,
             selected,
             str(selection_reason or "").strip() or "unknown",
+            provisional_server_auto_close_deferred or exact_phrase_close_deferred or interrupted_tool_output_candidate or followthrough_chain_bridge or required_deliverable_missing_substance or required_deliverable_missing_tool_execution or preserve_ongoing_for_read_result,
+            continuity_close_ongoing,
             continuity_close_commitment,
             continuity_close_unresolved,
             continuity_complete_required_deliverable,
             followthrough_chain_remaining_for_close,
+            preserve_ongoing_for_read_result,
             continuity_rebind_allowed,
             continuity_rebind_reason or "none",
             semantic_parent_turn_id or "none",
@@ -1174,8 +1183,8 @@ class ResponseTerminalHandlers:
             turn_id=continuity_turn_id,
             response_id=active_response_id_before_clear,
             origin=active_response_origin_before_clear,
-            keep_ongoing="true" if provisional_server_auto_close_deferred or exact_phrase_close_deferred or interrupted_tool_output_candidate or followthrough_chain_bridge or required_deliverable_missing_substance or required_deliverable_missing_tool_execution else "",
-            close_ongoing="true" if continuity_close_allowed else "",
+            keep_ongoing="true" if provisional_server_auto_close_deferred or exact_phrase_close_deferred or interrupted_tool_output_candidate or followthrough_chain_bridge or required_deliverable_missing_substance or required_deliverable_missing_tool_execution or preserve_ongoing_for_read_result else "",
+            close_ongoing="true" if continuity_close_ongoing else "",
             close_commitment="true" if continuity_close_commitment else "",
             close_unresolved="true" if continuity_close_unresolved else "",
             complete_required_deliverable="true" if continuity_complete_required_deliverable else "",
