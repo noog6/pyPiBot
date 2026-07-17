@@ -2805,6 +2805,7 @@ def test_handle_response_done_suppresses_exact_phrase_repair_when_startup_contra
     ]
 
 
+
 def test_handle_response_done_defers_terminal_close_when_exact_phrase_still_open() -> None:
     api = _make_api()
     api._maybe_schedule_empty_response_retry = AsyncMock()

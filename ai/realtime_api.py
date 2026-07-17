@@ -9936,11 +9936,11 @@ class RealtimeAPI:
         if resolved_input_event_key:
             next_state.input_event_key = resolved_input_event_key
         old_class = str(getattr(prior_state, "deliverable_class", "unknown") or "unknown").strip().lower() or "unknown"
-        old_covered = old_class == "final"
+        old_class_is_final = old_class == "final"
         mutator(next_state)
         new_class = str(getattr(next_state, "deliverable_class", "unknown") or "unknown").strip().lower() or "unknown"
-        new_covered = new_class == "final"
-        if old_class != new_class or old_covered != new_covered:
+        new_class_is_final = new_class == "final"
+        if old_class != new_class or old_class_is_final != new_class_is_final:
             selection_entry = None
             response_id = str(getattr(next_state, "response_id", "") or getattr(prior_state, "response_id", "") or "").strip()
             if response_id:
@@ -9953,15 +9953,15 @@ class RealtimeAPI:
             except Exception:
                 caller = "unknown"
             logger.info(
-                "deliverable_classification_changed run_id=%s turn_id=%s response_id=%s canonical_key=%s old_class=%s new_class=%s old_covered=%s new_covered=%s source=%s reason=%s selected=%s selection_reason=%s",
+                "deliverable_classification_changed run_id=%s turn_id=%s response_id=%s canonical_key=%s old_class=%s new_class=%s old_class_is_final=%s new_class_is_final=%s source=%s reason=%s selected=%s selection_reason=%s",
                 self._current_run_id() or "",
                 str(getattr(next_state, "turn_id", "") or resolved_turn_id or "turn-unknown"),
                 response_id or "none",
                 normalized_canonical_key,
                 old_class,
                 new_class,
-                str(old_covered).lower(),
-                str(new_covered).lower(),
+                str(old_class_is_final).lower(),
+                str(new_class_is_final).lower(),
                 caller,
                 caller,
                 str(selected).lower(),
