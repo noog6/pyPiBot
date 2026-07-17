@@ -46,6 +46,17 @@ from interaction import (
     InteractionStateManager,
 )
 from ai.tools import function_map, render_memory_cards_for_assistant, tools
+from ai.tool_capabilities import (
+    READ_PURPOSE_BACKGROUND_OBSERVATION,
+    READ_PURPOSE_COMPOUND_INTERMEDIATE,
+    READ_PURPOSE_NOT_READ,
+    READ_PURPOSE_RUNTIME_CONTEXT,
+    READ_PURPOSE_USER_REQUESTED_RESULT,
+    ToolCapabilities,
+    build_tool_capability_map,
+    normalize_read_purpose,
+    validate_tool_capability_declarations,
+)
 from ai.function_call_accumulator import FunctionCallAccumulator
 from ai.realtime.event_router import EventRouter
 from ai.realtime.confirmation import (
@@ -1005,9 +1016,20 @@ class RealtimeAPI:
         )
         self._alert_policy = AlertPolicy.from_config(config)
         governance_cfg = config.get("governance") or {}
-        _validate_tool_specs(governance_cfg.get("tool_specs") or {}, tools)
+        raw_tool_specs = governance_cfg.get("tool_specs") or {}
+        registered_tool_names = {str(tool.get("name") or "").strip().lower() for tool in tools}
+        _validate_tool_specs(raw_tool_specs, tools)
+        validate_tool_capability_declarations(
+            raw_tool_specs,
+            registered_tool_names=registered_tool_names,
+        )
+        self._tool_capability_map = build_tool_capability_map(
+            raw_tool_specs,
+            registered_tool_names=registered_tool_names,
+            require_declared=True,
+        )
         tool_specs = build_tool_specs(
-            governance_cfg.get("tool_specs") or {},
+            raw_tool_specs,
             registered_tool_names=(tool.get("name") for tool in tools),
         )
         self._governance = GovernanceLayer(tool_specs, config)
@@ -11109,6 +11131,16 @@ class RealtimeAPI:
         normalized_tool_name = str(tool_name or "").strip().lower()
         if normalized_tool_name:
             metadata["tool_name"] = normalized_tool_name
+        if normalized_tool_name == "recall_memories" and not any(
+            str(metadata.get(key) or "").strip()
+            for key in (
+                "tool_invocation_context",
+                "invocation_context",
+                "tool_followup_invocation_context",
+                "tool_result_invocation_context",
+            )
+        ):
+            metadata["tool_invocation_context"] = "direct_user"
         descriptive_visual_instruction = self._descriptive_visual_tool_followup_instruction(
             turn_id=turn_id,
             parent_input_event_key=parent_input_event_key,
@@ -11276,9 +11308,29 @@ class RealtimeAPI:
         if tool_result_has_distinct_info:
             metadata["tool_result_has_distinct_info"] = "true"
         read_purpose = self._read_result_purpose_for_tool_followup_metadata(metadata=metadata)
-        if read_purpose in {"user_requested_result", "compound_intermediate", "model_context_only", "internal_runtime_context"}:
+        capabilities = self._tool_capabilities(normalized_tool_name)
+        if read_purpose in {"user_requested_result", "compound_intermediate", "runtime_context", "background_observation", "internal_health"}:
             metadata["read_purpose"] = read_purpose
             metadata["tool_followup_read_purpose"] = read_purpose
+        invocation_context = self._tool_invocation_context_from_metadata(metadata)
+        if invocation_context == "direct_user":
+            if read_purpose == "compound_intermediate":
+                invocation_context = "compound"
+            elif read_purpose in {"runtime_context", "internal_health"}:
+                invocation_context = "runtime"
+            elif read_purpose == "background_observation":
+                invocation_context = "background"
+        logger.info(
+            "tool_result_purpose_classified run_id=%s tool_name=%s tool_call_id=%s operation_kind=%s read_purpose=%s capability_source=%s invocation_context=%s reason=%s",
+            self._current_run_id() or "",
+            normalized_tool_name or "unknown",
+            tool_call_id,
+            capabilities.operation_kind,
+            read_purpose,
+            capabilities.capability_source,
+            invocation_context,
+            "metadata_assignment",
+        )
         canonical_key = self._canonical_utterance_key(
             turn_id=turn_id,
             input_event_key=str(metadata.get("input_event_key") or tool_input_event_key),
@@ -12442,35 +12494,70 @@ class RealtimeAPI:
         covered = str(record.get("covered") or "").strip().lower() in {"true", "1", "yes"}
         return ("result_covered_true" if covered else "result_covered_false"), str(record.get("source") or "explicit_read_result_coverage").strip() or "explicit_read_result_coverage"
 
+    def _tool_capabilities(self, tool_name: str | None) -> ToolCapabilities:
+        normalized_tool_name = str(tool_name or "").strip().lower()
+        capabilities = getattr(self, "_tool_capability_map", {}).get(normalized_tool_name)
+        if isinstance(capabilities, ToolCapabilities):
+            return capabilities
+        return ToolCapabilities(tool_name=normalized_tool_name)
+
+
+    @staticmethod
+    def _tool_invocation_context_from_metadata(metadata: dict[str, Any]) -> str:
+        for key in (
+            "tool_invocation_context",
+            "invocation_context",
+            "tool_followup_invocation_context",
+            "tool_result_invocation_context",
+        ):
+            value = str(metadata.get(key) or "").strip().lower()
+            if value in {"direct_user", "compound", "runtime", "background", "internal", "automatic_context"}:
+                return "runtime" if value == "automatic_context" else value
+        if str(metadata.get("memory_brief_context") or "").strip().lower() in {"true", "1", "yes"}:
+            return "runtime"
+        return "direct_user"
+
     def _read_result_purpose_for_tool_followup_metadata(self, *, metadata: dict[str, Any], canonical_key: str | None = None) -> str:
-        explicit = str(metadata.get("read_purpose") or metadata.get("tool_followup_read_purpose") or "").strip().lower()
+        explicit = normalize_read_purpose(metadata.get("read_purpose") or metadata.get("tool_followup_read_purpose"))
         if explicit:
             return explicit
         tool_name = str(metadata.get("tool_name") or "").strip().lower()
-        if not self._is_read_only_helper_tool_for_precedence(tool_name=tool_name):
-            return "not_read_helper"
+        capabilities = self._tool_capabilities(tool_name)
+        if not capabilities.is_read_only:
+            return READ_PURPOSE_NOT_READ
+        invocation_context = self._tool_invocation_context_from_metadata(metadata)
+        if invocation_context == "background":
+            return READ_PURPOSE_BACKGROUND_OBSERVATION
+        if invocation_context in {"runtime", "internal"}:
+            return READ_PURPOSE_RUNTIME_CONTEXT
+        if invocation_context == "compound":
+            return READ_PURPOSE_COMPOUND_INTERMEDIATE if capabilities.compound_intermediate_eligible else READ_PURPOSE_RUNTIME_CONTEXT
         step_policy = str(
             metadata.get("followthrough_step_output_policy")
             or metadata.get("tool_followup_step_output_policy")
             or ""
         ).strip().lower()
-        if step_policy in {"model_context_injection_only", "silent_intermediate", "execution_state_update"}:
-            return "compound_intermediate" if step_policy == "silent_intermediate" else "model_context_only"
+        if step_policy in {"model_context_injection_only", "execution_state_update"}:
+            return READ_PURPOSE_RUNTIME_CONTEXT
+        if step_policy == "silent_intermediate":
+            return READ_PURPOSE_COMPOUND_INTERMEDIATE
         status_only = str(metadata.get("tool_followup_status_only") or "").strip().lower() in {"true", "1", "yes"}
         silent = (
             str(metadata.get("tool_followup_silent_audio") or "").strip().lower() in {"true", "1", "yes"}
             or str(metadata.get("tool_followup_silent_user_facing_output") or "").strip().lower() in {"true", "1", "yes"}
         )
         if status_only or silent:
-            return "compound_intermediate"
+            return READ_PURPOSE_COMPOUND_INTERMEDIATE if capabilities.compound_intermediate_eligible else READ_PURPOSE_RUNTIME_CONTEXT
         parent_turn_id = str(metadata.get("parent_turn_id") or metadata.get("turn_id") or "").strip()
         if parent_turn_id and self._turn_followthrough_chain_remaining(turn_id=parent_turn_id, include_report_followup=False):
-            return "compound_intermediate"
-        if step_policy == "required_deliverable":
-            return "user_requested_result"
-        if str(metadata.get("tool_followup") or "").strip().lower() in {"true", "1", "yes"}:
-            return "user_requested_result"
-        return "internal_runtime_context"
+            return READ_PURPOSE_COMPOUND_INTERMEDIATE if capabilities.compound_intermediate_eligible else READ_PURPOSE_RUNTIME_CONTEXT
+        if capabilities.runtime_only_background:
+            return READ_PURPOSE_RUNTIME_CONTEXT
+        if step_policy == "required_deliverable" and capabilities.user_result_eligible:
+            return READ_PURPOSE_USER_REQUESTED_RESULT
+        if str(metadata.get("tool_followup") or "").strip().lower() in {"true", "1", "yes"} and capabilities.user_result_eligible:
+            return READ_PURPOSE_USER_REQUESTED_RESULT
+        return READ_PURPOSE_RUNTIME_CONTEXT
 
     def _pending_user_requested_read_followup_coverage_for_parent(
         self,
@@ -12537,12 +12624,8 @@ class RealtimeAPI:
         tool_name = str(metadata.get("tool_name") or "").strip().lower()
         return self._is_low_risk_reversible_gesture_tool(tool_name=tool_name)
 
-    @staticmethod
-    def _is_read_only_helper_tool_for_precedence(*, tool_name: str | None) -> bool:
-        normalized_tool_name = str(tool_name or "").strip().lower()
-        if not normalized_tool_name:
-            return False
-        return normalized_tool_name.startswith("read_") or normalized_tool_name.startswith("recall_")
+    def _is_read_only_helper_tool_for_precedence(self, *, tool_name: str | None) -> bool:
+        return self._tool_capabilities(tool_name).is_read_only
 
     def _turn_pending_tool_followups_are_read_only_helpers(self, *, turn_id: str) -> bool:
         normalized_turn_id = str(turn_id or "").strip()
@@ -16175,10 +16258,11 @@ class RealtimeAPI:
     def _describe_staged_action(
         self, action: ActionPacket, motion_info: dict[str, Any] | None
     ) -> str:
-        if action.tool_name.startswith("read_") or action.tool_name.startswith("get_"):
+        capabilities = self._tool_capabilities(action.tool_name)
+        if capabilities.is_read_only:
+            if capabilities.runtime_only_background:
+                return f"Would fetch internal context via {action.tool_name}."
             return f"Would read data via {action.tool_name}."
-        if action.tool_name.startswith("recall_"):
-            return f"Would fetch stored memories via {action.tool_name}."
         if action.tool_name.startswith("gesture_") and motion_info:
             duration = motion_info.get("duration_ms")
             return (

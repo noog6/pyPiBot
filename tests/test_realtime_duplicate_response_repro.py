@@ -12,6 +12,7 @@ if "audioop" not in sys.modules:
     sys.modules["audioop"] = types.ModuleType("audioop")
 
 from ai.governance import ActionPacket
+from ai.tool_capabilities import build_tool_capability_map
 from ai.micro_ack_manager import MicroAckCategory, MicroAckContext
 from ai.realtime.response_create_runtime import ResponseCreateRuntime
 from ai.realtime.types import PendingResponseCreate
@@ -20,6 +21,7 @@ from ai.realtime_api import InteractionState, PendingServerAutoResponse, Realtim
 from ai.interaction_lifecycle_controller import InteractionLifecycleState
 from ai.continuity import ContinuityLedger
 from core.logging import logger
+import yaml
 
 
 class _RecordingWs:
@@ -178,6 +180,8 @@ def _make_api_stub() -> RealtimeAPI:
     api._record_user_input = lambda *_args, **_kwargs: None
     api._track_outgoing_event = RealtimeAPI._track_outgoing_event.__get__(api, RealtimeAPI)
     api._active_input_event_key_for_turn = lambda turn_id: api._active_input_event_key_by_turn_id.get(turn_id, "")
+    with open("config/default.yaml", "r", encoding="utf-8") as fh:
+        api._tool_capability_map = build_tool_capability_map(yaml.safe_load(fh)["governance"]["tool_specs"])
     api._input_audio_events = type(
         "_InputAudioEvents",
         (),
@@ -11302,7 +11306,7 @@ def test_user_requested_read_gate_aggregates_multiple_pending_reads() -> None:
     wifi_event, wifi_key = api._build_tool_followup_response_create_event(
         call_id="call_wifi_multi",
         response_create_event={"type": "response.create"},
-        tool_name="read_wifi_status",
+        tool_name="read_environment",
     )
     wifi_metadata = ((wifi_event.get("response") or {}).get("metadata") or {})
     wifi_metadata["blocked_by_response_id"] = parent_response_id
@@ -11322,7 +11326,7 @@ def test_user_requested_read_gate_aggregates_multiple_pending_reads() -> None:
     assert coverage_state == "coverage_unknown"
     assert coverage_source == "no_correlated_read_result_coverage"
     assert tool_call_id == "call_wifi_multi"
-    assert tool_name == "read_wifi_status"
+    assert tool_name == "read_environment"
     assert purpose == "user_requested_result"
 
 
@@ -11371,11 +11375,11 @@ def test_read_result_trace_coverage_does_not_bleed_to_later_tool_update() -> Non
     api._record_response_trace_context(
         parent_response_id,
         tool_call_id="call_wifi_sticky",
-        tool_name="read_wifi_status",
+        tool_name="read_environment",
     )
     wifi_metadata = dict(metadata)
     wifi_metadata["tool_call_id"] = "call_wifi_sticky"
-    wifi_metadata["tool_name"] = "read_wifi_status"
+    wifi_metadata["tool_name"] = "read_environment"
 
     voltage_state, _ = api._read_result_parent_coverage_state(
         parent_canonical_key=parent_key,
@@ -11402,10 +11406,10 @@ def test_read_result_trace_explicit_second_coverage_records_second_tool() -> Non
     )
     api._record_response_trace_context = RealtimeAPI._record_response_trace_context.__get__(api, RealtimeAPI)
     api._record_response_trace_context(parent_response_id, canonical_key=parent_key, tool_call_id="call_voltage_sticky2", tool_name="read_battery_voltage", read_result_parent_covered="true")
-    api._record_response_trace_context(parent_response_id, canonical_key=parent_key, tool_call_id="call_wifi_sticky2", tool_name="read_wifi_status", read_result_parent_covered="true")
+    api._record_response_trace_context(parent_response_id, canonical_key=parent_key, tool_call_id="call_wifi_sticky2", tool_name="read_environment", read_result_parent_covered="true")
     wifi_metadata = dict(metadata)
     wifi_metadata["tool_call_id"] = "call_wifi_sticky2"
-    wifi_metadata["tool_name"] = "read_wifi_status"
+    wifi_metadata["tool_name"] = "read_environment"
 
     wifi_state, _ = api._read_result_parent_coverage_state(parent_canonical_key=parent_key, parent_response_id=parent_response_id, response_metadata=wifi_metadata)
 
@@ -11431,7 +11435,7 @@ def test_read_result_cleanup_missing_metadata_does_not_clear_all_records() -> No
     api = _make_api_stub()
     parent_key, metadata, parent_response_id, _canonical_key, _turn_id = _setup_user_requested_read_parent(api, parent_text="Voltage and Wi-Fi covered.")
     api._record_read_result_parent_coverage(parent_canonical_key=parent_key, parent_response_id=parent_response_id, tool_call_id="call_voltage_cov", tool_name="read_battery_voltage", covered=True, source="test")
-    api._record_read_result_parent_coverage(parent_canonical_key=parent_key, parent_response_id=parent_response_id, tool_call_id="call_wifi_cov", tool_name="read_wifi_status", covered=True, source="test")
+    api._record_read_result_parent_coverage(parent_canonical_key=parent_key, parent_response_id=parent_response_id, tool_call_id="call_wifi_cov", tool_name="read_environment", covered=True, source="test")
 
     api._set_tool_followup_state(canonical_key="run:turn:tool:missing", state="dropped", reason="missing_metadata")
 
@@ -11443,12 +11447,12 @@ def test_read_result_cleanup_exact_tuple_only() -> None:
     api = _make_api_stub()
     parent_key, metadata, parent_response_id, canonical_key, _turn_id = _setup_user_requested_read_parent(api, parent_text="Voltage and Wi-Fi covered.")
     api._record_read_result_parent_coverage(parent_canonical_key=parent_key, parent_response_id=parent_response_id, tool_call_id="call_voltage_cov", tool_name="read_battery_voltage", covered=True, source="test")
-    api._record_read_result_parent_coverage(parent_canonical_key=parent_key, parent_response_id=parent_response_id, tool_call_id="call_wifi_cov", tool_name="read_wifi_status", covered=True, source="test")
+    api._record_read_result_parent_coverage(parent_canonical_key=parent_key, parent_response_id=parent_response_id, tool_call_id="call_wifi_cov", tool_name="read_environment", covered=True, source="test")
 
     api._set_tool_followup_state(canonical_key=canonical_key, state="delivered", reason="voltage_delivered")
     wifi_metadata = dict(metadata)
     wifi_metadata["tool_call_id"] = "call_wifi_cov"
-    wifi_metadata["tool_name"] = "read_wifi_status"
+    wifi_metadata["tool_name"] = "read_environment"
 
     assert api._read_result_parent_coverage_state(parent_canonical_key=parent_key, parent_response_id=parent_response_id, response_metadata=metadata)[0] == "coverage_unknown"
     assert api._read_result_parent_coverage_state(parent_canonical_key=parent_key, parent_response_id=parent_response_id, response_metadata=wifi_metadata)[0] == "result_covered_true"
@@ -11506,8 +11510,7 @@ def test_uncovered_user_requested_read_obligation_remains_open_after_parent_done
             "tool_followup": "true",
             "tool_call_id": "call_voltage_terminal",
             "tool_name": "read_battery_voltage",
-            "read_purpose": "user_requested_result",
-        }
+            }
     }
 
     assert api._turn_has_open_uncovered_user_requested_read_obligation(
@@ -11549,17 +11552,15 @@ def test_multi_read_uncovered_user_requested_read_obligation_requires_all_covere
             "tool_followup": "true",
             "tool_call_id": "call_voltage_multi",
             "tool_name": "read_battery_voltage",
-            "read_purpose": "user_requested_result",
-        },
+            },
         wifi_key: {
             "turn_id": turn_id,
             "parent_turn_id": turn_id,
             "parent_input_event_key": parent_input_event_key,
             "tool_followup": "true",
             "tool_call_id": "call_wifi_multi",
-            "tool_name": "read_wifi_status",
-            "read_purpose": "user_requested_result",
-        },
+            "tool_name": "read_environment",
+            },
     }
     api._read_result_coverage_by_parent_and_tool = {
         (parent_key, "call_voltage_multi"): {
@@ -11589,21 +11590,16 @@ def _capture_read_lifecycle_info_logs(monkeypatch) -> list[str]:
     return captured
 
 
-def _seed_voltage_read_result_lifecycle(api: RealtimeAPI, ws: _RecordingWs) -> dict[str, str]:
+def _seed_read_result_lifecycle(api: RealtimeAPI, ws: _RecordingWs, *, tool_name: str = "read_battery_voltage", tool_call_id: str = "call_voltage", turn_id: str = "turn_voltage", parent_input_event_key: str = "item_parent_voltage", parent_response_id: str = "resp_parent_voltage", user_text: str = "What is your current voltage?", parent_text: str = "Let me check that for you.", include_explicit_read_purpose: bool = True) -> dict[str, str]:
     _wire_runtime(api)
     api.websocket = ws
-    turn_id = "turn_voltage"
-    parent_input_event_key = "item_parent_voltage"
-    parent_response_id = "resp_parent_voltage"
-    tool_call_id = "call_voltage"
-    tool_name = "read_battery_voltage"
     tool_input_event_key = f"tool:{tool_call_id}"
     parent_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
     tool_canonical_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=tool_input_event_key)
 
     api._apply_continuity_event(
         "transcript_final",
-        text="What is your current voltage?",
+        text=user_text,
         source="input_audio_transcription",
         turn_id=turn_id,
     )
@@ -11620,7 +11616,7 @@ def _seed_voltage_read_result_lifecycle(api: RealtimeAPI, ws: _RecordingWs) -> d
     api._audio_playback_busy = True
     api._record_terminal_response_text(
         response_id=parent_response_id,
-        text="Let me check that for you.",
+        text=parent_text,
     )
     api._canonical_response_state_mutate(
         canonical_key=parent_canonical_key,
@@ -11642,11 +11638,15 @@ def _seed_voltage_read_result_lifecycle(api: RealtimeAPI, ws: _RecordingWs) -> d
         "tool_followup": "true",
         "tool_call_id": tool_call_id,
         "tool_name": tool_name,
-        "read_purpose": "user_requested_result",
         "parent_turn_id": turn_id,
         "parent_input_event_key": parent_input_event_key,
         "blocked_by_response_id": parent_response_id,
     }
+    if include_explicit_read_purpose:
+        metadata["read_purpose"] = "user_requested_result"
+    else:
+        metadata["read_purpose"] = api._read_result_purpose_for_tool_followup_metadata(metadata=metadata)
+        metadata["tool_followup_read_purpose"] = metadata["read_purpose"]
     followup_event = {"type": "response.create", "response": {"metadata": metadata}}
     api._response_create_queue.append(
         {
@@ -11707,10 +11707,13 @@ def _seed_voltage_read_result_lifecycle(api: RealtimeAPI, ws: _RecordingWs) -> d
     }
 
 
+def _seed_voltage_read_result_lifecycle(api: RealtimeAPI, ws: _RecordingWs) -> dict[str, str]:
+    return _seed_read_result_lifecycle(api, ws)
+
 def test_run_1080_parent_response_done_preserves_uncovered_read_request(monkeypatch) -> None:
     api = _make_api_stub()
     ws = _RecordingWs()
-    ids = _seed_voltage_read_result_lifecycle(api, ws)
+    ids = _seed_read_result_lifecycle(api, ws)
     logs = _capture_read_lifecycle_info_logs(monkeypatch)
 
     asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": ids["parent_response_id"]}}))
@@ -11753,10 +11756,170 @@ def test_run_1080_parent_response_done_preserves_uncovered_read_request(monkeypa
     assert ws.sent == []
 
 
+
+
+def test_recall_memories_direct_user_followup_creates_user_requested_result() -> None:
+    api = _make_api_stub()
+    metadata = {
+        "tool_name": "recall_memories",
+        "tool_call_id": "call_recall_direct",
+        "tool_followup": "true",
+        "parent_turn_id": "turn_recall_direct",
+        "parent_input_event_key": "item_recall_direct",
+        "tool_invocation_context": "direct_user",
+    }
+
+    assert api._read_result_purpose_for_tool_followup_metadata(metadata=metadata) == "user_requested_result"
+
+
+def test_recall_memories_runtime_context_followup_remains_runtime_context() -> None:
+    api = _make_api_stub()
+    metadata = {
+        "tool_name": "recall_memories",
+        "tool_call_id": "call_recall_runtime",
+        "tool_followup": "true",
+        "parent_turn_id": "turn_recall_runtime",
+        "parent_input_event_key": "item_recall_runtime",
+        "tool_invocation_context": "runtime",
+    }
+
+    assert api._read_result_purpose_for_tool_followup_metadata(metadata=metadata) == "runtime_context"
+
+
+def test_recall_memories_background_followup_classifies_background_observation() -> None:
+    api = _make_api_stub()
+    metadata = {
+        "tool_name": "recall_memories",
+        "tool_call_id": "call_recall_background",
+        "tool_followup": "true",
+        "tool_invocation_context": "background",
+    }
+
+    assert api._read_result_purpose_for_tool_followup_metadata(metadata=metadata) == "background_observation"
+
+
+def test_recall_memories_production_followup_metadata_sets_direct_user_context() -> None:
+    api = _make_api_stub()
+    api._current_turn_id_or_unknown = lambda: "turn_recall_direct"
+    api._active_input_event_key_by_turn_id["turn_recall_direct"] = "item_recall_direct"
+
+    event, canonical_key = api._build_tool_followup_response_create_event(
+        call_id="call_recall_direct",
+        response_create_event={"type": "response.create"},
+        tool_name="recall_memories",
+        tool_result_has_distinct_info=True,
+    )
+
+    metadata = ((event.get("response") or {}).get("metadata") or {})
+    assert canonical_key
+    assert metadata["tool_name"] == "recall_memories"
+    assert metadata["tool_invocation_context"] == "direct_user"
+    assert metadata["read_purpose"] == "user_requested_result"
+
+def test_output_volume_read_result_sends_once_and_settles_after_result_response(monkeypatch) -> None:
+    api = _make_api_stub()
+    ws = _RecordingWs()
+    ids = _seed_read_result_lifecycle(
+        api,
+        ws,
+        tool_name="get_output_volume",
+        tool_call_id="call_volume",
+        turn_id="turn_output_volume",
+        parent_input_event_key="item_parent_output_volume",
+        parent_response_id="resp_parent_output_volume",
+        user_text="What is your current output volume?",
+        parent_text="Let me check your output volume.",
+        include_explicit_read_purpose=False,
+    )
+    logs = _capture_read_lifecycle_info_logs(monkeypatch)
+    silent_incidents: list[dict[str, object]] = []
+    api._record_silent_turn_incident = lambda **kwargs: silent_incidents.append(kwargs)
+
+    metadata = api._tool_followup_metadata_store()[ids["tool_canonical_key"]]
+    assert metadata["tool_name"] == "get_output_volume"
+    assert metadata["read_purpose"] == "user_requested_result"
+    assert metadata["parent_turn_id"] == ids["turn_id"]
+    assert metadata["parent_input_event_key"] == ids["parent_input_event_key"]
+    assert metadata["tool_call_id"] == ids["tool_call_id"]
+
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": ids["parent_response_id"]}}))
+    coverage_state, _coverage_source = api._read_result_parent_coverage_state(
+        parent_canonical_key=ids["parent_canonical_key"],
+        parent_response_id=ids["parent_response_id"],
+        response_metadata=metadata,
+    )
+    assert coverage_state == "coverage_unknown"
+    selection = api._terminal_deliverable_selection_store().get(ids["parent_response_id"])
+    assert selection is not None
+    assert selection["selected"] is False
+    assert selection["reason"] == "tool_followup_precedence"
+    assert any("read_result_terminal_close_guard" in entry and "obligation_open=true" in entry for entry in logs)
+    assert any("continuity_response_done_handoff" in entry and "keep_ongoing=True" in entry and "close_ongoing=False" in entry for entry in logs)
+
+    api._audio_playback_busy = False
+    asyncio.run(api._drain_response_create_queue(source_trigger="playback_complete"))
+    response_create_events = [event for event in ws.sent if event.get("type") == "response.create"]
+    assert len(response_create_events) == 1
+    assert ((response_create_events[0].get("response") or {}).get("metadata") or {})["read_purpose"] == "user_requested_result"
+    assert any("read_result_generic_finality_override" in entry and "decision=preserve_followup" in entry for entry in logs)
+    assert any("response_create_outcome" in entry and "origin=tool_output" in entry and "action=SEND" in entry for entry in logs)
+    assert not any("tool_followup_final_deliverable_already_sent" in entry for entry in logs)
+
+    asyncio.run(api._drain_response_create_queue(source_trigger="playback_complete"))
+    assert len([event for event in ws.sent if event.get("type") == "response.create"]) == 1
+
+    result_response_id = "resp_output_volume_result"
+    result_text = "Your output volume is 90 percent, and it is not muted."
+    api._set_active_response_state(
+        response_id=result_response_id,
+        origin="tool_output",
+        input_event_key=ids["tool_input_event_key"],
+        canonical_key=ids["tool_canonical_key"],
+        consumes_canonical_slot=True,
+    )
+    api._response_in_flight = True
+    api.response_in_progress = True
+    api._response_trace_context_by_id[result_response_id] = {
+        "turn_id": ids["turn_id"],
+        "input_event_key": ids["tool_input_event_key"],
+        "canonical_key": ids["tool_canonical_key"],
+        "origin": "tool_output",
+        "tool_followup": "true",
+        "parent_turn_id": ids["turn_id"],
+        "parent_input_event_key": ids["parent_input_event_key"],
+    }
+    api._record_terminal_response_text(response_id=result_response_id, text=result_text)
+    assert "90 percent" in api._terminal_response_text(result_response_id)
+    api._canonical_response_state_mutate(
+        canonical_key=ids["tool_canonical_key"],
+        turn_id=ids["turn_id"],
+        input_event_key=ids["tool_input_event_key"],
+        mutator=lambda record: (
+            setattr(record, "origin", "tool_output"),
+            setattr(record, "response_id", result_response_id),
+            setattr(record, "created", True),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "final"),
+        ),
+    )
+    api._set_tool_followup_state(canonical_key=ids["tool_canonical_key"], state="created", reason="test_result_response_created")
+
+    parent_settlement = api._continuity_ledger_instance().build_turn_settlement(
+        api.get_continuity_brief("run-405-repro", ids["turn_id"], reason="before_result_done")
+    )
+    assert parent_settlement.settlement_state != "settled"
+    asyncio.run(api.handle_response_done({"type": "response.done", "response": {"id": result_response_id}}))
+    assert api._tool_followup_state(canonical_key=ids["tool_canonical_key"]) == "done"
+    final_settlement = api._continuity_ledger_instance().build_turn_settlement(
+        api.get_continuity_brief("run-405-repro", ids["turn_id"], reason="after_result_done")
+    )
+    assert final_settlement.settlement_state == "settled"
+    assert silent_incidents == []
+
 def test_run_1080_read_result_sends_once_and_settles_after_result_response(monkeypatch) -> None:
     api = _make_api_stub()
     ws = _RecordingWs()
-    ids = _seed_voltage_read_result_lifecycle(api, ws)
+    ids = _seed_read_result_lifecycle(api, ws)
     logs = _capture_read_lifecycle_info_logs(monkeypatch)
     silent_incidents: list[dict[str, object]] = []
     api._record_silent_turn_incident = lambda **kwargs: silent_incidents.append(kwargs)
