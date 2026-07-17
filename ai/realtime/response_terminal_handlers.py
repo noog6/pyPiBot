@@ -700,6 +700,14 @@ class ResponseTerminalHandlers:
             isinstance(obligations_map, dict)
             and any(str(key).startswith(f"{turn_id}:") for key in obligations_map)
         )
+        if hasattr(api, "_turn_has_open_uncovered_user_requested_read_obligation"):
+            obligation_open = bool(
+                obligation_open
+                or api._turn_has_open_uncovered_user_requested_read_obligation(
+                    turn_id=turn_id,
+                    parent_response_id=resolved_response_id,
+                )
+            )
         logger.info(
             "provisional_completion_eval run_id=%s turn_id=%s response_id=%s synthetic_key=%s canonical_key=%s transcript_linked=%s action=%s reason=%s",
             api._current_run_id() or "",

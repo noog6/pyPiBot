@@ -125,10 +125,10 @@ Progress acknowledgements are valid audible responses, but they are non-terminal
 
 The queue release path must preserve one substantive followup while the read-result obligation remains open. Duplicate result events should be suppressed by stable turn/tool/canonical identities, and failures should produce one controlled failure response rather than fabricating a value or settling silently.
 
-Implemented read-result logs in this seam currently include `read_result_parent_coverage_evaluated` and `read_result_parent_terminal_rejected`. Additional obligation lifecycle logs remain future instrumentation, not current behavior.
+Implemented read-result logs in this seam include `read_result_parent_coverage_evaluated`, `read_result_parent_terminal_rejected`, `read_result_terminal_close_guard`, `read_result_generic_finality_override`, and `deliverable_classification_changed`.
 
 ### Incremental obligation marker and positive coverage
 
 Pending user-facing read follow-up is currently the structural obligation marker at the tool-followup and terminal-selection seam. The observable states are: result owed (pending user-requested read follow-up exists), result available (tool result has produced a follow-up create), follow-up scheduled/released (tool-followup state is pending/release), and result delivered (the follow-up response becomes the terminal deliverable).
 
-For user-requested reads, parent suppression requires positive correlated coverage for the same parent canonical key and tool call. Negative evidence such as “the parent is not progress” is insufficient. If coverage is unknown, or known false, the follow-up remains authoritative and should be released once the response boundary permits. Compound-intermediate reads remain governed by the compound followthrough chain and do not independently create a standalone spoken-result obligation.
+For user-requested reads, parent suppression requires positive correlated coverage for the same parent canonical key and tool call. Negative evidence such as “the parent is not progress” is insufficient. If coverage is unknown, or known false, the follow-up remains authoritative and should be released once the response boundary permits; generic final-deliverable suppression must yield to that specific coverage verdict. Compound-intermediate reads remain governed by the compound followthrough chain and do not independently create a standalone spoken-result obligation.
