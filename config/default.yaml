@@ -320,6 +320,12 @@ governance:
   #   side_effects: normalized impact label for audits
   #   sensitivity: LOW | MEDIUM | HIGH
   #   default_confirmation: NEVER | ASK | ALWAYS
+  #   capabilities: authoritative runtime capability declaration used by governance and read-result delivery
+  #     operation_kind: read | write | action
+  #     result_visibility: user_facing | internal | compound | background
+  #     user_result_eligible: true when direct user invocations may create a spoken result obligation
+  #     compound_intermediate_eligible: true when compound flows may consume the result before final report
+  #     runtime_only_background: true when the result must not independently create speech
   tool_specs:
     read_battery_voltage:
       tier: 0
@@ -335,6 +341,12 @@ governance:
       side_effects: "NONE"
       sensitivity: "LOW"
       default_confirmation: "NEVER"
+      capabilities:
+        operation_kind: "read"
+        result_visibility: "user_facing"
+        user_result_eligible: true
+        compound_intermediate_eligible: false
+        runtime_only_background: false
     read_environment:
       tier: 0
       reversible: true
@@ -349,6 +361,12 @@ governance:
       side_effects: "NONE"
       sensitivity: "LOW"
       default_confirmation: "NEVER"
+      capabilities:
+        operation_kind: "read"
+        result_visibility: "user_facing"
+        user_result_eligible: true
+        compound_intermediate_eligible: false
+        runtime_only_background: false
     read_runtime_diagnostics:
       tier: 0
       reversible: true
@@ -363,6 +381,12 @@ governance:
       side_effects: "NONE"
       sensitivity: "LOW"
       default_confirmation: "NEVER"
+      capabilities:
+        operation_kind: "read"
+        result_visibility: "compound"
+        user_result_eligible: true
+        compound_intermediate_eligible: true
+        runtime_only_background: false
     get_session_ledger_status:
       tier: 0
       reversible: true
@@ -377,6 +401,12 @@ governance:
       side_effects: "NONE"
       sensitivity: "LOW"
       default_confirmation: "NEVER"
+      capabilities:
+        operation_kind: "read"
+        result_visibility: "user_facing"
+        user_result_eligible: true
+        compound_intermediate_eligible: false
+        runtime_only_background: false
     get_current_time:
       tier: 0
       reversible: true
@@ -391,6 +421,12 @@ governance:
       side_effects: "NONE"
       sensitivity: "LOW"
       default_confirmation: "NEVER"
+      capabilities:
+        operation_kind: "read"
+        result_visibility: "user_facing"
+        user_result_eligible: true
+        compound_intermediate_eligible: false
+        runtime_only_background: false
     read_imu_data:
       tier: 0
       reversible: true
@@ -405,6 +441,12 @@ governance:
       side_effects: "NONE"
       sensitivity: "LOW"
       default_confirmation: "NEVER"
+      capabilities:
+        operation_kind: "read"
+        result_visibility: "user_facing"
+        user_result_eligible: true
+        compound_intermediate_eligible: false
+        runtime_only_background: false
     gesture_idle:
       tier: 1
       reversible: true
@@ -419,6 +461,12 @@ governance:
       side_effects: "REVERSIBLE_MOTION"
       sensitivity: "LOW"
       default_confirmation: "ASK"
+      capabilities:
+        operation_kind: "action"
+        result_visibility: "internal"
+        user_result_eligible: false
+        compound_intermediate_eligible: false
+        runtime_only_background: false
     gesture_nod:
       tier: 1
       reversible: true
@@ -433,6 +481,12 @@ governance:
       side_effects: "REVERSIBLE_MOTION"
       sensitivity: "LOW"
       default_confirmation: "ASK"
+      capabilities:
+        operation_kind: "action"
+        result_visibility: "internal"
+        user_result_eligible: false
+        compound_intermediate_eligible: false
+        runtime_only_background: false
     gesture_no:
       tier: 1
       reversible: true
@@ -447,6 +501,12 @@ governance:
       side_effects: "REVERSIBLE_MOTION"
       sensitivity: "LOW"
       default_confirmation: "ASK"
+      capabilities:
+        operation_kind: "action"
+        result_visibility: "internal"
+        user_result_eligible: false
+        compound_intermediate_eligible: false
+        runtime_only_background: false
     gesture_look_around:
       tier: 1
       reversible: true
@@ -461,6 +521,12 @@ governance:
       side_effects: "REVERSIBLE_MOTION"
       sensitivity: "LOW"
       default_confirmation: "ASK"
+      capabilities:
+        operation_kind: "action"
+        result_visibility: "internal"
+        user_result_eligible: false
+        compound_intermediate_eligible: false
+        runtime_only_background: false
     gesture_look_up:
       tier: 1
       reversible: true
@@ -475,6 +541,12 @@ governance:
       side_effects: "REVERSIBLE_MOTION"
       sensitivity: "LOW"
       default_confirmation: "ASK"
+      capabilities:
+        operation_kind: "action"
+        result_visibility: "internal"
+        user_result_eligible: false
+        compound_intermediate_eligible: false
+        runtime_only_background: false
     gesture_look_left:
       tier: 1
       reversible: true
@@ -489,6 +561,12 @@ governance:
       side_effects: "REVERSIBLE_MOTION"
       sensitivity: "LOW"
       default_confirmation: "ASK"
+      capabilities:
+        operation_kind: "action"
+        result_visibility: "internal"
+        user_result_eligible: false
+        compound_intermediate_eligible: false
+        runtime_only_background: false
     gesture_look_right:
       tier: 1
       reversible: true
@@ -503,6 +581,12 @@ governance:
       side_effects: "REVERSIBLE_MOTION"
       sensitivity: "LOW"
       default_confirmation: "ASK"
+      capabilities:
+        operation_kind: "action"
+        result_visibility: "internal"
+        user_result_eligible: false
+        compound_intermediate_eligible: false
+        runtime_only_background: false
     gesture_look_down:
       tier: 1
       reversible: true
@@ -517,6 +601,12 @@ governance:
       side_effects: "REVERSIBLE_MOTION"
       sensitivity: "LOW"
       default_confirmation: "ASK"
+      capabilities:
+        operation_kind: "action"
+        result_visibility: "internal"
+        user_result_eligible: false
+        compound_intermediate_eligible: false
+        runtime_only_background: false
     gesture_look_center:
       tier: 1
       reversible: true
@@ -531,6 +621,12 @@ governance:
       side_effects: "REVERSIBLE_MOTION"
       sensitivity: "LOW"
       default_confirmation: "ASK"
+      capabilities:
+        operation_kind: "action"
+        result_visibility: "internal"
+        user_result_eligible: false
+        compound_intermediate_eligible: false
+        runtime_only_background: false
     gesture_curious_tilt:
       tier: 1
       reversible: true
@@ -545,6 +641,12 @@ governance:
       side_effects: "REVERSIBLE_MOTION"
       sensitivity: "LOW"
       default_confirmation: "ASK"
+      capabilities:
+        operation_kind: "action"
+        result_visibility: "internal"
+        user_result_eligible: false
+        compound_intermediate_eligible: false
+        runtime_only_background: false
     gesture_attention_snap:
       tier: 1
       reversible: true
@@ -559,6 +661,12 @@ governance:
       side_effects: "REVERSIBLE_MOTION"
       sensitivity: "LOW"
       default_confirmation: "ASK"
+      capabilities:
+        operation_kind: "action"
+        result_visibility: "internal"
+        user_result_eligible: false
+        compound_intermediate_eligible: false
+        runtime_only_background: false
     update_user_profile:
       tier: 2
       reversible: false
@@ -573,6 +681,12 @@ governance:
       side_effects: "PERSISTENT_WRITE"
       sensitivity: "HIGH"
       default_confirmation: "ALWAYS"
+      capabilities:
+        operation_kind: "write"
+        result_visibility: "internal"
+        user_result_eligible: false
+        compound_intermediate_eligible: false
+        runtime_only_background: false
     get_output_volume:
       tier: 0
       reversible: true
@@ -587,6 +701,12 @@ governance:
       side_effects: "NONE"
       sensitivity: "LOW"
       default_confirmation: "NEVER"
+      capabilities:
+        operation_kind: "read"
+        result_visibility: "user_facing"
+        user_result_eligible: true
+        compound_intermediate_eligible: false
+        runtime_only_background: false
     set_output_volume:
       tier: 1
       reversible: true
@@ -601,6 +721,12 @@ governance:
       side_effects: "REVERSIBLE_AUDIO"
       sensitivity: "LOW"
       default_confirmation: "ASK"
+      capabilities:
+        operation_kind: "write"
+        result_visibility: "internal"
+        user_result_eligible: false
+        compound_intermediate_eligible: false
+        runtime_only_background: false
     remember_memory:
       tier: 1
       reversible: true
@@ -615,6 +741,12 @@ governance:
       side_effects: "PERSISTENT_WRITE"
       sensitivity: "MEDIUM"
       default_confirmation: "ASK"
+      capabilities:
+        operation_kind: "write"
+        result_visibility: "internal"
+        user_result_eligible: false
+        compound_intermediate_eligible: false
+        runtime_only_background: false
     recall_memories:
       tier: 1
       reversible: true
@@ -629,6 +761,12 @@ governance:
       side_effects: "NONE"
       sensitivity: "MEDIUM"
       default_confirmation: "NEVER"
+      capabilities:
+        operation_kind: "read"
+        result_visibility: "user_facing"
+        user_result_eligible: true
+        compound_intermediate_eligible: false
+        runtime_only_background: false
     forget_memory:
       tier: 1
       reversible: false
@@ -643,6 +781,12 @@ governance:
       side_effects: "PERSISTENT_DELETE"
       sensitivity: "HIGH"
       default_confirmation: "ALWAYS"
+      capabilities:
+        operation_kind: "write"
+        result_visibility: "internal"
+        user_result_eligible: false
+        compound_intermediate_eligible: false
+        runtime_only_background: false
     perform_research:
       tier: 1
       reversible: false
@@ -657,6 +801,12 @@ governance:
       side_effects: "NETWORK_IO"
       sensitivity: "MEDIUM"
       default_confirmation: "ASK"
+      capabilities:
+        operation_kind: "action"
+        result_visibility: "internal"
+        user_result_eligible: false
+        compound_intermediate_eligible: false
+        runtime_only_background: false
 # Image response injection mode ("respond" or "catalog_only")
 image_response_mode: "catalog_only"
 injection_response_triggers:

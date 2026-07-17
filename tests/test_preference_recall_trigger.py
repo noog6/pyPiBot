@@ -660,6 +660,8 @@ def test_preference_recall_records_tool_and_updates_trace(monkeypatch) -> None:
     assert api._tool_call_records[-1]["source"] == "preference_recall"
     assert api._tool_call_records[-1]["turn_id"] == "turn-42"
     assert "editor" in api._tool_call_records[-1]["query"]
+    assert "tool_followup" not in api._tool_call_records[-1]
+    assert list(api._response_create_queue) == []
     assert not any("preference_recall_decision_trace" in entry for entry in logged)
 
 
