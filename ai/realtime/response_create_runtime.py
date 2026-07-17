@@ -303,6 +303,7 @@ class ResponseCreateRuntime:
         if hasattr(api, "_should_suppress_tool_followup_after_turn_deliverable") and api._should_suppress_tool_followup_after_turn_deliverable(
             turn_id=parent_turn_id,
             parent_input_event_key=parent_input_event_key,
+            response_metadata=prepared_snapshot.response_metadata,
         ):
             return self._build_execution_decision(
                 action=ResponseCreateOutcomeAction.DROP,

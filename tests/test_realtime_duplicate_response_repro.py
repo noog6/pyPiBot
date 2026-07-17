@@ -11475,3 +11475,102 @@ def test_read_result_coverage_store_capacity_prunes_oldest() -> None:
     assert len(store) == 512
     assert ("parent-0", "call-0") not in store
     assert ("parent-519", "call-519") in store
+
+
+def test_uncovered_user_requested_read_obligation_remains_open_after_parent_done() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    turn_id = "turn_1080_terminal_close"
+    parent_input_event_key = "item_parent_voltage_terminal"
+    parent_response_id = "resp-parent-voltage-terminal"
+    parent_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    followup_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key="tool:call_voltage_terminal")
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "server_auto"),
+            setattr(record, "response_id", parent_response_id),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "progress"),
+            setattr(record, "done", True),
+        ),
+    )
+    api._tool_followup_state_by_canonical_key = {followup_key: "scheduled_release"}
+    api._tool_followup_metadata_by_canonical_key = {
+        followup_key: {
+            "turn_id": turn_id,
+            "parent_turn_id": turn_id,
+            "parent_input_event_key": parent_input_event_key,
+            "tool_followup": "true",
+            "tool_call_id": "call_voltage_terminal",
+            "tool_name": "read_battery_voltage",
+            "read_purpose": "user_requested_result",
+        }
+    }
+
+    assert api._turn_has_open_uncovered_user_requested_read_obligation(
+        turn_id=turn_id,
+        parent_response_id=parent_response_id,
+    ) is True
+
+
+def test_multi_read_uncovered_user_requested_read_obligation_requires_all_covered() -> None:
+    api = _make_api_stub()
+    _wire_runtime(api)
+    turn_id = "turn_multi_read_terminal_close"
+    parent_input_event_key = "item_parent_multi_read"
+    parent_response_id = "resp-parent-multi-read"
+    parent_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    voltage_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key="tool:call_voltage_multi")
+    wifi_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key="tool:call_wifi_multi")
+    api._canonical_response_state_mutate(
+        canonical_key=parent_key,
+        turn_id=turn_id,
+        input_event_key=parent_input_event_key,
+        mutator=lambda record: (
+            setattr(record, "origin", "server_auto"),
+            setattr(record, "response_id", parent_response_id),
+            setattr(record, "deliverable_observed", True),
+            setattr(record, "deliverable_class", "final"),
+            setattr(record, "done", True),
+        ),
+    )
+    api._tool_followup_state_by_canonical_key = {
+        voltage_key: "scheduled_release",
+        wifi_key: "scheduled_release",
+    }
+    api._tool_followup_metadata_by_canonical_key = {
+        voltage_key: {
+            "turn_id": turn_id,
+            "parent_turn_id": turn_id,
+            "parent_input_event_key": parent_input_event_key,
+            "tool_followup": "true",
+            "tool_call_id": "call_voltage_multi",
+            "tool_name": "read_battery_voltage",
+            "read_purpose": "user_requested_result",
+        },
+        wifi_key: {
+            "turn_id": turn_id,
+            "parent_turn_id": turn_id,
+            "parent_input_event_key": parent_input_event_key,
+            "tool_followup": "true",
+            "tool_call_id": "call_wifi_multi",
+            "tool_name": "read_wifi_status",
+            "read_purpose": "user_requested_result",
+        },
+    }
+    api._read_result_coverage_by_parent_and_tool = {
+        (parent_key, "call_voltage_multi"): {
+            "covered": True,
+            "tool_name": "read_battery_voltage",
+            "parent_response_id": parent_response_id,
+            "source": "explicit_read_result_coverage",
+        }
+    }
+
+    assert api._turn_has_open_uncovered_user_requested_read_obligation(
+        turn_id=turn_id,
+        parent_response_id=parent_response_id,
+    ) is True

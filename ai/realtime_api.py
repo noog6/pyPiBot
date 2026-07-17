@@ -9935,7 +9935,38 @@ class RealtimeAPI:
             next_state.turn_id = resolved_turn_id
         if resolved_input_event_key:
             next_state.input_event_key = resolved_input_event_key
+        old_class = str(getattr(prior_state, "deliverable_class", "unknown") or "unknown").strip().lower() or "unknown"
+        old_covered = old_class == "final"
         mutator(next_state)
+        new_class = str(getattr(next_state, "deliverable_class", "unknown") or "unknown").strip().lower() or "unknown"
+        new_covered = new_class == "final"
+        if old_class != new_class or old_covered != new_covered:
+            selection_entry = None
+            response_id = str(getattr(next_state, "response_id", "") or getattr(prior_state, "response_id", "") or "").strip()
+            if response_id:
+                selection_entry = self._terminal_deliverable_selection_store().get(response_id)
+            selected = bool(selection_entry.get("selected", False)) if isinstance(selection_entry, dict) else False
+            selection_reason = str(selection_entry.get("reason") or "unknown").strip().lower() if isinstance(selection_entry, dict) else "unknown"
+            caller = "unknown"
+            try:
+                caller = str(getattr(__import__("sys")._getframe(1), "f_code").co_name or "unknown")
+            except Exception:
+                caller = "unknown"
+            logger.info(
+                "deliverable_classification_changed run_id=%s turn_id=%s response_id=%s canonical_key=%s old_class=%s new_class=%s old_covered=%s new_covered=%s source=%s reason=%s selected=%s selection_reason=%s",
+                self._current_run_id() or "",
+                str(getattr(next_state, "turn_id", "") or resolved_turn_id or "turn-unknown"),
+                response_id or "none",
+                normalized_canonical_key,
+                old_class,
+                new_class,
+                str(old_covered).lower(),
+                str(new_covered).lower(),
+                caller,
+                caller,
+                str(selected).lower(),
+                selection_reason or "unknown",
+            )
         state_store[normalized_canonical_key] = next_state
         self._sync_legacy_response_state_mirrors()
         self._debug_assert_canonical_state_invariants(
@@ -11674,11 +11705,64 @@ class RealtimeAPI:
             return ""
         return self._classify_deliverable_text(text)
 
+    def _turn_has_open_uncovered_user_requested_read_obligation(
+        self,
+        *,
+        turn_id: str,
+        parent_response_id: str | None = None,
+    ) -> bool:
+        read_pending, coverage_state, coverage_source, tool_call_id, tool_name, read_purpose = (
+            self._pending_user_requested_read_followup_coverage_for_parent(
+                turn_id=turn_id,
+                parent_response_id=parent_response_id,
+            )
+        )
+        obligation_open = bool(read_pending and coverage_state != "result_covered_true")
+        logger.info(
+            "read_result_terminal_close_guard run_id=%s turn_id=%s response_id=%s tool_call_id=%s tool_name=%s read_purpose=%s coverage_state=%s coverage_source=%s obligation_open=%s reason=%s",
+            self._current_run_id() or "",
+            str(turn_id or "").strip() or "turn-unknown",
+            str(parent_response_id or "").strip() or "none",
+            tool_call_id or "unknown",
+            tool_name or "unknown",
+            read_purpose or "unknown",
+            coverage_state,
+            coverage_source,
+            str(obligation_open).lower(),
+            "uncovered_user_requested_read" if obligation_open else "no_uncovered_user_requested_read",
+        )
+        return obligation_open
+
+    def _tool_followup_is_uncovered_user_requested_read(
+        self,
+        *,
+        turn_id: str,
+        response_metadata: dict[str, Any] | None,
+    ) -> tuple[bool, str, str]:
+        metadata = response_metadata if isinstance(response_metadata, dict) else {}
+        purpose = self._read_result_purpose_for_tool_followup_metadata(metadata=metadata)
+        if purpose != "user_requested_result":
+            return False, "not_user_requested_result", "none"
+        parent_turn_id = str(metadata.get("parent_turn_id") or turn_id or "").strip()
+        parent_input_event_key = str(metadata.get("parent_input_event_key") or "").strip()
+        parent_canonical_key = self._canonical_utterance_key(turn_id=parent_turn_id, input_event_key=parent_input_event_key)
+        parent_response_id = ""
+        parent_state = self._canonical_response_state(parent_canonical_key) if parent_canonical_key else None
+        if isinstance(parent_state, CanonicalResponseState):
+            parent_response_id = str(getattr(parent_state, "response_id", "") or "").strip()
+        coverage_state, coverage_source = self._read_result_parent_coverage_state(
+            parent_canonical_key=parent_canonical_key,
+            parent_response_id=parent_response_id,
+            response_metadata=metadata,
+        )
+        return coverage_state != "result_covered_true", coverage_state, coverage_source
+
     def _should_suppress_tool_followup_after_turn_deliverable(
         self,
         *,
         turn_id: str,
         parent_input_event_key: str | None = None,
+        response_metadata: dict[str, Any] | None = None,
     ) -> bool:
         normalized_turn_id = str(turn_id or "").strip()
         if not normalized_turn_id:
@@ -11689,6 +11773,22 @@ class RealtimeAPI:
         ):
             return False
         normalized_parent_key = str(parent_input_event_key or "").strip()
+        uncovered_read, coverage_state, coverage_source = self._tool_followup_is_uncovered_user_requested_read(
+            turn_id=normalized_turn_id,
+            response_metadata=response_metadata,
+        )
+        if uncovered_read:
+            logger.info(
+                "read_result_generic_finality_override run_id=%s turn_id=%s tool_call_id=%s tool_name=%s read_purpose=%s coverage_state=%s coverage_source=%s decision=preserve_followup reason=uncovered_user_requested_read generic_finality_blocked=true",
+                self._current_run_id() or "",
+                normalized_turn_id,
+                str((response_metadata or {}).get("tool_call_id") or "unknown").strip() or "unknown",
+                str((response_metadata or {}).get("tool_name") or "unknown").strip().lower() or "unknown",
+                "user_requested_result",
+                coverage_state,
+                coverage_source,
+            )
+            return False
         for state in self._canonical_response_state_store().values():
             if not isinstance(state, CanonicalResponseState):
                 continue

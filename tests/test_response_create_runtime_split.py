@@ -1248,3 +1248,129 @@ def test_response_create_runtime_logs_contract_breach_for_tool_followup_owner_mi
     runtime._log_response_create_outcome(snapshot=snapshot, decision=decision)
 
     assert any("contract_breach_detected" in msg for msg in info_messages)
+
+
+def test_post_decision_finalizer_preserves_uncovered_user_requested_read_followup() -> None:
+    api = _make_api_stub()
+    runtime = api._response_create_runtime
+    turn_id = "turn_1080_voltage"
+    parent_input_event_key = "item_parent_voltage"
+    parent_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    api._canonical_response_state_by_key = {
+        parent_key: CanonicalResponseState(
+            created=True,
+            done=True,
+            deliverable_observed=True,
+            deliverable_class="final",
+            origin="server_auto",
+            response_id="resp-parent-voltage",
+            turn_id=turn_id,
+            input_event_key=parent_input_event_key,
+        )
+    }
+    api._tool_followup_state_by_canonical_key = {}
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True: False
+    event = {
+        "type": "response.create",
+        "response": {
+            "metadata": {
+                "turn_id": turn_id,
+                "input_event_key": "tool:call_voltage",
+                "parent_turn_id": turn_id,
+                "parent_input_event_key": parent_input_event_key,
+                "tool_followup": "true",
+                "tool_call_id": "call_voltage",
+                "tool_name": "read_battery_voltage",
+                "read_purpose": "user_requested_result",
+            }
+        },
+    }
+    snapshot = runtime.prepare_response_create_snapshot(
+        response_create_event=event,
+        origin="tool_output",
+        utterance_context=None,
+        memory_brief_note=None,
+        now=1.0,
+    )
+    selected = runtime._build_execution_decision(
+        action=ResponseCreateOutcomeAction.SEND,
+        reason_code="queued_release",
+        explanation="release queued result",
+        selected_candidate_id="queued_release",
+    )
+
+    finalized = runtime._finalize_response_create_execution_decision(
+        prepared_snapshot=snapshot,
+        decision=selected,
+        execution_path="send",
+    )
+
+    assert finalized.action is ResponseCreateOutcomeAction.SEND
+    assert finalized.reason_code == "queued_release"
+
+
+def test_post_decision_finalizer_still_suppresses_positive_covered_user_requested_read_followup() -> None:
+    api = _make_api_stub()
+    runtime = api._response_create_runtime
+    turn_id = "turn_covered_voltage"
+    parent_input_event_key = "item_parent_voltage_covered"
+    parent_key = api._canonical_utterance_key(turn_id=turn_id, input_event_key=parent_input_event_key)
+    api._canonical_response_state_by_key = {
+        parent_key: CanonicalResponseState(
+            created=True,
+            done=True,
+            deliverable_observed=True,
+            deliverable_class="final",
+            origin="server_auto",
+            response_id="resp-parent-voltage-covered",
+            turn_id=turn_id,
+            input_event_key=parent_input_event_key,
+        )
+    }
+    api._read_result_coverage_by_parent_and_tool = {
+        (parent_key, "call_voltage_covered"): {
+            "covered": True,
+            "tool_name": "read_battery_voltage",
+            "parent_response_id": "resp-parent-voltage-covered",
+            "source": "explicit_read_result_coverage",
+        }
+    }
+    api._tool_followup_state_by_canonical_key = {}
+    api._turn_followthrough_chain_remaining = lambda *, turn_id, include_report_followup=True: False
+    event = {
+        "type": "response.create",
+        "response": {
+            "metadata": {
+                "turn_id": turn_id,
+                "input_event_key": "tool:call_voltage_covered",
+                "parent_turn_id": turn_id,
+                "parent_input_event_key": parent_input_event_key,
+                "tool_followup": "true",
+                "tool_call_id": "call_voltage_covered",
+                "tool_name": "read_battery_voltage",
+                "read_purpose": "user_requested_result",
+            }
+        },
+    }
+    snapshot = runtime.prepare_response_create_snapshot(
+        response_create_event=event,
+        origin="tool_output",
+        utterance_context=None,
+        memory_brief_note=None,
+        now=1.0,
+    )
+    selected = runtime._build_execution_decision(
+        action=ResponseCreateOutcomeAction.SEND,
+        reason_code="queued_release",
+        explanation="release queued result",
+        selected_candidate_id="queued_release",
+    )
+
+    finalized = runtime._finalize_response_create_execution_decision(
+        prepared_snapshot=snapshot,
+        decision=selected,
+        execution_path="send",
+    )
+
+    assert finalized.action is ResponseCreateOutcomeAction.DROP
+    assert finalized.reason_code == "tool_followup_final_deliverable_already_sent"
